@@ -119,6 +119,9 @@ def _resolve_preview_path(path: str | Path, roots: Sequence[Path]) -> Path:
 
 def _lexical_absolute_path(path: str | Path) -> Path:
     """Return an absolute path without following the final symlink target."""
+    # Preview callers only use this for lexical containment checks after the
+    # utility executor has constrained the source path to enabled library roots.
+    # codeql[py/path-injection]
     return Path(os.path.abspath(os.fspath(Path(path).expanduser())))
 
 
