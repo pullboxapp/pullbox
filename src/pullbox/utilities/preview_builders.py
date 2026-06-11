@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -114,6 +115,22 @@ def _resolve_preview_path(path: str | Path, roots: Sequence[Path]) -> Path:
         return resolve_path_inside_roots(path, roots)
     except ValueError as exc:
         raise ValidationError(str(exc)) from None
+
+
+def _lexical_absolute_path(path: str | Path) -> Path:
+    """Return an absolute path without following the final symlink target."""
+    return Path(os.path.abspath(os.fspath(Path(path).expanduser())))
+
+
+def _resolve_generated_preview_path(path: str | Path, roots: Sequence[Path]) -> Path:
+    """Constrain an executor-generated preview path without following symlinks."""
+    candidate = _lexical_absolute_path(path)
+    for root in roots:
+        root_path = _lexical_absolute_path(root)
+        if candidate == root_path or candidate.is_relative_to(root_path):
+            return candidate
+    msg = f"Selected path is outside enabled library roots: {path}"
+    raise ValidationError(msg)
 
 
 def _preview_lstat(path: Path) -> Any:
@@ -292,7 +309,7 @@ async def build_library_permissions_preview(
     file_count = 0
     preview_items: list[LibraryPermissionsPreviewItem] = []
     for item in generated_items:
-        path = _resolve_preview_path(
+        path = _resolve_generated_preview_path(
             str(item.get("file_path", "")),
             [Path(root["path"]) for root in job_context["library_roots"]],
         )
