@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
@@ -9,10 +10,12 @@ import pytest
 from sqlalchemy import select
 
 from pullbox.core.api_keys import (
+    API_KEY_HASH_PREFIX,
     API_KEY_LENGTH,
     API_KEY_PREFIX,
     hash_api_key,
     is_well_formed_api_key,
+    legacy_hash_api_key,
     normalize_api_key_name,
 )
 from pullbox.models.user import APIKey, User
@@ -58,14 +61,28 @@ class TestAPIKeyFormat:
 
 
 class TestAPIKeyHashing:
-    def test_hash_is_deterministic_sha256_hex(self) -> None:
+    def test_hash_is_versioned_hmac_not_raw_sha256_hex(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         raw_key = API_KEY_PREFIX + ("b" * 64)
+        monkeypatch.setattr("pullbox.core.api_keys.get_application_secret", lambda: "secret-one")
 
         hashed = hash_api_key(raw_key)
 
-        assert len(hashed) == 64
+        assert hashed.startswith(API_KEY_HASH_PREFIX)
         assert hashed == hash_api_key(raw_key)
+        assert hashed != hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
         assert raw_key not in hashed
+
+    def test_hash_uses_application_secret_as_pepper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        raw_key = API_KEY_PREFIX + ("c" * 64)
+        monkeypatch.setattr("pullbox.core.api_keys.get_application_secret", lambda: "secret-one")
+        first_hash = hash_api_key(raw_key)
+
+        monkeypatch.setattr("pullbox.core.api_keys.get_application_secret", lambda: "secret-two")
+
+        assert hash_api_key(raw_key) != first_hash
 
 
 class TestAPIKeyNameNormalization:
@@ -121,6 +138,29 @@ class TestAPIKeyServiceLifecycle:
         assert authenticated.id == user.id
         await db_session.refresh(api_key)
         assert api_key.last_used_at is not None
+
+    @pytest.mark.asyncio
+    async def test_validate_legacy_api_key_hash_upgrades_to_hmac(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        user = User(
+            username="legacy-key-user", password_hash=AuthService.hash_password("Test@1234")
+        )
+        db_session.add(user)
+        await db_session.flush()
+        raw_key = API_KEY_PREFIX + ("d" * 64)
+        legacy_hash = legacy_hash_api_key(raw_key)
+        api_key = APIKey(user_id=user.id, key_hash=legacy_hash, name="Legacy")
+        db_session.add(api_key)
+        await db_session.flush()
+
+        authenticated = await AuthService.validate_api_key(db_session, raw_key)
+
+        assert authenticated is not None
+        await db_session.refresh(api_key)
+        assert api_key.key_hash == hash_api_key(raw_key)
+        assert api_key.key_hash != legacy_hash
 
     @pytest.mark.asyncio
     async def test_revoked_api_key_is_rejected(self, db_session: AsyncSession) -> None:

@@ -441,6 +441,27 @@ async def test_mass_convert_preview_accepts_multiple_folders(
 
 
 @pytest.mark.asyncio
+async def test_mass_convert_preview_rejects_folder_outside_library_roots(
+    authenticated_client,
+    preview_paths: dict[str, str],
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    assert preview_paths["library_root"]
+    outside_folder = tmp_path / "outside"
+    outside_folder.mkdir()
+    (outside_folder / "outside.cbz").write_text("outside")
+
+    response = await authenticated_client.post(
+        "/api/v1/utilities/mass-convert/preview",
+        json={"scope": "folder", "file_paths": [str(outside_folder)]},
+        headers=_csrf_header_for(authenticated_client),
+    )
+
+    assert response.status_code == 422
+    assert "outside enabled library roots" in response.text
+
+
+@pytest.mark.asyncio
 async def test_library_permissions_preview_counts_recursive_folder_scope(
     authenticated_client,
     preview_paths: dict[str, str],
@@ -466,6 +487,33 @@ async def test_library_permissions_preview_counts_recursive_folder_scope(
     assert data["item_count"] == data["folder_count"] + data["file_count"]
     assert any(item["name"] == "batman-001.cbz" for item in data["items"])
     assert any(item["item_type"] == "folder" for item in data["items"])
+
+
+@pytest.mark.asyncio
+async def test_library_permissions_preview_rejects_paths_outside_library_roots(
+    authenticated_client,
+    preview_paths: dict[str, str],
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    assert preview_paths["library_root"]
+    outside_file = tmp_path / "outside.cbz"
+    outside_file.write_text("outside")
+
+    response = await authenticated_client.post(
+        "/api/v1/utilities/permissions/preview",
+        json={
+            "scope": "files",
+            "file_paths": [str(outside_file)],
+            "folder_mode": "750",
+            "file_mode": "640",
+            "include_folders": False,
+            "include_files": True,
+        },
+        headers=_csrf_header_for(authenticated_client),
+    )
+
+    assert response.status_code == 422
+    assert "outside enabled library roots" in response.text
 
 
 @pytest.mark.asyncio

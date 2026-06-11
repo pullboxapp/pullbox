@@ -9,7 +9,13 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pullbox.core.api_keys import API_KEY_PREFIX, hash_api_key, is_well_formed_api_key
+from pullbox.core.api_keys import (
+    API_KEY_PREFIX,
+    api_key_hash_candidates,
+    hash_api_key,
+    is_legacy_api_key_hash,
+    is_well_formed_api_key,
+)
 from pullbox.core.config_resolver import get_application_secret
 from pullbox.core.exceptions import AuthenticationError
 from pullbox.core.password_policy import MAX_PASSWORD_BYTES
@@ -127,10 +133,13 @@ class AuthService:
         if not is_well_formed_api_key(raw_key):
             return None
 
-        key_hash = hash_api_key(raw_key)
+        current_key_hash = hash_api_key(raw_key)
 
         result = await session.execute(
-            select(APIKey).where(APIKey.key_hash == key_hash, APIKey.is_active.is_(True))
+            select(APIKey).where(
+                APIKey.key_hash.in_(api_key_hash_candidates(raw_key)),
+                APIKey.is_active.is_(True),
+            )
         )
         api_key = result.scalar_one_or_none()
 
@@ -145,6 +154,8 @@ class AuthService:
                 return None
 
         api_key.last_used_at = datetime.now(UTC)
+        if is_legacy_api_key_hash(api_key.key_hash):
+            api_key.key_hash = current_key_hash
 
         # Eagerly load user
         user_result = await session.execute(

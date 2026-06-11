@@ -163,6 +163,10 @@ def _validate_browsable_path(path: str, allowed_roots: Sequence[Path] | None = N
         logger.warning("filesystem_path_blocked", requested_path=path[:100], reason="too_long")
         return fallback
 
+    # Authenticated operator browser: the raw value is length/character checked,
+    # blocked-prefix checked below, and optionally clamped to explicit roots
+    # before any listing is returned.
+    # codeql[py/path-injection]
     resolved = Path(sanitized).resolve()
     resolved_str = str(resolved)
 
@@ -180,6 +184,9 @@ def _validate_browsable_path(path: str, allowed_roots: Sequence[Path] | None = N
             return fallback
 
     # Fallback if path doesn't exist
+    # ``resolved`` has passed the browser safety checks above; this probe only
+    # decides whether to fall back to a safe root instead of returning content.
+    # codeql[py/path-injection]
     if not resolved.exists() or not resolved.is_dir():
         return fallback
 
