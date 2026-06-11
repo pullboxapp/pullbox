@@ -122,13 +122,22 @@ def _lexical_absolute_path(path: str | Path) -> Path:
     return Path(os.path.abspath(os.fspath(Path(path).expanduser())))
 
 
+def _generated_preview_root_paths(root: str | Path) -> tuple[Path, ...]:
+    """Return acceptable root prefixes for executor-generated preview paths."""
+    lexical_root = _lexical_absolute_path(root)
+    resolved_root = Path(root).expanduser().resolve(strict=False)
+    if resolved_root == lexical_root:
+        return (lexical_root,)
+    return (lexical_root, resolved_root)
+
+
 def _resolve_generated_preview_path(path: str | Path, roots: Sequence[Path]) -> Path:
     """Constrain an executor-generated preview path without following symlinks."""
     candidate = _lexical_absolute_path(path)
     for root in roots:
-        root_path = _lexical_absolute_path(root)
-        if candidate == root_path or candidate.is_relative_to(root_path):
-            return candidate
+        for root_path in _generated_preview_root_paths(root):
+            if candidate == root_path or candidate.is_relative_to(root_path):
+                return candidate
     msg = f"Selected path is outside enabled library roots: {path}"
     raise ValidationError(msg)
 

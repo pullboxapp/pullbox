@@ -118,3 +118,33 @@ async def test_library_permissions_preview_preserves_external_symlink_item(
     assert any(
         item.name == "External Archive" and item.item_type == "symlink" for item in preview.items
     )
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlink support unavailable")
+@pytest.mark.asyncio
+async def test_library_permissions_preview_accepts_symlinked_library_root(
+    tmp_path: Path,
+) -> None:
+    real_root = tmp_path / "real-library"
+    linked_root = tmp_path / "linked-library"
+    folder = real_root / "Batman"
+    folder.mkdir(parents=True)
+    (folder / "Batman 001.cbz").write_bytes(b"one")
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    preview = await build_library_permissions_preview(
+        LibraryPermissionsPreviewRequest(
+            scope="folder",
+            file_paths=[str(linked_root / "Batman")],
+            folder_mode="750",
+            file_mode="640",
+            include_folders=True,
+            include_files=True,
+        ),
+        session=_FakeSession(linked_root),
+    )
+
+    assert preview.scope == "folder"
+    assert preview.folder_count == 1
+    assert preview.file_count == 1
+    assert {item.name for item in preview.items} == {"Batman", "Batman 001.cbz"}
