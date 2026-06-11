@@ -116,6 +116,5 @@ async def test_library_permissions_preview_preserves_external_symlink_item(
     )
 
     assert any(
-        item.name == "External Archive" and item.item_type == "symlink"
-        for item in preview.items
+        item.name == "External Archive" and item.item_type == "symlink" for item in preview.items
     )
