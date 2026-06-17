@@ -1614,6 +1614,7 @@ class TestUtilitiesPage:
         )
 
         authed_page.locator("[data-testid='utilities-history-sort-job']").click()
+        utilities.wait_for_htmx()
         authed_page.wait_for_function(
             """
             () => (
@@ -1643,6 +1644,7 @@ class TestUtilitiesPage:
         )
 
         authed_page.locator("[data-testid='utilities-history-sort-job']").click()
+        utilities.wait_for_htmx()
         authed_page.wait_for_function(
             """
             () => (

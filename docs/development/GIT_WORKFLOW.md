@@ -410,6 +410,7 @@ Step 2: bump the version for release.
 ```bash
 # Edit src/pullbox/__init__.py from X.Y.Z-dev to X.Y.Z
 # Update CHANGELOG.md by moving curated Unreleased notes into X.Y.Z
+make release-changelog-check VERSION=X.Y.Z
 git add src/pullbox/__init__.py CHANGELOG.md
 git commit -m "chore: bump version to X.Y.Z for release"
 git push origin develop
@@ -453,17 +454,22 @@ Pullbox has two release-note artifacts:
 | Artifact | Source | When Updated | Purpose |
 |---|---|---|---|
 | `CHANGELOG.md` | Curated by maintainers | During release prep PR | Human-readable project history in the repo |
-| GitHub Release notes | Generated from commit subjects by `.github/workflows/release.yml` | After a signed version tag and successful Docker workflow | Detailed release event log, Docker pull commands, and image signature verification commands |
+| GitHub Release notes | Curated `CHANGELOG.md` release section plus generated commit details from `.github/workflows/release.yml` | After a signed version tag and successful Docker workflow | Public release summary, detailed release event log, Docker pull commands, and image signature verification commands |
 
 `CHANGELOG.md` is not generated automatically. Keep it concise and user-facing:
 summarize the release, do not paste every commit. During release prep, move
 completed `Unreleased` entries into a dated version section and create a fresh
 empty `Unreleased` section above it.
 
-Generated GitHub Release notes are commit-driven. They group conventional commit
-prefixes into release categories. If a commit lacks a recognized prefix, it lands
-under "Other Changes". This is why commit prefixes are required even for solo
-maintenance work.
+The release workflow requires a curated `CHANGELOG.md` section for the tagged
+version. It places that curated section first in the GitHub Release body, then
+appends generated commit details. Run `make release-changelog-check VERSION=X.Y.Z`
+during release prep so missing or empty release sections fail locally before the
+tagged release pipeline runs.
+
+Generated commit details are grouped by conventional commit prefixes. If a
+commit lacks a recognized prefix, it lands under "Other Changes". This is why
+commit prefixes are required even for solo maintenance work.
 
 Recommended mapping:
 
@@ -484,8 +490,9 @@ Recommended mapping:
 - Signed tags let GitHub show verified tag provenance when signing is configured
   correctly.
 - Release images are signed separately from Git tags. The Docker workflow uses
-  keyless Sigstore/Cosign with GitHub Actions OIDC, then verifies GHCR and
-  Docker Hub signatures before the workflow succeeds.
+  keyless Sigstore/Cosign with GitHub Actions OIDC, verifies GHCR and Docker
+  Hub signatures by digest before the workflow succeeds, and uploads that digest
+  for the GitHub Release notes.
 - If `git tag -s` fails, stop and configure a verified GPG or SSH signing key
   before pushing the tag.
 - Docker metadata rules may publish semver-derived aliases during release-tag
@@ -504,10 +511,11 @@ git push origin vX.Y.Z-rc1
 - [ ] `develop` is green before release prep.
 - [ ] Release version is committed before the release PR.
 - [ ] `CHANGELOG.md` has a curated section for the release.
+- [ ] `make release-changelog-check VERSION=X.Y.Z` passes.
 - [ ] Release PR targets `main`.
 - [ ] Release tag is signed and verified locally.
 - [ ] Release workflows complete successfully.
-- [ ] GHCR and Docker Hub image signatures verify with Cosign.
+- [ ] GHCR and Docker Hub image signatures verify with Cosign by digest.
 - [ ] GHCR and Docker Hub tags are reviewed after publish.
 
 ## 9. Post-Release Sync

@@ -316,7 +316,7 @@ container paths to host paths with `--path-map`, for example:
 PULLBOX_DB_URL=sqlite+aiosqlite:////path/to/pullbox.db \
   .venv/bin/python scripts/prune_large_library_issues.py \
   --threshold-mib 100 \
-  --path-map /comics=/Users/adam/Code/pullbox-dev/live-comics
+  --path-map /comics=/shared-drive/live-comics
 ```
 
 ## 7. Common Commands

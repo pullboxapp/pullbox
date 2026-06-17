@@ -1301,12 +1301,11 @@ class TestSSEStream:
 
     def test_stream_routes_do_not_hold_request_scoped_db_sessions(self) -> None:
         """Import SSE routes authenticate without keeping DbSession open for the stream."""
-        from fastapi.routing import APIRoute
-
         from pullbox.api.deps import get_db_dep, require_stream_auth
         from pullbox.app import create_app
+        from tests.route_contracts import RouteContract, iter_api_route_contracts
 
-        def iter_dependency_calls(route: APIRoute) -> set[object]:
+        def iter_dependency_calls(route: RouteContract) -> set[object]:
             calls: set[object] = set()
             stack = list(route.dependant.dependencies)
             while stack:
@@ -1322,8 +1321,8 @@ class TestSSEStream:
         }
 
         matched_paths: set[str] = set()
-        for route in app.routes:
-            if not isinstance(route, APIRoute) or route.path not in stream_paths:
+        for route in iter_api_route_contracts(app.routes):
+            if route.path not in stream_paths:
                 continue
             matched_paths.add(route.path)
             dependency_calls = iter_dependency_calls(route)

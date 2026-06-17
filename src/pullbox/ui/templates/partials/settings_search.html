@@ -343,7 +343,7 @@
         <div class="settings-rows settings-rows-align-end">
           {% call settings_row(label="Issue Size Warning", help="Warn when a single issue exceeds this size.") %}
             <div class="flex items-center gap-2">
-              <input type="number" name="search_size_warn_issue_mb" value="{{ configs.get('search_size_warn_issue_mb', '300') }}" min="50" max="2000" class="input-pb w-24">
+              <input type="number" name="search_size_warn_issue_mb" value="{{ configs.get('search_size_warn_issue_mb', '750') }}" min="50" max="2000" class="input-pb w-24">
               <span class="text-sm text-pb-text-sec">MB</span>
             </div>
           {% endcall %}
@@ -395,7 +395,7 @@
               @click="
                 thresholds = { issue: 'medium', annual: 'high', tpb: 'high', hc: 'high', omnibus: 'high', gn: 'high', ogn: 'high', one_shot: 'high', special: 'high', deluxe: 'high', compendium: 'high' };
                 const f = $el.closest('form');
-                f.querySelector('[name=search_size_warn_issue_mb]').value = '300';
+                f.querySelector('[name=search_size_warn_issue_mb]').value = '750';
                 f.querySelector('[name=search_size_warn_collection_mb]').value = '50';
                 f.querySelector('[name=search_two_pass_enabled][type=checkbox]').checked = true;
                 f.querySelector('[name=search_intervention_expiry_days]').value = '10';

@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.models import Base
 from pullbox.models.config import SystemConfig
+from pullbox.providers.base import ProviderRegistry
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
+from pullbox.services.search_runtime import build_search_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -165,6 +167,45 @@ class TestPutIdentitySettings:
         )
         assert resp.status_code == 200
         assert resp.json().get("restart_required") is not True
+
+
+class TestPutSearchSettings:
+    """Search settings saved through the UI config API feed runtime evaluation."""
+
+    @pytest.mark.asyncio
+    async def test_put_issue_size_warning_persists_and_updates_search_runtime(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        resp = await client.put(
+            "/api/v1/config",
+            json={"values": {"search_size_warn_issue_mb": "625"}},
+            headers=_csrf_header_for(client),
+        )
+        assert resp.status_code == 200
+
+        async def registry_builder(
+            _session: AsyncSession,
+            *,
+            include_download_clients: bool = True,
+        ) -> tuple[ProviderRegistry, dict[object, object]]:
+            assert include_download_clients is False
+            return ProviderRegistry(), {}
+
+        async with _db_factory() as session:
+            row = await session.get(SystemConfig, "search_size_warn_issue_mb")
+            assert row is not None
+            assert row.value == "625"
+
+            runtime = await build_search_runtime(
+                session,
+                include_download_clients=False,
+                registry_builder=registry_builder,
+            )
+
+        assert runtime is not None
+        assert runtime.eval_kwargs["warn_issue_mb"] == 625
 
 
 class TestRuntimeManagedKeys:

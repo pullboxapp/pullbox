@@ -5,10 +5,9 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from fastapi.routing import APIRoute
-
 from pullbox.api.deps import require_auth, require_interactive_auth, require_stream_auth
 from pullbox.app import create_app
+from tests.route_contracts import RouteContract, iter_api_route_contracts
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -16,7 +15,7 @@ if TYPE_CHECKING:
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-route-matrix")
 
 
-def _iter_dependency_calls(route: APIRoute) -> Iterable[object]:
+def _iter_dependency_calls(route: RouteContract) -> Iterable[object]:
     stack = list(route.dependant.dependencies)
     while stack:
         dependency = stack.pop()
@@ -24,7 +23,7 @@ def _iter_dependency_calls(route: APIRoute) -> Iterable[object]:
         stack.extend(dependency.dependencies)
 
 
-def _classify_route(route: APIRoute) -> str:
+def _classify_route(route: RouteContract) -> str:
     calls = set(_iter_dependency_calls(route))
     if require_interactive_auth in calls:
         return "interactive"
@@ -42,8 +41,8 @@ class TestApiRouteAccessMatrix:
         app = create_app()
 
         public_routes: set[tuple[str, str]] = set()
-        for route in app.routes:
-            if not isinstance(route, APIRoute) or not route.path.startswith("/api/v1"):
+        for route in iter_api_route_contracts(app.routes):
+            if not route.path.startswith("/api/v1"):
                 continue
             if _classify_route(route) != "public":
                 continue
@@ -61,8 +60,7 @@ class TestApiRouteAccessMatrix:
         app = create_app()
         route_map = {
             (method, route.path): _classify_route(route)
-            for route in app.routes
-            if isinstance(route, APIRoute)
+            for route in iter_api_route_contracts(app.routes)
             for method in (route.methods - {"HEAD", "OPTIONS"})
             if route.path.startswith("/api/v1")
         }

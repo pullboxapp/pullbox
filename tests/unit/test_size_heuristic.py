@@ -2,8 +2,8 @@
 
 Covers:
 - Normal-sized issue: confidence unchanged
-- Large issue (>300MB): confidence lowered one tier
-- Very large issue (>450MB): confidence set to LOW
+- Large issue (>750MB): confidence lowered one tier
+- Very large issue (>1125MB): confidence lowered one tier
 - Small collection (<50MB): confidence set to LOW with warning
 - Normal collection: no change
 - None size: no change

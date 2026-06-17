@@ -1,4 +1,4 @@
-.PHONY: help setup dev dev-local dev-docker dev-docker-up dev-docker-down dev-docker-logs dev-docker-shell dev-docker-seed prod-test-pull prod-test-up prod-test-refresh prod-test-down prod-test-logs prod-test-shell run lint format format-fix typecheck test test-unit test-slow test-integration test-api test-providers test-utilities test-a11y test-e2e test-e2e-chrome test-e2e-firefox coverage coverage-check migrate migration seed seed-full reset-db reset-password reset-import import-fixture performance-baseline validate runner-preflight workflow-hygiene secret-scan security-ci ci-local docker-build-check docker-smoke ci-full ci-clean-room security-check pre-commit css-build css-watch clean
+.PHONY: help setup dev dev-local dev-docker dev-docker-up dev-docker-down dev-docker-logs dev-docker-shell dev-docker-seed prod-test-pull prod-test-up prod-test-refresh prod-test-down prod-test-logs prod-test-shell run lint format format-fix typecheck test test-unit test-slow test-integration test-api test-providers test-utilities test-a11y test-e2e test-e2e-chrome test-e2e-firefox coverage coverage-check migrate migration seed seed-full reset-db reset-password reset-import import-fixture performance-baseline validate runner-preflight release-changelog-check workflow-hygiene secret-scan security-ci ci-local docker-build-check docker-smoke ci-full ci-clean-room security-check pre-commit css-build css-watch clean
 
 VENV := .venv
 PYTHON_BOOTSTRAP ?= python3
@@ -194,6 +194,10 @@ validate: css-build lint format typecheck test ## Run full validation (css + lin
 
 runner-preflight: ## Verify local runner prerequisites for CI lanes
 	@PATH="$(CURDIR)/$(VENV)/bin:$$PATH" .github/scripts/preflight-runner.sh base python node playwright
+
+release-changelog-check: ## Verify CHANGELOG.md has a curated release section (usage: make release-changelog-check VERSION=X.Y.Z)
+	@test -n "$(VERSION)" || (echo "VERSION is required, e.g. make release-changelog-check VERSION=1.0.0" >&2; exit 1)
+	$(PYTHON_BOOTSTRAP) scripts/extract_changelog_section.py --version "$(VERSION)" --check
 
 workflow-hygiene: ## Run local workflow linting with pinned actionlint
 	@echo "\033[36m──── Workflow Hygiene ────\033[0m"

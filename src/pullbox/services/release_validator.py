@@ -145,13 +145,13 @@ def _apply_size_heuristic(
     # Anniversary editions, graphic novels stored as STANDARD, and high-res
     # scans can legitimately be 500+ MB.
     if issue_type in _SINGLE_ISSUE_TYPES:
-        if size_mb > warn_issue_mb * 1.5:  # > 450MB default
+        if size_mb > warn_issue_mb * 1.5:  # > 1125MB default
             lower = _lower_confidence(confidence)
             return (
                 lower,
                 f"Unusually large for single issue ({size_mb:.0f} MB)",
             )
-        if size_mb > warn_issue_mb:  # > 300MB default
+        if size_mb > warn_issue_mb:  # > 750MB default
             lower = _lower_confidence(confidence)
             return lower, f"Large for single issue ({size_mb:.0f} MB)"
 

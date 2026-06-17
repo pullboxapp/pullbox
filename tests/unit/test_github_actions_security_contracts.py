@@ -260,17 +260,50 @@ def test_docker_workflow_signs_and_verifies_published_images() -> None:
     assert "sigstore/cosign-installer@" in docker_workflow
     assert "cosign sign --yes" in docker_workflow
     assert "steps.push-image.outputs.digest" in docker_workflow
+    assert "release-image-digest" in docker_workflow
+    assert "digest.txt" in docker_workflow
+    assert "actions/upload-artifact@" in docker_workflow
     assert "cosign verify" in docker_workflow
     assert "--certificate-identity-regexp" in docker_workflow
     assert "--certificate-oidc-issuer" in docker_workflow
 
 
 def test_release_notes_include_image_signature_verification() -> None:
-    release_workflow = (WORKFLOW_DIR / "release.yml").read_text(encoding="utf-8")
+    release_workflow_path = WORKFLOW_DIR / "release.yml"
+    release_workflow = release_workflow_path.read_text(encoding="utf-8")
+    data = _load_yaml(release_workflow_path)
+
+    permissions = data.get("permissions")
+    assert isinstance(permissions, dict)
+    assert permissions.get("actions") == "read"
+
+    jobs = data.get("jobs")
+    assert isinstance(jobs, dict)
+    release_job = jobs.get("create-release")
+    assert isinstance(release_job, dict)
+    job_permissions = release_job.get("permissions")
+    assert isinstance(job_permissions, dict)
+    assert job_permissions.get("actions") == "read"
 
     assert "## 🔐 Image Verification" in release_workflow
+    assert "actions/download-artifact@" in release_workflow
+    assert "release-image-digest" in release_workflow
+    assert "github.event.workflow_run.id" in release_workflow
+    assert "steps.image-digest.outputs.digest" in release_workflow
+    assert "**Digest:**" in release_workflow
     assert "cosign verify" in release_workflow
     assert release_workflow.count("--certificate-oidc-issuer") == 2
-    expected_ghcr_image = "ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}"
+    expected_ghcr_image = (
+        "ghcr.io/${{ github.repository }}@${{ steps.image-digest.outputs.digest }}"
+    )
     assert expected_ghcr_image in release_workflow
-    assert "docker.io/pullbox/pullbox:${{ steps.version.outputs.version }}" in release_workflow
+    assert "docker.io/pullbox/pullbox@${{ steps.image-digest.outputs.digest }}" in release_workflow
+
+
+def test_release_notes_use_curated_changelog_before_commit_details() -> None:
+    release_workflow = (WORKFLOW_DIR / "release.yml").read_text(encoding="utf-8")
+
+    assert "scripts/extract_changelog_section.py" in release_workflow
+    assert "--output curated_changelog.md" in release_workflow
+    assert "cat curated_changelog.md" in release_workflow
+    assert "## Commit Details" in release_workflow

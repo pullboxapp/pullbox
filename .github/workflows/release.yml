@@ -18,6 +18,7 @@ on:
     types: [completed]
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -31,6 +32,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -75,7 +77,41 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Generate changelog from commits
+      - name: Extract curated changelog section
+        if: steps.release.outputs.skip != 'true'
+        run: |
+          python3 scripts/extract_changelog_section.py \
+            --version "${{ steps.release.outputs.version }}" \
+            --output curated_changelog.md
+
+      - name: Download release image digest artifact
+        if: steps.release.outputs.skip != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-image-digest
+          path: release-image-digest
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate release image digest
+        if: steps.release.outputs.skip != 'true'
+        id: image-digest
+        run: |
+          DIGEST_FILE="release-image-digest/digest.txt"
+          if [ ! -f "${DIGEST_FILE}" ]; then
+            echo "::error::Docker workflow did not publish ${DIGEST_FILE}."
+            exit 1
+          fi
+
+          DIGEST=$(tr -d '[:space:]' < "${DIGEST_FILE}")
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected release image digest format: ${DIGEST}"
+            exit 1
+          fi
+
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
         if: steps.release.outputs.skip != 'true'
         id: changelog
         run: |
@@ -95,6 +131,10 @@ jobs:
 
           {
             echo "## What's Changed"
+            echo ""
+            cat curated_changelog.md
+            echo ""
+            echo "## Commit Details"
             echo ""
 
             FEATS=$(category_notes '^feat(\(.+\))?: ' 's/^feat(\(.+\))?: /- /')
@@ -174,20 +214,23 @@ jobs:
             echo "docker pull docker.io/pullbox/pullbox:${{ steps.version.outputs.version }}"
             echo '```'
             echo ""
+            echo "**Digest:** \`${{ steps.image-digest.outputs.digest }}\`"
+            echo ""
             echo "## 🔐 Image Verification"
             echo ""
             echo "Release images are signed with keyless Sigstore/Cosign using GitHub Actions OIDC."
+            echo "These commands verify the exact multi-architecture image digest published by this release."
             echo ""
             echo '```bash'
             echo "cosign verify \\"
             echo "  --certificate-identity-regexp '^https://github.com/${{ github.repository }}/\\.github/workflows/docker\\.yml@refs/tags/${{ steps.version.outputs.tag }}$' \\"
             echo "  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\"
-            echo "  ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}"
+            echo "  ghcr.io/${{ github.repository }}@${{ steps.image-digest.outputs.digest }}"
             echo ""
             echo "cosign verify \\"
             echo "  --certificate-identity-regexp '^https://github.com/${{ github.repository }}/\\.github/workflows/docker\\.yml@refs/tags/${{ steps.version.outputs.tag }}$' \\"
             echo "  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\"
-            echo "  docker.io/pullbox/pullbox:${{ steps.version.outputs.version }}"
+            echo "  docker.io/pullbox/pullbox@${{ steps.image-digest.outputs.digest }}"
             echo '```'
             echo ""
             echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG:-$(git rev-list --max-parents=0 HEAD | head -1)}...${{ steps.release.outputs.tag }}"

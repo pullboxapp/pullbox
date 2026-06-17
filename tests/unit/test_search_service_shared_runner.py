@@ -808,6 +808,8 @@ async def test_build_search_runtime_parses_config_and_respects_registry_flag(
             [
                 SystemConfig(key="source_priority", value="not-json"),
                 SystemConfig(key="search_type_thresholds", value='{"issue": "medium"}'),
+                SystemConfig(key="search_size_warn_issue_mb", value="625"),
+                SystemConfig(key="search_size_warn_collection_mb", value="80"),
                 SystemConfig(key="indexer_failure_threshold", value="5"),
             ]
         )
@@ -820,5 +822,7 @@ async def test_build_search_runtime_parses_config_and_respects_registry_flag(
     assert runtime.indexer_configs.keys() == {7}
     assert runtime.source_priority is None
     assert runtime.type_thresholds["issue"] == "medium"
+    assert runtime.eval_kwargs["warn_issue_mb"] == 625
+    assert runtime.eval_kwargs["warn_collection_mb"] == 80
     assert runtime.failure_threshold == 5
     assert build_registry_mock.await_args.kwargs["include_download_clients"] is False

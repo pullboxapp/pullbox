@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from fastapi.routing import APIRoute
-
 from pullbox.ui.routes import router
+from tests.route_contracts import iter_api_route_contracts
 
 
 def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
@@ -16,8 +15,7 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             route.name,
             route.endpoint.__name__,
         )
-        for route in router.routes
-        if isinstance(route, APIRoute)
+        for route in iter_api_route_contracts(router.routes)
     ]
 
     assert manifest == [

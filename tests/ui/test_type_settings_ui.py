@@ -99,7 +99,7 @@ class TestTypeSettingsRender:
         assert "Issue Size Warning" in html
         assert "Collection Size Warning" in html
         # Default values shown
-        assert 'value="300"' in html
+        assert 'value="750"' in html
         assert 'value="50"' in html
 
     @pytest.mark.asyncio

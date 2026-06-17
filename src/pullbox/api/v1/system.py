@@ -566,9 +566,11 @@ async def get_about(
         "log_level": app_config.get("log_level", "info"),
         # Links
         "homepage_url": "https://pullbox.app",
+        "docs_url": "https://pullbox.app/docs",
+        "troubleshooting_url": "https://pullbox.app/docs/reference/troubleshooting",
         "source_url": "https://github.com/pullboxapp/pullbox",
         "issues_url": "https://github.com/pullboxapp/pullbox/issues/new?template=bug_report.yml",
-        "discord_url": "https://discord.com/channels/1484661929657106644/1484662608022732810",
+        "discord_url": "https://discord.gg/mg6GQkATaA",
         "bsky_url": "https://bsky.app/profile/pullboxapp.bsky.social",
         "x_url": "https://x.com/PullboxApp",
         "mastodon_url": "https://mastodon.social/@PullboxApp",

@@ -546,6 +546,25 @@ jobs:
             --certificate-oidc-issuer "${CERTIFICATE_OIDC_ISSUER}" \
             "${DOCKERHUB_IMAGE}@${DIGEST}"
 
+      - name: Write release image digest artifact
+        env:
+          DIGEST: ${{ steps.push-image.outputs.digest }}
+        run: |
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected release image digest format: ${DIGEST}"
+            exit 1
+          fi
+
+          mkdir -p "${RUNNER_TEMP}/release-image-digest"
+          printf '%s\n' "${DIGEST}" > "${RUNNER_TEMP}/release-image-digest/digest.txt"
+
+      - name: Upload release image digest artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-image-digest
+          path: ${{ runner.temp }}/release-image-digest/digest.txt
+          retention-days: 30
+
       - name: Summary
         run: |
           {
