@@ -37,6 +37,30 @@ env:
   PYTHON_DEFAULT: "3.14"
 
 jobs:
+  release_sync_check:
+    name: Release Sync Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      is_sync: ${{ steps.release-sync.outputs.is_sync }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Detect safe post-release sync PR
+        id: release-sync
+        env:
+          RELEASE_SYNC_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_SYNC_BASE_REF: ${{ github.base_ref || '' }}
+          RELEASE_SYNC_HEAD_REF: ${{ github.head_ref || '' }}
+          RELEASE_SYNC_REPOSITORY: ${{ github.repository }}
+          RELEASE_SYNC_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          RELEASE_SYNC_ACTOR: ${{ github.actor }}
+        run: python .github/scripts/validate-release-sync-pr.py
+
   untrusted-sanity:
     name: Docker Sanity (untrusted PR)
     if: github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')
@@ -64,7 +88,12 @@ jobs:
 
   trusted-production-validate:
     name: Production Docker Validate (trusted)
-    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')
+    needs: release_sync_check
+    if: >-
+      needs.release_sync_check.outputs.is_sync != 'true' &&
+      (github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'))
     runs-on: [self-hosted, Linux, X64, docker]
     timeout-minutes: 35
     permissions:

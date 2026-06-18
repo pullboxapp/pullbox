@@ -408,18 +408,20 @@ make ci-full
 Step 2: bump the version for release.
 
 ```bash
+git switch -c release/prepare-X.Y.Z
+
 # Edit src/pullbox/__init__.py from X.Y.Z-dev to X.Y.Z
 # Update CHANGELOG.md by moving curated Unreleased notes into X.Y.Z
 make release-changelog-check VERSION=X.Y.Z
 git add src/pullbox/__init__.py CHANGELOG.md
 git commit -m "chore: bump version to X.Y.Z for release"
-git push origin develop
+git push -u origin release/prepare-X.Y.Z
 ```
 
-Step 3: open a PR from `develop` to `main`.
+Step 3: open a PR from the release branch to `main`.
 
 ```bash
-gh pr create --base main --head develop --title "Release vX.Y.Z" --body "Release vX.Y.Z
+gh pr create --base main --head release/prepare-X.Y.Z --title "Release vX.Y.Z" --body "Release vX.Y.Z
 
 ## Summary
 - Release summary goes here.
@@ -531,26 +533,50 @@ git push origin vX.Y.Z-rc1
 
 ### 9.2 Required standard
 
-After the release tag is pushed and release automation is healthy:
+After the release tag is pushed and release automation is healthy, open a
+post-release sync PR back to `develop`:
 
 ```bash
-git switch develop
-git pull --ff-only origin develop
+git switch main
+git pull --ff-only origin main
+git switch -c feature/sync-develop-X.Y.Z
 
-# Edit src/pullbox/__init__.py from X.Y.Z to next-dev-version
+# Edit src/pullbox/__init__.py from X.Y.Z to the next patch dev version,
+# for example 0.9.10 -> 0.9.11-dev.
 git add src/pullbox/__init__.py
-git commit -m "chore: bump version to next-dev-version"
-git push origin develop
+git commit -m "chore: sync develop after vX.Y.Z release"
+git push -u origin feature/sync-develop-X.Y.Z
+gh pr create --base develop --head feature/sync-develop-X.Y.Z \
+  --title "Sync develop after vX.Y.Z release" \
+  --body "Syncs main back to develop after vX.Y.Z and reopens the dev version."
 ```
 
-If a release fix lands on `main`, bring it back into `develop` before starting
-more feature work:
+The required CI, Security, Workflow Hygiene, and Docker Validate workflows have
+a narrow fast path for this exact PR shape:
+
+- base branch is `develop`;
+- head branch starts with `feature/sync-develop-`;
+- PR is same-repository, not a fork or Dependabot PR;
+- `origin/main` contains `origin/develop`;
+- PR head contains `origin/main`;
+- the only change after `origin/main` is `src/pullbox/__init__.py`;
+- the version changes from the released `X.Y.Z` to the next patch
+  `X.Y.(Z+1)-dev`.
+
+Any other sync, hotfix, workflow, or source-code change falls back to the normal
+full required checks.
+
+If a release fix lands on `main` outside the normal release PR, bring it back
+into `develop` before starting more feature work through a normal PR:
 
 ```bash
 git switch develop
 git pull --ff-only origin develop
+git switch -c feature/sync-develop-hotfix
 git merge origin/main
-git push origin develop
+git push -u origin feature/sync-develop-hotfix
+gh pr create --base develop --head feature/sync-develop-hotfix \
+  --title "Sync develop after release hotfix"
 ```
 
 ### 9.3 Current repo nuances

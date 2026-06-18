@@ -32,11 +32,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release_sync_check:
+    name: Release Sync Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      is_sync: ${{ steps.release-sync.outputs.is_sync }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Detect safe post-release sync PR
+        id: release-sync
+        env:
+          RELEASE_SYNC_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_SYNC_BASE_REF: ${{ github.base_ref || '' }}
+          RELEASE_SYNC_HEAD_REF: ${{ github.head_ref || '' }}
+          RELEASE_SYNC_REPOSITORY: ${{ github.repository }}
+          RELEASE_SYNC_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          RELEASE_SYNC_ACTOR: ${{ github.actor }}
+        run: python .github/scripts/validate-release-sync-pr.py
+
   # ──────────────────────────────────────────────
   # Job 1: gitleaks (blocking secret scan)
   # ──────────────────────────────────────────────
   gitleaks:
     name: Gitleaks
+    needs: release_sync_check
+    if: needs.release_sync_check.outputs.is_sync != 'true'
     runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
     timeout-minutes: 20
     permissions:
@@ -124,6 +150,8 @@ jobs:
   # ──────────────────────────────────────────────
   dependency-audit:
     name: pip-audit
+    needs: release_sync_check
+    if: needs.release_sync_check.outputs.is_sync != 'true'
     runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
     timeout-minutes: 15
     permissions:
@@ -159,6 +187,8 @@ jobs:
   # ──────────────────────────────────────────────
   safety-check:
     name: Safety Check
+    needs: release_sync_check
+    if: needs.release_sync_check.outputs.is_sync != 'true'
     runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
     timeout-minutes: 15
     permissions:
@@ -194,6 +224,8 @@ jobs:
   # ──────────────────────────────────────────────
   bandit:
     name: Bandit
+    needs: release_sync_check
+    if: needs.release_sync_check.outputs.is_sync != 'true'
     runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
     timeout-minutes: 15
     permissions:
@@ -238,7 +270,8 @@ jobs:
   # ──────────────────────────────────────────────
   codeql:
     name: CodeQL Analysis
-    if: github.repository_visibility == 'public' || vars.PULLBOX_ENABLE_CODEQL == 'true'
+    needs: release_sync_check
+    if: needs.release_sync_check.outputs.is_sync != 'true' && (github.repository_visibility == 'public' || vars.PULLBOX_ENABLE_CODEQL == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -265,6 +298,7 @@ jobs:
     name: Security Required
     runs-on: ubuntu-latest
     needs:
+      - release_sync_check
       - gitleaks
       - dependency-audit
       - safety-check
@@ -279,6 +313,7 @@ jobs:
         env:
           NEEDS_CONTEXT: ${{ toJson(needs) }}
           CODEQL_BLOCKING: ${{ vars.PULLBOX_REQUIRE_CODEQL == 'true' }}
+          RELEASE_SYNC_PR: ${{ needs.release_sync_check.outputs.is_sync }}
         run: |
           python - <<'PY'
           import json
@@ -287,6 +322,23 @@ jobs:
 
           needs = json.loads(os.environ["NEEDS_CONTEXT"])
           codeql_blocking = os.environ["CODEQL_BLOCKING"].lower() == "true"
+          release_sync_pr = os.environ["RELEASE_SYNC_PR"].lower() == "true"
+          if release_sync_pr:
+              release_sync = needs.get("release_sync_check", {}).get("result")
+              if release_sync != "success":
+                  print(f"Release sync validation failed: {release_sync}", file=sys.stderr)
+                  sys.exit(1)
+              unexpected = {
+                  name: info.get("result")
+                  for name, info in needs.items()
+                  if name != "release_sync_check" and info.get("result") not in {"skipped", "success"}
+              }
+              if unexpected:
+                  print(f"Release sync fast path saw unexpected job results: {unexpected}", file=sys.stderr)
+                  sys.exit(1)
+              print("Release sync fast path validated; heavyweight security jobs intentionally skipped.")
+              sys.exit(0)
+
           failed = {}
           for name, info in needs.items():
               result = info.get("result")
