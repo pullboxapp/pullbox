@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,17 @@ def _load_release_sync_module() -> Any:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 def _non_comment_uses_lines(path: Path) -> list[tuple[int, str]]:
@@ -262,6 +274,51 @@ def test_release_sync_fast_path_requires_next_patch_dev_version() -> None:
     )
     assert unchanged.is_sync is False
     assert "0.9.11-dev" in unchanged.reason
+
+
+def test_release_sync_validator_accepts_only_main_plus_next_dev_bump(tmp_path: Path) -> None:
+    validator = _load_release_sync_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    _git(repo, "init", "--initial-branch=develop")
+    _git(repo, "config", "user.email", "tests@example.invalid")
+    _git(repo, "config", "user.name", "Pullbox Tests")
+    version_file = repo / "src" / "pullbox" / "__init__.py"
+    version_file.parent.mkdir(parents=True)
+    version_file.write_text('__version__ = "0.9.9-dev"\n', encoding="utf-8")
+    _git(repo, "add", "src/pullbox/__init__.py")
+    _git(repo, "commit", "-m", "seed develop")
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
+
+    _git(repo, "switch", "-c", "main")
+    version_file.write_text('__version__ = "0.9.10"\n', encoding="utf-8")
+    _git(repo, "commit", "-am", "release")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+    _git(repo, "switch", "-c", "feature/sync-develop-0.9.10")
+    version_file.write_text('__version__ = "0.9.11-dev"\n', encoding="utf-8")
+    _git(repo, "commit", "-am", "dev bump")
+
+    env = {
+        "RELEASE_SYNC_EVENT_NAME": "pull_request",
+        "RELEASE_SYNC_BASE_REF": "develop",
+        "RELEASE_SYNC_HEAD_REF": "feature/sync-develop-0.9.10",
+        "RELEASE_SYNC_REPOSITORY": "pullboxapp/pullbox",
+        "RELEASE_SYNC_HEAD_REPOSITORY": "pullboxapp/pullbox",
+        "RELEASE_SYNC_ACTOR": "maintainer",
+    }
+
+    valid = validator.validate_release_sync_pr(env, repo, fetch_refs=False)
+    assert valid.is_sync is True
+
+    (repo / "README.md").write_text("extra change\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "extra change")
+
+    invalid = validator.validate_release_sync_pr(env, repo, fetch_refs=False)
+    assert invalid.is_sync is False
+    assert "only allows" in invalid.reason
 
 
 def test_release_sync_fast_path_is_wired_to_required_aggregate_workflows() -> None:
