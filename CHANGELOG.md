@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
+## [0.9.8] - 2026-06-18
+
+Corrective release for the `0.9.7` publish attempt, which pushed container
+images but did not create a GitHub Release because Docker Hub signature
+verification could not discover the freshly uploaded signature.
+
+### CI / Build
+
+- Release image signing now signs GHCR and Docker Hub image references
+  separately.
+- Release image verification now retries digest-signature checks so Docker Hub
+  has time to expose newly uploaded Cosign signatures before the workflow fails.
+
 ## [0.9.7] - 2026-06-17
 
 Testing and coverage sprint release focused on hardening Pullbox ahead of the
