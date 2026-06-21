@@ -23,6 +23,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
+## [0.9.11-rc1] - 2026-06-21
+
+Release candidate focused on production bug-bash validation, large-library
+import reliability, restore readiness, and pre-v1 confidence.
+
+### Added
+
+- Added Docker production environment examples, including documented runtime
+  variables and hardened-image-friendly storage guidance.
+- Added restore recovery aftercare so fresh installs can recover metadata and
+  background work after a database restore.
+- Added persistent deferred ComicInfo enrichment and catalog hydration recovery
+  after restarts.
+
+### Changed
+
+- Refined Library, Series, Pull List, Security, Settings, System, and import UI
+  contracts based on canary production testing.
+- Limited the Library browser to tracked catalog entries so existing external
+  comic folders are not mistaken for Pullbox-managed library content.
+- Clarified local-auth-bypass behavior for Docker bridge clients and local
+  installs.
+
+### Fixed
+
+- Fixed production configuration issues for local-auth-bypass saves, runtime
+  library root seeding, donation QR codes, HTTPS/settings toggles, API-key
+  creation feedback, task status pills, browser title casing, and dashboard
+  storage reporting.
+- Fixed downloads and post-processing visibility, including Usenet finalization
+  progress and downloads history empty-state clarity.
+- Fixed import and rollback edge cases from Mylar3 and folder imports, including
+  nested Mylar path maps, trusted Mylar issue targets, duplicate skip-existing
+  imports, live import log updates, blocked-file retries, and restore recovery.
+- Fixed pull-list monitoring toggles and series-detail monitored semantics.
+
+### Performance
+
+- Sped up Step 2 import scanning, Step 4 file processing, import metadata
+  hydration, and large-library browsing.
+- Reused import metadata cache data during hydration to avoid unnecessary
+  ComicVine work.
+- Improved scheduled wanted-search fairness and daily metadata task cadence.
+
+### Testing
+
+- Raised overall test coverage above 91%.
+- Added coverage for import execution, deferred ComicInfo enrichment, restore
+  recovery, Mylar3 path handling, API keys, local auth bypass, library browsing,
+  settings regressions, and UI shell contracts.
+
+### Documentation
+
+- Updated backup/restore, Docker production setup, environment variable, and
+  restore-aftercare documentation.
+
+### CI / Build
+
+- Added release-candidate container tagging safeguards so RC tags do not update
+  `latest`.
+- Fixed Docker smoke validation to avoid fixed host-port collisions.
+- Added and documented the release-sync fast path for version-only
+  post-release sync PRs.
+
 ## [0.9.10] - 2026-06-18
 
 Corrective release for the `0.9.9` release workflow, which pushed registry
