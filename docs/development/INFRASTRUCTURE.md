@@ -1,8 +1,8 @@
 # Pullbox Infrastructure Standards
 
 **Author:** Adam Hernandez
-**Version:** 1.1
-**Last Modified:** 2026-05-16
+**Version:** 1.2
+**Last Modified:** 2026-07-12
 
 ## Purpose
 
@@ -227,6 +227,11 @@ tracked in the active CI/CD path.
 - Trusted Docker validation and Docker release jobs use the explicit
   self-hosted `docker` runner label by design. They are not governed by
   `PULLBOX_CHECKS_RUNNER`.
+- The self-hosted pool is repository-scoped and runs inside the isolated
+  `pullbox-runner-vm` guest on `home-server`. It contains three `ci` runners
+  (`pullbox-home-ci-1` through `pullbox-home-ci-3`) and one dedicated `docker`
+  runner (`pullbox-home-docker`). The guest uses private NAT networking and has
+  no production host filesystem or Docker socket mounts.
 - Untrusted Docker PRs run a reduced public sanity check (`Dockerfile.dev`
   build) instead of the full DHI-backed production build.
 - `Docker Validate Required` is the stable aggregate check for Docker
