@@ -1,8 +1,8 @@
 # Pullbox Security Standards
 
 **Author:** Adam Hernandez
-**Version:** 1.1
-**Last Modified:** 2026-05-16
+**Version:** 1.2
+**Last Modified:** 2026-07-12
 
 ## Purpose
 
@@ -743,6 +743,10 @@ default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; 
   without publishing.
 - `.github/workflows/docker-release.yml` runs Grype container scanning before
   release image publication.
+- Docker validation and release scanning verify that Python's bundled Expat is
+  at least 2.8.1 before accepting the image.
+- `.grype.yaml` limits reviewed container exceptions to exact package versions;
+  the Grype High-severity gate remains blocking.
 - GitHub Actions are SHA-pinned with version comments.
 - Workflows define explicit default permissions and per-job permissions.
 - `.github/dependabot.yml` covers `pip`, `github-actions`, `docker`, and `npm`.
@@ -767,6 +771,8 @@ default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; 
   scripts from the checkout.
 - Dependency scanning remains active in CI.
 - Container scanning remains active for Docker artifacts.
+- Container exceptions must identify the vulnerability, package, version, and
+  reviewed exposure. Re-review them after each DHI base-image refresh.
 - CodeQL must run on GitHub-hosted runners only.
 - CodeQL should only become merge-blocking after an explicit policy change and
   backlog triage.
@@ -792,6 +798,8 @@ default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; 
 - [ ] Workflows and jobs declare explicit permissions.
 - [ ] `pip-audit` remains active in CI.
 - [ ] Grype remains active for container images.
+- [ ] Container exceptions remain version-pinned and documented.
+- [ ] The container Expat runtime assertion remains active before Grype.
 - [ ] Dependabot covers primary dependency surfaces.
 - [ ] CodeQL status is documented accurately.
 - [ ] Required branch checks use stable aggregate jobs.

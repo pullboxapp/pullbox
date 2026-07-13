@@ -247,6 +247,11 @@ jobs:
       - name: Runner preflight
         run: .github/scripts/preflight-runner.sh docker
 
+      - name: Verify container security runtime
+        run: |
+          docker run --rm -i --entrypoint python pullbox:ci-scan - \
+            < scripts/verify_container_security_runtime.py
+
       - name: Run Grype scan
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         id: scan

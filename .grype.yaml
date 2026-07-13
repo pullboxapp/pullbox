@@ -8,7 +8,7 @@
 # Python package vulnerabilities are not suppressed here; pip-audit covers
 # those separately in the security workflow.
 #
-# Reviewed against pullbox:ci-scan on 2026-06-17 using the local Grype DB.
+# Reviewed against pullbox:validate on 2026-07-12 using the local Grype DB.
 # Re-audit after each DHI base-image refresh and remove entries when fixed
 # stable Python 3.14 or Debian 13 packages become available upstream.
 
@@ -76,73 +76,147 @@ ignore:
       version: 3.14.6
       type: binary
 
+  # The application XML path uses Python's bundled Expat, which the container
+  # runtime check requires to be 2.8.1 or newer. The Debian 13 libexpat copy is
+  # retained only as the Fontconfig dependency used by Poppler PDF tools.
+  - vulnerability: CVE-2025-59375
+    package:
+      name: libexpat1
+      version: 2.7.1-2+dhi5
+      type: deb
+  - vulnerability: CVE-2025-59375
+    package:
+      name: libexpat1-dev
+      version: 2.7.1-2+dhi5
+      type: deb
+  - vulnerability: CVE-2026-45186
+    package:
+      name: libexpat1
+      version: 2.7.1-2+dhi5
+      type: deb
+  - vulnerability: CVE-2026-45186
+    package:
+      name: libexpat1-dev
+      version: 2.7.1-2+dhi5
+      type: deb
+  - vulnerability: CVE-2026-41080
+    package:
+      name: libexpat1
+      version: 2.7.1-2+dhi5
+      type: deb
+  - vulnerability: CVE-2026-41080
+    package:
+      name: libexpat1-dev
+      version: 2.7.1-2+dhi5
+      type: deb
+  - vulnerability: CVE-2026-25210
+    package:
+      name: libexpat1
+      version: 2.7.1-2+dhi5
+      type: deb
+  - vulnerability: CVE-2026-25210
+    package:
+      name: libexpat1-dev
+      version: 2.7.1-2+dhi5
+      type: deb
+
   # Debian 13 runtime packages. These are currently reported by Grype as
   # negligible/medium, no-fix, or won't-fix findings in the DHI Debian 13 base.
   - vulnerability: CVE-2010-4756
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2018-20796
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2019-1010022
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2019-1010023
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2019-1010024
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2019-1010025
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2019-9192
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2026-6238
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2026-5435
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
+      type: deb
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi1
+      type: deb
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2026-5450
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
+      type: deb
+  - vulnerability: CVE-2026-5450
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi1
+      type: deb
+  - vulnerability: CVE-2026-5450
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi1
       type: deb
   - vulnerability: CVE-2026-5928
     package:
       name: libc6
-      version: 2.41-12+deb13u3
+      version: 2.41-12+deb13u3+dhi1
+      type: deb
+  - vulnerability: CVE-2026-5928
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi1
+      type: deb
+  - vulnerability: CVE-2026-5928
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi1
       type: deb
 
   - vulnerability: CVE-2021-45346
     package:
       name: libsqlite3-0
-      version: 3.46.1-7+deb13u1
+      version: 3.46.1-7+deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2025-70873
     package:
       name: libsqlite3-0
-      version: 3.46.1-7+deb13u1
+      version: 3.46.1-7+deb13u1+dhi2
       type: deb
 
   # Debian trixie marks these SQLite FTS5 findings as no-dsa/minor while the
@@ -150,80 +224,80 @@ ignore:
   - vulnerability: CVE-2026-11822
     package:
       name: libsqlite3-0
-      version: 3.46.1-7+deb13u1
+      version: 3.46.1-7+deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-11824
     package:
       name: libsqlite3-0
-      version: 3.46.1-7+deb13u1
+      version: 3.46.1-7+deb13u1+dhi2
       type: deb
 
   - vulnerability: CVE-2022-0563
     package:
       name: libuuid1
-      version: 2.41-5
+      version: 2.41-5+dhi3
       type: deb
   - vulnerability: CVE-2025-14104
     package:
       name: libuuid1
-      version: 2.41-5
+      version: 2.41-5+dhi3
       type: deb
   - vulnerability: CVE-2026-27456
     package:
       name: libuuid1
-      version: 2.41-5
+      version: 2.41-5+dhi3
       type: deb
   - vulnerability: CVE-2026-3184
     package:
       name: libuuid1
-      version: 2.41-5
+      version: 2.41-5+dhi3
       type: deb
 
   - vulnerability: CVE-2025-6141
     package:
       name: libncursesw6
-      version: 6.5+20250216-2
+      version: 6.5+20250216-2+dhi4
       type: deb
   - vulnerability: CVE-2025-6141
     package:
       name: libtinfo6
-      version: 6.5+20250216-2
+      version: 6.5+20250216-2+dhi4
       type: deb
   - vulnerability: CVE-2025-6141
     package:
       name: ncurses-base
-      version: 6.5+20250216-2
+      version: 6.5+20250216-2+dhi4
       type: deb
   - vulnerability: CVE-2025-6141
     package:
       name: ncurses-bin
-      version: 6.5+20250216-2
+      version: 6.5+20250216-2+dhi4
       type: deb
   - vulnerability: CVE-2025-69720
     package:
       name: libncursesw6
-      version: 6.5+20250216-2
+      version: 6.5+20250216-2+dhi4
       type: deb
   - vulnerability: CVE-2025-69720
     package:
       name: libtinfo6
-      version: 6.5+20250216-2
+      version: 6.5+20250216-2+dhi4
       type: deb
   - vulnerability: CVE-2025-69720
     package:
       name: ncurses-base
-      version: 6.5+20250216-2
+      version: 6.5+20250216-2+dhi4
       type: deb
   - vulnerability: CVE-2025-69720
     package:
       name: ncurses-bin
-      version: 6.5+20250216-2
+      version: 6.5+20250216-2+dhi4
       type: deb
 
   - vulnerability: CVE-2026-27171
     package:
       name: zlib1g
-      version: 1:1.3.dfsg+really1.3.1-1+b1
+      version: 1:1.3.dfsg+really1.3.1-1+dhi2
       type: deb
   - vulnerability: CVE-2026-34743
     package:
@@ -233,5 +307,5 @@ ignore:
   - vulnerability: CVE-2026-42250
     package:
       name: libbz2-1.0
-      version: 1.0.8-6
+      version: 1.0.8-6+dhi2
       type: deb

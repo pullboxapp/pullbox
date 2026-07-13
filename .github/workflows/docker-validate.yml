@@ -162,6 +162,11 @@ jobs:
       - name: Inspect built production image
         run: docker image inspect pullbox:validate >/dev/null
 
+      - name: Verify container security runtime
+        run: |
+          docker run --rm -i --entrypoint python pullbox:validate - \
+            < scripts/verify_container_security_runtime.py
+
       - name: Run Grype scan
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
