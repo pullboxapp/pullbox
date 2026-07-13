@@ -527,6 +527,45 @@ def test_e2e_matrix_shards_each_browser_across_three_workers() -> None:
     assert "--dist=worksteal" in command
 
 
+def test_ci_video_and_trace_capture_are_manual_diagnostics_only() -> None:
+    workflow = _load_yaml(WORKFLOW_DIR / "ci.yml")
+    triggers = workflow.get(True, workflow.get("on"))
+    assert isinstance(triggers, dict)
+    dispatch = triggers.get("workflow_dispatch")
+    assert isinstance(dispatch, dict)
+    diagnostic_input = dispatch.get("inputs", {}).get("e2e_diagnostics")
+    assert diagnostic_input == {
+        "description": "Retain E2E failure video and traces",
+        "required": False,
+        "type": "boolean",
+        "default": False,
+    }
+
+    env = workflow.get("env")
+    assert isinstance(env, dict)
+    assert env.get("E2E_VIDEO_MODE") == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.e2e_diagnostics "
+        "&& 'retain-on-failure' || 'off' }}"
+    )
+    assert env.get("PULLBOX_E2E_TRACE") == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.e2e_diagnostics "
+        "&& 'true' || 'false' }}"
+    )
+
+    jobs = workflow.get("jobs")
+    assert isinstance(jobs, dict)
+    for job_name, step_name in [
+        ("accessibility", "Run accessibility browser tests"),
+        ("e2e", "Run E2E tests"),
+    ]:
+        job = jobs.get(job_name)
+        assert isinstance(job, dict)
+        step = next(step for step in job.get("steps", []) if step.get("name") == step_name)
+        command = step.get("run", "")
+        assert '--video "${E2E_VIDEO_MODE}"' in command
+        assert "--video retain-on-failure" not in command
+
+
 def test_browser_smoke_and_accessibility_artifacts_survive_failures_and_cancels() -> None:
     ci_workflow = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
     docker_validate = (WORKFLOW_DIR / "docker-validate.yml").read_text(encoding="utf-8")

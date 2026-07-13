@@ -22,6 +22,12 @@ on:
       - labeled
       - unlabeled
   workflow_dispatch:
+    inputs:
+      e2e_diagnostics:
+        description: Retain E2E failure video and traces
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +38,8 @@ concurrency:
 
 env:
   E2E_WORKERS: "3"
+  E2E_VIDEO_MODE: "${{ github.event_name == 'workflow_dispatch' && inputs.e2e_diagnostics && 'retain-on-failure' || 'off' }}"
+  PULLBOX_E2E_TRACE: "${{ github.event_name == 'workflow_dispatch' && inputs.e2e_diagnostics && 'true' || 'false' }}"
   PYTHON_DEFAULT: "3.14"
   PYTEST_WORKERS: "5"
 
@@ -316,7 +324,7 @@ jobs:
             -v \
             -m accessibility \
             --browser chromium \
-            --video retain-on-failure \
+            --video "${E2E_VIDEO_MODE}" \
             --screenshot only-on-failure \
             --full-page-screenshot \
             --output=test-results/e2e \
@@ -399,7 +407,7 @@ jobs:
             --dist=worksteal \
             --browser ${{ matrix.browser }} \
             ${{ matrix.pytest_extra_args }} \
-            --video retain-on-failure \
+            --video "${E2E_VIDEO_MODE}" \
             --screenshot only-on-failure \
             --full-page-screenshot \
             --output=test-results/e2e \
