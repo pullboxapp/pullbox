@@ -26,7 +26,7 @@ requirements.
   CI/security/workflow-hygiene checks run after maintainers apply `ci:full`.
 - CI tests Python 3.12, 3.13, and 3.14.
 - Self-hosted Python matrix jobs use five pytest workers per Python version.
-- Self-hosted functional E2E jobs use two isolated pytest workers per browser.
+- Self-hosted functional E2E jobs use three isolated pytest workers per browser.
 - Python 3.14 is the production container runtime.
 - The production Docker image uses Docker Hardened Images.
 - The runtime image is non-root and intentionally minimal.
