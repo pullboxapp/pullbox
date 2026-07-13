@@ -499,6 +499,15 @@ def test_ci_python_matrix_uses_five_parallel_workers() -> None:
     assert isinstance(env, dict)
     assert env.get("PYTEST_WORKERS") == "5"
 
+    jobs = workflow.get("jobs")
+    assert isinstance(jobs, dict)
+    test_job = jobs.get("test")
+    assert isinstance(test_job, dict)
+    test_step = next(
+        step for step in test_job.get("steps", []) if step.get("name") == "Run tests with coverage"
+    )
+    assert "--dist=worksteal" in test_step.get("run", "")
+
 
 def test_browser_smoke_and_accessibility_artifacts_survive_failures_and_cancels() -> None:
     ci_workflow = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")

@@ -193,6 +193,7 @@ jobs:
           pytest tests/ \
             --ignore=tests/e2e \
             -n "${PYTEST_WORKERS}" \
+            --dist=worksteal \
             --cov=pullbox \
             --cov-report=xml \
             --cov-report=term-missing \
