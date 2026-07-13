@@ -1,0 +1,639 @@
+---
+# Pullbox Docker Release Benchmark
+# Measures a distributed multi-platform build without publishing release tags.
+# Each run uses an isolated GHCR package that is deleted after measurement.
+#
+# Security: manual dispatch only, explicit permissions, and full-SHA action pins.
+
+name: Docker Release Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache_generation:
+        description: "Cache generation; reuse for warm runs, change for cold runs"
+        required: true
+        default: "v1"
+        type: string
+      cleanup:
+        description: "Delete the temporary GHCR package after the benchmark"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_DEFAULT: "3.14"
+
+concurrency:
+  group: docker-release-benchmark
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      benchmark-started-at: ${{ steps.prepare.outputs.benchmark_started_at }}
+      build-date: ${{ steps.prepare.outputs.build_date }}
+      image-name: ${{ steps.prepare.outputs.image_name }}
+      package-name: ${{ steps.prepare.outputs.package_name }}
+      version: ${{ steps.prepare.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Prepare benchmark metadata
+        id: prepare
+        env:
+          CACHE_GENERATION: ${{ inputs.cache_generation }}
+        run: |
+          if ! [[ "${CACHE_GENERATION}" =~ ^[A-Za-z0-9._-]{1,40}$ ]]; then
+            echo "::error::cache_generation must use 1-40 letters, numbers, dots, underscores, or hyphens."
+            exit 1
+          fi
+
+          VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/pullbox/__init__.py | head -1)
+          if [ -z "${VERSION}" ]; then
+            echo "::error::Unable to extract Pullbox version from src/pullbox/__init__.py"
+            exit 1
+          fi
+
+          REPOSITORY=$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          OWNER=${REPOSITORY%%/*}
+          PACKAGE_NAME="pullbox-benchmark-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          IMAGE_NAME="ghcr.io/${OWNER}/${PACKAGE_NAME}"
+
+          echo "benchmark_started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "package_name=${PACKAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Explain safety boundary
+        run: |
+          {
+            echo "## Docker Release Benchmark"
+            echo ""
+            echo "This run uses a temporary GHCR-only package and cannot publish release tags."
+            echo ""
+            echo "- Source: \`${GITHUB_SHA}\`"
+            echo "- Cache generation: \`${{ inputs.cache_generation }}\`"
+            echo "- Temporary package: \`${{ steps.prepare.outputs.image_name }}\`"
+            echo "- Cleanup requested: \`${{ inputs.cleanup }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-amd64:
+    name: Build AMD64
+    runs-on: [self-hosted, Linux, X64, docker]
+    needs: [prepare]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      build-seconds: ${{ steps.build-elapsed.outputs.seconds }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Runner preflight
+        run: .github/scripts/preflight-runner.sh base docker
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Validate DHI authentication
+        env:
+          DHI_USERNAME: ${{ secrets.DHI_USERNAME }}
+          DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
+        run: |
+          if [ -z "${DHI_USERNAME}" ] || [ -z "${DHI_TOKEN}" ]; then
+            echo "::error::DHI_USERNAME and DHI_TOKEN repository secrets are required."
+            exit 1
+          fi
+
+      - name: Log in to DHI
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start build timer
+        id: build-timer
+        run: echo "started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push AMD64 by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          outputs: type=image,name=${{ needs.prepare.outputs.image-name }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.title=Pullbox
+            org.opencontainers.image.description=Pullbox Docker release benchmark image
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.licenses=GPL-3.0-or-later
+          build-args: |
+            BUILD_DATE=${{ needs.prepare.outputs.build-date }}
+            GIT_SHA=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref_name }}
+            VERSION=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=pullbox-benchmark-amd64-${{ inputs.cache_generation }}
+          cache-to: type=gha,mode=max,scope=pullbox-benchmark-amd64-${{ inputs.cache_generation }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Record build duration
+        id: build-elapsed
+        env:
+          STARTED_AT: ${{ steps.build-timer.outputs.started_at }}
+        run: echo "seconds=$(( $(date +%s) - STARTED_AT ))" >> "$GITHUB_OUTPUT"
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected AMD64 digest: ${DIGEST}"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload AMD64 digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-digest-amd64
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  build-arm64:
+    name: Build ARM64
+    runs-on: [self-hosted, Linux, X64, docker]
+    needs: [prepare]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      build-seconds: ${{ steps.build-elapsed.outputs.seconds }}
+      digest: ${{ steps.build.outputs.digest }}
+      total-seconds: ${{ steps.total-elapsed.outputs.seconds }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Runner preflight
+        run: .github/scripts/preflight-runner.sh base docker
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Validate DHI authentication
+        env:
+          DHI_USERNAME: ${{ secrets.DHI_USERNAME }}
+          DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
+        run: |
+          if [ -z "${DHI_USERNAME}" ] || [ -z "${DHI_TOKEN}" ]; then
+            echo "::error::DHI_USERNAME and DHI_TOKEN repository secrets are required."
+            exit 1
+          fi
+
+      - name: Log in to DHI
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start job timer
+        id: total-timer
+        run: echo "started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Start build timer
+        id: build-timer
+        run: echo "started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push ARM64 by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/arm64
+          outputs: type=image,name=${{ needs.prepare.outputs.image-name }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.title=Pullbox
+            org.opencontainers.image.description=Pullbox Docker release benchmark image
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.licenses=GPL-3.0-or-later
+          build-args: |
+            BUILD_DATE=${{ needs.prepare.outputs.build-date }}
+            GIT_SHA=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref_name }}
+            VERSION=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=pullbox-benchmark-arm64-${{ inputs.cache_generation }}
+          cache-to: type=gha,mode=max,scope=pullbox-benchmark-arm64-${{ inputs.cache_generation }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Record build duration
+        id: build-elapsed
+        env:
+          STARTED_AT: ${{ steps.build-timer.outputs.started_at }}
+        run: echo "seconds=$(( $(date +%s) - STARTED_AT ))" >> "$GITHUB_OUTPUT"
+
+      - name: Verify ARM64 container security runtime
+        env:
+          IMAGE_REF: ${{ needs.prepare.outputs.image-name }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker run --rm --pull always --platform linux/arm64 -i \
+            --entrypoint python "${IMAGE_REF}" - \
+            < scripts/verify_container_security_runtime.py
+
+      - name: Record total ARM64 duration
+        id: total-elapsed
+        env:
+          STARTED_AT: ${{ steps.total-timer.outputs.started_at }}
+        run: echo "seconds=$(( $(date +%s) - STARTED_AT ))" >> "$GITHUB_OUTPUT"
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected ARM64 digest: ${DIGEST}"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload ARM64 digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-digest-arm64
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  validate-amd64:
+    name: Validate AMD64
+    runs-on: [self-hosted, Linux, X64, docker]
+    needs: [prepare, build-amd64]
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      validation-seconds: ${{ steps.elapsed.outputs.seconds }}
+    env:
+      IMAGE_REF: ${{ needs.prepare.outputs.image-name }}@${{ needs.build-amd64.outputs.digest }}
+      LOCAL_IMAGE: pullbox:benchmark-amd64-${{ github.run_id }}
+      SMOKE_CONTAINER: pullbox-benchmark-smoke-${{ github.run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Start validation timer
+        id: timer
+        run: echo "started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Runner preflight
+        run: .github/scripts/preflight-runner.sh base docker
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull benchmark image
+        run: |
+          docker pull "${IMAGE_REF}"
+          docker tag "${IMAGE_REF}" "${LOCAL_IMAGE}"
+
+      - name: Verify container security runtime
+        run: |
+          docker run --rm -i --entrypoint python "${LOCAL_IMAGE}" - \
+            < scripts/verify_container_security_runtime.py
+
+      - name: Run Grype scan
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: sarif
+          config: .grype.yaml
+
+      - name: Verify packaged static assets
+        run: |
+          docker run --rm --entrypoint python "${LOCAL_IMAGE}" -c '
+          import pullbox.app
+
+          assets = [
+              pullbox.app.STATIC_DIR / "css" / "tailwind.css",
+              pullbox.app.STATIC_DIR / "js" / "htmx.min.js",
+          ]
+          missing = [str(asset) for asset in assets if not asset.is_file()]
+          if missing:
+              raise SystemExit("Missing packaged static assets: " + ", ".join(missing))
+          print("Packaged static assets verified")
+          '
+
+      - name: Start container
+        run: |
+          docker run -d \
+            --name "${SMOKE_CONTAINER}" \
+            -p 127.0.0.1::8585 \
+            -e PULLBOX_SECRET_KEY=smoke-test-secret-key-for-docker-ci \
+            -e PULLBOX_LOG_LEVEL=WARNING \
+            "${LOCAL_IMAGE}"
+
+          smoke_port=$(docker port "${SMOKE_CONTAINER}" 8585/tcp | awk -F: 'NR == 1 { print $NF }')
+          if [ -z "${smoke_port}" ]; then
+            echo "::error::Could not determine Pullbox smoke-test port."
+            docker port "${SMOKE_CONTAINER}" || true
+            exit 1
+          fi
+          echo "PULLBOX_SMOKE_URL=http://127.0.0.1:${smoke_port}" >> "$GITHUB_ENV"
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf "${PULLBOX_SMOKE_URL}/ping" > /dev/null 2>&1; then
+              echo "Container healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Container failed to become healthy"
+          docker logs "${SMOKE_CONTAINER}"
+          exit 1
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT }}
+
+      - name: Setup runner-local test venv
+        run: .github/scripts/setup-runner-venv.sh "dev,e2e"
+
+      - name: Install Playwright browsers
+        run: playwright install chromium
+
+      - name: Python preflight
+        run: .github/scripts/preflight-runner.sh python
+
+      - name: Run smoke tests
+        env:
+          PULLBOX_SMOKE_TEST: "true"
+        run: |
+          pytest tests/e2e/test_smoke.py \
+            -v \
+            --base-url "${PULLBOX_SMOKE_URL}"
+
+      - name: Upload smoke traces
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-smoke-test-traces
+          path: test-results/smoke/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Record validation duration
+        id: elapsed
+        if: always()
+        env:
+          STARTED_AT: ${{ steps.timer.outputs.started_at }}
+        run: echo "seconds=$(( $(date +%s) - STARTED_AT ))" >> "$GITHUB_OUTPUT"
+
+      - name: Container logs on failure
+        if: failure() || cancelled()
+        run: docker logs "${SMOKE_CONTAINER}"
+
+      - name: Cleanup local container and image
+        if: always()
+        run: |
+          docker rm -f "${SMOKE_CONTAINER}" || true
+          docker image rm "${LOCAL_IMAGE}" || true
+
+  manifest:
+    name: Merge Benchmark Manifest
+    runs-on: ubuntu-latest
+    needs: [prepare, build-amd64, build-arm64, validate-amd64]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.inspect.outputs.digest }}
+      manifest-seconds: ${{ steps.elapsed.outputs.seconds }}
+      total-seconds: ${{ steps.elapsed.outputs.total_seconds }}
+    steps:
+      - name: Download platform digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: benchmark-digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start manifest timer
+        id: timer
+        run: echo "started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Create temporary multi-platform manifest
+        env:
+          IMAGE_NAME: ${{ needs.prepare.outputs.image-name }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          sources=()
+          for digest_file in *; do
+            sources+=("${IMAGE_NAME}@sha256:${digest_file}")
+          done
+
+          if [ "${#sources[@]}" -ne 2 ]; then
+            echo "::error::Expected two platform digests, found ${#sources[@]}."
+            exit 1
+          fi
+
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.description=Pullbox Docker release benchmark image" \
+            --tag "${IMAGE_NAME}:candidate" \
+            "${sources[@]}"
+
+      - name: Inspect temporary manifest
+        id: inspect
+        env:
+          IMAGE_NAME: ${{ needs.prepare.outputs.image-name }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE_NAME}:candidate" > manifest-inspect.txt
+          docker buildx imagetools inspect "${IMAGE_NAME}:candidate" --raw > manifest-index.json
+          cat manifest-inspect.txt
+
+          DIGEST=$(awk '$1 == "Digest:" { print $2; exit }' manifest-inspect.txt)
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected manifest digest: ${DIGEST}"
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open("manifest-index.json", encoding="utf-8") as handle:
+              index = json.load(handle)
+
+          manifests = index.get("manifests") or []
+          platforms = {
+              f"{(manifest.get('platform') or {}).get('os')}/"
+              f"{(manifest.get('platform') or {}).get('architecture')}"
+              for manifest in manifests
+              if manifest.get("platform")
+          }
+          expected = {"linux/amd64", "linux/arm64"}
+          if not expected.issubset(platforms):
+              print(f"Missing expected platforms: {expected - platforms}", file=sys.stderr)
+              sys.exit(1)
+
+          attestations = sum(
+              1
+              for manifest in manifests
+              if (manifest.get("annotations") or {}).get("vnd.docker.reference.type")
+              == "attestation-manifest"
+          )
+          if attestations == 0:
+              print("Missing SBOM/provenance attestations.", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Record benchmark duration
+        id: elapsed
+        env:
+          BENCHMARK_STARTED_AT: ${{ needs.prepare.outputs.benchmark-started-at }}
+          MANIFEST_STARTED_AT: ${{ steps.timer.outputs.started_at }}
+        run: |
+          NOW=$(date +%s)
+          echo "seconds=$(( NOW - MANIFEST_STARTED_AT ))" >> "$GITHUB_OUTPUT"
+          echo "total_seconds=$(( NOW - BENCHMARK_STARTED_AT ))" >> "$GITHUB_OUTPUT"
+
+      - name: Write benchmark summary
+        run: |
+          {
+            echo "## Benchmark Result"
+            echo ""
+            echo "| Measurement | Seconds |"
+            echo "|---|---:|"
+            echo "| AMD64 build | ${{ needs.build-amd64.outputs.build-seconds }} |"
+            echo "| ARM64 build | ${{ needs.build-arm64.outputs.build-seconds }} |"
+            echo "| ARM64 build and runtime verification | ${{ needs.build-arm64.outputs.total-seconds }} |"
+            echo "| AMD64 scan and smoke validation | ${{ needs.validate-amd64.outputs.validation-seconds }} |"
+            echo "| Manifest merge and inspection | ${{ steps.elapsed.outputs.seconds }} |"
+            echo "| End-to-end after prepare started | ${{ steps.elapsed.outputs.total_seconds }} |"
+            echo ""
+            echo "Temporary manifest digest: \`${{ steps.inspect.outputs.digest }}\`"
+            echo ""
+            echo "Cleanup time is intentionally excluded from the benchmark total."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup:
+    name: Delete Benchmark Package
+    runs-on: ubuntu-latest
+    needs: [prepare, build-amd64, build-arm64, validate-amd64, manifest]
+    if: ${{ always() && inputs.cleanup }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Delete isolated GHCR package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_NAME: ${{ needs.prepare.outputs.image-name }}
+          PACKAGE_NAME: ${{ needs.prepare.outputs.package-name }}
+        run: |
+          if [ -z "${IMAGE_NAME}" ] || [ -z "${PACKAGE_NAME}" ]; then
+            echo "::notice::No benchmark package was created."
+            exit 0
+          fi
+
+          OWNER_TYPE=$(jq -r '.repository.owner.type' "${GITHUB_EVENT_PATH}")
+          if ! [[ "${PACKAGE_NAME}" =~ ^[a-z0-9._-]+$ ]]; then
+            echo "::error::Refusing to delete unexpected package name: ${PACKAGE_NAME}"
+            exit 1
+          fi
+          if [[ "${PACKAGE_NAME}" != pullbox-benchmark-* ]]; then
+            echo "::error::Refusing to delete a non-benchmark package: ${PACKAGE_NAME}"
+            exit 1
+          fi
+
+          case "${OWNER_TYPE}" in
+            Organization)
+              ENDPOINT="/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/${PACKAGE_NAME}"
+              ;;
+            User)
+              ENDPOINT="/users/${GITHUB_REPOSITORY_OWNER}/packages/container/${PACKAGE_NAME}"
+              ;;
+            *)
+              echo "::error::Unexpected repository owner type: ${OWNER_TYPE}"
+              exit 1
+              ;;
+          esac
+
+          for attempt in $(seq 1 12); do
+            if gh api --method DELETE "${ENDPOINT}"; then
+              echo "Deleted temporary package ${IMAGE_NAME}."
+              exit 0
+            fi
+            echo "Package deletion not ready; retrying in 10 seconds (${attempt}/12)."
+            sleep 10
+          done
+
+          echo "::warning::Unable to delete ${IMAGE_NAME}; remove this isolated benchmark package manually."

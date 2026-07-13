@@ -185,6 +185,7 @@ tracked in the active CI/CD path.
 | `Security` | Pull requests and manual dispatch | gitleaks, dependency audits, Bandit, CodeQL, and aggregate security gate after `ci:full` |
 | `Workflow Hygiene` | Pull requests and manual dispatch | actionlint and aggregate workflow gate after `ci:full` |
 | `Docker Validate` | Pull requests and manual dispatch | Trusted DHI production image validation or reduced public sanity validation |
+| `Docker Release Benchmark` | Manual dispatch | GHCR-only distributed AMD64/ARM64 build timing with temporary package cleanup |
 | `Docker Release` | Version tag push and manual dispatch | Release image build, Grype scan, smoke test, GHCR/Docker Hub publish, Cosign signing, and signature verification |
 | `Release` | Successful `Docker Release` workflow run | GitHub Release creation with curated changelog, generated commit details, Docker pull commands, signature verification, and full changelog link |
 
@@ -217,6 +218,14 @@ tracked in the active CI/CD path.
   the released version to the next patch `-dev` version.
 - Docker validation is a PR/manual GitHub Actions workflow. It never logs in to
   publish registries and never pushes images.
+- Docker release benchmarking is manual-only. It builds AMD64 and ARM64 by
+  digest on separate `docker` runners, validates the AMD64 image while ARM64
+  continues, creates a temporary multi-platform manifest in an isolated GHCR
+  package, and deletes that package after timing. It never publishes to Docker
+  Hub or writes version, `latest`, or `edge` tags.
+- Reuse the same Docker benchmark `cache_generation` for warm-cache comparisons.
+  Change it for a cold-cache comparison. Benchmark summaries exclude cleanup
+  time from the measured critical path.
 - Docker publication depends on trusted refs and release tags.
 - DHI credentials are required for Docker builds that pull `dhi.io` base images.
 - Forked or Dependabot PRs may not have repository secrets. PR workflows should
@@ -236,6 +245,9 @@ tracked in the active CI/CD path.
 - Trusted Docker validation and Docker release jobs use the explicit
   self-hosted `docker` runner label by design. They are not governed by
   `PULLBOX_CHECKS_RUNNER`.
+- Two isolated-VM runners carry the `docker` label so benchmark platform builds
+  can run concurrently. Production release behavior remains unchanged until a
+  benchmarked design is adopted explicitly.
 - Untrusted Docker PRs run a reduced public sanity check (`Dockerfile.dev`
   build) instead of the full DHI-backed production build.
 - `Docker Validate Required` is the stable aggregate check for Docker

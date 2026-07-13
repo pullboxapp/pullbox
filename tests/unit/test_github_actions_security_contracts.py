@@ -709,6 +709,68 @@ def test_docker_release_workflow_is_tag_or_manual_only_and_scans_before_publish(
     assert push_job.get("runs-on") == ["self-hosted", "Linux", "X64", "docker"]
 
 
+def test_docker_release_benchmark_is_manual_isolated_and_non_release() -> None:
+    """Benchmark runs must not mutate either production registry namespace."""
+    workflow_path = WORKFLOW_DIR / "docker-release-benchmark.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    data = _load_yaml(workflow_path)
+    triggers = data.get(True, data.get("on"))
+    assert triggers == {
+        "workflow_dispatch": {
+            "inputs": {
+                "cache_generation": {
+                    "description": ("Cache generation; reuse for warm runs, change for cold runs"),
+                    "required": True,
+                    "default": "v1",
+                    "type": "string",
+                },
+                "cleanup": {
+                    "description": ("Delete the temporary GHCR package after the benchmark"),
+                    "required": True,
+                    "default": True,
+                    "type": "boolean",
+                },
+            }
+        }
+    }
+
+    jobs = data.get("jobs")
+    assert isinstance(jobs, dict)
+    assert jobs["build-amd64"].get("runs-on") == [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "docker",
+    ]
+    assert jobs["build-arm64"].get("runs-on") == [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "docker",
+    ]
+    assert jobs["validate-amd64"].get("needs") == ["prepare", "build-amd64"]
+    assert jobs["manifest"].get("needs") == [
+        "prepare",
+        "build-amd64",
+        "build-arm64",
+        "validate-amd64",
+    ]
+
+    assert "REPOSITORY=$(printf '%s' \"${GITHUB_REPOSITORY}\"" in workflow
+    assert 'PACKAGE_NAME="pullbox-benchmark-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in workflow
+    assert "push-by-digest=true" in workflow
+    assert "pullbox-benchmark-amd64-${{ inputs.cache_generation }}" in workflow
+    assert "pullbox-benchmark-arm64-${{ inputs.cache_generation }}" in workflow
+    assert "Delete isolated GHCR package" in workflow
+    assert "if: ${{ always() && inputs.cleanup }}" in workflow
+    assert "docker.io/pullbox/pullbox" not in workflow
+    assert "DOCKERHUB" not in workflow
+    assert "cosign" not in workflow.lower()
+    assert "type=raw,value=latest" not in workflow
+    assert "type=raw,value=edge" not in workflow
+    assert "release-image-digest" not in workflow
+
+
 def test_docker_release_uses_trigger_tag_without_sha_rediscovery() -> None:
     docker_workflow_path = WORKFLOW_DIR / "docker-release.yml"
     docker_workflow = docker_workflow_path.read_text(encoding="utf-8")
