@@ -758,6 +758,28 @@ def test_docker_workflow_signs_and_verifies_published_images() -> None:
     assert "--certificate-oidc-issuer" in docker_workflow
 
 
+def test_docker_release_verifies_each_published_platform_runtime() -> None:
+    data = _load_yaml(WORKFLOW_DIR / "docker-release.yml")
+    push_job = data["jobs"]["push"]
+    steps = push_job["steps"]
+    step_names = [step.get("name") for step in steps if isinstance(step, dict)]
+
+    assert "Verify published platform security runtimes" in step_names
+    verify_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Verify published platform security runtimes"
+    )
+    verify_run = verify_step.get("run", "")
+    assert "for platform in linux/amd64 linux/arm64" in verify_run
+    assert '"${GHCR_IMAGE}@${DIGEST}"' in verify_run
+    assert "scripts/verify_container_security_runtime.py" in verify_run
+    assert step_names.index("Build and push multi-arch") < step_names.index(
+        "Verify published platform security runtimes"
+    )
+
+
 def test_release_notes_include_image_signature_verification() -> None:
     release_workflow_path = WORKFLOW_DIR / "release.yml"
     release_workflow = release_workflow_path.read_text(encoding="utf-8")
