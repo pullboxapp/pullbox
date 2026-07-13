@@ -245,9 +245,10 @@ tracked in the active CI/CD path.
 - Trusted Docker validation and Docker release jobs use the explicit
   self-hosted `docker` runner label by design. They are not governed by
   `PULLBOX_CHECKS_RUNNER`.
-- Two isolated-VM runners carry the `docker` label so benchmark platform builds
-  can run concurrently. Production release behavior remains unchanged until a
-  benchmarked design is adopted explicitly.
+- Two isolated-VM runners carry the `docker` label so benchmark and production
+  AMD64/ARM64 platform builds can run concurrently. Production releases use
+  architecture-specific GitHub Actions cache scopes and merge the platform
+  digests only after validation succeeds.
 - Untrusted Docker PRs run a reduced public sanity check (`Dockerfile.dev`
   build) instead of the full DHI-backed production build.
 - `Docker Validate Required` is the stable aggregate check for Docker
@@ -608,7 +609,9 @@ Development dependency categories:
 ### 8.1 Current Pullbox implementation
 
 - Version tags trigger GitHub Actions release and Docker automation.
-- GitHub Actions `Docker Release` builds, scans, smoke-tests, publishes, signs, and
+- GitHub Actions `Docker Release` builds AMD64 and ARM64 concurrently on the two
+  Docker runners, scans and smoke-tests the AMD64 candidate while ARM64
+  continues, publishes the validated multi-platform manifests, signs them, and
   verifies release images only for version tags or explicit release dispatches.
 - GitHub Actions `Docker Validate` validates Docker-sensitive PR changes without
   publishing.
@@ -622,6 +625,11 @@ Development dependency categories:
 - The root `CHANGELOG.md` is curated manually during release prep.
 - Release tags are expected to be signed.
 - GHCR and Docker Hub are the current image registries.
+- Platform jobs stage immutable, untagged digests in both registries. Version,
+  `latest`, `edge`, and SHA tags are created only after Grype and smoke
+  validation succeeds.
+- GHCR and Docker Hub final manifests must resolve to the same digest and expose
+  both runnable architectures plus SBOM/provenance attestations.
 - GHCR may display SBOM/provenance attestation manifests as `unknown/unknown`.
   Those entries are expected supply-chain metadata, not runnable Pullbox images.
 
@@ -635,7 +643,8 @@ Development dependency categories:
   is pushed.
 - Docker publication should happen only from trusted refs and should not publish
   ordinary untagged `main` merges.
-- Release images should pass Grype and smoke tests before publication.
+- Release images should pass Grype and smoke tests before runnable registry tags
+  are published.
 - Release images should publish SBOM/provenance attestations and pass Cosign
   digest signature verification before Docker Release succeeds.
 - GHCR and Docker Hub tags should be reviewed after release.
@@ -648,6 +657,9 @@ Development dependency categories:
 - Pre-release tags can exercise the full pipeline before a stable release.
 - Pre-release tags must not update `latest`; only final release tags should move
   that alias.
+- The AMD64 and ARM64 builders use separate stable cache scopes. Changing a
+  scope generation intentionally creates a cold build; routine releases should
+  reuse the existing generation.
 - If Docker publish succeeds but registry tags look wrong, treat that as release
   hygiene work before moving on.
 
@@ -661,6 +673,7 @@ Development dependency categories:
       annotations.
 - [ ] Multi-arch manifests include `linux/amd64`, `linux/arm64`, and
       SBOM/provenance attestation manifests.
+- [ ] GHCR and Docker Hub publish the same final multi-platform digest.
 - [ ] GHCR and Docker Hub release image signatures verify with Cosign by digest.
 - [ ] Unwanted GHCR and Docker Hub aliases are reviewed and cleaned up.
 

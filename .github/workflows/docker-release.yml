@@ -1,30 +1,12 @@
 ---
 # Pullbox Docker Release Pipeline
-# Builds images, scans with Grype, runs smoke tests, publishes registry images,
-# signs them with Cosign, and verifies signatures only for release tags or
-# explicit release dispatches.
+# Builds AMD64 and ARM64 images concurrently, validates the AMD64 candidate,
+# publishes multi-platform manifests to GHCR and Docker Hub, signs both
+# registries with Cosign, and verifies the published release.
 #
-# Registries: GHCR and Docker Hub.
-#
-# Security: All actions pinned to full SHA. Container scanned before push.
-# See: docs/development/INFRASTRUCTURE.md
-#
-# Trigger rules:
-#   v* tag push  → release image build/publish/sign/verify
-#   dispatch     → manual release image build from the selected ref
-# Trusted Docker publish stays on the self-hosted runner. This workflow is not
-# governed by the general checks-runner toggle.
-#
-# Tag strategy:
-#   final v* tag → 1.2.3, latest, sha-xxxxx
-#   pre-release  → 1.2.3-rc1, sha-xxxxx
-#   manual       → edge (or custom), sha-xxxxx
-#
-# Versioning:
-#   Version is read from pullbox/__init__.py (__version__).
-#   During development: "0.X.0-dev" (bumped per sprint milestone).
-#   At release: "1.0.0-rc1" → "1.0.0" (git tag triggers release workflow).
-#   See CICD_SPRINT_GUIDE.md for the full versioning plan.
+# Security: All actions pinned to full SHA. Release tags or explicit manual
+# dispatches are the only publishing triggers. Runnable tags are created only
+# after the candidate image passes Grype and smoke validation.
 
 name: Docker Release
 
@@ -52,23 +34,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ──────────────────────────────────────────────
-  # Job 0: Decide whether this invocation should build
-  # ──────────────────────────────────────────────
-  gate:
-    name: Resolve Docker Trigger
-    runs-on: [self-hosted, Linux, X64, docker]
+  # Resolve release metadata once without occupying a Docker runner.
+  build:
+    name: Prepare Docker Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
-      should-run: ${{ steps.decide.outputs.should_run }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+      image-labels: ${{ steps.meta.outputs.labels }}
+      image-annotations: ${{ steps.meta.outputs.annotations }}
+      image-version: ${{ steps.version.outputs.version }}
+      build-date: ${{ steps.release-metadata.outputs.build_date }}
       build-sha: ${{ steps.resolve-sha.outputs.sha }}
-      release-tag: ${{ steps.resolve-sha.outputs.release_tag }}
+      release-tag: ${{ steps.resolve-tag.outputs.tag }}
+      is-release: ${{ steps.resolve-tag.outputs.is_release }}
+      is-prerelease: ${{ steps.resolve-tag.outputs.is_prerelease }}
     steps:
       - name: Resolve correct SHA
         id: resolve-sha
         run: |
-          echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_REF_TYPE}" = "tag" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
             echo "release_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           else
@@ -82,82 +69,36 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Decide whether to run Docker jobs
-        id: decide
-        run: |
-          echo "should_run=true" >> "$GITHUB_OUTPUT"
-          echo "Release tag/manual trigger; running Docker release workflow."
-
-  # ──────────────────────────────────────────────
-  # Job 1: Build multi-arch image
-  # ──────────────────────────────────────────────
-  build:
-    name: Build Multi-Arch Image
-    runs-on: [self-hosted, Linux, X64, docker]
-    needs: [gate]
-    timeout-minutes: 45
-    if: needs.gate.outputs.should-run == 'true'
-    permissions:
-      contents: read
-    outputs:
-      image-tags: ${{ steps.meta.outputs.tags }}
-      image-labels: ${{ steps.meta.outputs.labels }}
-      image-version: ${{ steps.version.outputs.version }}
-      build-sha: ${{ needs.gate.outputs.build-sha }}
-      release-tag: ${{ steps.resolve-tag.outputs.tag }}
-      is-release: ${{ steps.resolve-tag.outputs.is_release }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ needs.gate.outputs.build-sha }}
-          fetch-depth: 0
-          fetch-tags: true
-
       - name: Resolve tag from trigger
         id: resolve-tag
         run: |
-          TAG="${{ needs.gate.outputs.release-tag }}"
+          TAG="${{ steps.resolve-sha.outputs.release_tag }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          if [ -n "$TAG" ]; then
+          if [ -n "${TAG}" ]; then
             echo "is_release=true" >> "$GITHUB_OUTPUT"
-            if [[ "$TAG" == *-* ]]; then
+            if [[ "${TAG}" == *-* ]]; then
               echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
             else
               echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
             fi
-            echo "Found tag: $TAG"
           else
             echo "is_release=false" >> "$GITHUB_OUTPUT"
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "No release tag for this trigger"
           fi
 
-      - name: Runner preflight
-        run: .github/scripts/preflight-runner.sh base docker
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Validate DHI authentication
-        env:
-          DHI_USERNAME: ${{ secrets.DHI_USERNAME }}
-          DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
+      - name: Extract version
+        id: version
         run: |
-          if [ -z "${DHI_USERNAME}" ] || [ -z "${DHI_TOKEN}" ]; then
-            echo "::error::DHI_USERNAME and DHI_TOKEN repository secrets are required to build Docker Hardened Images in CI."
+          VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/pullbox/__init__.py | head -1)
+          if [ -z "${VERSION}" ]; then
+            echo "::error::Unable to extract Pullbox version from src/pullbox/__init__.py"
             exit 1
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Log in to DHI
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: dhi.io
-          username: ${{ secrets.DHI_USERNAME }}
-          password: ${{ secrets.DHI_TOKEN }}
+      - name: Capture release metadata
+        id: release-metadata
+        run: echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
         id: meta
@@ -178,250 +119,33 @@ jobs:
             org.opencontainers.image.description=Modern comic book management and acquisition platform
             org.opencontainers.image.url=https://github.com/${{ github.repository }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ needs.gate.outputs.build-sha }}
+            org.opencontainers.image.revision=${{ steps.resolve-sha.outputs.sha }}
             org.opencontainers.image.licenses=GPL-3.0-or-later
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
           annotations: |
             org.opencontainers.image.description=Modern comic book management and acquisition platform for self-hosted environments
 
-      - name: Extract version
-        id: version
-        run: |
-          VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/pullbox/__init__.py | head -1)
-          if [ -z "$VERSION" ]; then
-            echo "::error::Unable to extract Pullbox version from src/pullbox/__init__.py"
-            exit 1
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      # Build for amd64 only and export to local Docker for scanning + smoke tests.
-      # Multi-arch push happens in the push job after validation.
-      - name: Build amd64 image (for scan + smoke)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64
-          load: true
-          tags: pullbox:ci-scan
-          build-args: |
-            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
-            GIT_SHA=${{ needs.gate.outputs.build-sha }}
-            GIT_BRANCH=${{ github.ref_name }}
-            VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Save image for downstream jobs
-        run: docker save pullbox:ci-scan | gzip > "${{ runner.temp }}/pullbox-image.tar.gz"
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: docker-image
-          path: ${{ runner.temp }}/pullbox-image.tar.gz
-          retention-days: 1
-
-  # ──────────────────────────────────────────────
-  # Job 2: Grype vulnerability scan
-  # ──────────────────────────────────────────────
-  scan:
-    name: Container Scan (Grype)
+  # Build each platform on a separate Docker runner. Digests are pushed without
+  # runnable tags so failed validation cannot publish a release.
+  build-amd64:
+    name: Build AMD64
     runs-on: [self-hosted, Linux, X64, docker]
     needs: [build]
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Download image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: docker-image
-          path: ${{ runner.temp }}/docker-image-scan
-
-      - name: Load image
-        run: docker load < "${{ runner.temp }}/docker-image-scan/pullbox-image.tar.gz"
-
-      - name: Runner preflight
-        run: .github/scripts/preflight-runner.sh docker
-
-      - name: Verify container security runtime
-        run: |
-          docker run --rm -i --entrypoint python pullbox:ci-scan - \
-            < scripts/verify_container_security_runtime.py
-
-      - name: Run Grype scan
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        id: scan
-        with:
-          image: pullbox:ci-scan
-          fail-build: true
-          severity-cutoff: high
-          output-format: sarif
-          config: .grype.yaml
-
-      - name: Upload SARIF to GitHub Security
-        if: always()
-        continue-on-error: true  # SARIF upload requires GitHub Advanced Security (paid for private repos)
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
-        with:
-          sarif_file: ${{ steps.scan.outputs.sarif }}
-          category: container-scan
-
-  # ──────────────────────────────────────────────
-  # Job 3: Smoke test against Docker image
-  # ──────────────────────────────────────────────
-  smoke-test:
-    name: Docker Smoke Test
-    runs-on: [self-hosted, Linux, X64, docker]
-    needs: [build]
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Download image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: docker-image
-          path: ${{ runner.temp }}/docker-image-smoke
-
-      - name: Load image
-        run: docker load < "${{ runner.temp }}/docker-image-smoke/pullbox-image.tar.gz"
-
-      - name: Runner preflight
-        run: .github/scripts/preflight-runner.sh docker
-
-      - name: Verify packaged static assets
-        run: |
-          docker run --rm --entrypoint python pullbox:ci-scan -c '
-          import pullbox.app
-
-          assets = [
-              pullbox.app.STATIC_DIR / "css" / "tailwind.css",
-              pullbox.app.STATIC_DIR / "js" / "htmx.min.js",
-          ]
-          missing = [str(asset) for asset in assets if not asset.is_file()]
-          if missing:
-              raise SystemExit("Missing packaged static assets: " + ", ".join(missing))
-          print("Packaged static assets verified")
-          '
-
-      - name: Start container
-        run: |
-          docker run -d \
-            --name pullbox-smoke \
-            -p 127.0.0.1::8585 \
-            -e PULLBOX_SECRET_KEY=smoke-test-secret-key-for-docker-ci \
-            -e PULLBOX_LOG_LEVEL=WARNING \
-            pullbox:ci-scan
-          smoke_port="$(docker port pullbox-smoke 8585/tcp | awk -F: 'NR == 1 { print $NF }')"
-          if [ -z "${smoke_port}" ]; then
-            echo "::error::Could not determine Pullbox smoke-test port."
-            docker port pullbox-smoke || true
-            exit 1
-          fi
-          echo "PULLBOX_SMOKE_URL=http://127.0.0.1:${smoke_port}" >> "$GITHUB_ENV"
-          echo "Container listening on http://127.0.0.1:${smoke_port}"
-
-      - name: Wait for healthy
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf "${PULLBOX_SMOKE_URL}/ping" > /dev/null 2>&1; then
-              echo "✅ Container healthy after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "❌ Container failed to become healthy"
-          docker logs pullbox-smoke
-          exit 1
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: ${{ env.PYTHON_DEFAULT }}
-
-      - name: Setup runner-local test venv
-        run: .github/scripts/setup-runner-venv.sh "dev,e2e"
-
-      - name: Install Playwright browsers
-        run: playwright install chromium
-
-      - name: Python preflight
-        run: .github/scripts/preflight-runner.sh python
-
-      - name: Run smoke tests
-        run: |
-          pytest tests/e2e/test_smoke.py \
-            -v \
-            --base-url "${PULLBOX_SMOKE_URL}"
-        env:
-          PULLBOX_SMOKE_TEST: "true"
-
-      - name: Upload smoke traces
-        if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: smoke-test-traces
-          path: test-results/smoke/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Container logs on failure
-        if: failure() || cancelled()
-        run: docker logs pullbox-smoke
-
-      - name: Cleanup
-        if: always()
-        run: docker rm -f pullbox-smoke || true
-
-  # ──────────────────────────────────────────────
-  # Job 4: Push to registries (after scan + smoke)
-  # ──────────────────────────────────────────────
-  push:
-    name: Push to Registries
-    runs-on: [self-hosted, Linux, X64, docker]
-    needs: [build, scan, smoke-test]
     if: needs.build.outputs.is-release == 'true' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 60
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
     outputs:
-      image-digest: ${{ steps.push-image.outputs.digest }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.build.outputs.build-sha }}
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Resolve tag from trigger
-        id: resolve-tag
-        run: |
-          TAG="${{ needs.build.outputs.release-tag }}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          if [ -n "$TAG" ]; then
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-            if [[ "$TAG" == *-* ]]; then
-              echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Runner preflight
         run: .github/scripts/preflight-runner.sh base docker
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -432,7 +156,7 @@ jobs:
           DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
         run: |
           if [ -z "${DHI_USERNAME}" ] || [ -z "${DHI_TOKEN}" ]; then
-            echo "::error::DHI_USERNAME and DHI_TOKEN repository secrets are required to build Docker Hardened Images in CI."
+            echo "::error::DHI_USERNAME and DHI_TOKEN repository secrets are required."
             exit 1
           fi
 
@@ -456,7 +180,7 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           if [ -z "${DOCKERHUB_USERNAME}" ] || [ -z "${DOCKERHUB_TOKEN}" ]; then
-            echo "::error::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets are required to publish release images to Docker Hub."
+            echo "::error::Docker Hub credentials are required to publish release images."
             exit 1
           fi
 
@@ -466,118 +190,500 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        env:
-          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
-        with:
-          images: |
-            ${{ env.GHCR_IMAGE }}
-            ${{ env.DOCKERHUB_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}},value=${{ steps.resolve-tag.outputs.tag }},enable=${{ steps.resolve-tag.outputs.is_release }}
-            type=raw,value=latest,enable=${{ steps.resolve-tag.outputs.is_release == 'true' && steps.resolve-tag.outputs.is_prerelease != 'true' }}
-            type=raw,value=${{ inputs.tag_override || 'edge' }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=sha,format=short,prefix=sha-
-          labels: |
-            org.opencontainers.image.title=Pullbox
-            org.opencontainers.image.description=Modern comic book management and acquisition platform
-            org.opencontainers.image.url=https://github.com/${{ github.repository }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ needs.build.outputs.build-sha }}
-            org.opencontainers.image.licenses=GPL-3.0-or-later
-            org.opencontainers.image.version=${{ needs.build.outputs.image-version }}
-          annotations: |
-            org.opencontainers.image.description=Modern comic book management and acquisition platform for self-hosted environments
-
-      - name: Extract version
-        id: version
-        run: |
-          VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/pullbox/__init__.py | head -1)
-          if [ -z "$VERSION" ]; then
-            echo "::error::Unable to extract Pullbox version from src/pullbox/__init__.py"
-            exit 1
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push multi-arch
-        id: push-image
+      - name: Build and push AMD64 by digest
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
+          platforms: linux/amd64
+          outputs: >-
+            type=image,"name=${{ env.GHCR_IMAGE }},${{ env.DOCKERHUB_IMAGE }}",push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ needs.build.outputs.image-labels }}
+          annotations: ${{ needs.build.outputs.image-annotations }}
           build-args: |
-            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            BUILD_DATE=${{ needs.build.outputs.build-date }}
             GIT_SHA=${{ needs.build.outputs.build-sha }}
             GIT_BRANCH=${{ github.ref_name }}
-            VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            VERSION=${{ needs.build.outputs.image-version }}
+          cache-from: type=gha,scope=pullbox-release-amd64-v1
+          cache-to: type=gha,mode=max,scope=pullbox-release-amd64-v1
           provenance: mode=max
           sbom: true
 
-      - name: Validate pushed image digest
+      - name: Validate AMD64 digest in both registries
         env:
-          DIGEST: ${{ steps.push-image.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::Unexpected pushed image digest format: ${DIGEST}"
+            echo "::error::Unexpected AMD64 digest: ${DIGEST}"
+            exit 1
+          fi
+          docker buildx imagetools inspect "${GHCR_IMAGE}@${DIGEST}" > /dev/null
+          docker buildx imagetools inspect "${DOCKERHUB_IMAGE}@${DIGEST}" > /dev/null
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload AMD64 digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-digest-amd64
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  build-arm64:
+    name: Build ARM64
+    runs-on: [self-hosted, Linux, X64, docker]
+    needs: [build]
+    if: needs.build.outputs.is-release == 'true' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.build.outputs.build-sha }}
+
+      - name: Runner preflight
+        run: .github/scripts/preflight-runner.sh base docker
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Validate DHI authentication
+        env:
+          DHI_USERNAME: ${{ secrets.DHI_USERNAME }}
+          DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
+        run: |
+          if [ -z "${DHI_USERNAME}" ] || [ -z "${DHI_TOKEN}" ]; then
+            echo "::error::DHI_USERNAME and DHI_TOKEN repository secrets are required."
             exit 1
           fi
 
-      - name: Validate pushed image metadata
+      - name: Log in to DHI
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate Docker Hub authentication
         env:
-          DIGEST: ${{ steps.push-image.outputs.digest }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          docker buildx imagetools inspect "${GHCR_IMAGE}@${DIGEST}" --raw > image-index.json
+          if [ -z "${DOCKERHUB_USERNAME}" ] || [ -z "${DOCKERHUB_TOKEN}" ]; then
+            echo "::error::Docker Hub credentials are required to publish release images."
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push ARM64 by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/arm64
+          outputs: >-
+            type=image,"name=${{ env.GHCR_IMAGE }},${{ env.DOCKERHUB_IMAGE }}",push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ needs.build.outputs.image-labels }}
+          annotations: ${{ needs.build.outputs.image-annotations }}
+          build-args: |
+            BUILD_DATE=${{ needs.build.outputs.build-date }}
+            GIT_SHA=${{ needs.build.outputs.build-sha }}
+            GIT_BRANCH=${{ github.ref_name }}
+            VERSION=${{ needs.build.outputs.image-version }}
+          cache-from: type=gha,scope=pullbox-release-arm64-v1
+          cache-to: type=gha,mode=max,scope=pullbox-release-arm64-v1
+          provenance: mode=max
+          sbom: true
+
+      - name: Validate ARM64 digest in both registries
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected ARM64 digest: ${DIGEST}"
+            exit 1
+          fi
+          docker buildx imagetools inspect "${GHCR_IMAGE}@${DIGEST}" > /dev/null
+          docker buildx imagetools inspect "${DOCKERHUB_IMAGE}@${DIGEST}" > /dev/null
+
+      - name: Verify ARM64 container security runtime
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker run --rm --pull always --platform linux/arm64 -i \
+            --entrypoint python "${GHCR_IMAGE}@${DIGEST}" - \
+            < scripts/verify_container_security_runtime.py
+
+      - name: Export ARM64 digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload ARM64 digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-digest-arm64
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Scan and smoke-test the AMD64 digest as soon as it is available. This runs
+  # concurrently with the longer QEMU-backed ARM64 build.
+  validate-amd64:
+    name: Validate AMD64 Candidate
+    runs-on: [self-hosted, Linux, X64, docker]
+    needs: [build, build-amd64]
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    env:
+      IMAGE_REF: ghcr.io/${{ github.repository }}@${{ needs.build-amd64.outputs.digest }}
+      LOCAL_IMAGE: pullbox:release-amd64-${{ github.run_id }}
+      SMOKE_CONTAINER: pullbox-release-smoke-${{ github.run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.build.outputs.build-sha }}
+
+      - name: Runner preflight
+        run: .github/scripts/preflight-runner.sh base docker
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull candidate image
+        run: |
+          docker pull "${IMAGE_REF}"
+          docker tag "${IMAGE_REF}" "${LOCAL_IMAGE}"
+
+      - name: Verify container security runtime
+        run: |
+          docker run --rm -i --entrypoint python "${LOCAL_IMAGE}" - \
+            < scripts/verify_container_security_runtime.py
+
+      - name: Run Grype scan
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        id: scan
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: sarif
+          config: .grype.yaml
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: container-scan
+
+      - name: Verify packaged static assets
+        run: |
+          docker run --rm --entrypoint python "${LOCAL_IMAGE}" -c '
+          import pullbox.app
+
+          assets = [
+              pullbox.app.STATIC_DIR / "css" / "tailwind.css",
+              pullbox.app.STATIC_DIR / "js" / "htmx.min.js",
+          ]
+          missing = [str(asset) for asset in assets if not asset.is_file()]
+          if missing:
+              raise SystemExit("Missing packaged static assets: " + ", ".join(missing))
+          print("Packaged static assets verified")
+          '
+
+      - name: Start container
+        run: |
+          docker run -d \
+            --name "${SMOKE_CONTAINER}" \
+            -p 127.0.0.1::8585 \
+            -e PULLBOX_SECRET_KEY=smoke-test-secret-key-for-docker-ci \
+            -e PULLBOX_LOG_LEVEL=WARNING \
+            "${LOCAL_IMAGE}"
+          smoke_port=$(docker port "${SMOKE_CONTAINER}" 8585/tcp | awk -F: 'NR == 1 { print $NF }')
+          if [ -z "${smoke_port}" ]; then
+            echo "::error::Could not determine Pullbox smoke-test port."
+            docker port "${SMOKE_CONTAINER}" || true
+            exit 1
+          fi
+          echo "PULLBOX_SMOKE_URL=http://127.0.0.1:${smoke_port}" >> "$GITHUB_ENV"
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf "${PULLBOX_SMOKE_URL}/ping" > /dev/null 2>&1; then
+              echo "Container healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Container failed to become healthy"
+          docker logs "${SMOKE_CONTAINER}"
+          exit 1
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT }}
+
+      - name: Setup runner-local test venv
+        run: .github/scripts/setup-runner-venv.sh "dev,e2e"
+
+      - name: Install Playwright browsers
+        run: playwright install chromium
+
+      - name: Python preflight
+        run: .github/scripts/preflight-runner.sh python
+
+      - name: Run smoke tests
+        env:
+          PULLBOX_SMOKE_TEST: "true"
+        run: |
+          pytest tests/e2e/test_smoke.py \
+            -v \
+            --base-url "${PULLBOX_SMOKE_URL}"
+
+      - name: Upload smoke traces
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-test-traces
+          path: test-results/smoke/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Container logs on failure
+        if: failure() || cancelled()
+        run: docker logs "${SMOKE_CONTAINER}"
+
+      - name: Cleanup local container and image
+        if: always()
+        run: |
+          docker rm -f "${SMOKE_CONTAINER}" || true
+          docker image rm "${LOCAL_IMAGE}" || true
+
+  # Assemble and tag the already-built platform digests only after validation.
+  push:
+    name: Publish Multi-Arch Manifests
+    runs-on: ubuntu-latest
+    needs: [build, build-amd64, build-arm64, validate-amd64]
+    if: needs.build.outputs.is-release == 'true' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-digest: ${{ steps.inspect.outputs.digest }}
+    steps:
+      - name: Download platform digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: arm64
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate Docker Hub authentication
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "${DOCKERHUB_USERNAME}" ] || [ -z "${DOCKERHUB_TOKEN}" ]; then
+            echo "::error::Docker Hub credentials are required to publish release images."
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish GHCR multi-platform manifest
+        env:
+          TAGS: ${{ needs.build.outputs.image-tags }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          sources=()
+          for digest_file in *; do
+            sources+=("${GHCR_IMAGE}@sha256:${digest_file}")
+          done
+          if [ "${#sources[@]}" -ne 2 ]; then
+            echo "::error::Expected two platform digests, found ${#sources[@]}."
+            exit 1
+          fi
+
+          tag_args=()
+          while IFS= read -r tag; do
+            if [[ "${tag}" == "${GHCR_IMAGE}:"* ]]; then
+              tag_args+=(--tag "${tag}")
+            fi
+          done <<< "${TAGS}"
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "::error::No GHCR release tags were generated."
+            exit 1
+          fi
+
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.description=Modern comic book management and acquisition platform for self-hosted environments" \
+            "${tag_args[@]}" \
+            "${sources[@]}"
+
+      - name: Publish Docker Hub multi-platform manifest
+        env:
+          TAGS: ${{ needs.build.outputs.image-tags }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          sources=()
+          for digest_file in *; do
+            sources+=("${DOCKERHUB_IMAGE}@sha256:${digest_file}")
+          done
+
+          tag_args=()
+          while IFS= read -r tag; do
+            if [[ "${tag}" == "${DOCKERHUB_IMAGE}:"* ]]; then
+              tag_args+=(--tag "${tag}")
+            fi
+          done <<< "${TAGS}"
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "::error::No Docker Hub release tags were generated."
+            exit 1
+          fi
+
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.description=Modern comic book management and acquisition platform for self-hosted environments" \
+            "${tag_args[@]}" \
+            "${sources[@]}"
+
+      - name: Validate pushed image metadata
+        id: inspect
+        env:
+          TAGS: ${{ needs.build.outputs.image-tags }}
+        run: |
+          GHCR_TAG=$(printf '%s\n' "${TAGS}" | awk -v prefix="${GHCR_IMAGE}:" 'index($0, prefix) == 1 { print; exit }')
+          if [ -z "${GHCR_TAG}" ]; then
+            echo "::error::Unable to resolve a published GHCR tag."
+            exit 1
+          fi
+          TAG_SUFFIX=${GHCR_TAG#${GHCR_IMAGE}:}
+          DOCKERHUB_TAG="${DOCKERHUB_IMAGE}:${TAG_SUFFIX}"
+
+          docker buildx imagetools inspect "${GHCR_TAG}" > ghcr-inspect.txt
+          docker buildx imagetools inspect "${DOCKERHUB_TAG}" > dockerhub-inspect.txt
+          docker buildx imagetools inspect "${GHCR_TAG}" --raw > ghcr-index.json
+          docker buildx imagetools inspect "${DOCKERHUB_TAG}" --raw > dockerhub-index.json
+
+          GHCR_DIGEST=$(awk '$1 == "Digest:" { print $2; exit }' ghcr-inspect.txt)
+          DOCKERHUB_DIGEST=$(awk '$1 == "Digest:" { print $2; exit }' dockerhub-inspect.txt)
+          if ! [[ "${GHCR_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected GHCR manifest digest: ${GHCR_DIGEST}"
+            exit 1
+          fi
+          if [ "${GHCR_DIGEST}" != "${DOCKERHUB_DIGEST}" ]; then
+            echo "::error::Published registry digests differ: GHCR=${GHCR_DIGEST} DockerHub=${DOCKERHUB_DIGEST}"
+            exit 1
+          fi
+          echo "digest=${GHCR_DIGEST}" >> "$GITHUB_OUTPUT"
+
           python3 - <<'PY'
           import json
           import sys
 
-          with open("image-index.json", encoding="utf-8") as handle:
-              index = json.load(handle)
-
-          annotations = index.get("annotations") or {}
           expected_description = (
               "Modern comic book management and acquisition platform for "
               "self-hosted environments"
           )
-          if annotations.get("org.opencontainers.image.description") != expected_description:
-              print("Missing OCI index description annotation.", file=sys.stderr)
-              sys.exit(1)
-
-          manifests = index.get("manifests") or []
-          platforms = {
-              f"{(manifest.get('platform') or {}).get('os')}/"
-              f"{(manifest.get('platform') or {}).get('architecture')}"
-              for manifest in manifests
-              if manifest.get("platform")
-          }
           expected_platforms = {"linux/amd64", "linux/arm64"}
-          if not expected_platforms.issubset(platforms):
-              print(f"Missing expected runnable platforms: {expected_platforms - platforms}", file=sys.stderr)
-              sys.exit(1)
 
-          attestation_count = sum(
-              1
-              for manifest in manifests
-              if (manifest.get("annotations") or {}).get("vnd.docker.reference.type")
-              == "attestation-manifest"
-          )
-          if attestation_count == 0:
-              print("Missing SBOM/provenance attestation manifests.", file=sys.stderr)
-              sys.exit(1)
+          for registry, path in [
+              ("GHCR", "ghcr-index.json"),
+              ("Docker Hub", "dockerhub-index.json"),
+          ]:
+              with open(path, encoding="utf-8") as handle:
+                  index = json.load(handle)
+
+              annotations = index.get("annotations") or {}
+              if annotations.get("org.opencontainers.image.description") != expected_description:
+                  print(f"{registry}: missing OCI index description annotation.", file=sys.stderr)
+                  sys.exit(1)
+
+              manifests = index.get("manifests") or []
+              platforms = {
+                  f"{(manifest.get('platform') or {}).get('os')}/"
+                  f"{(manifest.get('platform') or {}).get('architecture')}"
+                  for manifest in manifests
+                  if manifest.get("platform")
+              }
+              if not expected_platforms.issubset(platforms):
+                  missing = expected_platforms - platforms
+                  print(f"{registry}: missing runnable platforms: {missing}", file=sys.stderr)
+                  sys.exit(1)
+
+              attestations = sum(
+                  1
+                  for manifest in manifests
+                  if (manifest.get("annotations") or {}).get("vnd.docker.reference.type")
+                  == "attestation-manifest"
+              )
+              if attestations == 0:
+                  print(f"{registry}: missing SBOM/provenance attestations.", file=sys.stderr)
+                  sys.exit(1)
           PY
 
       - name: Verify published platform security runtimes
         env:
-          DIGEST: ${{ steps.push-image.outputs.digest }}
+          DIGEST: ${{ steps.inspect.outputs.digest }}
         run: |
           for platform in linux/amd64 linux/arm64; do
             echo "Verifying container security runtime for ${platform}"
@@ -591,17 +697,14 @@ jobs:
           {
             echo "## Docker Images Published"
             echo ""
-            echo "**Digest:** \`${{ steps.push-image.outputs.digest }}\`"
+            echo "**Digest:** \`${{ steps.inspect.outputs.digest }}\`"
             echo ""
             echo "**Tags:**"
             echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
+            echo "${{ needs.build.outputs.image-tags }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ──────────────────────────────────────────────
-  # Job 5: Sign published image digests
-  # ──────────────────────────────────────────────
   sign:
     name: Sign Published Images
     runs-on: ubuntu-latest
@@ -626,7 +729,7 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           if [ -z "${DOCKERHUB_USERNAME}" ] || [ -z "${DOCKERHUB_TOKEN}" ]; then
-            echo "::error::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets are required to sign release images on Docker Hub."
+            echo "::error::Docker Hub credentials are required to sign release images."
             exit 1
           fi
 
@@ -647,7 +750,6 @@ jobs:
             echo "::error::Push job did not return a digest to sign."
             exit 1
           fi
-
           cosign sign --yes "${GHCR_IMAGE}@${DIGEST}"
           cosign sign --yes "${DOCKERHUB_IMAGE}@${DIGEST}"
 
@@ -670,12 +772,10 @@ jobs:
                 "${image_ref}"; then
                 return 0
               fi
-
               if [ "${attempt}" -eq "${max_attempts}" ]; then
                 echo "::error::Signature for ${label} was not discoverable after ${max_attempts} attempts."
                 return 1
               fi
-
               echo "::notice::Signature for ${label} was not discoverable yet; retrying in 10 seconds (${attempt}/${max_attempts})."
               sleep 10
             done

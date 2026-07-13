@@ -654,7 +654,7 @@ def test_docker_smoke_workflows_use_ephemeral_host_ports() -> None:
         },
         {
             "workflow": "docker-release.yml",
-            "container": "pullbox-smoke",
+            "container": '"${SMOKE_CONTAINER}"',
             "url_env": "PULLBOX_SMOKE_URL",
         },
     ]
@@ -702,11 +702,110 @@ def test_docker_release_workflow_is_tag_or_manual_only_and_scans_before_publish(
     assert isinstance(jobs, dict)
     push_job = jobs.get("push")
     assert isinstance(push_job, dict)
+    validate_job = jobs.get("validate-amd64")
+    assert isinstance(validate_job, dict)
 
     assert "anchore/scan-action@" in docker_workflow
     assert "config: .grype.yaml" in docker_workflow
-    assert push_job.get("needs") == ["build", "scan", "smoke-test"]
-    assert push_job.get("runs-on") == ["self-hosted", "Linux", "X64", "docker"]
+    assert validate_job.get("needs") == ["build", "build-amd64"]
+    assert push_job.get("needs") == [
+        "build",
+        "build-amd64",
+        "build-arm64",
+        "validate-amd64",
+    ]
+    assert push_job.get("runs-on") == "ubuntu-latest"
+
+
+def test_docker_release_distributes_platform_builds_before_manifest_publish() -> None:
+    """Release platforms should build concurrently and publish tags only after validation."""
+    workflow_path = WORKFLOW_DIR / "docker-release.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    data = _load_yaml(workflow_path)
+    jobs = data.get("jobs")
+    assert isinstance(jobs, dict)
+
+    prepare = jobs.get("build")
+    amd64 = jobs.get("build-amd64")
+    arm64 = jobs.get("build-arm64")
+    validate = jobs.get("validate-amd64")
+    push = jobs.get("push")
+    for job in [prepare, amd64, arm64, validate, push]:
+        assert isinstance(job, dict)
+
+    assert prepare.get("runs-on") == "ubuntu-latest"
+    assert prepare.get("outputs", {}).get("image-tags") == "${{ steps.meta.outputs.tags }}"
+    assert prepare.get("outputs", {}).get("build-date") == (
+        "${{ steps.release-metadata.outputs.build_date }}"
+    )
+
+    expected_runner = ["self-hosted", "Linux", "X64", "docker"]
+    for platform_job, platform, cache_scope in [
+        (amd64, "linux/amd64", "pullbox-release-amd64-v1"),
+        (arm64, "linux/arm64", "pullbox-release-arm64-v1"),
+    ]:
+        assert platform_job.get("runs-on") == expected_runner
+        assert platform_job.get("needs") == ["build"]
+        assert platform_job.get("permissions", {}).get("packages") == "write"
+        build_step = next(
+            step
+            for step in platform_job.get("steps", [])
+            if isinstance(step, dict) and step.get("name", "").startswith("Build and push")
+        )
+        build_with = build_step.get("with")
+        assert isinstance(build_with, dict)
+        assert build_with.get("platforms") == platform
+        assert "push-by-digest=true" in build_with.get("outputs", "")
+        assert "${{ env.GHCR_IMAGE }},${{ env.DOCKERHUB_IMAGE }}" in build_with.get("outputs", "")
+        assert build_with.get("cache-from") == f"type=gha,scope={cache_scope}"
+        assert build_with.get("cache-to") == f"type=gha,mode=max,scope={cache_scope}"
+        assert build_with.get("provenance") == "mode=max"
+        assert build_with.get("sbom") is True
+
+    assert "Set up QEMU" not in {
+        step.get("name") for step in amd64.get("steps", []) if isinstance(step, dict)
+    }
+    assert "Set up QEMU" in {
+        step.get("name") for step in arm64.get("steps", []) if isinstance(step, dict)
+    }
+    assert "Verify ARM64 container security runtime" in {
+        step.get("name") for step in arm64.get("steps", []) if isinstance(step, dict)
+    }
+
+    assert validate.get("needs") == ["build", "build-amd64"]
+    assert validate.get("runs-on") == expected_runner
+    validate_names = {
+        step.get("name") for step in validate.get("steps", []) if isinstance(step, dict)
+    }
+    assert {
+        "Run Grype scan",
+        "Verify packaged static assets",
+        "Run smoke tests",
+    } <= validate_names
+
+    assert push.get("needs") == [
+        "build",
+        "build-amd64",
+        "build-arm64",
+        "validate-amd64",
+    ]
+    assert push.get("runs-on") == "ubuntu-latest"
+    push_names = {step.get("name") for step in push.get("steps", []) if isinstance(step, dict)}
+    assert {
+        "Download platform digests",
+        "Set up QEMU",
+        "Publish GHCR multi-platform manifest",
+        "Publish Docker Hub multi-platform manifest",
+        "Validate pushed image metadata",
+        "Verify published platform security runtimes",
+    } <= push_names
+    assert "Build and push multi-arch" not in push_names
+    assert "pattern: release-digest-*" in workflow
+    assert "merge-multiple: true" in workflow
+    assert "docker buildx imagetools create" in workflow
+    assert "GHCR_DIGEST" in workflow
+    assert "DOCKERHUB_DIGEST" in workflow
+    assert "Published registry digests differ" in workflow
 
 
 def test_docker_release_benchmark_is_manual_isolated_and_non_release() -> None:
@@ -778,20 +877,14 @@ def test_docker_release_uses_trigger_tag_without_sha_rediscovery() -> None:
     jobs = data.get("jobs")
     assert isinstance(jobs, dict)
 
-    gate = jobs.get("gate")
-    assert isinstance(gate, dict)
-    assert gate.get("outputs", {}).get("release-tag") == (
-        "${{ steps.resolve-sha.outputs.release_tag }}"
-    )
-
     build = jobs.get("build")
     assert isinstance(build, dict)
     assert build.get("outputs", {}).get("release-tag") == "${{ steps.resolve-tag.outputs.tag }}"
+    assert build.get("outputs", {}).get("build-sha") == "${{ steps.resolve-sha.outputs.sha }}"
 
     assert "GITHUB_REF_NAME" in docker_workflow
     assert "GITHUB_REF_TYPE" in docker_workflow
-    assert 'TAG="${{ needs.gate.outputs.release-tag }}"' in docker_workflow
-    assert 'TAG="${{ needs.build.outputs.release-tag }}"' in docker_workflow
+    assert 'TAG="${{ steps.resolve-sha.outputs.release_tag }}"' in docker_workflow
     assert "git tag --points-at" not in docker_workflow
     assert "tag.txt" in docker_workflow
 
@@ -806,7 +899,7 @@ def test_docker_release_prerelease_tags_do_not_update_latest() -> None:
         "type=raw,value=latest,enable=${{ steps.resolve-tag.outputs.is_release == 'true' && "
         "steps.resolve-tag.outputs.is_prerelease != 'true' }}"
     )
-    assert docker_workflow.count(latest_guard) == 2
+    assert docker_workflow.count(latest_guard) == 1
     assert (
         "type=raw,value=latest,enable=${{ steps.resolve-tag.outputs.is_release }}"
         not in docker_workflow
@@ -848,26 +941,24 @@ def test_docker_workflow_signs_and_verifies_published_images() -> None:
 
     push_outputs = push_job.get("outputs")
     assert isinstance(push_outputs, dict)
-    assert push_outputs.get("image-digest") == "${{ steps.push-image.outputs.digest }}"
+    assert push_outputs.get("image-digest") == "${{ steps.inspect.outputs.digest }}"
 
     steps = push_job.get("steps")
     assert isinstance(steps, list)
-    build_steps = [
-        step
-        for step in steps
-        if isinstance(step, dict) and step.get("name") == "Build and push multi-arch"
+    assert push_job.get("runs-on") == "ubuntu-latest"
+    assert push_job.get("needs") == [
+        "build",
+        "build-amd64",
+        "build-arm64",
+        "validate-amd64",
     ]
-    assert len(build_steps) == 1
-    build_step = build_steps[0]
-    assert build_step.get("id") == "push-image"
-    build_with = build_step.get("with")
-    assert isinstance(build_with, dict)
-    assert build_with.get("provenance") == "mode=max"
-    assert build_with.get("sbom") is True
-    assert build_with.get("annotations") == "${{ steps.meta.outputs.annotations }}"
 
+    build_job = jobs.get("build")
+    assert isinstance(build_job, dict)
     metadata_steps = [
-        step for step in steps if isinstance(step, dict) and step.get("name") == "Docker metadata"
+        step
+        for step in build_job.get("steps", [])
+        if isinstance(step, dict) and step.get("name") == "Docker metadata"
     ]
     assert len(metadata_steps) == 1
     metadata_env = metadata_steps[0].get("env")
@@ -944,7 +1035,7 @@ def test_docker_release_verifies_each_published_platform_runtime() -> None:
     assert "for platform in linux/amd64 linux/arm64" in verify_run
     assert '"${GHCR_IMAGE}@${DIGEST}"' in verify_run
     assert "scripts/verify_container_security_runtime.py" in verify_run
-    assert step_names.index("Build and push multi-arch") < step_names.index(
+    assert step_names.index("Validate pushed image metadata") < step_names.index(
         "Verify published platform security runtimes"
     )
 
