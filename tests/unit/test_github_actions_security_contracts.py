@@ -18,6 +18,7 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 DEPENDABOT_CONFIG = REPO_ROOT / ".github" / "dependabot.yml"
 CODEQL_CONFIG = REPO_ROOT / ".github" / "codeql" / "codeql-config.yml"
 GRYPE_CONFIG = REPO_ROOT / ".grype.yaml"
+ACTIONLINT_CONFIG = REPO_ROOT / ".github" / "actionlint.yaml"
 RELEASE_SYNC_SCRIPT = REPO_ROOT / ".github" / "scripts" / "validate-release-sync-pr.py"
 
 ACTION_REF_RE = re.compile(
@@ -457,6 +458,12 @@ def test_trusted_jobs_use_explicit_self_hosted_runner_labels() -> None:
             if runs_on == "self-hosted":
                 failures.append(f"{workflow.name}:{job_name}")
     assert failures == []
+
+
+def test_actionlint_allowlist_declares_every_custom_runner_label() -> None:
+    config = _load_yaml(ACTIONLINT_CONFIG)
+    labels = config.get("self-hosted-runner", {}).get("labels")
+    assert set(labels) == {"checks", "ci", "docker"}
 
 
 def test_self_hosted_jobs_separate_heavy_ci_from_lightweight_checks() -> None:

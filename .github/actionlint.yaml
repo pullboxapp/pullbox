@@ -1,4 +1,5 @@
 self-hosted-runner:
   labels:
+    - checks
     - ci
     - docker
