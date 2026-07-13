@@ -25,6 +25,7 @@ requirements.
 - Pull request pushes run a cheap GitHub Actions preflight by default. Full PR
   CI/security/workflow-hygiene checks run after maintainers apply `ci:full`.
 - CI tests Python 3.12, 3.13, and 3.14.
+- Self-hosted Python matrix jobs use five pytest workers per Python version.
 - Python 3.14 is the production container runtime.
 - The production Docker image uses Docker Hardened Images.
 - The runtime image is non-root and intentionally minimal.
@@ -222,8 +223,11 @@ tracked in the active CI/CD path.
   - `github-hosted` moves trusted checks to `ubuntu-latest`
 - Fork and Dependabot pull requests always run ordinary checks on
   `ubuntu-latest`, regardless of `PULLBOX_CHECKS_RUNNER`.
-- Trusted ordinary jobs use the explicit self-hosted `ci` runner label when
-  `PULLBOX_CHECKS_RUNNER` is not `github-hosted`.
+- Trusted compute-intensive test and E2E jobs use the explicit self-hosted `ci`
+  runner label when `PULLBOX_CHECKS_RUNNER` is not `github-hosted`.
+- Trusted accessibility, dependency-audit, static-analysis, secret-scan, and
+  workflow-hygiene jobs use the explicit self-hosted `checks` runner label so
+  they cannot occupy a matrix-test runner slot.
 - Trusted Docker validation and Docker release jobs use the explicit
   self-hosted `docker` runner label by design. They are not governed by
   `PULLBOX_CHECKS_RUNNER`.

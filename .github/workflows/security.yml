@@ -95,7 +95,7 @@ jobs:
     name: Gitleaks
     needs: [release_sync_check, full_ci_check]
     if: needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.run_full == 'true'
-    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
+    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","checks"]') }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -184,7 +184,7 @@ jobs:
     name: pip-audit
     needs: [release_sync_check, full_ci_check]
     if: needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.run_full == 'true'
-    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
+    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","checks"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -223,7 +223,7 @@ jobs:
     name: Safety Check
     needs: [release_sync_check, full_ci_check]
     if: needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.run_full == 'true'
-    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
+    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","checks"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -260,7 +260,7 @@ jobs:
     name: Bandit
     needs: [release_sync_check, full_ci_check]
     if: needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.run_full == 'true'
-    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
+    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","checks"]') }}
     timeout-minutes: 15
     permissions:
       contents: read

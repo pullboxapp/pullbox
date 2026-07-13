@@ -459,6 +459,40 @@ def test_trusted_jobs_use_explicit_self_hosted_runner_labels() -> None:
     assert failures == []
 
 
+def test_self_hosted_jobs_separate_heavy_ci_from_lightweight_checks() -> None:
+    """Keep matrix tests off runners used by accessibility and security checks."""
+    expected_labels = {
+        "ci.yml": {
+            "ci": ["quality-gate", "typecheck", "test", "alembic-check", "e2e"],
+            "checks": ["accessibility"],
+        },
+        "security.yml": {
+            "checks": ["gitleaks", "dependency-audit", "safety-check", "bandit"],
+        },
+        "workflow-hygiene.yml": {"checks": ["actionlint"]},
+    }
+
+    for workflow_name, labels in expected_labels.items():
+        jobs = _load_yaml(WORKFLOW_DIR / workflow_name).get("jobs")
+        assert isinstance(jobs, dict)
+        for label, job_names in labels.items():
+            selector = f'["self-hosted","Linux","X64","{label}"]'
+            for job_name in job_names:
+                job = jobs.get(job_name)
+                assert isinstance(job, dict)
+                runs_on = job.get("runs-on")
+                assert isinstance(runs_on, str)
+                assert "ubuntu-latest" in runs_on
+                assert selector in runs_on
+
+
+def test_ci_python_matrix_uses_five_parallel_workers() -> None:
+    workflow = _load_yaml(WORKFLOW_DIR / "ci.yml")
+    env = workflow.get("env")
+    assert isinstance(env, dict)
+    assert env.get("PYTEST_WORKERS") == "5"
+
+
 def test_browser_smoke_and_accessibility_artifacts_survive_failures_and_cancels() -> None:
     ci_workflow = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
     docker_validate = (WORKFLOW_DIR / "docker-validate.yml").read_text(encoding="utf-8")
