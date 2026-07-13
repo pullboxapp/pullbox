@@ -1045,6 +1045,9 @@ def test_docker_release_verifies_each_published_platform_runtime() -> None:
     verify_run = verify_step.get("run", "")
     assert "for platform in linux/amd64 linux/arm64" in verify_run
     assert '"${GHCR_IMAGE}@${DIGEST}"' in verify_run
+    digest_evict = 'docker image rm --force "${GHCR_IMAGE}@${DIGEST}"'
+    assert digest_evict in verify_run
+    assert verify_run.index(digest_evict) < verify_run.index("docker run --rm --pull always")
     assert "scripts/verify_container_security_runtime.py" in verify_run
     assert step_names.index("Validate pushed image metadata") < step_names.index(
         "Verify published platform security runtimes"

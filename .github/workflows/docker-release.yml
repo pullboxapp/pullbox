@@ -692,6 +692,9 @@ jobs:
         run: |
           for platform in linux/amd64 linux/arm64; do
             echo "Verifying container security runtime for ${platform}"
+            # The classic Docker image store cannot retain two platform
+            # selections under the same multi-platform digest reference.
+            docker image rm --force "${GHCR_IMAGE}@${DIGEST}" > /dev/null 2>&1 || true
             docker run --rm --pull always --platform "${platform}" -i \
               --entrypoint python "${GHCR_IMAGE}@${DIGEST}" - \
               < scripts/verify_container_security_runtime.py
