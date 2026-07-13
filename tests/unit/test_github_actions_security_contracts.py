@@ -792,6 +792,7 @@ def test_docker_release_distributes_platform_builds_before_manifest_publish() ->
     assert push.get("runs-on") == "ubuntu-latest"
     push_names = {step.get("name") for step in push.get("steps", []) if isinstance(step, dict)}
     assert {
+        "Checkout",
         "Download platform digests",
         "Set up QEMU",
         "Publish GHCR multi-platform manifest",
@@ -799,6 +800,16 @@ def test_docker_release_distributes_platform_builds_before_manifest_publish() ->
         "Validate pushed image metadata",
         "Verify published platform security runtimes",
     } <= push_names
+    push_steps = [step for step in push.get("steps", []) if isinstance(step, dict)]
+    checkout_step = next(step for step in push_steps if step.get("name") == "Checkout")
+    assert checkout_step.get("with", {}).get("ref") == "${{ needs.build.outputs.build-sha }}"
+    assert next(
+        index for index, step in enumerate(push_steps) if step.get("name") == "Checkout"
+    ) < next(
+        index
+        for index, step in enumerate(push_steps)
+        if step.get("name") == "Verify published platform security runtimes"
+    )
     assert "Build and push multi-arch" not in push_names
     assert "pattern: release-digest-*" in workflow
     assert "merge-multiple: true" in workflow
