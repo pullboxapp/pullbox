@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Raised the Pillow dependency floor to 12.3.0 to include upstream fixes for
+  crafted font/image memory exhaustion and Windows viewer command injection.
+
 ### Performance
 
 ### Testing
@@ -20,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 ### CI / Build
+
+- Parallelized AMD64 and ARM64 release builds across two Docker runners while
+  preserving Grype, smoke-test, dual-registry, attestation, and signing gates.
 
 ### Internal
 
