@@ -142,6 +142,22 @@ def test_runtime_state_paths_are_created_with_non_root_ownership() -> None:
     assert "COPY --from=builder --chown=65532:65532 /opt/venv /opt/venv" in text
 
 
+def test_runtime_python_loads_copied_packages_across_dhi_layouts() -> None:
+    """Runtime Python must load packages without relying on the builder's symlinks."""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    pip_upgrade = '"${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip wheel'
+    runtime_path = (
+        'PATH="/opt/python/bin:/usr/bin:/opt/venv/bin:/usr/local/sbin:'
+        '/usr/local/bin:/usr/sbin:/sbin:/bin"'
+    )
+
+    assert pip_upgrade in text
+    assert '"${VIRTUAL_ENV}/bin/python" -m pip install --no-cache-dir' in text
+    assert runtime_path in text
+    assert 'PYTHONPATH="/opt/venv/lib/python3.14/site-packages"' in text
+    assert 'ln -sfn /opt/python/bin/python "${VIRTUAL_ENV}/bin/python"' not in text
+
+
 def test_compose_files_mount_canonical_media_paths() -> None:
     """Compose examples should expose the documented app-side media roots."""
     expected_mounts = {"/comics", "/downloads", "/imports"}

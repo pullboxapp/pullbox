@@ -36,8 +36,8 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 
 RUN python -m venv "${VIRTUAL_ENV}" \
-    && python -m pip install --upgrade pip wheel \
-    && python -m pip install --no-cache-dir --no-compile ".[prod]" \
+    && "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip wheel \
+    && "${VIRTUAL_ENV}/bin/python" -m pip install --no-cache-dir --no-compile ".[prod]" \
     && find "${VIRTUAL_ENV}" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 RUN set -eu; \
@@ -83,7 +83,8 @@ RUN set -eu; \
 FROM dhi.io/python:3.14-debian13 AS runtime
 
 ENV VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:/opt/python/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    PATH="/opt/python/bin:/usr/bin:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin" \
+    PYTHONPATH="/opt/venv/lib/python3.14/site-packages" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PULLBOX_DB_URL="sqlite+aiosqlite:////data/pullbox.db"

@@ -146,11 +146,15 @@ def test_run_migrations_prints_completion_when_alembic_succeeds(
 ) -> None:
     import pullbox.docker_entrypoint as entrypoint
 
-    monkeypatch.setattr(entrypoint, "_run_process", lambda _command: 0)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(entrypoint, "_run_process", lambda command: commands.append(command) or 0)
 
     entrypoint._run_migrations()
 
     output = capsys.readouterr().out
+    assert commands == [
+        [sys.executable, "-m", "alembic", "-c", "alembic/alembic.ini", "upgrade", "head"]
+    ]
     assert "Running database migrations" in output
     assert "Database migrations complete" in output
 
@@ -309,6 +313,6 @@ def test_module_entrypoint_runs_default_command_without_real_processes(
 
     assert exc_info.value.code == 0
     assert commands == [
-        ["alembic", "-c", "alembic/alembic.ini", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "-c", "alembic/alembic.ini", "upgrade", "head"],
         ["python", "-m", "pullbox"],
     ]

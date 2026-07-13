@@ -91,7 +91,9 @@ def _install_startup_log_mirror(startup_log: Path) -> StartupLogMirror:
 def _run_migrations() -> None:
     """Run database migrations before application launch."""
     print(render_migration_start(), flush=True)
-    exit_code = _run_process(["alembic", "-c", "alembic/alembic.ini", "upgrade", "head"])
+    exit_code = _run_process(
+        [sys.executable, "-m", "alembic", "-c", "alembic/alembic.ini", "upgrade", "head"]
+    )
     if exit_code != 0:
         sys.exit(exit_code)
     print(render_migration_complete(), flush=True)
