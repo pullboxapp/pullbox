@@ -26,6 +26,7 @@ requirements.
   CI/security/workflow-hygiene checks run after maintainers apply `ci:full`.
 - CI tests Python 3.12, 3.13, and 3.14.
 - Self-hosted Python matrix jobs use five pytest workers per Python version.
+- Self-hosted functional E2E jobs use two isolated pytest workers per browser.
 - Python 3.14 is the production container runtime.
 - The production Docker image uses Docker Hardened Images.
 - The runtime image is non-root and intentionally minimal.
@@ -95,6 +96,8 @@ tests/e2e/
 - Tests outside `tests/unit/` are treated as slower coverage.
 - E2E tests run a live app and seed through API-style setup rather than relying
   on broad seed scripts.
+- Each parallel E2E worker creates its own temporary database, data directories,
+  uvicorn server, browser session, and local port.
 - Search and parser tests should use real fixture data when release-title edge
   cases matter.
 - Coverage percentage is useful, but contract coverage matters more.

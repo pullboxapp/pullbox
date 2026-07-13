@@ -31,6 +31,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  E2E_WORKERS: "2"
   PYTHON_DEFAULT: "3.14"
   PYTEST_WORKERS: "5"
 
@@ -394,6 +395,8 @@ jobs:
           pytest tests/e2e/ \
             -v \
             -m "not accessibility" \
+            -n "${E2E_WORKERS}" \
+            --dist=worksteal \
             --browser ${{ matrix.browser }} \
             ${{ matrix.pytest_extra_args }} \
             --video retain-on-failure \

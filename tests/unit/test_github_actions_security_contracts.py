@@ -509,6 +509,24 @@ def test_ci_python_matrix_uses_five_parallel_workers() -> None:
     assert "--dist=worksteal" in test_step.get("run", "")
 
 
+def test_e2e_matrix_shards_each_browser_across_two_workers() -> None:
+    workflow = _load_yaml(WORKFLOW_DIR / "ci.yml")
+    env = workflow.get("env")
+    assert isinstance(env, dict)
+    assert env.get("E2E_WORKERS") == "2"
+
+    jobs = workflow.get("jobs")
+    assert isinstance(jobs, dict)
+    e2e_job = jobs.get("e2e")
+    assert isinstance(e2e_job, dict)
+    e2e_step = next(
+        step for step in e2e_job.get("steps", []) if step.get("name") == "Run E2E tests"
+    )
+    command = e2e_step.get("run", "")
+    assert '-n "${E2E_WORKERS}"' in command
+    assert "--dist=worksteal" in command
+
+
 def test_browser_smoke_and_accessibility_artifacts_survive_failures_and_cancels() -> None:
     ci_workflow = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
     docker_validate = (WORKFLOW_DIR / "docker-validate.yml").read_text(encoding="utf-8")
