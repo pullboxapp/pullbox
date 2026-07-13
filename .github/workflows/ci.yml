@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  E2E_WORKERS: "2"
+  E2E_WORKERS: "3"
   PYTHON_DEFAULT: "3.14"
   PYTEST_WORKERS: "5"
 

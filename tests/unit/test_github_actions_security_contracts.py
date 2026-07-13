@@ -509,11 +509,11 @@ def test_ci_python_matrix_uses_five_parallel_workers() -> None:
     assert "--dist=worksteal" in test_step.get("run", "")
 
 
-def test_e2e_matrix_shards_each_browser_across_two_workers() -> None:
+def test_e2e_matrix_shards_each_browser_across_three_workers() -> None:
     workflow = _load_yaml(WORKFLOW_DIR / "ci.yml")
     env = workflow.get("env")
     assert isinstance(env, dict)
-    assert env.get("E2E_WORKERS") == "2"
+    assert env.get("E2E_WORKERS") == "3"
 
     jobs = workflow.get("jobs")
     assert isinstance(jobs, dict)
