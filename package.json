@@ -6,7 +6,7 @@
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.3.3",
-    "axe-core": "^4.12.1",
+    "axe-core": "^4.13.0",
     "tailwindcss": "^4.3.3"
   }
 }
