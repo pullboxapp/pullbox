@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pullbox.core.source_metadata import MetadataSignal
+
 if TYPE_CHECKING:
     from pullbox.core.source_metadata import SourceMetadata
 
@@ -36,7 +38,14 @@ def trusted_known_cv_id_without_fetch(
         return True
     if comicinfo_cv_id is None and source_metadata.comicvine_series_id is None:
         return False
-    return source_metadata.diagnostics.get("comicvine_series_id_source") == "comicvine_volume_url"
+    if source_metadata.diagnostics.get("identity_conflicts"):
+        return False
+    series_id_signal = source_metadata.signals.get("comicvine_series_id")
+    if series_id_signal == MetadataSignal.SIDECAR:
+        return True
+    return series_id_signal in {None, MetadataSignal.COMICINFO} and source_metadata.diagnostics.get(
+        "comicvine_series_id_source"
+    ) in {"comicvine_volume_url", "comicvine_note_id"}
 
 
 def known_cv_id_evaluation_from_metadata(

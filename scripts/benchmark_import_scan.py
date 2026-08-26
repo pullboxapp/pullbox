@@ -112,23 +112,50 @@ class FakeMetadataProvider:
         ]
 
 
-def _build_tree(root: Path, *, series_count: int, files_per_series: int) -> None:
+def _build_tree(
+    root: Path,
+    *,
+    series_count: int,
+    files_per_series: int,
+    trusted_comicinfo: bool,
+) -> None:
     for series_idx in range(series_count):
-        folder = root / f"Series {series_idx:04d} ({2000 + (series_idx % 20)})"
+        title = f"Series {series_idx:04d}"
+        year = 2000 + (series_idx % 20)
+        series_provider_id = 100000 + series_idx
+        folder = root / f"{title} ({year})"
         folder.mkdir(parents=True, exist_ok=True)
         for file_idx in range(1, files_per_series + 1):
-            archive_path = folder / f"Series {series_idx:04d} #{file_idx:03d}.cbz"
+            archive_path = folder / f"{title} #{file_idx:03d}.cbz"
             with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr(
-                    f"Series {series_idx:04d} #{file_idx:03d}.jpg",
+                    f"{title} #{file_idx:03d}.jpg",
                     b"benchmark-page",
                 )
+                if trusted_comicinfo:
+                    issue_provider_id = (series_provider_id * 1000) + file_idx
+                    archive.writestr(
+                        "ComicInfo.xml",
+                        (
+                            "<?xml version='1.0'?>"
+                            "<ComicInfo>"
+                            f"<Series>{title}</Series>"
+                            f"<Number>{file_idx}</Number>"
+                            f"<Volume>{year}</Volume>"
+                            "<Notes>"
+                            f"[cv_vol_id:{series_provider_id}] "
+                            f"[cv_issue_id:{issue_provider_id}]"
+                            "</Notes>"
+                            "</ComicInfo>"
+                        ),
+                    )
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--series-count", type=int, default=200)
     parser.add_argument("--files-per-series", type=int, default=12)
+    parser.add_argument("--trusted-comicinfo", action="store_true")
     args = parser.parse_args()
 
     provider = FakeMetadataProvider()
@@ -182,6 +209,7 @@ async def main() -> None:
                 root,
                 series_count=args.series_count,
                 files_per_series=args.files_per_series,
+                trusted_comicinfo=args.trusted_comicinfo,
             )
 
             db_path = Path(tmp) / "benchmark.db"
@@ -216,6 +244,7 @@ async def main() -> None:
                 report = {
                     "series_count": args.series_count,
                     "files_per_series": args.files_per_series,
+                    "trusted_comicinfo": args.trusted_comicinfo,
                     "elapsed_ms": elapsed_ms,
                     "archive_read_count": archive_read_count,
                     "archive_entry_issue_hint_count": archive_entry_issue_hint_count,

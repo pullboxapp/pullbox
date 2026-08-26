@@ -73,6 +73,39 @@ class TestArchiveMetadataExtraction:
         assert metadata.signals["comicvine_series_id"] == MetadataSignal.SIDECAR
         assert metadata.signals["issue_type"] == MetadataSignal.SIDECAR
 
+    def test_conflicting_sidecar_and_comicinfo_ids_are_recorded(self, tmp_path: Path) -> None:
+        folder = tmp_path / "Batman (2016)"
+        folder.mkdir()
+        (folder / "series.json").write_text(json.dumps({"comicid": 11111, "issueid": 22222}))
+        archive = folder / "Batman 001.cbz"
+        _write_cbz(
+            archive,
+            """<?xml version="1.0"?>
+            <ComicInfo>
+              <Series>Batman</Series>
+              <Number>1</Number>
+              <Notes>[cv_vol_id:97508] [cv_issue_id:123456]</Notes>
+            </ComicInfo>
+            """,
+        )
+
+        metadata = SourceMetadataExtractor().from_archive_path(archive)
+
+        assert metadata.comicvine_series_id == 11111
+        assert metadata.comicvine_issue_id == 22222
+        assert metadata.diagnostics["identity_conflicts"] == [
+            {
+                "field": "comicvine_series_id",
+                "comicinfo": 97508,
+                "sidecar": 11111,
+            },
+            {
+                "field": "comicvine_issue_id",
+                "comicinfo": 123456,
+                "sidecar": 22222,
+            },
+        ]
+
     def test_comicinfo_can_supply_series_issue_and_year(self, tmp_path: Path) -> None:
         folder = tmp_path / "Batman (2016)"
         folder.mkdir()
@@ -569,6 +602,33 @@ class TestArchiveMetadataExtraction:
         assert metadata.issue_number == 20.0
         assert "archive_entry_issue_hint" not in metadata.diagnostics
         assert metadata.diagnostics["archive_entry_issue_hint_checked"] is True
+
+    def test_archive_identity_probe_can_skip_page_name_issue_hint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        folder = tmp_path / "Hello Darkness"
+        folder.mkdir()
+        archive = folder / "Hello Darkness 020 (2026).cbz"
+        _write_cbz(archive)
+
+        def _unexpected_issue_hint(*args: object, **kwargs: object) -> None:
+            raise AssertionError("identity probe must not inspect archive page names")
+
+        monkeypatch.setattr(
+            SourceMetadataExtractor,
+            "archive_entry_issue_hint_from_path",
+            _unexpected_issue_hint,
+        )
+
+        metadata = SourceMetadataExtractor().from_archive_path(
+            archive,
+            include_archive_entry_issue_hint=False,
+        )
+
+        assert metadata.diagnostics["archive_metadata_loaded"] is True
+        assert "archive_entry_issue_hint_checked" not in metadata.diagnostics
 
     def test_archive_page_name_hint_skips_parsing_when_too_few_images(
         self,

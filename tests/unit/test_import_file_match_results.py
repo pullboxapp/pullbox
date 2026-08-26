@@ -202,6 +202,43 @@ def test_file_match_summary_preserves_trusted_mylar_series_with_unmatched_file()
     assert series.cv_match_method == "mylar3_cv_id"
 
 
+def test_file_match_summary_preserves_trusted_folder_series_with_unmatched_file() -> None:
+    series = ImportedSeries(
+        raw_series_name="Batman",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=97508,
+        cv_title="Batman",
+        cv_match_score=1.0,
+        cv_match_method="comicinfo_cv_id",
+    )
+    files = [
+        ImportedFile(
+            file_name="Batman Annual 001 (2016).cbz",
+            parsed_series="Batman Annual",
+            parsed_issue_number=1.0,
+            status=ImportedFileStatus.NO_MATCH,
+            diagnostics={
+                "kind": "metadata_conflict",
+                "conflict_type": "trusted_source_series_id_mismatch",
+                "preserve_series_match": True,
+            },
+        )
+    ]
+
+    summary = apply_file_match_series_summary(
+        series,
+        files,
+        duplicate_series=False,
+        duplicate_merge_profile=None,
+        cv_match_threshold=0.88,
+    )
+
+    assert summary.series_invalidated is False
+    assert series.status == ImportSeriesStatus.MATCHED
+    assert series.cv_id == 97508
+    assert series.cv_match_method == "comicinfo_cv_id"
+
+
 def test_file_match_summary_updates_duplicate_series_diagnostics_from_profile() -> None:
     series = ImportedSeries(
         raw_series_name="Absolute Batman",

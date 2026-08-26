@@ -33,6 +33,8 @@ PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD = "provider_zero_issue_single_issue"
 PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND = "provider_missing_issue_placeholder"
 PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD = "import_reconcile_provisional_issue"
 _PLACEHOLDER_ISSUE_TYPES = frozenset({IssueType.ONE_SHOT, IssueType.SPECIAL})
+_TRUSTED_SERIES_MATCH_METHODS = frozenset({"mylar3_cv_id", "comicinfo_cv_id"})
+_TRUSTED_IDENTITY_SIGNALS = frozenset({"mylar3", "comicinfo", "sidecar"})
 
 
 @dataclass(slots=True)
@@ -86,9 +88,9 @@ async def load_file_match_target_index(
             target_index.number_map[issue.issue_number] = entry
         return target_index
 
-    trusted_mylar_index = _trusted_mylar_issue_target_index(imp_series, files or [])
-    if trusted_mylar_index is not None:
-        return trusted_mylar_index
+    trusted_source_index = _trusted_source_issue_target_index(imp_series, files or [])
+    if trusted_source_index is not None:
+        return trusted_source_index
 
     if imp_series.cv_id is not None and metadata_provider is not None:
         try:
@@ -134,23 +136,48 @@ async def load_file_match_target_index(
     return target_index
 
 
-def _trusted_mylar_issue_target_index(
+def _trusted_source_issue_target_index(
     imp_series: ImportedSeries,
     files: list[ImportedFile],
 ) -> FileMatchTargetIndex | None:
-    """Build same-series targets from trusted Mylar rows without provider calls."""
+    """Build issue targets from trusted local metadata without provider calls."""
     if imp_series.cv_id is None or not files:
         return None
 
     target_index = FileMatchTargetIndex()
-    has_trusted_mylar_identity = imp_series.cv_match_method == "mylar3_cv_id"
-    for imp_file in files:
-        has_trusted_mylar_identity = (
-            has_trusted_mylar_identity or _has_trusted_mylar_issue_identity(imp_file)
+    has_trusted_source_identity = (
+        imp_series.cv_match_method in _TRUSTED_SERIES_MATCH_METHODS
+        or any(
+            _has_trusted_issue_identity(imp_file)
+            and not _trusted_issue_series_mismatch(imp_series, imp_file)
+            and _trusted_issue_series_id(imp_file) is not None
+            for imp_file in files
         )
-        target = _trusted_mylar_issue_target(imp_series, imp_file)
+    )
+    if not has_trusted_source_identity:
+        return None
+
+    for imp_file in files:
+        source_conflicts = _trusted_source_identity_conflicts(imp_file)
+        if source_conflicts:
+            _mark_trusted_source_identity_conflict(
+                imp_file,
+                imp_series,
+                conflict_type="trusted_source_identity_conflict",
+                identity_conflicts=source_conflicts,
+            )
+            continue
+
+        target = _trusted_source_issue_target(imp_series, imp_file)
         if target is None:
-            _add_mylar_provisional_target(target_index, imp_file)
+            if _trusted_issue_series_mismatch(imp_series, imp_file):
+                _mark_trusted_source_identity_conflict(
+                    imp_file,
+                    imp_series,
+                    conflict_type="trusted_source_series_id_mismatch",
+                )
+            else:
+                _add_trusted_provisional_target(target_index, imp_file)
             continue
         issue_cv_id, issue_number, issue_title = target
         entry = (None, issue_cv_id, False, None, issue_title)
@@ -161,14 +188,14 @@ def _trusted_mylar_issue_target_index(
             target_index.synthetic_issue_titles.pop(issue_number, None)
             target_index.provisional_issue_numbers.discard(issue_number)
 
-    return target_index if has_trusted_mylar_identity else None
+    return target_index
 
 
-def _add_mylar_provisional_target(
+def _add_trusted_provisional_target(
     target_index: FileMatchTargetIndex,
     imp_file: ImportedFile,
 ) -> None:
-    """Add a local issue target when Mylar knows the series but not the issue row."""
+    """Add a local issue target when the source knows the series but not the issue ID."""
     if imp_file.comicvine_issue_id is not None:
         return
     issue_number = candidate_issue_number(imp_file)
@@ -181,26 +208,29 @@ def _add_mylar_provisional_target(
     target_index.provisional_issue_numbers.add(issue_number)
 
 
-def _has_trusted_mylar_issue_identity(imp_file: ImportedFile) -> bool:
+def _has_trusted_issue_identity(imp_file: ImportedFile) -> bool:
     diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
     signals = diagnostics.get("metadata_signals")
     return bool(
         imp_file.comicvine_issue_id is not None
         and isinstance(signals, dict)
-        and signals.get("comicvine_issue_id") == "mylar3"
+        and signals.get("comicvine_issue_id") in _TRUSTED_IDENTITY_SIGNALS
     )
 
 
-def _trusted_mylar_issue_target(
+def _trusted_source_issue_target(
     imp_series: ImportedSeries,
     imp_file: ImportedFile,
 ) -> tuple[int, float | None, str | None] | None:
-    """Return a trusted Mylar issue identity when it belongs to the matched series."""
+    """Return a trusted local issue identity when it belongs to the matched series."""
     if imp_file.comicvine_issue_id is None:
         return None
     diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
     signals = diagnostics.get("metadata_signals")
-    if not isinstance(signals, dict) or signals.get("comicvine_issue_id") != "mylar3":
+    if (
+        not isinstance(signals, dict)
+        or signals.get("comicvine_issue_id") not in _TRUSTED_IDENTITY_SIGNALS
+    ):
         return None
     if imp_series.cv_id is None:
         return None
@@ -208,19 +238,81 @@ def _trusted_mylar_issue_target(
     if source_series_cv_id != int(imp_series.cv_id):
         return None
 
-    issue_title: str | None = None
-    source_metadata = diagnostics.get("source_metadata")
-    if isinstance(source_metadata, dict):
-        mylar_issue = source_metadata.get("mylar3_issue")
-        if isinstance(mylar_issue, dict):
-            raw_title = mylar_issue.get("title")
-            issue_title = str(raw_title) if raw_title else None
+    issue_title = _trusted_source_issue_title(diagnostics)
 
     return (
         int(imp_file.comicvine_issue_id),
         candidate_issue_number(imp_file),
         issue_title,
     )
+
+
+def _trusted_source_issue_title(diagnostics: dict[str, object]) -> str | None:
+    source_metadata = diagnostics.get("source_metadata")
+    if isinstance(source_metadata, dict):
+        mylar_issue = source_metadata.get("mylar3_issue")
+        if isinstance(mylar_issue, dict):
+            raw_title = mylar_issue.get("title")
+            if raw_title:
+                return str(raw_title)
+        comicinfo = source_metadata.get("comicinfo")
+        if isinstance(comicinfo, dict):
+            raw_title = comicinfo.get("title")
+            if raw_title:
+                return str(raw_title)
+    return None
+
+
+def _trusted_issue_series_mismatch(
+    imp_series: ImportedSeries,
+    imp_file: ImportedFile,
+) -> bool:
+    if not _has_trusted_issue_identity(imp_file) or imp_series.cv_id is None:
+        return False
+    diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
+    source_series_cv_id = _safe_int(diagnostics.get("comicvine_series_id"))
+    return source_series_cv_id is not None and source_series_cv_id != int(imp_series.cv_id)
+
+
+def _trusted_issue_series_id(imp_file: ImportedFile) -> int | None:
+    diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
+    return _safe_int(diagnostics.get("comicvine_series_id"))
+
+
+def _trusted_source_identity_conflicts(imp_file: ImportedFile) -> list[dict[str, object]]:
+    diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
+    source_metadata = diagnostics.get("source_metadata")
+    conflicts = (
+        source_metadata.get("identity_conflicts") if isinstance(source_metadata, dict) else None
+    )
+    if not isinstance(conflicts, list):
+        return []
+    return [dict(conflict) for conflict in conflicts if isinstance(conflict, dict)]
+
+
+def _mark_trusted_source_identity_conflict(
+    imp_file: ImportedFile,
+    imp_series: ImportedSeries,
+    *,
+    conflict_type: str,
+    identity_conflicts: list[dict[str, object]] | None = None,
+) -> None:
+    diagnostics = dict(imp_file.diagnostics or {})
+    source_series_cv_id = _safe_int(diagnostics.get("comicvine_series_id"))
+    diagnostics.update(
+        {
+            "kind": "metadata_conflict",
+            "conflict_type": conflict_type,
+            "preserve_series_match": True,
+            "rejection_reason": "Trusted local metadata contains conflicting ComicVine IDs.",
+            "source_series_cv_id": source_series_cv_id,
+            "target_series_cv_id": imp_series.cv_id,
+            "source_issue_cv_id": imp_file.comicvine_issue_id,
+        }
+    )
+    if identity_conflicts:
+        diagnostics["identity_conflicts"] = identity_conflicts
+    imp_file.diagnostics = diagnostics
 
 
 def _safe_int(value: object) -> int | None:

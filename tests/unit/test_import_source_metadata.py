@@ -753,6 +753,58 @@ async def test_source_metadata_for_matching_series_can_load_deferred_archive_met
     assert metadata.diagnostics["comicinfo"]["publisher"] == "DC Comics"
 
 
+@pytest.mark.asyncio
+async def test_source_metadata_for_matching_series_preserves_scanned_sidecar_identity(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    file_path = tmp_path / "Batman 001.cbz"
+    file_path.write_bytes(b"already scanned")
+    job = await _create_import_job(db_session)
+    imp_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Batman",
+        raw_year=2016,
+        source_folder=str(tmp_path),
+        file_count=1,
+        files_total=1,
+        cv_id=97508,
+        cv_match_method="comicinfo_cv_id",
+        diagnostics={},
+    )
+    db_session.add(imp_series)
+    await db_session.flush()
+    db_session.add(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imp_series.id,
+            file_path=str(file_path),
+            file_name=file_path.name,
+            file_format="cbz",
+            parsed_series="Batman",
+            parsed_issue_number=1.0,
+            parsed_year=2016,
+            diagnostics={
+                "comicvine_series_id": 97508,
+                "metadata_signals": {
+                    "comicvine_series_id": MetadataSignal.SIDECAR.value,
+                },
+                "source_metadata": {
+                    "archive_metadata_loaded": False,
+                    "archive_metadata_deferred": True,
+                },
+            },
+        )
+    )
+    await db_session.flush()
+
+    metadata = await source_metadata_for_matching_series(db_session, imp_series)
+
+    assert metadata.comicvine_series_id == 97508
+    assert metadata.signals["comicvine_series_id"] == MetadataSignal.SIDECAR
+    assert metadata.diagnostics["comicvine_series_id_source"] == "sidecar"
+
+
 def test_build_import_metadata_conflict_requires_strong_title_mismatch() -> None:
     metadata = SourceMetadata(
         original_title="Chicken Devil 004 (2022).cbz",
@@ -852,8 +904,12 @@ def test_sync_import_file_source_metadata_refreshes_repaired_file(tmp_path: Path
         year=2022,
         issue_number=4.0,
         issue_type=IssueType.ISSUE,
+        comicvine_series_id=97508,
         comicvine_issue_id=905404,
-        signals={"series_name": MetadataSignal.COMICINFO},
+        signals={
+            "series_name": MetadataSignal.COMICINFO,
+            "comicvine_series_id": MetadataSignal.COMICINFO,
+        },
         diagnostics={"has_comicinfo": True, "comicinfo": {"number": "4"}},
     )
 
@@ -865,4 +921,8 @@ def test_sync_import_file_source_metadata_refreshes_repaired_file(tmp_path: Path
     assert imp_file.has_comicinfo is True
     assert imp_file.issue_number_raw == "4"
     assert diagnostics["source_issue_type"] == "issue"
-    assert diagnostics["metadata_signals"] == {"series_name": "comicinfo"}
+    assert diagnostics["comicvine_series_id"] == 97508
+    assert diagnostics["metadata_signals"] == {
+        "series_name": "comicinfo",
+        "comicvine_series_id": "comicinfo",
+    }

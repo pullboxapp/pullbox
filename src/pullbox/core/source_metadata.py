@@ -317,6 +317,7 @@ class SourceMetadataExtractor:
         archive_path: str | Path,
         *,
         include_archive_comicinfo: bool = True,
+        include_archive_entry_issue_hint: bool = True,
         sidecar_data: dict[str, Any] | None = None,
     ) -> SourceMetadata:
         """Build metadata from filename, folder sidecars, and optional archive ComicInfo."""
@@ -333,7 +334,9 @@ class SourceMetadataExtractor:
                 path,
                 expected_series_name=metadata.series_name,
             )
-            if include_archive_comicinfo and comicinfo is None
+            if (
+                include_archive_comicinfo and include_archive_entry_issue_hint and comicinfo is None
+            )
             else None
         )
         sidecar = sidecar_data if sidecar_data is not None else self._read_sidecars(path.parent)
@@ -345,6 +348,7 @@ class SourceMetadataExtractor:
             archive_entry_issue_hint=archive_entry_issue_hint,
             sidecar=sidecar,
             include_archive_comicinfo=include_archive_comicinfo,
+            include_archive_entry_issue_hint=include_archive_entry_issue_hint,
         )
 
     def from_release_title(
@@ -408,10 +412,12 @@ class SourceMetadataExtractor:
         archive_path: str | Path,
         *,
         include_archive_comicinfo: bool = True,
+        include_archive_entry_issue_hint: bool = True,
     ) -> SourceMetadata:
         return self.from_path(
             archive_path,
             include_archive_comicinfo=include_archive_comicinfo,
+            include_archive_entry_issue_hint=include_archive_entry_issue_hint,
         )
 
     def read_sidecars(self, folder: str | Path) -> dict[str, Any]:
@@ -427,6 +433,7 @@ class SourceMetadataExtractor:
         archive_entry_issue_hint: ArchiveEntryIssueHint | None,
         sidecar: dict[str, Any],
         include_archive_comicinfo: bool,
+        include_archive_entry_issue_hint: bool,
     ) -> SourceMetadata:
         series_name = metadata.series_name
         issue_number = metadata.issue_number
@@ -439,6 +446,7 @@ class SourceMetadataExtractor:
         series_status = None
         issue_count_hint = None
         signals = dict(metadata.signals)
+        identity_conflicts: list[dict[str, object]] = []
         diagnostics: dict[str, object] = {
             "folder_name": folder_name,
             "sidecar_files_present": sorted(sidecar["files_present"]),
@@ -533,17 +541,35 @@ class SourceMetadataExtractor:
             }
         else:
             diagnostics["has_comicinfo"] = False
-            if include_archive_comicinfo:
+            if include_archive_comicinfo and include_archive_entry_issue_hint:
                 diagnostics["archive_entry_issue_hint_checked"] = True
             if archive_entry_issue_hint is not None:
                 diagnostics["archive_entry_issue_hint"] = dict(archive_entry_issue_hint)
 
         if sidecar["series_id"] is not None:
+            if comicvine_series_id is not None and comicvine_series_id != sidecar["series_id"]:
+                identity_conflicts.append(
+                    {
+                        "field": "comicvine_series_id",
+                        "comicinfo": comicvine_series_id,
+                        "sidecar": sidecar["series_id"],
+                    }
+                )
             comicvine_series_id = sidecar["series_id"]
             signals["comicvine_series_id"] = MetadataSignal.SIDECAR
         if sidecar["issue_id"] is not None:
+            if comicvine_issue_id is not None and comicvine_issue_id != sidecar["issue_id"]:
+                identity_conflicts.append(
+                    {
+                        "field": "comicvine_issue_id",
+                        "comicinfo": comicvine_issue_id,
+                        "sidecar": sidecar["issue_id"],
+                    }
+                )
             comicvine_issue_id = sidecar["issue_id"]
             signals["comicvine_issue_id"] = MetadataSignal.SIDECAR
+        if identity_conflicts:
+            diagnostics["identity_conflicts"] = identity_conflicts
         if sidecar["booktype"] is not None:
             issue_type = sidecar["booktype"]
             signals["issue_type"] = MetadataSignal.SIDECAR

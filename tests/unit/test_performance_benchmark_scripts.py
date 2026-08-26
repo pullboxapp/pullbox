@@ -72,6 +72,26 @@ def test_import_scan_benchmark_uses_stable_provider_ids_for_multi_series() -> No
     assert report["archive_entry_issue_hint_count"] == 16
 
 
+def test_import_scan_benchmark_uses_trusted_folder_metadata_without_provider_calls() -> None:
+    report = _run_benchmark(
+        _repo_root(),
+        "scripts/benchmark_import_scan.py",
+        "--trusted-comicinfo",
+        "--series-count",
+        "4",
+        files_per_series=4,
+    )
+
+    assert report["trusted_comicinfo"] is True
+    assert report["series_matched"] == 4
+    assert report["total_files_matched"] == 16
+    assert report["archive_read_count"] == 4
+    assert report["provider_search_calls"] == 0
+    assert report["provider_get_series_calls"] == 0
+    assert report["provider_issue_summary_calls"] == 0
+    assert report["provider_issue_number_calls"] == 0
+
+
 def test_import_execute_benchmark_exits_cleanly() -> None:
     report = _run_benchmark(_repo_root(), "scripts/benchmark_import_execute.py")
 
