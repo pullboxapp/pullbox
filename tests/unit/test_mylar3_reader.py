@@ -9,6 +9,8 @@ import pytest
 
 from pullbox.core.exceptions import MylarReadError
 from pullbox.core.mylar3_reader import Mylar3Reader
+from pullbox.models.issue import IssueType
+from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,93 +23,129 @@ def _create_mylar_db(
     annuals: list[dict[str, str | int | None]] | None = None,
 ) -> None:
     """Create a fake Mylar3 database with a comic table."""
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("""
-        CREATE TABLE comics (
-            ComicID TEXT,
-            ComicName TEXT,
-            ComicYear TEXT,
-            ComicPublisher TEXT,
-            ComicLocation TEXT,
-            Status TEXT,
-            Total INTEGER,
-            ComicImage TEXT
-        )
-    """)
-    for s in series or []:
-        conn.execute(
-            "INSERT INTO comics VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                s.get("ComicID"),
-                s.get("ComicName"),
-                s.get("ComicYear"),
-                s.get("ComicPublisher"),
-                s.get("ComicLocation"),
-                s.get("Status", "Active"),
-                s.get("Total", 0),
-                s.get("ComicImage"),
-            ),
-        )
-    if issues is not None:
-        conn.execute("""
-            CREATE TABLE issues (
-                IssueID TEXT,
-                ComicName TEXT,
-                IssueName TEXT,
-                Issue_Number TEXT,
-                ComicID TEXT,
-                Location TEXT,
-                IssueDate TEXT,
-                Int_IssueNumber INTEGER
-            )
-        """)
-        for issue in issues:
-            conn.execute(
-                "INSERT INTO issues VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    issue.get("IssueID"),
-                    issue.get("ComicName"),
-                    issue.get("IssueName"),
-                    issue.get("Issue_Number"),
-                    issue.get("ComicID"),
-                    issue.get("Location"),
-                    issue.get("IssueDate"),
-                    issue.get("Int_IssueNumber"),
-                ),
-            )
-    if annuals is not None:
-        conn.execute("""
-            CREATE TABLE annuals (
-                IssueID TEXT,
-                Issue_Number TEXT,
-                IssueName TEXT,
-                IssueDate TEXT,
-                ComicID TEXT,
-                Location TEXT,
-                Int_IssueNumber INTEGER,
-                ComicName TEXT,
-                ReleaseComicID TEXT,
-                ReleaseComicName TEXT
-            )
-        """)
-        for annual in annuals:
-            conn.execute(
-                "INSERT INTO annuals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    annual.get("IssueID"),
-                    annual.get("Issue_Number"),
-                    annual.get("IssueName"),
-                    annual.get("IssueDate"),
-                    annual.get("ComicID"),
-                    annual.get("Location"),
-                    annual.get("Int_IssueNumber"),
-                    annual.get("ComicName"),
-                    annual.get("ReleaseComicID"),
-                    annual.get("ReleaseComicName"),
-                ),
-            )
-    conn.commit()
-    conn.close()
+    create_mylar3_db(
+        db_path,
+        series=series or [],
+        issues=issues,
+        annuals=annuals,
+    )
+
+
+@pytest.mark.asyncio
+async def test_annual_row_preserves_release_identity_and_issue_type(tmp_path: Path) -> None:
+    db = tmp_path / "mylar.db"
+    series_dir = tmp_path / "comics" / "X-Men"
+    regular_path = series_dir / "X-Men 001 (2021).cbz"
+    annual_path = series_dir / "X-Men Annual 001 (2023).cbz"
+    create_minimal_cbz(regular_path)
+    create_minimal_cbz(annual_path)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-140553",
+                "ComicName": "X-Men",
+                "ComicYear": "2021",
+                "ComicPublisher": "Marvel",
+                "ComicLocation": str(series_dir),
+                "Total": 30,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "900001",
+                "ComicID": "140553",
+                "ComicName": "X-Men",
+                "IssueName": "Fearless",
+                "Issue_Number": "1",
+                "Location": regular_path.name,
+                "IssueDate": "2021-09-01",
+            }
+        ],
+        annuals=[
+            {
+                "IssueID": "950001",
+                "ComicID": "140553",
+                "ComicName": "X-Men",
+                "IssueName": "Contest of Chaos",
+                "Issue_Number": "1",
+                "Location": annual_path.name,
+                "IssueDate": "2023-08-16",
+                "ReleaseComicID": "CV-153726",
+                "ReleaseComicName": "X-Men Annual",
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(db).read_series()
+
+    assert len(results) == 2
+    by_cv_id = {item.mylar3_cv_id: item for item in results}
+
+    regular_series = by_cv_id[140553]
+    assert regular_series.raw_series_name == "X-Men"
+    assert [item.file_name for item in regular_series.files] == [regular_path.name]
+    assert regular_series.files[0].issue_type == IssueType.ISSUE
+    assert regular_series.files[0].comicvine_series_id == 140553
+
+    annual_series = by_cv_id[153726]
+    assert annual_series.raw_series_name == "X-Men Annual"
+    assert annual_series.raw_year == 2023
+    assert annual_series.raw_publisher == "Marvel"
+    assert annual_series.diagnostics["source_issue_type"] == IssueType.ANNUAL.value
+    assert [item.file_name for item in annual_series.files] == [annual_path.name]
+    assert annual_series.files[0].issue_type == IssueType.ANNUAL
+    assert annual_series.files[0].comicvine_series_id == 153726
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("file_name", "expected_type"),
+    [
+        ("Fixture Special 001 (2024).cbz", IssueType.SPECIAL),
+        ("Fixture One-Shot 001 (2024).cbz", IssueType.ONE_SHOT),
+        ("Fixture TPB 001 (2024).cbz", IssueType.TPB),
+        ("Fixture Omnibus 001 (2024).cbz", IssueType.OMNIBUS),
+        ("Fixture Graphic Novel 001 (2024).cbz", IssueType.GN),
+    ],
+)
+async def test_issue_row_preserves_non_standard_filename_type(
+    tmp_path: Path,
+    file_name: str,
+    expected_type: IssueType,
+) -> None:
+    db = tmp_path / "mylar.db"
+    series_dir = tmp_path / "comics" / "Fixture"
+    issue_path = series_dir / file_name
+    create_minimal_cbz(issue_path)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-200001",
+                "ComicName": "Fixture",
+                "ComicYear": "2024",
+                "ComicLocation": str(series_dir),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "990001",
+                "ComicID": "200001",
+                "ComicName": "Fixture",
+                "IssueName": "Fixture",
+                "Issue_Number": "1",
+                "Location": issue_path.name,
+                "IssueDate": "2024-01-01",
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(db).read_series()
+
+    assert len(results) == 1
+    assert results[0].files[0].issue_type == expected_type
 
 
 class TestBasicRead:

@@ -67,6 +67,7 @@ def apply_file_match_series_summary(
     invalidation_diagnostics: dict[str, Any] | None = None
     if (
         not duplicate_series
+        and imp_series.cv_match_method != "mylar3_cv_id"
         and imp_series.status == ImportSeriesStatus.MATCHED
         and imp_series.files_total > 0
         and imp_series.files_matched == 0

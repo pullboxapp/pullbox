@@ -169,6 +169,39 @@ def test_file_match_summary_invalidates_plain_unmatched_series() -> None:
     ]
 
 
+def test_file_match_summary_preserves_trusted_mylar_series_with_unmatched_file() -> None:
+    series = ImportedSeries(
+        raw_series_name="X-Men",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=140553,
+        cv_title="X-Men",
+        cv_match_score=1.0,
+        cv_match_method="mylar3_cv_id",
+    )
+    files = [
+        ImportedFile(
+            file_name="X-Men Annual 001 (2023).cbz",
+            parsed_series="X-Men Annual",
+            parsed_issue_number=1.0,
+            comicvine_issue_id=950001,
+            status=ImportedFileStatus.NO_MATCH,
+        )
+    ]
+
+    summary = apply_file_match_series_summary(
+        series,
+        files,
+        duplicate_series=False,
+        duplicate_merge_profile=None,
+        cv_match_threshold=0.88,
+    )
+
+    assert summary.series_invalidated is False
+    assert series.status == ImportSeriesStatus.MATCHED
+    assert series.cv_id == 140553
+    assert series.cv_match_method == "mylar3_cv_id"
+
+
 def test_file_match_summary_updates_duplicate_series_diagnostics_from_profile() -> None:
     series = ImportedSeries(
         raw_series_name="Absolute Batman",

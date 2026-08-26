@@ -16,7 +16,10 @@ from pullbox.core.type_semantics import (
 from pullbox.models.issue import IssueType
 from pullbox.services.import_embedded_title_match import embedded_issue_number_title_match
 from pullbox.services.import_file_issue_signals import candidate_issue_number
-from pullbox.services.import_file_match_targets import PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD
+from pullbox.services.import_file_match_targets import (
+    PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
+    PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD,
+)
 
 SINGLE_ISSUE_COLLECTION_VOLUME_METHOD = "single_issue_collection_volume_subtitle"
 SINGLE_ISSUE_EMBEDDED_NUMBER_TITLE_METHOD = "single_issue_embedded_number_title"
@@ -169,6 +172,9 @@ def select_file_match_candidate(
             method="comicvine_id",
         )
 
+    if imp_file.comicvine_issue_id is not None:
+        return None
+
     issue_number = candidate_issue_number(imp_file)
     if issue_number is not None and issue_number in target_index.number_map:
         matched_issue_id, matched_issue_cv_id, has_library_file, matched_issue, issue_title = (
@@ -183,11 +189,7 @@ def select_file_match_candidate(
             matched_issue=matched_issue,
             target_issue_title=issue_title,
             confidence="high" if series_high_confidence else "medium",
-            method=(
-                PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD
-                if synthetic_issue_type is not None
-                else "issue_number"
-            ),
+            method=_target_match_method(target_index, issue_number, synthetic_issue_type),
             synthetic_issue_type=synthetic_issue_type,
         )
 
@@ -256,15 +258,30 @@ def select_file_match_candidate(
             matched_issue=matched_issue,
             target_issue_title=issue_title,
             confidence="medium",
-            method=(
-                PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD
-                if synthetic_issue_type is not None
-                else "single_issue_series"
+            method=_target_match_method(
+                target_index,
+                target_issue_number,
+                synthetic_issue_type,
+                fallback="single_issue_series",
             ),
             synthetic_issue_type=synthetic_issue_type,
         )
 
     return None
+
+
+def _target_match_method(
+    target_index: FileMatchTargetIndex,
+    issue_number: float,
+    synthetic_issue_type: IssueType | None,
+    *,
+    fallback: str = "issue_number",
+) -> str:
+    if issue_number in target_index.provisional_issue_numbers:
+        return PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD
+    if synthetic_issue_type is not None:
+        return PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD
+    return fallback
 
 
 def _can_use_single_issue_collection_volume_subtitle_match(

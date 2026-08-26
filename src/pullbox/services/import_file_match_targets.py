@@ -43,6 +43,7 @@ class FileMatchTargetIndex:
     number_map: dict[float, FileMatchTargetEntry] = field(default_factory=dict)
     synthetic_issue_types: dict[float, IssueType] = field(default_factory=dict)
     synthetic_issue_titles: dict[float, str | None] = field(default_factory=dict)
+    provisional_issue_numbers: set[float] = field(default_factory=set)
     existing_series: Series | None = None
     issue_entries: list[tuple[Issue, bool]] = field(default_factory=list)
 
@@ -137,22 +138,57 @@ def _trusted_mylar_issue_target_index(
     imp_series: ImportedSeries,
     files: list[ImportedFile],
 ) -> FileMatchTargetIndex | None:
-    """Build issue targets from trusted Mylar issue rows when all files have them."""
+    """Build same-series targets from trusted Mylar rows without provider calls."""
     if imp_series.cv_id is None or not files:
         return None
 
     target_index = FileMatchTargetIndex()
+    has_trusted_mylar_identity = imp_series.cv_match_method == "mylar3_cv_id"
     for imp_file in files:
+        has_trusted_mylar_identity = (
+            has_trusted_mylar_identity or _has_trusted_mylar_issue_identity(imp_file)
+        )
         target = _trusted_mylar_issue_target(imp_series, imp_file)
         if target is None:
-            return None
+            _add_mylar_provisional_target(target_index, imp_file)
+            continue
         issue_cv_id, issue_number, issue_title = target
         entry = (None, issue_cv_id, False, None, issue_title)
         target_index.cv_id_map[issue_cv_id] = entry
         if issue_number is not None:
             target_index.number_map[issue_number] = entry
+            target_index.synthetic_issue_types.pop(issue_number, None)
+            target_index.synthetic_issue_titles.pop(issue_number, None)
+            target_index.provisional_issue_numbers.discard(issue_number)
 
-    return target_index if target_index.has_targets else None
+    return target_index if has_trusted_mylar_identity else None
+
+
+def _add_mylar_provisional_target(
+    target_index: FileMatchTargetIndex,
+    imp_file: ImportedFile,
+) -> None:
+    """Add a local issue target when Mylar knows the series but not the issue row."""
+    if imp_file.comicvine_issue_id is not None:
+        return
+    issue_number = candidate_issue_number(imp_file)
+    if issue_number is None or issue_number in target_index.number_map:
+        return
+    issue_type = _file_placeholder_issue_type(imp_file) or IssueType.ISSUE
+    target_index.number_map.setdefault(issue_number, (None, None, False, None, None))
+    target_index.synthetic_issue_types[issue_number] = issue_type
+    target_index.synthetic_issue_titles[issue_number] = None
+    target_index.provisional_issue_numbers.add(issue_number)
+
+
+def _has_trusted_mylar_issue_identity(imp_file: ImportedFile) -> bool:
+    diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
+    signals = diagnostics.get("metadata_signals")
+    return bool(
+        imp_file.comicvine_issue_id is not None
+        and isinstance(signals, dict)
+        and signals.get("comicvine_issue_id") == "mylar3"
+    )
 
 
 def _trusted_mylar_issue_target(

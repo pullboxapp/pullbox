@@ -35,6 +35,7 @@ from pullbox.models.series import Series, SeriesStatus
 from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
 from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate, RecoverOrphanRequest
 from pullbox.services.import_service import ImportService
+from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -681,6 +682,159 @@ class TestMylar3Import:
         assert job.status == ImportJobStatus.COMPLETED
         assert job.series_imported == len(matched_ids)
         assert job.series_failed == 0
+
+    async def test_trusted_mylar_annual_reaches_review_without_provider_calls(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "X-Men"
+        regular_path = series_dir / "X-Men 001 (2021).cbz"
+        annual_path = series_dir / "X-Men Annual 001 (2023).cbz"
+        create_minimal_cbz(regular_path)
+        create_minimal_cbz(annual_path)
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-140553",
+                    "ComicName": "X-Men",
+                    "ComicYear": "2021",
+                    "ComicPublisher": "Marvel",
+                    "ComicLocation": str(series_dir),
+                    "Total": 30,
+                }
+            ],
+            issues=[
+                {
+                    "IssueID": "900001",
+                    "ComicID": "140553",
+                    "ComicName": "X-Men",
+                    "IssueName": "Fearless",
+                    "Issue_Number": "1",
+                    "Location": regular_path.name,
+                    "IssueDate": "2021-09-01",
+                }
+            ],
+            annuals=[
+                {
+                    "IssueID": "950001",
+                    "ComicID": "140553",
+                    "ComicName": "X-Men",
+                    "IssueName": "Contest of Chaos",
+                    "Issue_Number": "1",
+                    "Location": annual_path.name,
+                    "IssueDate": "2023-08-16",
+                    "ReleaseComicID": "CV-153726",
+                    "ReleaseComicName": "X-Men Annual",
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+        await db_session.refresh(job)
+
+        assert job.status == ImportJobStatus.REVIEW
+        assert job.series_found == 2
+        series_result = await db_session.execute(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        imported_series = series_result.scalars().all()
+        assert {item.cv_id for item in imported_series} == {140553, 153726}
+        assert all(item.status == ImportSeriesStatus.MATCHED for item in imported_series)
+        assert all(item.cv_match_method == "mylar3_cv_id" for item in imported_series)
+
+        file_result = await db_session.execute(
+            sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+        )
+        imported_files = file_result.scalars().all()
+        assert len(imported_files) == 2
+        assert all(item.status == ImportedFileStatus.MATCHED for item in imported_files)
+        by_name = {item.file_name: item for item in imported_files}
+        assert by_name[regular_path.name].matched_issue_cv_id == 900001
+        assert by_name[annual_path.name].matched_issue_cv_id == 950001
+
+    async def test_incomplete_trusted_mylar_row_reaches_review_without_provider_calls(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "X-Men"
+        unresolved_path = series_dir / "X-Men Special (2023).cbz"
+        create_minimal_cbz(unresolved_path)
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-140553",
+                    "ComicName": "X-Men",
+                    "ComicYear": "2021",
+                    "ComicPublisher": "Marvel",
+                    "ComicLocation": str(series_dir),
+                    "Total": 1,
+                }
+            ],
+            issues=[],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+        await db_session.refresh(job)
+
+        assert job.status == ImportJobStatus.REVIEW
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.cv_id == 140553
+        assert series_item.cv_match_method == "mylar3_cv_id"
+        file_item = await db_session.scalar(
+            sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+        )
+        assert file_item is not None
+        assert file_item.status == ImportedFileStatus.NO_MATCH
 
 
 # ── Scenario C: Deduplication ──────────────────────────────────────────
