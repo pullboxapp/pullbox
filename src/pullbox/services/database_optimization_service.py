@@ -45,6 +45,13 @@ class DatabaseOptimizationResult:
         return max(0, self.before.database_bytes - self.after.database_bytes)
 
 
+@dataclass(frozen=True, slots=True)
+class DatabaseMaintenanceResult:
+    """Verified outcome of lightweight recurring SQLite maintenance."""
+
+    integrity_result: str
+
+
 class DatabaseOptimizationService:
     """Inspect and compact one SQLite database file."""
 
@@ -80,6 +87,33 @@ class DatabaseOptimizationService:
                 f"SQLite integrity verification failed after optimization: {after.integrity_result}"
             )
         return DatabaseOptimizationResult(before=before, after=after)
+
+    def maintain(self) -> DatabaseMaintenanceResult:
+        """Rebuild indexes, refresh planner statistics, and verify integrity."""
+        self._ensure_database_exists()
+        with self._connect(read_only=False) as connection:
+            checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is not None and int(checkpoint[0]) != 0:
+                raise DatabaseOptimizationError(
+                    "SQLite could not checkpoint the write-ahead log because the database is busy."
+                )
+            connection.execute("REINDEX")
+            # This maintenance connection has no query history, so include the
+            # all-tables mask recommended by SQLite for a fresh connection.
+            connection.execute("PRAGMA optimize=0x10002")
+            checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is not None and int(checkpoint[0]) != 0:
+                raise DatabaseOptimizationError(
+                    "SQLite could not checkpoint the write-ahead log after maintenance."
+                )
+            integrity_row = connection.execute("PRAGMA quick_check").fetchone()
+
+        integrity_result = str(integrity_row[0] if integrity_row else "unknown")
+        if integrity_result.lower() != "ok":
+            raise DatabaseOptimizationError(
+                f"SQLite integrity verification failed after maintenance: {integrity_result}"
+            )
+        return DatabaseMaintenanceResult(integrity_result=integrity_result)
 
     def _ensure_database_exists(self) -> None:
         if not self._db_path.is_file():
@@ -138,3 +172,8 @@ class DatabaseOptimizationRuntimeService:
         """Compact the database outside the event loop under the maintenance gate."""
         async with database_maintenance_window(reason="database_optimize"):
             return await asyncio.to_thread(self._service.optimize)
+
+    async def maintain(self) -> DatabaseMaintenanceResult:
+        """Run recurring maintenance outside the event loop under the shared gate."""
+        async with database_maintenance_window(reason="nightly_database_maintenance"):
+            return await asyncio.to_thread(self._service.maintain)
