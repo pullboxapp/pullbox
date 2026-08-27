@@ -17,6 +17,34 @@ pytestmark = pytest.mark.e2e
 class TestSidebarShell:
     """Behavior-first E2E checks for the persistent sidebar shell."""
 
+    def test_sidebar_shell_recovers_when_initial_stylesheet_request_fails(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        stylesheet_requests: list[str] = []
+
+        def fail_initial_stylesheet(route) -> None:  # type: ignore[no-untyped-def]
+            stylesheet_requests.append(route.request.url)
+            if len(stylesheet_requests) == 1:
+                route.abort()
+                return
+            route.continue_()
+
+        authed_page.route("**/static/css/tailwind.css*", fail_initial_stylesheet)
+
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/series")
+        authed_page.wait_for_function(
+            "document.documentElement.hasAttribute('data-pullbox-stylesheet-ready')",
+            timeout=5000,
+        )
+
+        assert len(stylesheet_requests) == 2
+        assert "pullbox_retry=" in stylesheet_requests[1]
+        assert authed_page.locator("body").get_attribute("data-shell-pending") is None
+        assert shell.sidebar.evaluate("node => getComputedStyle(node).position") == "fixed"
+
     def test_sidebar_shell_renders_standardized_regions(
         self,
         authed_page,
