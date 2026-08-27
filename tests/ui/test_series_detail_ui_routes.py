@@ -33,6 +33,13 @@ def _series_alternate_names_html(html: str) -> str:
     return html[start:end]
 
 
+def _series_detail_content_html(html: str) -> str:
+    """Return page-specific content without shared shell recovery scripts."""
+    start = html.index('data-testid="series-detail-page"')
+    end = html.index('data-testid="page-footer-dock"', start)
+    return html[start:end]
+
+
 class _SelectRecorder:
     """Capture SELECT statements emitted by the test app engine."""
 
@@ -281,7 +288,7 @@ class TestSeriesDetailRouteContracts:
         assert "page-dock-inner page-dock-inner-status-only" in response.text
         assert 'data-testid="page-dock-pagination"' not in response.text
         assert "transition:true" not in response.text
-        assert "window.location.reload()" not in response.text
+        assert "window.location.reload()" not in _series_detail_content_html(response.text)
         assert "window.__autoSearching" not in response.text
         assert "htmx.ajax('POST', '/htmx/series/" not in response.text
 

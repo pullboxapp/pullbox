@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -281,7 +282,7 @@ class ImportServiceFileOperationsMixin:
         page_count = None
         if source_path is not None:
             page_count_started_at = time.monotonic()
-            page_count = inspect_archive_page_count(source_path)
+            page_count = await asyncio.to_thread(inspect_archive_page_count, source_path)
             if timing is not None:
                 timing.update(
                     {

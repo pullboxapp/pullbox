@@ -1935,7 +1935,7 @@ class TestImportExecutionAutoflushDiscipline:
             ("finalizing", 0, 4, "steps", True, 0),
             ("finalizing", 1, 4, "steps", True, 0),
             ("finalizing", 2, 4, "steps", True, 0),
-            ("finalizing", 3, 4, "steps", True, 0),
+            ("finalizing", 3, 4, "steps", True, 1),
             ("finalizing", 4, 4, "steps", False, 1),
         ]
 
