@@ -319,6 +319,68 @@ class TestRunAllChecksPersistence:
         assert history_count == 6
 
     @pytest.mark.asyncio
+    async def test_current_health_prunes_retired_subject_and_resolves_incident(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        await HealthService._persist_outcomes(
+            db_session,
+            [
+                CheckOutcome(
+                    component="download_clients",
+                    check_name="connectivity",
+                    status=HealthStatus.DEGRADED,
+                    message="One route needs attention",
+                ),
+                CheckOutcome(
+                    component="download_clients",
+                    check_name="artifact_host_summary",
+                    status=HealthStatus.UNHEALTHY,
+                    message="Artifact host unavailable",
+                    subject_key="artifact-host:generic_https",
+                    subject_label="Generic HTTPS",
+                ),
+            ],
+        )
+
+        await HealthService._persist_outcomes(
+            db_session,
+            [
+                CheckOutcome(
+                    component="download_clients",
+                    check_name="connectivity",
+                    status=HealthStatus.HEALTHY,
+                    message="All acquisition routes available",
+                )
+            ],
+        )
+
+        current_rows = list(
+            (
+                await db_session.execute(
+                    select(HealthCurrentStatusModel).where(
+                        HealthCurrentStatusModel.component == "download_clients"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        incident = (
+            await db_session.execute(
+                select(HealthIncidentModel).where(
+                    HealthIncidentModel.component == "download_clients",
+                    HealthIncidentModel.subject_key == "artifact-host:generic_https",
+                )
+            )
+        ).scalar_one()
+
+        assert [(row.subject_key, row.current_key) for row in current_rows] == [
+            (None, "__summary__")
+        ]
+        assert incident.resolved_at is not None
+
+    @pytest.mark.asyncio
     async def test_comicvine_run_persists_grouped_summary_and_subchecks(
         self, db_session: AsyncSession
     ) -> None:

@@ -744,6 +744,9 @@ class TestSettingsRouteContracts:
         assert 'data-testid="settings-direct-host-generic_https"' in response.text
         assert 'data-testid="settings-direct-host-pixeldrain"' in response.text
         assert 'data-testid="settings-direct-host-mega"' not in response.text
+        assert 'data-testid="settings-direct-host-validation-generic_https"' in response.text
+        assert ">Validated per download</span>" in response.text
+        assert "x-show=\"activeHost.host_kind !== 'generic_https'\"" in response.text
 
     async def test_direct_download_settings_hide_hosts_for_disabled_named_host_provider(
         self,

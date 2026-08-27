@@ -281,6 +281,13 @@ async def upsert_health_current_status_rows(
         select(HealthCurrentStatusModel).where(HealthCurrentStatusModel.component.in_(components))
     )
     existing = {_current_status_identity(row): row for row in result.scalars().all()}
+    current_identities = {
+        (payload.component, payload.subject_key_norm, payload.current_key) for payload in payloads
+    }
+
+    for identity, stale_row in existing.items():
+        if identity not in current_identities:
+            await session.delete(stale_row)
 
     for payload in payloads:
         identity = (payload.component, payload.subject_key_norm, payload.current_key)
@@ -331,6 +338,13 @@ async def update_health_incidents(
         )
     )
     active = {_incident_identity(row): row for row in result.scalars().all()}
+    current_identities = {
+        (payload.component, payload.subject_key_norm, payload.current_key) for payload in payloads
+    }
+
+    for identity, retired_incident in active.items():
+        if identity not in current_identities:
+            retired_incident.resolved_at = checked_at
 
     for payload in payloads:
         identity = (payload.component, payload.subject_key_norm, payload.current_key)

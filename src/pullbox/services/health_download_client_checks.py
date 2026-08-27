@@ -326,7 +326,12 @@ async def _check_direct_download_subjects(session: AsyncSession) -> list[CheckOu
     keeps scheduled health non-destructive: it never resolves or downloads an
     artifact just to prove a source is available.
     """
-    from pullbox.models.direct_acquisition import DirectHostConfig, DirectProviderConfig
+    from pullbox.models.direct_acquisition import (
+        DirectArtifactHostKind,
+        DirectHostConfig,
+        DirectHostReachabilityState,
+        DirectProviderConfig,
+    )
 
     providers = list(
         (
@@ -339,7 +344,7 @@ async def _check_direct_download_subjects(session: AsyncSession) -> list[CheckOu
         .scalars()
         .all()
     )
-    hosts = list(
+    configured_hosts = list(
         (
             await session.execute(
                 select(DirectHostConfig)
@@ -350,6 +355,13 @@ async def _check_direct_download_subjects(session: AsyncSession) -> list[CheckOu
         .scalars()
         .all()
     )
+    hosts = []
+    for host in configured_hosts:
+        if host.host_kind is DirectArtifactHostKind.GENERIC_HTTPS:
+            host.reachability_state = DirectHostReachabilityState.NOT_CHECKED
+            continue
+        hosts.append(host)
+
     return [
         *(_direct_provider_outcome(provider) for provider in providers),
         *(_direct_artifact_host_outcome(host) for host in hosts),
