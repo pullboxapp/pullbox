@@ -652,19 +652,36 @@
                   </div>
                   <p class="text-[11px] text-pb-text-dim mt-1">Absolute path where Pullbox sees completed AirDC++ downloads.</p>
                 </div>
-                <div>
-                  <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Queue Priority</label>
-                  <select x-model="form.airdcpp_queue_priority" class="input-pb w-48">
-                    <option value="">AirDC++ default</option>
-                    <option value="-1">Default</option>
-                    <option value="0">Paused (forced)</option>
-                    <option value="1">Paused</option>
-                    <option value="2">Lowest</option>
-                    <option value="3">Low</option>
-                    <option value="4">Normal</option>
-                    <option value="5">High</option>
-                    <option value="6">Highest</option>
-                  </select>
+                <div class="grid grid-cols-2 gap-3">
+                  <div data-testid="settings-clients-airdcpp-client-priority">
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Priority</label>
+                    <div class="flex items-center gap-2">
+                      <input type="number" x-model.number="form.priority" min="1" max="100"
+                             class="input-pb w-20">
+                      <span class="text-xs text-pb-text-dim">1 = highest, 100 = lowest</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Queue Priority</label>
+                    {{ dropdown_select(
+                      name="airdcpp_queue_priority",
+                      value="",
+                      options=[
+                        ("", "AirDC++ default"),
+                        ("-1", "Default"),
+                        ("0", "Paused (forced)"),
+                        ("1", "Paused"),
+                        ("2", "Lowest"),
+                        ("3", "Low"),
+                        ("4", "Normal"),
+                        ("5", "High"),
+                        ("6", "Highest"),
+                      ],
+                      root_testid="settings-clients-airdcpp-queue-priority-select",
+                      class_name="w-48",
+                      local_model="form.airdcpp_queue_priority"
+                    ) }}
+                  </div>
                 </div>
               </section>
 
