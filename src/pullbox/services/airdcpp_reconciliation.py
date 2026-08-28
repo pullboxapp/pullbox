@@ -279,7 +279,7 @@ class AirDcppReconciler:
                     )
                 elif snapshot.acquisition_id in recovered:
                     recovered_mutation = recovered[snapshot.acquisition_id]
-                    if _recovery_snapshot_is_current(acquisition, snapshot):
+                    if _active_snapshot_is_current(acquisition, snapshot):
                         changed += int(
                             _apply_recovered_mutation(
                                 acquisition,
@@ -290,7 +290,7 @@ class AirDcppReconciler:
                     elif _stale_recovery_requires_cleanup(acquisition, recovered_mutation):
                         stale_recovered_bundle_ids.add(recovered_mutation.bundle_id)
                 elif snapshot.acquisition_id in retry_failures:
-                    if _recovery_snapshot_is_current(acquisition, snapshot):
+                    if _active_snapshot_is_current(acquisition, snapshot):
                         changed += int(
                             _apply_pre_id_retry_failure(
                                 acquisition,
@@ -303,8 +303,9 @@ class AirDcppReconciler:
                     and complete_snapshot
                     and _missing_bundle_state_is_actionable(snapshot, now=now)
                 ):
-                    missing += 1
-                    changed += int(_apply_missing_bundle(acquisition, at=now))
+                    if _active_snapshot_is_current(acquisition, snapshot):
+                        missing += 1
+                        changed += int(_apply_missing_bundle(acquisition, at=now))
                 await project_download_operation_progress(
                     session,
                     acquisition.download_history,
@@ -405,7 +406,7 @@ def _pre_id_retry_due(snapshot: _ActiveSnapshot, *, now: datetime) -> bool:
     return False
 
 
-def _recovery_snapshot_is_current(
+def _active_snapshot_is_current(
     acquisition: AirDcppAcquisition,
     snapshot: _ActiveSnapshot,
 ) -> bool:

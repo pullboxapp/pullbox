@@ -635,6 +635,55 @@ async def test_manual_retry_claim_is_not_missing_before_its_deadline(
 
 
 @pytest.mark.asyncio
+async def test_expired_manual_retry_claim_does_not_hide_a_committed_replacement(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.client_state = "retry_mutation_pending"
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    class _CommitReplacementDuringSnapshotApi(_FakeApi):
+        async def get_queue_bundles(
+            self,
+            *,
+            start: int,
+            count: int,
+        ) -> list[AirDcppQueueBundle]:
+            async with db_factory() as session:
+                history = await session.get(DownloadHistory, history_id)
+                acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+                assert history is not None and acquisition is not None
+                acquisition.bundle_id = 95
+                acquisition.client_state = "source_search_pending"
+                acquisition.next_retry_at = datetime.now(UTC)
+                history.external_id = f"airdcpp:{client_id}:bundle:95"
+                await session.commit()
+            return await super().get_queue_bundles(start=start, count=count)
+
+    api = _CommitReplacementDuringSnapshotApi([[]])
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert result.changed == 0
+    assert result.missing == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert history.state is DownloadState.RETRY_PENDING
+        assert history.external_id == f"airdcpp:{client_id}:bundle:95"
+        assert acquisition.bundle_id == 95
+        assert acquisition.client_state == "source_search_pending"
+
+
+@pytest.mark.asyncio
 async def test_pre_id_reconciliation_recreates_an_expired_route_by_exact_tth(
     db_factory: async_sessionmaker[AsyncSession],
 ) -> None:
