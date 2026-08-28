@@ -124,6 +124,7 @@ def test_import_execute_mixed_file_work_profile_uses_real_registration() -> None
     assert report["total_files_failed"] == 0
     assert report["register_calls"] == 0
     assert report["library_file_count"] == 3
+    assert report["operation_progress_count"] == 1
     assert report["source_format_counts"] == {"cb7": 1, "cbr": 1, "cbz": 1}
     assert report["library_format_counts"] == {"cbz": 3}
     library_file_names = cast("list[Any]", report["library_file_names"])
