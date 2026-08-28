@@ -268,9 +268,36 @@ async def _cancel_on_client(download: DownloadHistory, session: DbSession) -> No
                 )
             )
         ).scalar_one_or_none()
-        if acquisition is None or acquisition.bundle_id is None:
+        if acquisition is None:
             logger.warning("cancel_airdcpp_reference_invalid", download_id=download.id)
             return
+        if acquisition.bundle_id is None:
+            cancellation = await session.execute(
+                update(AirDcppAcquisition)
+                .where(
+                    AirDcppAcquisition.id == acquisition.id,
+                    AirDcppAcquisition.bundle_id.is_(None),
+                )
+                .values(
+                    client_state="cancelled",
+                    next_retry_at=None,
+                    reconciliation_error=None,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+            if cancellation.rowcount == 1:  # type: ignore[attr-defined]
+                await session.refresh(acquisition)
+                logger.info(
+                    "airdcpp_pre_bundle_cancelled",
+                    download_id=download.id,
+                    client_config_id=acquisition.client_config_id,
+                )
+                return
+            await session.refresh(acquisition)
+            if acquisition.bundle_id is None:
+                logger.warning("cancel_airdcpp_reference_invalid", download_id=download.id)
+                return
         air_registry = get_airdcpp_supervisor_registry()
         supervisor = (
             air_registry.get(acquisition.client_config_id)

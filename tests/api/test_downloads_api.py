@@ -1117,6 +1117,61 @@ class TestDownloadRouteFunctions:
             assert issue.status is IssueStatus.WANTED
 
     @pytest.mark.asyncio
+    async def test_cancel_airdcpp_download_marks_pre_bundle_intent_cancelled(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        issue_id = await _seed_issue(db_factory, status=IssueStatus.DOWNLOADING)
+        config_id = 78
+        await _seed_client_config(
+            db_factory,
+            config_id=config_id,
+            client_type=DownloadClientType.AIRDCPP,
+        )
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            state=DownloadState.QUEUED,
+            client_type=DownloadClientType.AIRDCPP,
+            external_id=None,
+            download_client_config_id=config_id,
+            error_message=None,
+        )
+        async with db_factory() as session:
+            acquisition = AirDcppAcquisition(
+                download_history_id=download_id,
+                request_key="cancel-airdcpp-pre-bundle",
+                client_config_id=config_id,
+                client_identity=f"airdcpp:{config_id}",
+                tth="CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y",
+                size_bytes=100_000_000,
+                original_name="Batman 004 (2025).cbz",
+                client_state="mutation_pending",
+            )
+            session.add(acquisition)
+            await session.flush()
+            acquisition_id = acquisition.id
+            await session.commit()
+
+        with patch("pullbox.composition.airdcpp.get_airdcpp_supervisor_registry") as get_registry:
+            async with db_factory() as session:
+                await downloads_api.cancel_download(download_id, object(), session)  # type: ignore[arg-type]
+                await session.commit()
+
+        get_registry.assert_not_called()
+        async with db_factory() as session:
+            download = await session.get(DownloadHistory, download_id)
+            acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+            issue = await session.get(Issue, issue_id)
+            assert download is not None and acquisition is not None and issue is not None
+            assert download.state is DownloadState.FAILED
+            assert download.error_message == "Cancelled by user"
+            assert acquisition.bundle_id is None
+            assert acquisition.client_state == "cancelled"
+            assert acquisition.next_retry_at is None
+            assert issue.status is IssueStatus.WANTED
+
+    @pytest.mark.asyncio
     async def test_cancel_airdcpp_download_preserves_active_state_when_client_unavailable(
         self,
         db_factory: async_sessionmaker[AsyncSession],
