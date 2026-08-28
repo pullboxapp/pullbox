@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Protocol
 
+import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.orm import joinedload
 
@@ -32,6 +33,7 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 10
 _MAX_PRE_ID_LOOKUPS = 10
 _PROGRESS_WRITE_INTERVAL = timedelta(seconds=5)
+logger = structlog.get_logger(__name__)
 _TERMINAL_STATES = frozenset(
     {
         DownloadState.COMPLETED,
@@ -69,6 +71,8 @@ class AirDcppReconciliationApi(Protocol):
         priority: int | None,
     ) -> AirDcppQueueBundleAddInfo: ...
 
+    async def remove_queue_bundle(self, bundle_id: int) -> None: ...
+
     async def search_queue_bundle(self, bundle_id: int) -> None: ...
 
 
@@ -90,6 +94,7 @@ class AirDcppReconciliationResult:
 class _ActiveSnapshot:
     acquisition_id: int
     bundle_id: int | None
+    client_state: str | None
     tth: str
     size_bytes: int
     target_name: str
@@ -174,6 +179,7 @@ class AirDcppReconciler:
                 _ActiveSnapshot(
                     row.id,
                     row.bundle_id,
+                    row.client_state,
                     row.tth,
                     row.size_bytes,
                     row.original_name,
@@ -194,6 +200,7 @@ class AirDcppReconciler:
         adopted: dict[int, AirDcppQueueFile] = {}
         recovered: dict[int, _RecoveredMutation] = {}
         retry_failures: dict[int, str] = {}
+        stale_recovered_bundle_ids: set[int] = set()
         pre_id = [snapshot for snapshot in snapshots if snapshot.bundle_id is None]
         now = datetime.now(UTC)
         for snapshot in pre_id[:_MAX_PRE_ID_LOOKUPS]:
@@ -271,13 +278,17 @@ class AirDcppReconciler:
                         )
                     )
                 elif snapshot.acquisition_id in recovered:
-                    changed += int(
-                        _apply_recovered_mutation(
-                            acquisition,
-                            recovered[snapshot.acquisition_id],
-                            at=now,
+                    recovered_mutation = recovered[snapshot.acquisition_id]
+                    if _recovery_snapshot_is_current(acquisition, snapshot):
+                        changed += int(
+                            _apply_recovered_mutation(
+                                acquisition,
+                                recovered_mutation,
+                                at=now,
+                            )
                         )
-                    )
+                    elif _stale_recovery_requires_cleanup(acquisition, recovered_mutation):
+                        stale_recovered_bundle_ids.add(recovered_mutation.bundle_id)
                 elif snapshot.acquisition_id in retry_failures:
                     changed += int(
                         _apply_pre_id_retry_failure(
@@ -295,6 +306,18 @@ class AirDcppReconciler:
                     _shared_progress_snapshot(acquisition),
                 )
             await session.commit()
+
+        for bundle_id in stale_recovered_bundle_ids:
+            try:
+                await api_client.remove_queue_bundle(bundle_id)
+            except AirDcppEntityNotFoundError:
+                pass
+            except AirDcppError as exc:
+                logger.warning(
+                    "airdcpp_stale_recovery_cleanup_failed",
+                    bundle_id=bundle_id,
+                    error_code=exc.code,
+                )
 
         return AirDcppReconciliationResult(
             processed=len(snapshots),
@@ -370,7 +393,35 @@ def _queue_priority(route_snapshot: dict[str, object] | None) -> int | None:
 
 
 def _pre_id_retry_due(snapshot: _ActiveSnapshot, *, now: datetime) -> bool:
-    return snapshot.next_retry_at is None or snapshot.next_retry_at <= now
+    if snapshot.client_state == "reconcile_pending":
+        return snapshot.next_retry_at is None or snapshot.next_retry_at <= now
+    if snapshot.client_state == "mutation_pending":
+        return snapshot.next_retry_at is not None and snapshot.next_retry_at <= now
+    return False
+
+
+def _recovery_snapshot_is_current(
+    acquisition: AirDcppAcquisition,
+    snapshot: _ActiveSnapshot,
+) -> bool:
+    history = acquisition.download_history
+    return (
+        DownloadState(history.state) not in _TERMINAL_STATES
+        and acquisition.bundle_id == snapshot.bundle_id
+        and acquisition.client_state == snapshot.client_state
+        and acquisition.retry_count == snapshot.retry_count
+    )
+
+
+def _stale_recovery_requires_cleanup(
+    acquisition: AirDcppAcquisition,
+    recovered: _RecoveredMutation,
+) -> bool:
+    history = acquisition.download_history
+    return (
+        DownloadState(history.state) in _TERMINAL_STATES
+        or acquisition.bundle_id != recovered.bundle_id
+    )
 
 
 async def _retry_pre_id_mutation(

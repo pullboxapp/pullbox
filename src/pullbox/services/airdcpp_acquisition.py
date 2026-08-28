@@ -19,6 +19,8 @@ from pullbox.providers.airdcpp.errors import (
     AirDcppUnavailableError,
 )
 
+_INITIAL_MUTATION_RECOVERY_DELAY = timedelta(minutes=5)
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -145,6 +147,7 @@ class AirDcppQueueAcquisitionService:
             },
             retry_count=0,
             max_retries=3,
+            next_retry_at=now + _INITIAL_MUTATION_RECOVERY_DELAY,
         )
         session.add(acquisition)
         issue.status = IssueStatus.DOWNLOADING

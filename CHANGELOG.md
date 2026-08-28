@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Kept transient AirDC++ queue lookup failures from consuming the bounded queue
   mutation retry budget or prematurely failing an active remote download.
+- Prevented AirDC++ reconciliation from racing an initial queue mutation or
+  resurrecting a download cancelled while recovery was in flight.
 
 ## [1.2.0] - 2026-08-28
 

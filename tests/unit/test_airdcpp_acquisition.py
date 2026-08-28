@@ -132,9 +132,19 @@ class _FakeApi:
         self.mutations = 0
         self.lookups = 0
         self.file_bundle_mutations = 0
+        self.observed_mutation_state: str | None = None
+        self.observed_next_retry_at: datetime | None = None
 
     async def download_search_result(self, *_args: object, **_kwargs: object):
         assert self.session.in_transaction() is False
+        pending = (
+            await self.session.execute(
+                select(AirDcppAcquisition).where(AirDcppAcquisition.bundle_id.is_(None))
+            )
+        ).scalar_one()
+        self.observed_mutation_state = pending.client_state
+        self.observed_next_retry_at = pending.next_retry_at
+        await self.session.commit()
         self.mutations += 1
         if self.failure is not None:
             raise self.failure
@@ -212,6 +222,9 @@ async def test_acquisition_persists_before_mutation_and_replays_idempotently(
         )
 
         assert api.mutations == 1
+        assert api.observed_mutation_state == "mutation_pending"
+        assert api.observed_next_retry_at is not None
+        assert api.observed_next_retry_at > datetime.now(UTC)
         assert second.acquisition_id == first.acquisition_id
         acquisition = await session.get(AirDcppAcquisition, first.acquisition_id)
         history = await session.get(DownloadHistory, first.download_history_id)
