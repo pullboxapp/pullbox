@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Kept transient AirDC++ queue lookup failures from consuming the bounded queue
+  mutation retry budget or prematurely failing an active remote download.
+
 ## [1.2.0] - 2026-08-28
 
 Minor release adding native Direct Connect acquisition, LibGen direct-download

@@ -151,12 +151,14 @@ class _FakeApi:
         pages: list[list[AirDcppQueueBundle]],
         *,
         files: list[AirDcppQueueFile] | None = None,
+        lookup_failure: Exception | None = None,
         retry_result: AirDcppQueueBundleAddInfo | None = None,
         retry_failure: Exception | None = None,
         create_result: AirDcppQueueBundleAddInfo | None = None,
     ) -> None:
         self.pages = pages
         self.files = files or []
+        self.lookup_failure = lookup_failure
         self.retry_result = retry_result or AirDcppQueueBundleAddInfo(id=92, merged=False)
         self.retry_failure = retry_failure
         self.create_result = create_result or AirDcppQueueBundleAddInfo(id=93, merged=False)
@@ -173,6 +175,8 @@ class _FakeApi:
 
     async def get_queue_files_by_tth(self, tth: str):
         self.tth_calls.append(tth)
+        if self.lookup_failure is not None:
+            raise self.lookup_failure
         return self.files
 
     async def search_queue_bundle(self, bundle_id: int) -> None:
@@ -633,3 +637,41 @@ async def test_pre_id_reconciliation_exhaustion_becomes_manually_retryable_failu
         assert acquisition.reconciliation_error == "queue_mutation_failed"
         assert history.state is DownloadState.FAILED
         assert history.next_retry_at is None
+
+
+@pytest.mark.asyncio
+async def test_pre_id_lookup_failure_does_not_consume_mutation_retry_budget(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.retry_count = 2
+        acquisition.max_retries = 3
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+    api = _FakeApi([[]], lookup_failure=AirDcppUnavailableError())
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert api.tth_calls == [_TTH]
+    assert api.retry_calls == []
+    assert api.create_calls == []
+    assert result.changed == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert acquisition.bundle_id is None
+        assert acquisition.client_state == "reconcile_pending"
+        assert acquisition.retry_count == 2
+        assert acquisition.reconciliation_error is None
+        assert history.state is DownloadState.RETRY_PENDING

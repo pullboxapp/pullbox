@@ -199,9 +199,7 @@ class AirDcppReconciler:
         for snapshot in pre_id[:_MAX_PRE_ID_LOOKUPS]:
             try:
                 files = await api_client.get_queue_files_by_tth(snapshot.tth)
-            except AirDcppError as exc:
-                if _pre_id_retry_due(snapshot, now=now):
-                    retry_failures[snapshot.acquisition_id] = exc.code
+            except AirDcppError:
                 continue
             exact = [
                 item
