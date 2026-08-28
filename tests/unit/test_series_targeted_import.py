@@ -12,12 +12,18 @@ from pullbox.core.events import EventBus, SeriesAdded
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.naming import classify_series_type
 from pullbox.models.config import SystemConfig
-from pullbox.models.import_job import ImportedSeries
+from pullbox.models.import_job import (
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSourceType,
+)
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, SeriesType
 from pullbox.providers.base import IssueSummary, SeriesMetadata
+from pullbox.services import series_service as series_service_module
 from pullbox.services.series_service import SeriesService
 
 if TYPE_CHECKING:
@@ -158,6 +164,50 @@ async def test_targeted_import_creates_partial_catalog_without_emitting_series_a
     assert emitted == []
     issues = (await db_session.scalars(select(Issue).where(Issue.series_id == series.id))).all()
     assert [(issue.issue_number, issue.comicvine_id) for issue in issues] == [(4.0, 120004)]
+
+
+@pytest.mark.asyncio
+async def test_targeted_import_caches_discovered_local_series_cover(
+    db_session: AsyncSession,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_cover = tmp_path / "mylar" / "cover.jpg"
+    local_cover.parent.mkdir()
+    local_cover.write_bytes(b"cover")
+    job = ImportJob(
+        source_path=str(tmp_path / "mylar.db"),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.IMPORTING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    metadata = MagicMock()
+    metadata.upsert_series_metadata = AsyncMock(side_effect=_fake_upsert_series)
+    metadata.upsert_issue_summaries = AsyncMock(side_effect=_fake_upsert_issue_summaries)
+    cache_local_cover = AsyncMock()
+    monkeypatch.setattr(
+        series_service_module,
+        "cache_imported_series_cover",
+        cache_local_cover,
+    )
+    service = SeriesService(metadata_service=metadata, event_bus=EventBus())
+    import_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Batman",
+        cv_id=47050,
+        cv_title="Batman",
+        source_folder=str(local_cover.parent),
+        diagnostics={"kind": "series_match"},
+    )
+
+    series = await service.add_from_import_review_targeted(
+        db_session,
+        import_series=import_series,
+        issue_summaries=[],
+    )
+
+    cache_local_cover.assert_awaited_once_with(db_session, series, local_cover)
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 
 from pullbox.models.airdcpp import AirDcppAcquisition
 from pullbox.models.download import DownloadHistory, DownloadState
+from pullbox.services.download_operation_progress import project_download_operation_progress
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -213,6 +214,11 @@ class AirDcppReconciler:
                 elif snapshot.bundle_id is not None and complete_snapshot:
                     missing += 1
                     changed += int(_apply_missing_bundle(acquisition, at=now))
+                await project_download_operation_progress(
+                    session,
+                    acquisition.download_history,
+                    _shared_progress_snapshot(acquisition),
+                )
             await session.commit()
 
         return AirDcppReconciliationResult(
@@ -334,6 +340,43 @@ def apply_airdcpp_bundle(
             history.downloaded_path = remote_target
         history.error_message = next_error
     return True
+
+
+def _shared_progress_snapshot(acquisition: AirDcppAcquisition) -> dict[str, object]:
+    queue = (acquisition.route_snapshot or {}).get("queue")
+    if not isinstance(queue, dict):
+        return {
+            "client_state": (acquisition.client_state or "queued").replace("_", " ").title(),
+            "source_label": "AirDC++",
+            "is_indeterminate": True,
+        }
+    size = queue.get("size_bytes")
+    transferred = queue.get("downloaded_bytes")
+    size_bytes = int(size) if isinstance(size, int | float) and size > 0 else None
+    transferred_bytes = (
+        int(transferred) if isinstance(transferred, int | float) and transferred >= 0 else None
+    )
+    progress = (
+        min(transferred_bytes / size_bytes, 1.0)
+        if transferred_bytes is not None and size_bytes is not None
+        else None
+    )
+    status_id = queue.get("status_id")
+    client_state = (
+        status_id.replace("_", " ").title()
+        if isinstance(status_id, str) and status_id
+        else (acquisition.client_state or "queued").replace("_", " ").title()
+    )
+    return {
+        "progress": progress,
+        "speed_bytes": queue.get("speed_bytes"),
+        "eta_seconds": queue.get("eta_seconds"),
+        "size_bytes": size_bytes,
+        "bytes_transferred": transferred_bytes,
+        "client_state": client_state,
+        "source_label": "AirDC++",
+        "is_indeterminate": progress is None,
+    }
 
 
 def _download_state(bundle: AirDcppQueueBundle) -> DownloadState:

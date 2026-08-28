@@ -20,13 +20,14 @@ async def _seed_import_history_job(
     *,
     status: str = "scanning",
     source_path: str = "/tmp/import-history-contract",
+    source_type: str = "filesystem",
 ) -> int:  # type: ignore[no-untyped-def]
     from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 
     async with sec_db() as session:
         job = ImportJob(
             source_path=source_path,
-            source_type=ImportSourceType.FILESYSTEM,
+            source_type=ImportSourceType(source_type),
             status=ImportJobStatus(status),
             series_found=7,
             series_imported=0,
@@ -70,6 +71,30 @@ class TestImportHistoryTabRouteContracts:
         assert 'data-testid="import-history-results"' in response.text
         assert 'data-testid="import-history-table-shell"' in response.text
         assert 'data-testid="import-history-delete-modal"' in response.text
+
+    @pytest.mark.parametrize("source_type", ["filesystem", "mylar3"])
+    async def test_step_four_explains_that_import_continues_in_background(
+        self,
+        authenticated_client,
+        sec_db,
+        source_type: str,
+    ) -> None:  # type: ignore[no-untyped-def]
+        job_id = await _seed_import_history_job(
+            sec_db,
+            status="importing",
+            source_path=("/tmp/mylar.db" if source_type == "mylar3" else "/tmp/comics"),
+            source_type=source_type,
+        )
+
+        response = await authenticated_client.get(
+            f"/import/{job_id}/progress-partial?next_step=5&mode=import"
+        )
+
+        assert response.status_code == 200
+        assert 'data-testid="import-background-notice"' in response.text
+        assert "You can safely leave this page" in response.text
+        assert 'data-testid="import-background-library-link"' in response.text
+        assert 'data-testid="import-background-dashboard-link"' in response.text
 
     async def test_import_history_inner_hx_request_returns_history_bundle(
         self,

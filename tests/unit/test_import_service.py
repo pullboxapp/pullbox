@@ -64,6 +64,7 @@ def _make_discovered(
     publisher: str | None = None,
     file_count: int = 5,
     mylar3_cv_id: int | None = None,
+    folder_cv_id: int | None = None,
     comicinfo_cv_id: int | None = None,
     source_folder: str = "/comics/Batman (2016)",
 ) -> DiscoveredSeries:
@@ -76,6 +77,7 @@ def _make_discovered(
         source_folder=source_folder,
         source_folder_relative=name,
         mylar3_cv_id=mylar3_cv_id,
+        folder_cv_id=folder_cv_id,
         comicinfo_cv_id=comicinfo_cv_id,
     )
 
@@ -1577,7 +1579,7 @@ class TestRunMatching:
         self, db_session: AsyncSession, service: ImportService
     ) -> None:
         """Successful CV match populates cv_* fields and sets MATCHED."""
-        job = await _create_job_row(db_session)
+        job = await _create_job_row(db_session, source_type=ImportSourceType.MYLAR3)
         item = ImportedSeries(
             import_job_id=job.id,
             raw_series_name="Batman",
@@ -1626,7 +1628,7 @@ class TestRunMatching:
         db_session.add(existing)
         await db_session.flush()
 
-        job = await _create_job_row(db_session)
+        job = await _create_job_row(db_session, source_type=ImportSourceType.MYLAR3)
         item = ImportedSeries(
             import_job_id=job.id,
             raw_series_name="About Betty's Boob",
@@ -1665,7 +1667,7 @@ class TestRunMatching:
         self, db_session: AsyncSession, service: ImportService
     ) -> None:
         """No CV match sets status to NO_MATCH."""
-        job = await _create_job_row(db_session)
+        job = await _create_job_row(db_session, source_type=ImportSourceType.MYLAR3)
         item = ImportedSeries(
             import_job_id=job.id,
             raw_series_name="Unknown Series",
@@ -4882,9 +4884,24 @@ class TestEndToEnd:
         discovered = [
             _make_discovered(name="Batman", year=2016),  # duplicate
             _make_discovered(name="Saga", year=2012, source_folder="/comics/Saga"),  # duplicate
-            _make_discovered(name="Invincible", year=2003, source_folder="/comics/Invincible"),
-            _make_discovered(name="Spawn", year=1992, source_folder="/comics/Spawn"),
-            _make_discovered(name="Hellboy", year=1994, source_folder="/comics/Hellboy"),
+            _make_discovered(
+                name="Invincible",
+                year=2003,
+                folder_cv_id=11111,
+                source_folder="/comics/Invincible",
+            ),
+            _make_discovered(
+                name="Spawn",
+                year=1992,
+                folder_cv_id=22222,
+                source_folder="/comics/Spawn",
+            ),
+            _make_discovered(
+                name="Hellboy",
+                year=1994,
+                folder_cv_id=33333,
+                source_folder="/comics/Hellboy",
+            ),
         ]
 
         async def mock_scan(root):

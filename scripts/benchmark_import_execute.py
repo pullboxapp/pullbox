@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.core.library_policy import LibraryIngestPolicy, serialize_library_ingest_policy
@@ -41,6 +41,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.operation_progress import OperationProgress
 from pullbox.models.series import Series
 from pullbox.performance.baseline import current_process_peak_rss_bytes
 from pullbox.services.import_service import ImportService
@@ -366,8 +367,14 @@ async def main() -> None:
             await session.commit()
 
             import pullbox.services.import_service as import_service_module
+            from pullbox.services import operation_progress_dispatch
 
             original_register = import_service_module.register_library_file
+            original_progress_session_factory = operation_progress_dispatch.get_session_factory
+            operation_progress_dispatch.get_session_factory = cast(
+                "Any",
+                lambda: session_factory,
+            )
             if not real_file_work:
                 import_service_module.register_library_file = cast("Any", fake_register_file)
             try:
@@ -375,7 +382,13 @@ async def main() -> None:
                 await service.run_import(session, job.id)
                 elapsed_ms = round((time.monotonic() - started_at) * 1000)
             finally:
-                import_service_module.register_library_file = original_register
+                try:
+                    await operation_progress_dispatch.drain_operation_progress_updates()
+                finally:
+                    import_service_module.register_library_file = original_register
+                    operation_progress_dispatch.get_session_factory = (
+                        original_progress_session_factory
+                    )
 
             from pullbox.services.import_comicinfo_enrichment import comicinfo_enrichment_tasks
 
@@ -388,6 +401,9 @@ async def main() -> None:
                 (await session.execute(select(LibraryFile).order_by(LibraryFile.file_name)))
                 .scalars()
                 .all()
+            )
+            operation_progress_count = int(
+                await session.scalar(select(func.count(OperationProgress.id))) or 0
             )
             source_format_counts = Counter(
                 path.suffix.lower().lstrip(".")
@@ -408,6 +424,7 @@ async def main() -> None:
                 "series_add_calls": fake_series_service.add_calls,
                 "register_calls": register_calls,
                 "library_file_count": len(library_files),
+                "operation_progress_count": operation_progress_count,
                 "library_file_names": [library_file.file_name for library_file in library_files],
                 "library_format_counts": dict(sorted(library_format_counts.items())),
                 "source_format_counts": dict(sorted(source_format_counts.items())),

@@ -33,7 +33,10 @@ from pullbox.providers.artifact_hosts.contract import (
     HostResolutionRequest,
     ResolvedTransfer,
 )
-from pullbox.providers.artifact_hosts.limiter import ArtifactTransferLimiter
+from pullbox.providers.artifact_hosts.limiter import (
+    ArtifactTransferLimiter,
+    DirectProviderTransferLimiter,
+)
 from pullbox.providers.artifact_hosts.mega import (
     MegaBridgeCancelledError,
     MegaBridgePausedError,
@@ -78,9 +81,21 @@ from pullbox.services.direct_download_history_adapter import sync_direct_downloa
 from pullbox.services.direct_host_reachability import record_direct_host_operational_result
 from pullbox.services.direct_provider_capabilities import uses_internal_generic_https
 from pullbox.services.intervention_service import InterventionService
+from pullbox.services.post_processing_operation_progress import (
+    project_post_processing_operation_progress,
+)
+from pullbox.tasks.post_processing_progress import (
+    PostProcessingPhase,
+    _clear_post_processing,
+    _mark_post_processing_complete,
+    _set_post_processing_phase,
+    get_all_post_processing_progress,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from pullbox.models.download import DownloadHistory
 
 logger = structlog.get_logger(__name__)
 
@@ -195,6 +210,7 @@ class DirectAcquisitionExecutor:
         mega_runner: Any,
         quarantine: DirectArtifactQuarantine,
         limiter: ArtifactTransferLimiter | None = None,
+        provider_limiter: DirectProviderTransferLimiter | None = None,
         validator: ArtifactValidator = validate_direct_artifact,
         post_processor: PostProcessor = run_direct_artifact_post_processing,
         now: Clock | None = None,
@@ -204,6 +220,9 @@ class DirectAcquisitionExecutor:
         self._mega_runner = mega_runner
         self._quarantine = quarantine
         self._limiter = limiter or ArtifactTransferLimiter(global_limit=3, per_host_limit=1)
+        self._provider_limiter = provider_limiter or DirectProviderTransferLimiter(
+            per_provider_limit=1
+        )
         self._validator = validator
         self._post_processor = post_processor
         self._now = now or (lambda: datetime.now(UTC))
@@ -278,22 +297,33 @@ class DirectAcquisitionExecutor:
                     progress,
                 )
 
-            await _enter_resolving(session, attempt, artifact, progress)
-            request = await _await_with_cancel(source_factory, cancel_event)
-            _validate_source_request(request, artifact)
-            credentials, host_config_id = await _load_host_credentials(
-                session,
-                artifact.host_kind,
-                internal_generic_https=(
-                    attempt.provider_config is not None
-                    and uses_internal_generic_https(attempt.provider_config.manifest_snapshot)
-                ),
+            await progress.write(
+                stage="provider_queue",
+                snapshot=_provider_queue_snapshot(artifact),
+                force=True,
+                details={"provider_name": _direct_provider_name(attempt)},
             )
-
-            async with self._limiter.slot(
-                artifact.host_kind,
-                cancel_event=cancel_event,
+            async with (
+                self._provider_limiter.slot(
+                    attempt.provider_identity,
+                    cancel_event=cancel_event,
+                ),
+                self._limiter.slot(
+                    artifact.host_kind,
+                    cancel_event=cancel_event,
+                ),
             ):
+                await _enter_resolving(session, attempt, artifact, progress)
+                request = await _await_with_cancel(source_factory, cancel_event)
+                _validate_source_request(request, artifact)
+                credentials, host_config_id = await _load_host_credentials(
+                    session,
+                    artifact.host_kind,
+                    internal_generic_https=(
+                        attempt.provider_config is not None
+                        and uses_internal_generic_https(attempt.provider_config.manifest_snapshot)
+                    ),
+                )
                 resolved = await _await_with_cancel(
                     lambda: self._resolve_host(
                         session,
@@ -576,12 +606,18 @@ class DirectAcquisitionExecutor:
     ) -> DirectExecutionResult:
         acquisition_id = attempt.id
         artifact_id = artifact.id
+        if progress.download_history_id is None:
+            await progress.write(stage="post_processing", force=True)
+        download_history_id = progress.download_history_id
+        if download_history_id is None:
+            raise RuntimeError("Direct post-processing requires a download history record.")
         try:
             pack_coverage = _selected_pack_coverage(attempt)
             if len(pack_coverage) > 1:
                 processed = await run_direct_artifact_pack_post_processing(
                     session,
                     acquisition_id=attempt.id,
+                    download_history_id=download_history_id,
                     issue_id=attempt.issue_id,
                     source_path=final_path,
                     expected_issue_numbers=pack_coverage,
@@ -592,6 +628,7 @@ class DirectAcquisitionExecutor:
                 processed = await self._post_processor(
                     session,
                     acquisition_id=attempt.id,
+                    download_history_id=download_history_id,
                     issue_id=attempt.issue_id,
                     source_path=final_path,
                     replace_existing_file=attempt.replace_existing_file,
@@ -819,6 +856,12 @@ class _ProgressWriter:
             (attempt.progress_snapshot or {}).get("source_slow") is True
         )
         self._slow_source_tracker = _SlowSourceTracker()
+        self._download_history_id: int | None = None
+
+    @property
+    def download_history_id(self) -> int | None:
+        """Return the durable UI identity established by the latest write."""
+        return self._download_history_id
 
     async def write_resolver_attempt(self, event: ArtifactResolutionProgress) -> None:
         await self.write(
@@ -883,17 +926,42 @@ class _ProgressWriter:
             revision=self._attempt.progress_revision + 1,
             snapshot=data,
         )
-        await sync_direct_download_history(
+        history = await sync_direct_download_history(
             self._session,
             self._attempt,
             self._artifact,
             at=self._now(),
             final_path=final_path,
         )
+        self._download_history_id = history.id
+        await self._project_post_processing_lifecycle(history, stage=stage)
         await self._session.commit()
         self._last_saved_at = now
         self._last_saved_bytes = current_bytes
         self._last_saved_source_slow = source_slow
+
+    async def _project_post_processing_lifecycle(
+        self,
+        history: DownloadHistory,
+        *,
+        stage: str,
+    ) -> None:
+        snapshot = None
+        if stage == "post_processing":
+            _set_post_processing_phase(history.id, PostProcessingPhase.RESOLVING_SOURCE)
+            snapshot = get_all_post_processing_progress().get(history.id)
+        elif stage == "completed":
+            _mark_post_processing_complete(history.id)
+            snapshot = get_all_post_processing_progress().get(history.id)
+        elif self._attempt.failure_class is DirectArtifactFailureClass.POST_PROCESS:
+            _clear_post_processing(history.id)
+        else:
+            return
+        await project_post_processing_operation_progress(
+            self._session,
+            history,
+            snapshot,
+        )
 
 
 async def _load_attempt(
@@ -962,6 +1030,37 @@ async def _enter_resolving(
     artifact.failure_code = None
     artifact.error_message = None
     await progress.write(stage="resolving", force=True)
+
+
+def _provider_queue_snapshot(
+    artifact: DirectArtifactAttempt,
+) -> TransferProgressSnapshot:
+    total = artifact.expected_size
+    transferred = artifact.bytes_transferred
+    return TransferProgressSnapshot(
+        bytes_transferred=transferred,
+        total_bytes=total,
+        percent=(
+            min(100, int((transferred * 100) / total)) if total is not None and total > 0 else None
+        ),
+        bytes_per_second=None,
+        eta_seconds=None,
+    )
+
+
+def _direct_provider_name(attempt: DirectAcquisitionAttempt) -> str:
+    configured_name = getattr(attempt.provider_config, "display_name", None)
+    if isinstance(configured_name, str) and configured_name.strip():
+        return configured_name.strip()
+    labels = {
+        "pullbox.getcomics": "GetComics",
+        "pullbox.annas_archive": "Anna's Archive",
+        "pullbox.libgen": "Library Genesis",
+    }
+    return labels.get(
+        attempt.provider_identity,
+        attempt.provider_identity.removeprefix("pullbox.").replace("_", " ").title(),
+    )
 
 
 async def _enter_downloading(

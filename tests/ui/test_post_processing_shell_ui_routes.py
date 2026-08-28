@@ -318,7 +318,8 @@ class TestPostProcessingRouteContracts:
     ) -> None:  # type: ignore[no-untyped-def]
         await _seed_post_processing_contract_data(sec_db)
 
-        async def _fake_live_status_map(active_items):  # type: ignore[no-untyped-def]
+        async def _fake_live_status_map(session, active_items):  # type: ignore[no-untyped-def]
+            del session
             assert len(active_items) == 1
             return {
                 active_items[0].id: {
@@ -326,8 +327,9 @@ class TestPostProcessingRouteContracts:
                     "status_label": "Registering library file",
                     "shows_transfer_metrics": False,
                     "elapsed_seconds": 14,
-                    "phase_progress_pct": 92.0,
-                    "phase_progress_label": "Step 5 of 5",
+                    "phase_progress_pct": None,
+                    "phase_progress_label": "In progress",
+                    "progress_indeterminate": True,
                 }
             }
 
@@ -344,9 +346,10 @@ class TestPostProcessingRouteContracts:
 
         assert response.status_code == 200
         assert "Registering library file" in response.text
-        assert "Step 5 of 5" in response.text
+        assert "In progress" in response.text
         assert "14s elapsed" in response.text
         assert 'data-testid="pp-queue-item-progress-bar"' in response.text
+        assert "is-indeterminate" in response.text
         assert "justify-center text-center leading-tight" in response.text
         assert 'aria-label="Toggle details"' in response.text
 
@@ -358,7 +361,8 @@ class TestPostProcessingRouteContracts:
     ) -> None:  # type: ignore[no-untyped-def]
         await _seed_post_processing_contract_data(sec_db)
 
-        async def _fake_live_status_map(active_items):  # type: ignore[no-untyped-def]
+        async def _fake_live_status_map(session, active_items):  # type: ignore[no-untyped-def]
+            del session
             assert len(active_items) == 1
             return {
                 active_items[0].id: {
@@ -421,7 +425,8 @@ class TestPostProcessingRouteContracts:
             lambda: {imported_item.id},
         )
 
-        async def _fake_live_status_map(active_items):  # type: ignore[no-untyped-def]
+        async def _fake_live_status_map(session, active_items):  # type: ignore[no-untyped-def]
+            del session
             return {
                 item.id: {
                     "phase_label": "Import complete",
@@ -461,7 +466,14 @@ class TestPostProcessingRouteContracts:
         self,
         sec_db,
     ) -> None:  # type: ignore[no-untyped-def]
-        import pullbox.tasks.download_task as download_task
+        from pullbox.models.operation_progress import (
+            OperationProgressState,
+            OperationProgressType,
+        )
+        from pullbox.services.operation_progress import (
+            OperationProgressUpdate,
+            publish_operation_progress,
+        )
 
         async with sec_db() as session:
             series = Series(title="Live Snapshot", sort_title="live snapshot")
@@ -482,22 +494,31 @@ class TestPostProcessingRouteContracts:
                 updated_at=datetime(2026, 4, 3, 20, 5, tzinfo=UTC),
             )
             session.add(download)
+            await session.flush()
+            await publish_operation_progress(
+                session,
+                OperationProgressUpdate(
+                    operation_type=OperationProgressType.POST_PROCESSING,
+                    operation_key=str(download.id),
+                    revision=2,
+                    state=OperationProgressState.RUNNING,
+                    phase="validating_files",
+                    title=download.title,
+                    message="Validating files",
+                ),
+            )
             await session.commit()
-            await session.refresh(download)
 
-        download_task._clear_post_processing(download.id)
-        download_task._set_post_processing_phase(
-            download.id,
-            download_task.PostProcessingPhase.VALIDATING_FILES,
-        )
-        try:
-            live_status = await ui_routes._load_post_processing_live_status_map([download])
-        finally:
-            download_task._clear_post_processing(download.id)
+        async with sec_db() as session:
+            live_status = await ui_routes._load_post_processing_live_status_map(
+                session,
+                [download],
+            )
 
         assert live_status[download.id]["phase_label"] == "Validating files"
-        assert live_status[download.id]["phase_progress_pct"] == 36.0
-        assert live_status[download.id]["phase_progress_label"] == "Step 2 of 5"
+        assert live_status[download.id]["phase_progress_pct"] is None
+        assert live_status[download.id]["phase_progress_label"] == "In progress"
+        assert live_status[download.id]["progress_indeterminate"] is True
         assert live_status[download.id]["shows_transfer_metrics"] is False
 
     async def test_recently_imported_item_is_hidden_from_history_until_queue_grace_ends(

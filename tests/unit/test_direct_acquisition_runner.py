@@ -26,10 +26,14 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
+from pullbox.models.operation_progress import OperationProgress, OperationProgressType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.providers.artifact_hosts.contract import HostResolutionRequest
 from pullbox.services.direct_acquisition_switch import DirectSourceSwitchError
-from pullbox.services.direct_download_history_adapter import ensure_direct_download_history
+from pullbox.services.direct_download_history_adapter import (
+    ensure_direct_download_history,
+    sync_direct_download_history,
+)
 from pullbox.tasks.direct_acquisition_task import DirectAcquisitionRunner
 
 if TYPE_CHECKING:
@@ -164,6 +168,89 @@ async def test_history_adapter_collapses_legacy_duplicate_rows(
     assert histories[0].download_url == "pullbox-direct://attempt/1"
     assert blocklist_entry is not None
     assert blocklist_entry.download_history_id == history.id
+
+
+@pytest.mark.asyncio
+async def test_history_adapter_projects_direct_progress_to_shared_activity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        attempt = await session.get(DirectAcquisitionAttempt, 1)
+        artifact = await session.get(DirectArtifactAttempt, 1)
+        assert attempt is not None and artifact is not None
+        attempt.provider_identity = "pullbox.getcomics"
+        attempt.state = DirectAcquisitionState.DOWNLOADING
+        attempt.progress_snapshot = {
+            "stage": "downloading",
+            "host_kind": "pixeldrain",
+            "percent": 40,
+            "bytes_transferred": 40_000_000,
+            "total_bytes": 100_000_000,
+            "bytes_per_second": 2_000_000,
+            "eta_seconds": 30,
+        }
+        history = await sync_direct_download_history(
+            session,
+            attempt,
+            artifact,
+            at=datetime(2026, 8, 27, tzinfo=UTC),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        operation = (
+            await session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.DOWNLOAD,
+                    OperationProgress.operation_key == str(history.id),
+                )
+            )
+        ).scalar_one()
+
+    assert operation.overall_percent == pytest.approx(40.0)
+    assert operation.overall_current == 40_000_000
+    assert operation.overall_total == 100_000_000
+    assert operation.rate == 2_000_000
+    assert operation.eta_seconds == 30
+    assert operation.source_label == "GetComics via PixelDrain"
+    assert operation.message == "Downloading from PixelDrain"
+
+
+@pytest.mark.asyncio
+async def test_history_adapter_projects_provider_queue_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        attempt = await session.get(DirectAcquisitionAttempt, 1)
+        artifact = await session.get(DirectArtifactAttempt, 1)
+        assert attempt is not None and artifact is not None
+        attempt.provider_identity = "pullbox.libgen"
+        attempt.state = DirectAcquisitionState.QUEUED
+        attempt.progress_snapshot = {
+            "stage": "provider_queue",
+            "provider_name": "Library Genesis",
+            "host_kind": "generic_https",
+        }
+        history = await sync_direct_download_history(
+            session,
+            attempt,
+            artifact,
+            at=datetime(2026, 8, 28, tzinfo=UTC),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        operation = (
+            await session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.DOWNLOAD,
+                    OperationProgress.operation_key == str(history.id),
+                )
+            )
+        ).scalar_one()
+
+    assert operation.message == "Queued for Library Genesis"
+    assert operation.source_label == "Library Genesis via HTTPS"
 
 
 @dataclass

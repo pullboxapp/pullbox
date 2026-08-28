@@ -463,10 +463,11 @@ def _post_processing_recent_completion_ids_bridge() -> set[int]:
 
 
 async def _post_processing_live_status_map_bridge(
+    session: AsyncSession,
     active_items: Sequence[DownloadHistory],
 ) -> dict[int, dict[str, object]]:
     """Route live-status checks through the facade for compatibility tests."""
-    return await _load_post_processing_live_status_map(active_items)
+    return await _load_post_processing_live_status_map(session, active_items)
 
 
 post_processing_routes.configure_post_processing_routes(

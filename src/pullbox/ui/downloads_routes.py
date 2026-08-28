@@ -20,6 +20,7 @@ from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt, DirectArtifactAttempt
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue
+from pullbox.models.operation_progress import OperationProgress, OperationProgressType
 from pullbox.models.series import Series
 from pullbox.services.download_history_classification import (
     download_history_clause,
@@ -550,16 +551,10 @@ async def load_download_progress_map(
     *,
     fallback_progress: Mapping[int, object],
 ) -> dict[int, object]:
-    """Return queue progress, overlaying fresh client snapshots when possible.
-
-    The scheduler-owned in-memory cache remains the low-cost fallback, but the
-    queue page polls often enough that we prefer a direct client status check
-    for active downloads so the UI does not appear hung between scheduler ticks.
-    """
+    """Return queue progress from local durable state without polling clients."""
     from pullbox.tasks.download_task import ProgressSnapshot
 
     progress_map = dict(fallback_progress)
-    start = time.monotonic()
     direct_items: dict[int, int] = {}
     for item in queue_items:
         if item.download_client is not DownloadClientType.DIRECT or not item.external_id:
@@ -656,104 +651,34 @@ async def load_download_progress_map(
                 source_label="AirDC++",
                 bytes_transferred=transferred_bytes,
             )
-    pollable_items = [
-        item
-        for item in queue_items
-        if item.download_client not in {DownloadClientType.DIRECT, DownloadClientType.AIRDCPP}
-        and is_download_queue_pollable_state(item.state)
-        and item.external_id
-    ]
-    if not pollable_items:
-        return progress_map
 
-    from pullbox.composition.providers import register_download_clients
-    from pullbox.providers.base import ProviderRegistry
-
-    registry = ProviderRegistry()
-    await register_download_clients(session, registry)
-    if not registry.get_download_clients():
-        return progress_map
-
-    items_by_client: dict[str, list[DownloadHistory]] = {}
-    for item in pollable_items:
-        items_by_client.setdefault(item.download_client.value, []).append(item)
-
-    matched_total = 0
-    unmatched_total = 0
-    for client_type, client_items in items_by_client.items():
-        client = registry.get_client_for_type(client_type)
-        if client is None:
-            unmatched_total += len(client_items)
-            continue
-
-        client_start = time.monotonic()
-        try:
-            queue_statuses = await client.get_queue()
-        except Exception:
-            unmatched_total += len(client_items)
-            logger.debug(
-                "downloads_queue_progress_overlay_client_failed",
-                client_type=client_type,
-                requested=len(client_items),
-            )
-            continue
-
-        indexed_statuses = {
-            status.external_id: status
-            for status in queue_statuses
-            if getattr(status, "external_id", None)
-        }
-        client_matched = 0
-        matched_ids: set[int] = set()
-        for item in client_items:
-            if not item.external_id:
-                continue
-            status = indexed_statuses.get(str(item.external_id))
-            if status is None:
-                continue
-            progress_map[item.id] = build_live_progress_snapshot(
-                progress_map.get(item.id),
-                status,
-            )
-            client_matched += 1
-            matched_ids.add(item.id)
-
-        if client_type in {DownloadClientType.SABNZBD.value, DownloadClientType.NZBGET.value}:
-            for item in client_items:
-                if not item.external_id or item.id in matched_ids:
-                    continue
-                try:
-                    status = await client.get_download_status(str(item.external_id))
-                except Exception:
-                    continue
-                progress_map[item.id] = build_live_progress_snapshot(
-                    progress_map.get(item.id),
-                    status,
+    operation_keys = [str(item.id) for item in queue_items]
+    if operation_keys:
+        operations = (
+            await session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.DOWNLOAD,
+                    OperationProgress.operation_key.in_(operation_keys),
                 )
-                client_matched += 1
-                matched_ids.add(item.id)
-
-        client_unmatched = len(client_items) - client_matched
-        matched_total += client_matched
-        unmatched_total += client_unmatched
-        logger.debug(
-            "downloads_queue_progress_overlay_client_complete",
-            client_type=client_type,
-            requested=len(client_items),
-            returned=len(queue_statuses),
-            matched=client_matched,
-            unmatched=client_unmatched,
-            duration_ms=round((time.monotonic() - client_start) * 1000, 1),
-        )
-
-    logger.debug(
-        "downloads_queue_progress_overlay_complete",
-        client_count=len(items_by_client),
-        pollable_count=len(pollable_items),
-        matched_count=matched_total,
-        unmatched_count=unmatched_total,
-        duration_ms=round((time.monotonic() - start) * 1000, 1),
-    )
+            )
+        ).scalars()
+        item_ids = {str(item.id): item.id for item in queue_items}
+        for operation in operations:
+            projected_download_id = item_ids.get(operation.operation_key)
+            if projected_download_id is None:
+                continue
+            progress_map[projected_download_id] = ProgressSnapshot(
+                progress=(operation.overall_percent or 0.0) / 100,
+                speed_bytes=int(operation.rate) if operation.rate is not None else None,
+                eta_seconds=operation.eta_seconds,
+                size_bytes=operation.overall_total,
+                updated_at=time.monotonic(),
+                client_state=(operation.message or operation.phase.replace("_", " ").capitalize()),
+                source_label=operation.source_label,
+                bytes_transferred=operation.overall_current,
+                is_indeterminate=operation.overall_indeterminate,
+                source_slow=operation.detail_snapshot.get("source_slow") is True,
+            )
 
     return progress_map
 
@@ -764,6 +689,11 @@ def _direct_progress_label(snapshot: Mapping[str, object]) -> str:
     stage_value = str(stage) if isinstance(stage, str) and stage else "direct"
     host_label = _direct_host_label(host_kind)
 
+    if stage_value == "provider_queue":
+        provider_name = snapshot.get("provider_name")
+        if isinstance(provider_name, str) and provider_name.strip():
+            return f"Queued for {provider_name.strip()}"
+        return "Queued for direct provider"
     if stage_value == "resolver":
         resolver_name = snapshot.get("resolver_name")
         resolver_kind = snapshot.get("resolver_kind")
@@ -809,6 +739,7 @@ def _direct_source_label(provider_identity: str, host_kind: object) -> str:
     provider_labels = {
         "pullbox.getcomics": "GetComics",
         "pullbox.annas_archive": "Anna's Archive",
+        "pullbox.libgen": "Library Genesis",
     }
     provider_label = provider_labels.get(
         provider_identity,

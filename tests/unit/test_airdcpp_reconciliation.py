@@ -16,6 +16,7 @@ from pullbox.models.airdcpp import AirDcppAcquisition
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.operation_progress import OperationProgress, OperationProgressType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.providers.airdcpp.contracts import AirDcppQueueBundle, AirDcppQueueFile
 from pullbox.services.airdcpp_reconciliation import AirDcppReconciler, apply_airdcpp_bundle
@@ -227,6 +228,14 @@ async def test_reconciliation_maps_stable_status_fields_without_localized_text(
     async with db_factory() as session:
         history = await session.get(DownloadHistory, history_id)
         acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        operation = (
+            await session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.DOWNLOAD,
+                    OperationProgress.operation_key == str(history_id),
+                )
+            )
+        ).scalar_one()
         assert history is not None and acquisition is not None
         assert history.state is expected
         assert history.downloaded_path == (
@@ -237,6 +246,9 @@ async def test_reconciliation_maps_stable_status_fields_without_localized_text(
         assert acquisition.client_state == bundle.status.id
         assert acquisition.remote_target == "/Downloads/Example Comic 001 (2026).cbz"
         assert acquisition.last_reconciled_at is not None
+        assert operation.source_label == "AirDC++"
+        assert operation.overall_total == 100_000_000
+        assert operation.overall_current == bundle.downloaded_bytes
         assert result.processed == 1
         assert result.completed == int(expected is DownloadState.COMPLETED)
 

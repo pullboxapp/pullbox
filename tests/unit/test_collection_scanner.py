@@ -179,6 +179,50 @@ class TestDeepNesting:
         assert results[0].raw_series_name == "Batman"
         assert results[0].raw_year == 2016
 
+    @pytest.mark.asyncio
+    async def test_pullbox_folder_suffix_supplies_trusted_comicvine_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _make_series_dir(
+            tmp_path,
+            "Batman (2016) 97508",
+            files=["Batman 001 (2016).cbz", "Batman 002 (2016).cbz"],
+        )
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Batman"
+        assert results[0].raw_year == 2016
+        assert results[0].folder_cv_id == 97508
+        assert results[0].diagnostics["folder_identity"] == {
+            "kind": "pullbox_series_folder",
+            "comicvine_series_id": 97508,
+        }
+
+    @pytest.mark.asyncio
+    async def test_pullbox_collision_folder_suffix_supplies_trusted_comicvine_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _make_series_dir(
+            tmp_path,
+            "Batman (2024) [cv-162083]",
+            files=["Batman 001 (2024).cbz", "Batman 002 (2024).cbz"],
+        )
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Batman"
+        assert results[0].raw_year == 2024
+        assert results[0].folder_cv_id == 162083
+        assert results[0].diagnostics["folder_identity"] == {
+            "kind": "pullbox_series_folder",
+            "comicvine_series_id": 162083,
+        }
+
 
 class TestMixedFormats:
     """Test 5: Mixed formats in same series folder."""

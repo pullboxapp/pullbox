@@ -24,6 +24,7 @@ from sqlalchemy import select
 from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.operation_progress import OperationProgress, OperationProgressState
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 from pullbox.utilities.base_executor import (
@@ -476,6 +477,28 @@ class TestJobCreation:
         assert job.failed_items == 0
         assert job.skipped_items == 0
         assert job.warning_count == 0
+
+    @pytest.mark.asyncio
+    async def test_create_job_projects_queued_shared_activity(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        mgr = JobQueueManager(session_factory=None)
+        job = await mgr.create_job(
+            session=db_session,
+            job_type=JobType.MASS_RENAME,
+            display_name="Rename files",
+            config={},
+            created_by="admin",
+        )
+
+        result = await db_session.execute(
+            select(OperationProgress).where(OperationProgress.operation_key == job.id)
+        )
+        operation = result.scalar_one()
+
+        assert operation.state is OperationProgressState.QUEUED
+        assert operation.title == "Rename files"
 
 
 # ── Queue Ordering ─────────────────────────────────────────────

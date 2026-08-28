@@ -26,7 +26,12 @@ from pullbox.models.download import DownloadClientType
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
 from pullbox.providers.base import ProviderRegistry
+from pullbox.services.download_operation_progress import project_download_operation_progress
 from pullbox.services.download_service import DownloadService
+from pullbox.services.post_processing_operation_progress import (
+    queue_post_processing_phase,
+    queue_post_processing_snapshot,
+)
 from pullbox.tasks import download_monitor_apply as _download_monitor_apply
 from pullbox.tasks import download_monitor_poll as _download_monitor_poll
 from pullbox.tasks import download_monitor_read as _download_monitor_read
@@ -343,6 +348,7 @@ async def monitor_downloads() -> None:
                     handle_download_failure=_handle_download_failure,
                     emit_download_lifecycle_summary=_emit_download_lifecycle_summary,
                     event_logger=logger,
+                    publish_progress=project_download_operation_progress,
                 )
                 completed = apply_result.completed
                 failed = apply_result.failed
@@ -417,15 +423,28 @@ async def _run_post_processing(
     """
     from asyncio import get_running_loop
 
+    operation_loop = get_running_loop()
     log = logger.bind(download_id=download.id, issue_id=download.issue_id)
     trace = PostProcessingRunTrace(download_id=download.id)
     trace.transfer_method = None
+
+    def _publish_post_processing_phase(
+        current_download: DownloadHistory,
+        phase: PostProcessingPhase,
+    ) -> None:
+        operation_loop.call_soon_threadsafe(
+            queue_post_processing_phase,
+            current_download,
+            phase,
+        )
+
     runtime = PostProcessingRuntime(
         download=download,
         trace=trace,
         log=log,
         summary_logger=logger,
         set_phase=_set_post_processing_phase,
+        publish_phase=_publish_post_processing_phase,
     )
 
     log.debug(
@@ -437,14 +456,7 @@ async def _run_post_processing(
         ),
         client_type=str(download.download_client.value),
     )
-    _set_post_processing_phase(download.id, PostProcessingPhase.RESOLVING_SOURCE)
-    log.debug(
-        "post_processing_phase_entered",
-        download_id=download.id,
-        issue_id=download.issue_id,
-        phase=trace.current_phase.value,
-        phase_label=trace.current_phase.label,
-    )
+    runtime.enter_phase(PostProcessingPhase.RESOLVING_SOURCE)
 
     try:
         from pullbox.core.library_policy import load_library_ingest_policy
@@ -574,6 +586,25 @@ async def _run_post_processing(
         method = ingest_policy.post_processing_method
         from pullbox.services.issue_file_service import resolve_configured_utility_trash_dir
 
+        def _track_transfer_progress(
+            download_id: int,
+            *,
+            total_bytes: int,
+            done_bytes: int,
+        ) -> None:
+            _set_post_processing_transfer_progress(
+                download_id,
+                total_bytes=total_bytes,
+                done_bytes=done_bytes,
+            )
+            snapshot = get_all_post_processing_progress().get(download_id)
+            if snapshot is not None:
+                operation_loop.call_soon_threadsafe(
+                    queue_post_processing_snapshot,
+                    download,
+                    snapshot,
+                )
+
         dest_path = await transfer_and_register_library_file(
             session=session,
             comic_file=comic_file,
@@ -585,7 +616,7 @@ async def _run_post_processing(
             runtime=runtime,
             log=log,
             register_library_file=register_library_file,
-            set_transfer_progress=_set_post_processing_transfer_progress,
+            set_transfer_progress=_track_transfer_progress,
             infer_effective_transfer_method=_infer_effective_post_processing_transfer_method,
             replacement_trash_dir=await resolve_configured_utility_trash_dir(session)
             if replacing_existing_file

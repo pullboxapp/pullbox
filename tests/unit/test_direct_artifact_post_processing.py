@@ -48,6 +48,7 @@ async def test_direct_handoff_reuses_pipeline_without_client_mapping_or_cleanup(
     result = await run_direct_artifact_post_processing(
         session,
         acquisition_id=12,
+        download_history_id=56,
         issue_id=34,
         source_path=source,
         replace_existing_file=True,
@@ -59,7 +60,7 @@ async def test_direct_handoff_reuses_pipeline_without_client_mapping_or_cleanup(
     assert observed["cleanup_source"] is False
     assert observed["allow_resource_safety_exception"] is True
     assert observed["resolved_path"] == str(source)
-    assert observed["download"].id == -12
+    assert observed["download"].id == 56
     assert observed["download"].download_client.value == "direct"
     assert observed["download"].replace_existing_file is True
     assert result.library_file_id == 77
@@ -83,6 +84,7 @@ async def test_direct_handoff_fails_when_pipeline_does_not_register_file(
         await run_direct_artifact_post_processing(
             session,
             acquisition_id=1,
+            download_history_id=3,
             issue_id=2,
             source_path=source,
             replace_existing_file=False,
@@ -116,6 +118,7 @@ async def test_direct_handoff_materializes_library_symlink_before_quarantine_cle
     result = await run_direct_artifact_post_processing(
         session,
         acquisition_id=12,
+        download_history_id=56,
         issue_id=34,
         source_path=source,
         replace_existing_file=False,
@@ -187,6 +190,7 @@ async def test_direct_pack_always_imports_the_explicitly_selected_skipped_issue(
     result = await run_direct_artifact_pack_post_processing(
         session,
         acquisition_id=1,
+        download_history_id=2,
         issue_id=target_issue.id,
         source_path=tmp_path / "pack.cbz",
         expected_issue_numbers=frozenset({"5"}),
@@ -259,6 +263,7 @@ async def test_direct_pack_only_replaces_the_explicitly_selected_existing_issue(
     await run_direct_artifact_pack_post_processing(
         session,
         acquisition_id=1,
+        download_history_id=2,
         issue_id=target_issue.id,
         source_path=tmp_path / "pack.cbz",
         expected_issue_numbers=frozenset({"5", "6"}),
@@ -323,6 +328,7 @@ async def test_direct_pack_materializes_library_symlinks_before_workspace_cleanu
     await run_direct_artifact_pack_post_processing(
         session,
         acquisition_id=1,
+        download_history_id=2,
         issue_id=target_issue.id,
         source_path=tmp_path / "pack.cbz",
         expected_issue_numbers=frozenset({"5"}),

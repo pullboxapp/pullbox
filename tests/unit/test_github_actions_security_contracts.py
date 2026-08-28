@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -54,13 +55,29 @@ def _load_release_sync_module() -> Any:
 
 
 def _git(cwd: Path, *args: str) -> str:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    hooks_path = cwd / ".git-test-hooks"
+    hooks_path.mkdir(exist_ok=True)
     result = subprocess.run(
-        ["git", *args],
+        [
+            "git",
+            "-c",
+            f"core.hooksPath={hooks_path}",
+            "-c",
+            "commit.gpgSign=false",
+            *args,
+        ],
         cwd=cwd,
-        check=True,
+        check=False,
         capture_output=True,
+        env=env,
         text=True,
     )
+    if result.returncode != 0:
+        command = " ".join(("git", *args))
+        raise AssertionError(
+            f"{command} failed with exit {result.returncode}:\n{result.stderr.strip()}"
+        )
     return result.stdout.strip()
 
 

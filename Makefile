@@ -329,6 +329,9 @@ reset-import: ## Undo a test import (restores files, cleans DB). Add DRY_RUN=1 t
 import-fixture: ## Extract test import fixture to data/test-import/ for manual import testing
 	$(PYTHON) scripts/generate_import_fixture.py
 
+mylar-import-benchmark: ## Benchmark trusted Mylar migration without external metadata calls
+	$(PYTHON) scripts/benchmark_mylar3_import.py $(MYLAR_IMPORT_BENCHMARK_ARGS)
+
 performance-baseline: ## Capture a JSON performance baseline for the active dev server
 	@mkdir -p data/performance
 	$(SECRET) $(PYTHON) scripts/performance_baseline.py \

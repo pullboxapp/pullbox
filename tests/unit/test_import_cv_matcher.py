@@ -545,6 +545,41 @@ class TestMatchToComicvine:
         assert top_titles == ["Chicken Devils", "Chicken Devil"]
 
     @pytest.mark.asyncio
+    async def test_trusted_source_identity_conflict_skips_provider_lookup(self) -> None:
+        provider = AsyncMock()
+        source_metadata = SourceMetadata(
+            original_title="Batman 001.cbz",
+            series_name="Batman",
+            comicvine_series_id=11111,
+            signals={"comicvine_series_id": MetadataSignal.SIDECAR},
+            diagnostics={
+                "comicvine_series_id_source": "sidecar",
+                "identity_conflicts": [
+                    {
+                        "field": "comicvine_series_id",
+                        "comicinfo": 97508,
+                        "sidecar": 11111,
+                    }
+                ],
+            },
+        )
+
+        evaluation = await evaluate_comicvine_match(
+            provider=provider,
+            raw_name="Batman",
+            raw_year=2016,
+            source_metadata=source_metadata,
+            comicinfo_cv_id=11111,
+        )
+
+        assert evaluation.match is None
+        assert evaluation.diagnostics["kind"] == "series_conflict"
+        assert evaluation.diagnostics["reason"] == "trusted_source_identity_conflict"
+        provider.assert_not_called()
+        provider.get_series.assert_not_awaited()
+        provider.search_series.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_volume_subtitle_candidate_beats_base_series_conflict(self) -> None:
         """A collection subtitle in the filename should corroborate the matching CV title."""
         provider = AsyncMock()

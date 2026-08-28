@@ -3494,7 +3494,9 @@ function importProgressData(jobId, nextStep, sourceType) {
     pausing: false,
     optimisticPauseRequested: false,
     resuming: false,
+    cancelPrompting: false,
     cancelling: false,
+    cancelReturnStarted: false,
     continuing: false,
     controlState: {},
     stats: {
@@ -3728,6 +3730,12 @@ function importProgressData(jobId, nextStep, sourceType) {
     },
 
     showCancelAction: function () {
+      if (
+        (this.isScanMode() || this.isImportMode() || this.isRollbackMode()) &&
+        (this.cancelPrompting || this.cancelling)
+      ) {
+        return true;
+      }
       if (
         (this.isScanMode() || this.isImportMode() || this.isRollbackMode()) &&
         !this.completed &&
@@ -4225,7 +4233,12 @@ function importProgressData(jobId, nextStep, sourceType) {
       if (this.completed || this.failed) {
         return;
       }
-      if (String(data.status || "").toLowerCase() !== "importing") {
+      var activeStatus = String(data.status || "").toLowerCase();
+      if (
+        ["scanning", "analyzing", "matching", "file_matching", "importing", "rolling_back"].indexOf(
+          activeStatus,
+        ) === -1
+      ) {
         return;
       }
 
@@ -4244,9 +4257,9 @@ function importProgressData(jobId, nextStep, sourceType) {
         this.fileProgressRevision = incomingRevision;
       }
 
-      this.jobStatus = "importing";
-      this.phase = "importing";
-      this.phaseLabel = this.phaseLabelForKey("importing");
+      this.jobStatus = activeStatus;
+      this.phase = String(data.phase || activeStatus);
+      this.phaseLabel = this.phaseLabelForKey(this.phase);
       if (typeof data.progress === "number" && !Number.isNaN(data.progress)) {
         this.progress = Math.max(this.progress, Math.max(0, Math.min(100, Math.round(data.progress))));
       }
@@ -4865,6 +4878,24 @@ function importProgressData(jobId, nextStep, sourceType) {
       if (data.control_state && typeof data.control_state === "object") {
         this.controlState = data.control_state;
       }
+      var cancellationAction =
+        (data.control_state && typeof data.control_state.requested_action === "string"
+          ? data.control_state.requested_action
+          : typeof data.requested_action === "string"
+            ? data.requested_action
+            : ""
+        ).toLowerCase();
+      if (
+        this.jobStatus === "cancelling" ||
+        (this.jobStatus === "rolling_back" && cancellationAction === "cancel") ||
+        cancellationAction === "cancel"
+      ) {
+        this.cancelling = true;
+      } else if (
+        ["review", "completed", "failed", "cancelled", "rolled_back"].indexOf(this.jobStatus) !== -1
+      ) {
+        this.cancelling = false;
+      }
       if (this.optimisticPauseRequested) {
         var requestedAction =
           (data.control_state && typeof data.control_state.requested_action === "string"
@@ -4948,14 +4979,24 @@ function importProgressData(jobId, nextStep, sourceType) {
         return;
       }
 
-      if (data.status === "failed" || data.status === "cancelled") {
-      this.optimisticPauseRequested = false;
-      this.failed = true;
-      this.completed = false;
-      this.resetCurrentItemProgress();
-      this.emitFooterState();
-      this.stopPolling();
-      return;
+      if (data.status === "cancelled") {
+        this.optimisticPauseRequested = false;
+        this.failed = false;
+        this.completed = false;
+        this.resetCurrentItemProgress();
+        this.emitFooterState();
+        this.returnToImportStartAfterCancellation();
+        return;
+      }
+
+      if (data.status === "failed") {
+        this.optimisticPauseRequested = false;
+        this.failed = true;
+        this.completed = false;
+        this.resetCurrentItemProgress();
+        this.emitFooterState();
+        this.stopPolling();
+        return;
       }
 
       this.failed = false;
@@ -4970,6 +5011,19 @@ function importProgressData(jobId, nextStep, sourceType) {
         return;
       }
       this.applyJobState(snapshot, snapshot.recent_logs);
+    },
+
+    returnToImportStartAfterCancellation: function () {
+      if (this.cancelReturnStarted) {
+        return;
+      }
+      this.cancelReturnStarted = true;
+      this.cancelling = true;
+      this.stopPolling();
+      this.stopClock();
+      this.disconnectSSE("cancelled");
+      purgeImportClientState(this.jobId);
+      window.location.replace("/import?tab=collection");
     },
 
     startClock: function () {
@@ -5010,7 +5064,7 @@ function importProgressData(jobId, nextStep, sourceType) {
     init: function () {
       this.hydrateFromSnapshot();
       this.nowMs = Date.now();
-      if (this.completed || this.failed) {
+      if (this.completed || this.failed || this.cancelReturnStarted) {
         return;
       }
       this.startClock();
@@ -5066,6 +5120,10 @@ function importProgressData(jobId, nextStep, sourceType) {
         self.nowMs = Date.now();
         self.applyJobState(data, null);
 
+        if (self.cancelReturnStarted) {
+          return;
+        }
+
         if (self.nextStep === 5 && self.totalSelected === 0 && data.series_found) {
           self.totalSelected = data.series_found;
         }
@@ -5104,11 +5162,18 @@ function importProgressData(jobId, nextStep, sourceType) {
         var response = await fetch("/import/" + this.jobId + "/progress-state");
 
         if (!response.ok) {
+          if (response.status === 404 && this.cancelling) {
+            this.returnToImportStartAfterCancellation();
+          }
           return;
         }
 
         var job = await response.json();
         this.applyJobState(job, job.recent_logs || []);
+
+        if (this.cancelReturnStarted) {
+          return;
+        }
 
         if (this.isTerminalStatus(job.status, job.mode)) {
           this.stopPolling();
@@ -5269,7 +5334,12 @@ function importProgressData(jobId, nextStep, sourceType) {
     },
 
     cancelRun: async function () {
-      if (!this.jobId || this.cancelling || !this.showCancelAction()) {
+      if (
+        !this.jobId ||
+        this.cancelPrompting ||
+        this.cancelling ||
+        !this.showCancelAction()
+      ) {
         return;
       }
       var cancelTitle = this.isScanMode()
@@ -5282,12 +5352,18 @@ function importProgressData(jobId, nextStep, sourceType) {
         : this.isImportMode()
           ? "This will stop the current import, roll back any imported changes, and move the job to history."
           : "This will stop the current rollback run.";
-      var confirmed = await pbConfirm({
-        title: cancelTitle,
-        message: cancelMessage,
-        confirmText: this.cancelActionLabel(),
-        destructive: true,
-      });
+      this.cancelPrompting = true;
+      var confirmed = false;
+      try {
+        confirmed = await pbConfirm({
+          title: cancelTitle,
+          message: cancelMessage,
+          confirmText: this.cancelActionLabel(),
+          destructive: true,
+        });
+      } finally {
+        this.cancelPrompting = false;
+      }
       if (!confirmed) {
         return;
       }
@@ -5305,15 +5381,30 @@ function importProgressData(jobId, nextStep, sourceType) {
           });
           throw new Error(error.detail || "Failed to cancel " + this.runNoun() + ".");
         }
-        purgeImportClientState(this.jobId);
-        window.location.assign(this.isScanMode() ? "/import?tab=collection" : "/import?tab=history");
+        var job = await response.json().catch(function () {
+          return null;
+        });
+        if (!job) {
+          this.returnToImportStartAfterCancellation();
+          return;
+        }
+        var snapshot = this.jobReadToProgressState(job);
+        if (snapshot) {
+          this.applyJobState(snapshot, snapshot.recent_logs || []);
+        }
+        if (!this.cancelReturnStarted) {
+          this.startClock();
+          this.startPolling();
+          if (!this.evtSource) {
+            this.connectSSE();
+          }
+        }
       } catch (err) {
+        this.cancelling = false;
         showToast({
           message: (err && err.message) || "Failed to cancel " + this.runNoun() + ".",
           level: "error",
         });
-      } finally {
-        this.cancelling = false;
       }
     },
 
@@ -10565,6 +10656,14 @@ function appShell() {
     usageStatsLoaded: false,
     usageStatsSaving: false,
     donationsOpen: false,
+    activityOperations: [],
+    activityOpen: false,
+    activityActiveCount: 0,
+    activitySpinnerCount: 0,
+    activityAttentionCount: 0,
+    activitySource: null,
+    activityPollTimer: null,
+    activityRefreshing: false,
 
     get collapsed() {
       return !this.sidebarOpen && !this.sidebarMobileOpen;
@@ -10599,6 +10698,7 @@ function appShell() {
       };
 
       self.bootstrapUsageStatsPrompt();
+      self.bootstrapActivity();
     },
 
     destroy: function () {
@@ -10608,6 +10708,358 @@ function appShell() {
       if (window.__pullboxUpdateUsageStatsPreference) {
         delete window.__pullboxUpdateUsageStatsPreference;
       }
+      this.disconnectActivityStream();
+      this.clearActivityTimer();
+    },
+
+    clearActivityTimer: function () {
+      if (this.activityPollTimer) {
+        window.clearTimeout(this.activityPollTimer);
+        this.activityPollTimer = null;
+      }
+    },
+
+    scheduleActivityPoll: function (delayMs) {
+      var self = this;
+      self.clearActivityTimer();
+      self.activityPollTimer = window.setTimeout(function () {
+        self.activityPollTimer = null;
+        self.refreshActivity();
+      }, delayMs || 3000);
+    },
+
+    bootstrapActivity: function () {
+      this.connectActivityStream();
+      this.refreshActivity();
+    },
+
+    refreshActivity: function () {
+      var self = this;
+      if (self.activityRefreshing) {
+        return;
+      }
+      self.activityRefreshing = true;
+      fetch("/api/v1/activity", {
+        headers: { Accept: "application/json" },
+      })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("Failed to load background activity.");
+          }
+          return response.json();
+        })
+        .then(function (payload) {
+          self.activityOperations =
+            payload && Array.isArray(payload.operations) ? payload.operations : [];
+          self.activityActiveCount = Math.max(
+            0,
+            Number(payload && payload.active_count) || 0,
+          );
+          self.activitySpinnerCount = Math.max(
+            0,
+            Number(payload && payload.spinner_count) || 0,
+          );
+          self.activityAttentionCount = Math.max(
+            0,
+            Number(payload && payload.attention_count) || 0,
+          );
+        })
+        .catch(function () {
+          // Activity is supplemental; a transient failure must not interrupt the page.
+        })
+        .finally(function () {
+          self.activityRefreshing = false;
+          self.scheduleActivityPoll(3000);
+          if (!self.activitySource) {
+            self.connectActivityStream();
+          }
+        });
+    },
+
+    connectActivityStream: function () {
+      var self = this;
+      if (self.activitySource) {
+        return;
+      }
+      var source = new EventSource("/api/v1/activity/stream");
+      self.activitySource = source;
+      var refreshFromEvent = function () {
+        if (self.activitySource === source) {
+          self.refreshActivity();
+        }
+      };
+      source.addEventListener("ready", refreshFromEvent);
+      source.addEventListener("progress", refreshFromEvent);
+      source.onmessage = refreshFromEvent;
+      source.onerror = function () {
+        if (self.activitySource !== source) {
+          return;
+        }
+        self.disconnectActivityStream();
+      };
+    },
+
+    disconnectActivityStream: function () {
+      if (!this.activitySource) {
+        return;
+      }
+      try {
+        this.activitySource.close();
+      } catch (_) {
+        // Closing a stale activity stream is best-effort.
+      }
+      this.activitySource = null;
+    },
+
+    acknowledgeActivity: function (operationId) {
+      var self = this;
+      fetch("/api/v1/activity/" + operationId + "/acknowledge", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "X-CSRF-Token": readCsrfTokenFromBody(),
+        },
+      })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("Failed to dismiss activity.");
+          }
+          return response.json();
+        })
+        .then(function () {
+          self.refreshActivity();
+        })
+        .catch(function () {
+          if (typeof showToast === "function") {
+            showToast({
+              message: "Unable to dismiss this activity right now.",
+              level: "error",
+            });
+          }
+        });
+    },
+
+    activityBadgeCount: function () {
+      return this.activityAttentionCount > 0
+        ? this.activityAttentionCount
+        : this.activityActiveCount;
+    },
+
+    activityHasRecentSuccess: function () {
+      return this.activityOperations.some(function (operation) {
+        return operation && operation.state === "completed";
+      });
+    },
+
+    activityButtonLabel: function () {
+      if (this.activityAttentionCount > 0) {
+        return this.activityAttentionCount === 1
+          ? "1 activity needs attention"
+          : this.activityAttentionCount + " activities need attention";
+      }
+      if (this.activityActiveCount > 0) {
+        return this.activityActiveCount === 1
+          ? "1 background operation active"
+          : this.activityActiveCount + " background operations active";
+      }
+      if (this.activityHasRecentSuccess()) {
+        return "Background work completed";
+      }
+      return "Background activity";
+    },
+
+    activitySummaryLabel: function () {
+      if (this.activityAttentionCount > 0) {
+        return this.activityAttentionCount + " need attention";
+      }
+      if (this.activityActiveCount > 0) {
+        return this.activityActiveCount + " active";
+      }
+      if (this.activityOperations.length > 0) {
+        return "Recently completed";
+      }
+      return "Idle";
+    },
+
+    activitySourceLabel: function (operation) {
+      if (operation && operation.source_label) {
+        return operation.source_label;
+      }
+      var labels = {
+        import: "Import",
+        download: "Download",
+        post_processing: "Post-processing",
+        issue_import: "Manual import",
+        orphan_recovery: "Import recovery",
+        utility: "Utility",
+      };
+      return labels[operation && operation.operation_type] || "Background work";
+    },
+
+    activityStateLabel: function (operation) {
+      var labels = {
+        queued: "Queued",
+        running: "Working",
+        paused: "Paused",
+        retrying: "Retrying",
+        completed: "Complete",
+        failed: "Failed",
+        cancelled: "Cancelled",
+      };
+      return labels[operation && operation.state] || "Working";
+    },
+
+    activityOperationClass: function (operation) {
+      if (operation && operation.tone === "danger") {
+        return "border-pb-error/40";
+      }
+      if (operation && operation.tone === "warning") {
+        return "border-pb-warning/40";
+      }
+      if (operation && operation.tone === "success") {
+        return "border-pb-success/40";
+      }
+      return "border-pb-border";
+    },
+
+    activityToneTextClass: function (operation) {
+      if (operation && operation.tone === "danger") {
+        return "text-pb-error";
+      }
+      if (operation && operation.tone === "warning") {
+        return "text-pb-warning";
+      }
+      if (operation && operation.tone === "success") {
+        return "text-pb-success";
+      }
+      return "text-pb-interactive";
+    },
+
+    activityButtonClass: function () {
+      if (this.activityAttentionCount > 0) {
+        return "bg-pb-error/15 text-pb-error hover:bg-pb-error/25";
+      }
+      if (this.activitySpinnerCount > 0) {
+        return "bg-pb-interactive/15 text-pb-interactive hover:bg-pb-interactive/25";
+      }
+      if (this.activityHasRecentSuccess()) {
+        return "bg-pb-success/15 text-pb-success hover:bg-pb-success/25";
+      }
+      return "text-pb-text-sec hover:bg-pb-card-hover hover:text-pb-text";
+    },
+
+    activityOverallIndeterminate: function (operation) {
+      return !operation || !operation.overall || operation.overall.indeterminate === true;
+    },
+
+    activityItemIndeterminate: function (operation) {
+      return (
+        !operation ||
+        !operation.item ||
+        operation.item.indeterminate === true
+      );
+    },
+
+    activityOverallPercent: function (operation) {
+      var value = Number(operation && operation.overall && operation.overall.percent);
+      return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+    },
+
+    activityItemPercent: function (operation) {
+      var value = Number(operation && operation.item && operation.item.percent);
+      return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+    },
+
+    activityFormatMeasure: function (measure) {
+      if (!measure) {
+        return "";
+      }
+      var current = Number(measure.current);
+      var total = Number(measure.total);
+      var hasCurrent = measure.current != null && Number.isFinite(current);
+      var hasTotal = measure.total != null && Number.isFinite(total) && total > 0;
+      if (hasCurrent && hasTotal) {
+        if (
+          measure.unit === "bytes" &&
+          window._pb &&
+          typeof window._pb.formatBytes === "function"
+        ) {
+          return window._pb.formatBytes(current) + " / " + window._pb.formatBytes(total);
+        }
+        return Math.round(current) + " / " + Math.round(total) + (measure.unit ? " " + measure.unit : "");
+      }
+      var percent = Number(measure.percent);
+      if (measure.percent != null && Number.isFinite(percent)) {
+        return Math.round(percent) + "%";
+      }
+      if (hasCurrent) {
+        return Math.round(current) + (measure.unit ? " " + measure.unit : "");
+      }
+      return measure.indeterminate ? "Working" : "";
+    },
+
+    activityOverallLabel: function (operation) {
+      return this.activityFormatMeasure(operation && operation.overall);
+    },
+
+    activityItemLabel: function (operation) {
+      return this.activityFormatMeasure(operation && operation.item);
+    },
+
+    activityItemPhaseLabel: function (operation) {
+      var phase = String(
+        (operation && operation.item && operation.item.phase) ||
+        (operation && operation.phase) ||
+        "Current item",
+      );
+      return phase
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, function (letter) {
+          return letter.toUpperCase();
+        });
+    },
+
+    activityEtaLabel: function (seconds) {
+      if (seconds == null || seconds === "") {
+        return "";
+      }
+      var value = Number(seconds);
+      if (!Number.isFinite(value) || value <= 0) {
+        return "";
+      }
+      if (value < 60) {
+        return Math.max(1, Math.round(value)) + " sec remaining";
+      }
+      if (value < 3600) {
+        return Math.max(1, Math.round(value / 60)) + " min remaining";
+      }
+      var hours = Math.floor(value / 3600);
+      var minutes = Math.round((value % 3600) / 60);
+      return hours + " hr" + (minutes ? " " + minutes + " min" : "") + " remaining";
+    },
+
+    activityRateEtaLabel: function (operation) {
+      if (!operation) {
+        return "";
+      }
+      var parts = [];
+      var rate = Number(operation.rate);
+      if (operation.rate != null && Number.isFinite(rate) && rate >= 0) {
+        if (
+          operation.rate_unit === "bytes_per_second" &&
+          window._pb &&
+          typeof window._pb.formatBytes === "function"
+        ) {
+          parts.push(window._pb.formatBytes(rate) + "/s");
+        } else {
+          parts.push(Math.round(rate) + (operation.rate_unit ? " " + operation.rate_unit : ""));
+        }
+      }
+      var eta = this.activityEtaLabel(operation.eta_seconds);
+      if (eta) {
+        parts.push(eta);
+      }
+      return parts.join(" · ");
     },
 
     sidebarWidth: function () {

@@ -300,6 +300,11 @@ async def run_import_scan_pipeline(
         await session.commit()
 
         if progress_callback:
+            matching_message = (
+                "Resolving local source identities..."
+                if job.source_type == ImportSourceType.FILESYSTEM
+                else "Matching against ComicVine..."
+            )
             await emit_progress(
                 session,
                 job,
@@ -344,7 +349,7 @@ async def run_import_scan_pipeline(
                     status=ImportJobStatus.MATCHING,
                     phase="matching",
                     progress=SCAN_PROGRESS_MATCH_START,
-                    message="Matching against ComicVine...",
+                    message=matching_message,
                     estimated_seconds_remaining=estimate_remaining_seconds(
                         job.scan_started_at,
                         SCAN_PROGRESS_MATCH_START,
@@ -657,6 +662,7 @@ async def _scan_collection_discovered_series(
                         files=pending_files,
                         has_files=discovered.has_files,
                         mylar3_cv_id=discovered.mylar3_cv_id,
+                        folder_cv_id=discovered.folder_cv_id,
                         comicinfo_cv_id=discovered.comicinfo_cv_id,
                         comicinfo_source=discovered.comicinfo_source,
                         diagnostics=dict(discovered.diagnostics),

@@ -1450,8 +1450,18 @@ class TestProgressEvents:
         matching_completed = next(
             event for event in progress_events if event.message == "Matched files in Batman"
         )
+        matched_first = next(
+            event for event in progress_events if event.message == "Matched file 1/2 for Batman"
+        )
+        target_loading = next(
+            event
+            for event in progress_events
+            if event.message == "Loading issue targets for Batman (series 1/1)..."
+        )
 
-        assert matching_started.current_item_progress_pct == 0
+        assert target_loading.current_item_progress_pct == 5
+        assert matching_started.current_item_progress_pct == 50
+        assert matched_first.current_item_progress_pct == 75
         assert matching_completed.progress >= 99
         assert matching_completed.current_item_progress_pct == 100
 

@@ -9,6 +9,8 @@ from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import ImportedFileStatus
 from pullbox.models.issue import IssueType
 from pullbox.services.import_file_match_targets import (
+    PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND,
+    PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
     PROVIDER_ZERO_ISSUE_PLACEHOLDER_KIND,
     PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD,
 )
@@ -98,12 +100,23 @@ def apply_matched_file_outcome(
     imp_file.status = ImportedFileStatus.MATCHED
     imp_file.include_in_import = False
     if (
-        match_candidate.method == PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD
+        match_candidate.method
+        in {
+            PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD,
+            PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
+        }
         and match_candidate.synthetic_issue_type is not None
     ):
+        provisional = match_candidate.method == PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD
         imp_file.diagnostics = {
-            "kind": PROVIDER_ZERO_ISSUE_PLACEHOLDER_KIND,
-            "target_state": "synthetic_issue_target",
+            "kind": (
+                PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND
+                if provisional
+                else PROVIDER_ZERO_ISSUE_PLACEHOLDER_KIND
+            ),
+            "target_state": (
+                "provisional_issue_target" if provisional else "synthetic_issue_target"
+            ),
             "target_series_cv_id": imp_series.user_selected_cv_id or imp_series.cv_id,
             "target_series_title": imp_series.cv_title or imp_series.raw_series_name,
             "target_series_issue_count": imp_series.cv_issue_count,
@@ -111,7 +124,10 @@ def apply_matched_file_outcome(
             "target_issue_type": match_candidate.synthetic_issue_type.value,
             "target_issue_title": match_candidate.target_issue_title,
             "rejection_reason": (
-                "ComicVine has a matching one-shot/special volume but no issue rows yet."
+                "Mylar identifies the series and local issue number; ComicVine metadata "
+                "will hydrate after import."
+                if provisional
+                else "ComicVine has a matching one-shot/special volume but no issue rows yet."
             ),
         }
     else:

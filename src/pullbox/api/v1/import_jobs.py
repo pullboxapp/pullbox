@@ -11,6 +11,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse  # noqa: TC00
 from sqlalchemy.exc import OperationalError
 
 from pullbox.api.deps import AuthenticatedStreamUser, AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.api.v1.import_job_activity import get_active_import_activity_response
 from pullbox.api.v1.import_job_control_actions import (
     allow_safety_blocked_file_once_and_retry_response,
     cancel_import_job_response,
@@ -79,6 +80,7 @@ from pullbox.schemas.import_job import (
     FileMetadataRepairRequest,
     FileSelectionBulkUpdateRequest,
     FileSelectionUpdateRequest,
+    ImportActivityRead,
     ImportedFileRead,
     ImportedFilesResponse,
     ImportedSeriesRead,
@@ -202,6 +204,15 @@ router.include_router(orphaned_router)
 
 
 # ── Job Detail & Preview ─────────────────────────────────────────────
+
+
+@router.get("/active", response_model=ImportActivityRead)
+async def get_active_import_activity(
+    _user: AuthenticatedUser,
+    session: DbSession,
+) -> ImportActivityRead:
+    """Return background import activity for the persistent app header."""
+    return await get_active_import_activity_response(session)
 
 
 @router.get("/{job_id}", response_model=ImportJobRead)

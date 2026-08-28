@@ -10,16 +10,28 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
 from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+from pullbox.models.operation_progress import (
+    OperationProgress,
+    OperationProgressState,
+    OperationProgressType,
+)
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_service import RunImportResult
+from pullbox.services.operation_progress import (
+    OperationProgressMeasure,
+    OperationProgressUpdate,
+    publish_operation_progress,
+)
 from pullbox.tasks.import_task import (
     ImportRunner,
     _build_import_service,
+    _emit_terminal_event_for_job,
     _publish_progress_event,
     _review_rematch_locks,
     get_highest_visible_progress_revision,
@@ -780,6 +792,125 @@ class TestRunImportExecuteTask:
         assert job.progress_snapshot["current_file_stage"] is None
         assert job.progress_snapshot["control_state"]["can_pause"] is False
         assert "control_state" in job.progress_snapshot
+
+    @pytest.mark.asyncio
+    async def test_execute_task_projects_completed_terminal_state_to_global_activity(
+        self, db_session: AsyncSession
+    ) -> None:
+        """A completed import must stop the global spinner at 100 percent."""
+        job = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        job.progress_revision = 7
+        job.progress_snapshot = {
+            "status": ImportJobStatus.IMPORTING.value,
+            "mode": "import",
+            "phase": "importing",
+            "progress": 64,
+            "progress_revision": 7,
+            "message": "Processing file 2/5 in review group 8/25",
+        }
+        await publish_operation_progress(
+            db_session,
+            OperationProgressUpdate(
+                operation_type=OperationProgressType.IMPORT,
+                operation_key=str(job.id),
+                revision=7,
+                state=OperationProgressState.RUNNING,
+                phase="importing",
+                title="Folder import",
+                message="Processing file 2/5 in review group 8/25",
+                overall=OperationProgressMeasure(percent=64),
+            ),
+        )
+        await db_session.commit()
+
+        mock_service = AsyncMock()
+
+        async def complete_import(session, job_id, progress_callback=None):
+            import_job = await session.get(ImportJob, job_id)
+            assert import_job is not None
+            import_job.status = ImportJobStatus.COMPLETED
+            import_job.total_files_imported = 1
+            await session.flush()
+
+        mock_service.run_import.side_effect = complete_import
+
+        @asynccontextmanager
+        async def mock_session_ctx():
+            yield db_session
+
+        with (
+            patch("pullbox.tasks.import_task.get_session_factory") as mock_factory,
+            patch(
+                "pullbox.tasks.import_task._build_import_service",
+                return_value=mock_service,
+            ),
+        ):
+            mock_factory.return_value = mock_session_ctx
+            await run_import_execute_task(job.id)
+
+        operation = (
+            await db_session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.IMPORT,
+                    OperationProgress.operation_key == str(job.id),
+                )
+            )
+        ).scalar_one()
+        await db_session.refresh(job)
+
+        assert operation.state is OperationProgressState.COMPLETED
+        assert operation.revision == job.progress_revision
+        assert operation.overall_percent == 100
+        assert operation.overall_indeterminate is False
+        assert operation.completed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_rollback_terminal_event_stops_global_activity_spinner(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Rollback completion must replace its last running activity revision."""
+        job = await _create_job(db_session, status=ImportJobStatus.ROLLED_BACK)
+        job.progress_revision = 18
+        job.progress_snapshot = {
+            "status": ImportJobStatus.ROLLED_BACK.value,
+            "mode": "rollback",
+            "phase": "rollback",
+            "progress": 100,
+            "progress_revision": 18,
+            "message": "Import rollback completed.",
+        }
+        await publish_operation_progress(
+            db_session,
+            OperationProgressUpdate(
+                operation_type=OperationProgressType.IMPORT,
+                operation_key=str(job.id),
+                revision=17,
+                state=OperationProgressState.RUNNING,
+                phase="rollback",
+                title="Folder import",
+                message="Rolling back 376/376 actions...",
+                overall=OperationProgressMeasure(percent=100),
+            ),
+        )
+        await db_session.commit()
+
+        with patch("pullbox.tasks.import_task.publish", new_callable=AsyncMock):
+            terminal_status = await _emit_terminal_event_for_job(db_session, job.id)
+
+        operation = (
+            await db_session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.IMPORT,
+                    OperationProgress.operation_key == str(job.id),
+                )
+            )
+        ).scalar_one()
+
+        assert terminal_status is ImportJobStatus.ROLLED_BACK
+        assert operation.state is OperationProgressState.COMPLETED
+        assert operation.phase == "rollback"
+        assert operation.overall_percent == 100
+        assert operation.completed_at is not None
 
 
 # ── Test: Startup Recovery ───────────────────────────────────────────────

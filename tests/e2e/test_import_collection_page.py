@@ -970,6 +970,113 @@ class TestImportCollectionTab:
 
         assert requests == [("DELETE", f"{seeded_server}/api/v1/import/{review_job_id}")]
 
+    @pytest.mark.parametrize("terminal_response", ["cancelled", "missing"])
+    def test_import_collection_active_cancel_waits_for_terminal_state_before_reset(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+        terminal_response: str,
+    ) -> None:
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="history")
+        matching_job_id = self._active_matching_job_id(authed_page)
+
+        assert matching_job_id is not None
+
+        state = {"cancel_requested": False, "terminal": False}
+        cancel_requests: list[str] = []
+
+        def progress_snapshot(*, terminal: bool) -> dict[str, object]:
+            status = "cancelled" if terminal else "matching"
+            return {
+                "job_id": matching_job_id,
+                "status": status,
+                "mode": "scan",
+                "phase": "done" if terminal else "matching",
+                "progress": 100 if terminal else 64,
+                "message": (
+                    "Import cancelled by user."
+                    if terminal
+                    else "Finishing the current safe step before cancelling."
+                ),
+                "control_state": {
+                    "can_pause": not state["cancel_requested"],
+                    "can_resume": False,
+                    "can_cancel": not state["cancel_requested"],
+                    "requested_action": "cancel" if state["cancel_requested"] else "none",
+                },
+            }
+
+        def fulfill_progress_state(route) -> None:  # type: ignore[no-untyped-def]
+            if state["terminal"] and terminal_response == "missing":
+                route.fulfill(
+                    status=404,
+                    content_type="application/json",
+                    body='{"detail":"Import job not found"}',
+                )
+                return
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(progress_snapshot(terminal=state["terminal"])),
+            )
+
+        def fulfill_cancel_request(route) -> None:  # type: ignore[no-untyped-def]
+            cancel_requests.append(route.request.url)
+            state["cancel_requested"] = True
+            snapshot = progress_snapshot(terminal=False)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "id": matching_job_id,
+                        "status": "matching",
+                        "progress_snapshot": snapshot,
+                    }
+                ),
+            )
+
+        authed_page.route("**/api/v1/import/*/stream", lambda route: route.abort())
+        authed_page.route(
+            f"**/import/{matching_job_id}/progress-state",
+            fulfill_progress_state,
+        )
+        authed_page.route(
+            f"**/api/v1/import/{matching_job_id}/cancel",
+            fulfill_cancel_request,
+        )
+        authed_page.goto(
+            f"{seeded_server}/import?tab=collection&resume_job_id={matching_job_id}&resume_step=2",
+            wait_until="domcontentloaded",
+        )
+        import_page.progress_panel.wait_for(state="visible", timeout=5000)
+        import_page.progress_cancel_run_button.wait_for(state="visible", timeout=5000)
+        authed_page.evaluate("() => { window.pbConfirm = async () => true; }")
+
+        import_page.progress_cancel_run_button.click()
+        authed_page.wait_for_function(
+            """() => {
+                const button = document.querySelector("[data-testid='import-progress-cancel-run']");
+                return !!button && button.disabled && button.textContent.includes("Cancelling");
+            }""",
+            timeout=5000,
+        )
+
+        assert "resume_job_id" in authed_page.url
+        assert len(cancel_requests) == 1
+
+        authed_page.evaluate(
+            """() => {
+                document.querySelector("[data-testid='import-progress-cancel-run']").click();
+            }"""
+        )
+        authed_page.wait_for_timeout(200)
+        assert len(cancel_requests) == 1
+
+        state["terminal"] = True
+        authed_page.wait_for_url(re.compile(r"/import\?tab=collection$"), timeout=5000)
+
     def test_import_collection_progress_log_viewer_renders_entries(
         self,
         authed_page,

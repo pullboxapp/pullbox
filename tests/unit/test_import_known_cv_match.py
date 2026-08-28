@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pullbox.core.source_metadata import SourceMetadata
+from pullbox.core.source_metadata import MetadataSignal, SourceMetadata
 from pullbox.providers.base import SeriesMetadata
 from pullbox.services.import_known_cv_match import (
     known_cv_id_evaluation_from_source,
@@ -39,9 +39,28 @@ def test_trusted_known_cv_id_accepts_mylar_and_explicit_volume_urls() -> None:
             original_title="Batman.cbz",
             series_name="Batman",
             comicvine_series_id=97508,
+            signals={"comicvine_series_id": MetadataSignal.COMICINFO},
             diagnostics={"comicvine_series_id_source": "comicvine_volume_url"},
         ),
     )
+
+
+def test_trusted_known_cv_id_accepts_structured_notes_and_sidecars() -> None:
+    for signal, source in (
+        (MetadataSignal.COMICINFO, "comicvine_note_id"),
+        (MetadataSignal.SIDECAR, "sidecar"),
+    ):
+        assert trusted_known_cv_id_without_fetch(
+            mylar3_cv_id=None,
+            comicinfo_cv_id=97508,
+            source_metadata=SourceMetadata(
+                original_title="Batman.cbz",
+                series_name="Batman",
+                comicvine_series_id=97508,
+                signals={"comicvine_series_id": signal},
+                diagnostics={"comicvine_series_id_source": source},
+            ),
+        )
 
 
 def test_trusted_known_cv_id_rejects_loose_comicinfo_ids() -> None:
@@ -49,6 +68,29 @@ def test_trusted_known_cv_id_rejects_loose_comicinfo_ids() -> None:
         mylar3_cv_id=None,
         comicinfo_cv_id=97508,
         source_metadata=SourceMetadata(original_title="Batman.cbz", series_name="Batman"),
+    )
+
+
+def test_trusted_known_cv_id_rejects_conflicting_explicit_ids() -> None:
+    assert not trusted_known_cv_id_without_fetch(
+        mylar3_cv_id=None,
+        comicinfo_cv_id=97508,
+        source_metadata=SourceMetadata(
+            original_title="Batman.cbz",
+            series_name="Batman",
+            comicvine_series_id=97508,
+            signals={"comicvine_series_id": MetadataSignal.SIDECAR},
+            diagnostics={
+                "comicvine_series_id_source": "sidecar",
+                "identity_conflicts": [
+                    {
+                        "field": "comicvine_series_id",
+                        "comicinfo": 97508,
+                        "sidecar": 12345,
+                    }
+                ],
+            },
+        ),
     )
 
 

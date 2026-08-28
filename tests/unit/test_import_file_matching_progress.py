@@ -21,6 +21,12 @@ from pullbox.services.import_file_matching_progress import (
     build_file_matching_progress_emitter,
     load_file_match_target_index_with_progress,
 )
+from pullbox.services.import_progress_runtime import (
+    ScanReviewFileMatchProfile,
+    ScanReviewSeriesMatchProfile,
+    scan_review_completed_weight,
+    scan_review_progress_plan,
+)
 
 if TYPE_CHECKING:
     from pullbox.schemas.import_job import ImportProgressEvent
@@ -186,6 +192,73 @@ async def test_file_matching_progress_eta_uses_total_work_units() -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_matching_display_progress_does_not_precredit_next_work_unit() -> None:
+    persisted_events: list[ImportProgressEvent] = []
+    work_eta_calls: list[dict[str, Any]] = []
+    plan = scan_review_progress_plan(
+        analysis_series_count=1,
+        series_match_profiles=[ScanReviewSeriesMatchProfile(file_count=2)],
+        file_match_profiles=[ScanReviewFileMatchProfile(file_count=2, issue_count=12)],
+    )
+
+    async def emit_progress(
+        _session: object,
+        _job: ImportJob,
+        event: ImportProgressEvent,
+        _callback: object,
+    ) -> None:
+        persisted_events.append(event)
+
+    def estimate_remaining_work_seconds(
+        _started_at: datetime | None,
+        *,
+        completed_units: int | float,
+        total_units: int | float,
+        current_unit_progress_pct: int | float | None = None,
+    ) -> int:
+        work_eta_calls.append(
+            {
+                "completed_units": completed_units,
+                "total_units": total_units,
+                "current_unit_progress_pct": current_unit_progress_pct,
+            }
+        )
+        return 123
+
+    emitter = build_file_matching_progress_emitter(
+        session=object(),
+        job=_job(),
+        progress_callback=object(),
+        emit_progress=emit_progress,
+        emit_live_progress=lambda *_args, **_kwargs: None,
+        phase_progress=lambda *_args: 91,
+        estimate_remaining_seconds=lambda *_args: 12,
+        estimate_remaining_work_seconds=estimate_remaining_work_seconds,
+        job_stats=lambda _job: {},
+        total_file_phase_units=3,
+        revision_state={"value": 10},
+        scan_review_plan=plan,
+    )
+
+    await emitter(
+        _series(),
+        2,
+        message="Matched file 1/2 for Batman",
+        current_item_progress_pct=75,
+        current_work_unit_progress_pct=0,
+    )
+
+    expected_completed_weight = scan_review_completed_weight(
+        plan,
+        phase="file_matching",
+        completed_items=2,
+        current_item_progress_pct=0,
+    )
+    assert persisted_events[0].current_item_progress_pct == 75
+    assert work_eta_calls[0]["completed_units"] == expected_completed_weight
+
+
+@pytest.mark.asyncio
 async def test_file_matching_progress_emitter_sends_live_event() -> None:
     persisted_events: list[dict[str, Any]] = []
     live_events: list[dict[str, Any]] = []
@@ -330,12 +403,58 @@ async def test_load_file_match_target_index_with_progress_emits_heartbeat() -> N
     assert events[0]["kwargs"] == {
         "message": "Loading issue targets for Batman (series 1/1)...",
         "current_item_stage": "file_matching",
+        "current_item_progress_pct": 5,
+        "current_work_unit_progress_pct": 0,
     }
     assert events[1]["kwargs"]["message"].startswith(
         "Still loading issue targets for Batman (1s elapsed)..."
     )
     assert events[1]["kwargs"]["current_item_progress_pct"] == 15
+    assert events[1]["kwargs"]["current_work_unit_progress_pct"] == 15
     assert events[1]["kwargs"]["live_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_load_file_match_target_index_emits_start_for_existing_series() -> None:
+    target_index = object()
+    events: list[dict[str, Any]] = []
+    series = _series()
+    series.series_id = 99
+
+    async def load_file_match_target_index(*_args: Any, **_kwargs: Any) -> object:
+        return target_index
+
+    async def emit_file_matching_progress(*args: Any, **kwargs: Any) -> None:
+        events.append({"args": args, "kwargs": kwargs})
+
+    result = await load_file_match_target_index_with_progress(
+        session=object(),
+        job_id=42,
+        item=series,
+        files_to_match=[],
+        duplicate_series=False,
+        metadata_provider=None,
+        series_idx=2,
+        total_series=4,
+        completed_units=7,
+        progress_callback=object(),
+        emit_file_matching_progress=emit_file_matching_progress,
+        raise_if_cancelled=lambda *_args: None,
+        load_file_match_target_index=load_file_match_target_index,
+    )
+
+    assert result is target_index
+    assert events == [
+        {
+            "args": (series, 7),
+            "kwargs": {
+                "message": "Loading issue targets for Batman (series 3/4)...",
+                "current_item_stage": "file_matching",
+                "current_item_progress_pct": 5,
+                "current_work_unit_progress_pct": 0,
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

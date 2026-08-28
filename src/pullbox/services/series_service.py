@@ -16,6 +16,7 @@ from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.library_policy import load_library_naming_policy
 from pullbox.core.naming import format_series_folder
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
+from pullbox.models.import_job import ImportJob, ImportSourceType
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.models.series import (
@@ -26,7 +27,11 @@ from pullbox.models.series import (
     SeriesType,
 )
 from pullbox.providers.base import IssueSummary, SeriesMetadata
-from pullbox.services.cover_cache_service import purge_series_cover_cache
+from pullbox.services.cover_cache_service import (
+    cache_imported_series_cover,
+    find_imported_series_cover,
+    purge_series_cover_cache,
+)
 from pullbox.services.series_delete_targets import (
     SeriesDeleteContext as SeriesDeleteContext,
 )
@@ -212,6 +217,18 @@ class SeriesService:
                 cv_id,
                 folder_series_type=_targeted_import_folder_type_hint(series, issue_summaries),
             )
+
+        local_cover = (
+            find_imported_series_cover(Path(import_series.source_folder))
+            if import_series.source_folder
+            else None
+        )
+        if local_cover is not None:
+            source_type = await session.scalar(
+                select(ImportJob.source_type).where(ImportJob.id == import_series.import_job_id)
+            )
+            if source_type == ImportSourceType.MYLAR3:
+                await cache_imported_series_cover(session, series, local_cover)
 
         if issue_summaries:
             await self._metadata.upsert_issue_summaries(session, series, issue_summaries)

@@ -62,6 +62,16 @@ def _metadata_signals(raw_signals: object) -> dict[str, MetadataSignal]:
     return signals
 
 
+def _optional_int(value: object) -> int | None:
+    """Return an integer metadata identifier when one was persisted."""
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _has_deferred_archive_metadata(raw_source_metadata: object) -> bool:
     """Return whether scan intentionally deferred archive ComicInfo loading."""
     return bool(
@@ -348,6 +358,8 @@ def import_file_has_deferred_archive_metadata(imp_file: ImportedFile) -> bool:
 async def load_deferred_source_metadata_for_import_file(
     imp_series: ImportedSeries,
     imp_file: ImportedFile,
+    *,
+    include_archive_entry_issue_hint: bool = True,
 ) -> SourceMetadata:
     """Load archive metadata on demand for a deferred import file."""
     base_metadata = source_metadata_for_import_file(imp_series, imp_file)
@@ -357,6 +369,7 @@ async def load_deferred_source_metadata_for_import_file(
     loaded_metadata = await asyncio.to_thread(
         SourceMetadataExtractor().from_archive_path,
         imp_file.file_path,
+        include_archive_entry_issue_hint=include_archive_entry_issue_hint,
     )
     update: dict[str, object] = {}
     if loaded_metadata.series_name is None and base_metadata.series_name is not None:
@@ -371,6 +384,15 @@ async def load_deferred_source_metadata_for_import_file(
 def source_metadata_for_import_series(imp_series: ImportedSeries) -> SourceMetadata:
     """Build shared semantic metadata from persisted import series scan fields."""
     diagnostics = dict(imp_series.diagnostics or {})
+    direct_identity_signals = {
+        "mylar3_cv_id": MetadataSignal.MYLAR3,
+        "comicinfo_cv_id": MetadataSignal.COMICINFO,
+        "folder_cv_id": MetadataSignal.PULLBOX_FOLDER,
+    }
+    identity_signal = direct_identity_signals.get(imp_series.cv_match_method or "")
+    source_diagnostics: dict[str, object] = {"file_count": imp_series.file_count}
+    if identity_signal == MetadataSignal.PULLBOX_FOLDER:
+        source_diagnostics["comicvine_series_id_source"] = "pullbox_folder_name"
     return SourceMetadata(
         original_title=imp_series.raw_series_name,
         source_path=imp_series.source_folder,
@@ -378,10 +400,9 @@ def source_metadata_for_import_series(imp_series: ImportedSeries) -> SourceMetad
         year=imp_series.raw_year,
         issue_type=_source_issue_type(diagnostics.get("source_issue_type")),
         comicvine_series_id=(
-            imp_series.cv_id
-            if imp_series.cv_match_method in {"mylar3_cv_id", "comicinfo_cv_id"}
-            else None
+            imp_series.cv_id if imp_series.cv_match_method in direct_identity_signals else None
         ),
+        signals=({"comicvine_series_id": identity_signal} if identity_signal is not None else {}),
         series_status=(
             str(diagnostics["series_status"])
             if diagnostics.get("series_status") is not None
@@ -392,9 +413,7 @@ def source_metadata_for_import_series(imp_series: ImportedSeries) -> SourceMetad
             if diagnostics.get("issue_count_hint") is not None
             else None
         ),
-        diagnostics={
-            "file_count": imp_series.file_count,
-        },
+        diagnostics=source_diagnostics,
     )
 
 
@@ -403,6 +422,7 @@ async def source_metadata_for_matching_series(
     imp_series: ImportedSeries,
     *,
     load_deferred_archive_metadata: bool = False,
+    trusted_identity_probe_limit: int = 0,
 ) -> SourceMetadata:
     """Augment persisted series metadata with alternate filename-derived identities."""
     metadata = source_metadata_for_import_series(imp_series)
@@ -427,19 +447,112 @@ async def source_metadata_for_matching_series(
     )
     clean_one_shot_series_names: list[str] = []
     inferred_issue_types: list[IssueType] = []
+    trusted_series_id = metadata.comicvine_series_id
+    trusted_series_id_signal = metadata.signals.get("comicvine_series_id")
+    trusted_series_id_source = metadata.diagnostics.get("comicvine_series_id_source")
+    identity_conflicts: list[dict[str, object]] = []
+    probed_archive_count = 0
     for imp_file in files:
         file_diagnostics = dict(imp_file.diagnostics or {})
         file_signals = _metadata_signals(file_diagnostics.get("metadata_signals"))
+        persisted_source_metadata = file_diagnostics.get("source_metadata")
+        persisted_source_metadata = (
+            persisted_source_metadata if isinstance(persisted_source_metadata, dict) else {}
+        )
+        persisted_conflicts = persisted_source_metadata.get("identity_conflicts")
+        if isinstance(persisted_conflicts, list):
+            for conflict in persisted_conflicts:
+                if isinstance(conflict, dict) and conflict not in identity_conflicts:
+                    identity_conflicts.append(dict(conflict))
+        persisted_series_id = _optional_int(file_diagnostics.get("comicvine_series_id"))
+        persisted_series_signal = file_signals.get("comicvine_series_id")
+        if persisted_series_id is not None and persisted_series_signal in {
+            MetadataSignal.COMICINFO,
+            MetadataSignal.SIDECAR,
+        }:
+            if trusted_series_id is not None and trusted_series_id != persisted_series_id:
+                conflict = {
+                    "field": "comicvine_series_id",
+                    "first": trusted_series_id,
+                    "conflicting": persisted_series_id,
+                }
+                if conflict not in identity_conflicts:
+                    identity_conflicts.append(conflict)
+            else:
+                trusted_series_id = persisted_series_id
+                trusted_series_id_signal = persisted_series_signal
+                trusted_series_id_source = (
+                    persisted_source_metadata.get("comicvine_series_id_source")
+                    or persisted_series_signal.value
+                )
         archive_metadata: SourceMetadata | None = None
-        if (
-            load_deferred_archive_metadata
-            and imp_file.status != ImportedFileStatus.SAFETY_BLOCKED
-            and _has_deferred_archive_metadata(file_diagnostics.get("source_metadata"))
-        ):
-            archive_metadata = await asyncio.to_thread(
-                extractor.from_archive_path,
-                imp_file.file_path,
+        has_deferred_archive_metadata = _has_deferred_archive_metadata(
+            file_diagnostics.get("source_metadata")
+        )
+        should_probe_trusted_identity = (
+            probed_archive_count < trusted_identity_probe_limit
+            and has_deferred_archive_metadata
+            and (
+                trusted_series_id is None
+                or (
+                    trusted_series_id_signal
+                    in {MetadataSignal.SIDECAR, MetadataSignal.PULLBOX_FOLDER}
+                    and probed_archive_count == 0
+                )
             )
+        )
+        if (
+            imp_file.status != ImportedFileStatus.SAFETY_BLOCKED
+            and has_deferred_archive_metadata
+            and (load_deferred_archive_metadata or should_probe_trusted_identity)
+        ):
+            archive_metadata = await load_deferred_source_metadata_for_import_file(
+                imp_series,
+                imp_file,
+                include_archive_entry_issue_hint=load_deferred_archive_metadata,
+            )
+            if should_probe_trusted_identity:
+                probed_archive_count += 1
+
+            if archive_metadata.comicvine_series_id is not None:
+                refreshed_diagnostics = dict(imp_file.diagnostics or {})
+                refreshed_diagnostics.update(
+                    sync_import_file_source_metadata(
+                        imp_file,
+                        Path(imp_file.file_path),
+                        archive_metadata,
+                    )
+                )
+                imp_file.diagnostics = refreshed_diagnostics
+                file_diagnostics = refreshed_diagnostics
+                file_signals = _metadata_signals(file_diagnostics.get("metadata_signals"))
+
+            archive_conflicts = archive_metadata.diagnostics.get("identity_conflicts")
+            if isinstance(archive_conflicts, list):
+                for conflict in archive_conflicts:
+                    if isinstance(conflict, dict) and conflict not in identity_conflicts:
+                        identity_conflicts.append(dict(conflict))
+            archive_series_id = archive_metadata.comicvine_series_id
+            archive_series_signal = archive_metadata.signals.get("comicvine_series_id")
+            if archive_series_id is not None and archive_series_signal in {
+                MetadataSignal.COMICINFO,
+                MetadataSignal.SIDECAR,
+            }:
+                if trusted_series_id is not None and trusted_series_id != archive_series_id:
+                    conflict = {
+                        "field": "comicvine_series_id",
+                        "first": trusted_series_id,
+                        "conflicting": archive_series_id,
+                    }
+                    if conflict not in identity_conflicts:
+                        identity_conflicts.append(conflict)
+                else:
+                    trusted_series_id = archive_series_id
+                    trusted_series_id_signal = archive_series_signal
+                    trusted_series_id_source = (
+                        archive_metadata.diagnostics.get("comicvine_series_id_source")
+                        or archive_series_signal.value
+                    )
         if imp_file.parsed_issue_number is not None:
             issue_numbers.append(float(imp_file.parsed_issue_number))
         elif archive_metadata is not None and archive_metadata.issue_number is not None:
@@ -609,6 +722,10 @@ async def source_metadata_for_matching_series(
         diagnostics["volume_subtitle_hint"] = next(iter(volume_subtitle_hints.values()))
     if issue_numbers:
         diagnostics["issue_numbers"] = sorted(set(issue_numbers))
+    if trusted_series_id_source is not None:
+        diagnostics["comicvine_series_id_source"] = trusted_series_id_source
+    if identity_conflicts:
+        diagnostics["identity_conflicts"] = identity_conflicts
 
     metadata_update: dict[str, object] = {}
     if signals != metadata.signals:
@@ -617,6 +734,11 @@ async def source_metadata_for_matching_series(
         metadata_update["diagnostics"] = diagnostics
     if metadata.issue_number is None and issue_numbers:
         metadata_update["issue_number"] = sorted(issue_numbers)[0]
+    if trusted_series_id is not None and not identity_conflicts:
+        metadata_update["comicvine_series_id"] = trusted_series_id
+        if trusted_series_id_signal is not None:
+            signals["comicvine_series_id"] = trusted_series_id_signal
+            metadata_update["signals"] = signals
     if len(clean_one_shot_series_names) == 1:
         metadata_update["series_name"] = clean_one_shot_series_names[0]
     if metadata.issue_type == IssueType.ISSUE and len(inferred_issue_types) == 1:
@@ -762,6 +884,7 @@ def sync_import_file_source_metadata(
 
     return {
         "source_issue_type": metadata.issue_type.value,
+        "comicvine_series_id": metadata.comicvine_series_id,
         "metadata_signals": metadata_signals,
         "source_metadata": source_metadata,
     }

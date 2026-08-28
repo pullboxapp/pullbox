@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from pullbox.models.import_job import ImportSourceType
 from pullbox.services.import_counters import (
     recompute_file_counters as recompute_import_file_counters,
 )
@@ -212,6 +213,8 @@ else:
 
 logger = structlog.get_logger(__name__)
 
+_TRUSTED_FOLDER_IDENTITY_PROBE_LIMIT = 3
+
 
 class ImportServiceMatchingMixin:
     """Mixin for Step 2 series matching, file matching, and conflict detection."""
@@ -229,7 +232,13 @@ class ImportServiceMatchingMixin:
         load_deferred_source_metadata_for_import_file
     )
     _source_metadata_for_import_series = staticmethod(source_metadata_for_import_series)
-    _source_metadata_for_matching_series = staticmethod(source_metadata_for_matching_series)
+    _source_metadata_for_matching_series = staticmethod(
+        lambda session, imp_series: source_metadata_for_matching_series(
+            session,
+            imp_series,
+            trusted_identity_probe_limit=_TRUSTED_FOLDER_IDENTITY_PROBE_LIMIT,
+        )
+    )
     _load_deferred_source_metadata_for_matching_series = staticmethod(
         lambda session, imp_series: source_metadata_for_matching_series(
             session,
@@ -430,6 +439,7 @@ class ImportServiceMatchingMixin:
             estimate_remaining_seconds=self._estimate_remaining_seconds,
             job_stats=self._job_stats,
             maybe_slow_item_delay=self._maybe_slow_item_delay,
+            provider_free_filesystem=job.source_type == ImportSourceType.FILESYSTEM,
             estimate_remaining_work_seconds=estimate_remaining_work_seconds,
             progress_callback=progress_callback,
         )

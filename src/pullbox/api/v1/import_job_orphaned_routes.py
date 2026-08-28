@@ -18,6 +18,9 @@ from pullbox.schemas.import_job import (
     RecoverOrphanRequest,
     RecoverOrphanResponse,
 )
+from pullbox.services.secondary_operation_progress import (
+    project_orphan_recovery_operation_progress,
+)
 from pullbox.tasks.import_orphan_recovery_task import (
     get_orphan_recovery_progress_state,
     start_orphan_recovery_run,
@@ -152,9 +155,13 @@ async def start_orphan_recovery(
     imported_series_id: int,
     _user: AuthenticatedUser,
     body: RecoverOrphanRequest,
+    session: DbSession,
 ) -> OrphanRecoveryProgressResponse:
     """Start a background orphan recovery run and return its initial progress state."""
-    return await start_orphan_recovery_run(imported_series_id, body)
+    progress = await start_orphan_recovery_run(imported_series_id, body)
+    await project_orphan_recovery_operation_progress(session, progress)
+    await session.commit()
+    return progress
 
 
 @router.get(
@@ -164,10 +171,13 @@ async def start_orphan_recovery(
 async def get_orphan_recovery_progress(
     imported_series_id: int,
     _user: AuthenticatedUser,
+    session: DbSession,
 ) -> OrphanRecoveryProgressResponse:
     """Return the latest live progress snapshot for an orphan recovery run."""
     progress = get_orphan_recovery_progress_state(imported_series_id)
     if progress is not None:
+        await project_orphan_recovery_operation_progress(session, progress)
+        await session.commit()
         return progress
     return OrphanRecoveryProgressResponse(
         imported_series_id=imported_series_id,

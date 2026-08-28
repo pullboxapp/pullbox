@@ -19,6 +19,23 @@ ALLOWED_SYNC_CHANGES = {VERSION_FILE}
 SYNC_BRANCH_PREFIX = "feature/sync-develop-"
 VERSION_RE = re.compile(r'^__version__ = "([^"]+)"$', re.MULTILINE)
 RELEASE_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+GIT_REPOSITORY_ENV_VARS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+}
 
 
 @dataclass(frozen=True)
@@ -72,10 +89,14 @@ def version_bump_is_release_sync(main_text: str, head_text: str) -> ValidationRe
 
 
 def _run_git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    for key in GIT_REPOSITORY_ENV_VARS:
+        env.pop(key, None)
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
         check=check,
+        env=env,
         text=True,
         capture_output=True,
     )

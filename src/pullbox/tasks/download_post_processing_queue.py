@@ -16,11 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pullbox.database import get_session_factory
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
+from pullbox.services.post_processing_operation_progress import (
+    project_post_processing_operation_progress,
+)
 from pullbox.tasks.post_processing_progress import (
     PostProcessingPhase,
     _clear_post_processing,
     _mark_post_processing_complete,
     _set_post_processing_phase,
+    get_all_post_processing_progress,
 )
 
 if TYPE_CHECKING:
@@ -170,6 +174,11 @@ async def process_completed(
                         download.post_processing_claim_token = None
                         download.post_processing_claimed_at = None
                         _mark_post_processing_complete(dl_id)
+                        await project_post_processing_operation_progress(
+                            session,
+                            download,
+                            get_all_post_processing_progress().get(dl_id),
+                        )
                         processed += 1
                         log.info(
                             "post_processing_handoff_complete",
@@ -206,6 +215,11 @@ async def process_completed(
                                     issue = await err_session.get(Issue, dl.issue_id)
                                     if issue and issue.status == IssueStatus.DOWNLOADING:
                                         issue.status = IssueStatus.WANTED
+
+                                    await project_post_processing_operation_progress(
+                                        err_session,
+                                        dl,
+                                    )
 
                                 await err_session.commit()
                             except Exception:

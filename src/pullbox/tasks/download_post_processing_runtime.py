@@ -23,11 +23,14 @@ class PostProcessingRuntime:
     log: Any
     summary_logger: Any
     set_phase: Callable[[int, PostProcessingPhase], None]
+    publish_phase: Callable[[Any, PostProcessingPhase], None] | None = None
 
     def enter_phase(self, phase: PostProcessingPhase) -> None:
         """Enter a phase and update the live post-processing progress snapshot."""
         self.trace.enter_phase(phase)
         self.set_phase(self.download.id, phase)
+        if self.publish_phase is not None:
+            self.publish_phase(self.download, phase)
         self.log.debug(
             "post_processing_phase_entered",
             download_id=self.download.id,

@@ -130,7 +130,100 @@ async def sync_direct_download_history(
     elif attempt.state is DirectAcquisitionState.FAILED:
         history.completed_at = at
     await _sync_issue_status(session, attempt)
+    from pullbox.services.download_operation_progress import (
+        project_download_operation_progress,
+    )
+
+    await project_download_operation_progress(
+        session,
+        history,
+        _shared_progress_snapshot(attempt, artifact),
+    )
     return history
+
+
+def _shared_progress_snapshot(
+    attempt: DirectAcquisitionAttempt,
+    artifact: DirectArtifactAttempt,
+) -> dict[str, object]:
+    snapshot = dict(attempt.progress_snapshot or {})
+    raw_percent = snapshot.get("percent")
+    percent = (
+        max(0.0, min(float(raw_percent) / 100, 1.0))
+        if isinstance(raw_percent, int | float)
+        else None
+    )
+    host_kind = str(snapshot.get("host_kind") or artifact.host_kind.value)
+    return {
+        "progress": percent,
+        "speed_bytes": snapshot.get("bytes_per_second"),
+        "eta_seconds": snapshot.get("eta_seconds"),
+        "size_bytes": snapshot.get("total_bytes") or artifact.expected_size,
+        "bytes_transferred": snapshot.get("bytes_transferred"),
+        "client_state": _direct_progress_label(snapshot, host_kind),
+        "source_label": _direct_source_label(attempt.provider_identity, host_kind),
+        "is_indeterminate": percent is None,
+        "source_slow": snapshot.get("source_slow") is True,
+    }
+
+
+def _direct_progress_label(snapshot: dict[str, object], host_kind: str) -> str:
+    stage = str(snapshot.get("stage") or "direct")
+    host_label = _direct_host_label(host_kind)
+    if stage == "provider_queue":
+        provider_name = snapshot.get("provider_name")
+        if isinstance(provider_name, str) and provider_name.strip():
+            return f"Queued for {provider_name.strip()}"
+        return "Queued for direct provider"
+    if stage == "resolver":
+        resolver_name = str(snapshot.get("resolver_name") or "browser resolver").strip()
+        resolver_kind = snapshot.get("resolver_kind")
+        resolver_scope = snapshot.get("resolver_scope")
+        attempt = snapshot.get("resolver_attempt")
+        total = snapshot.get("resolver_total")
+        if resolver_kind == "trawl" and resolver_scope == "datanodes":
+            return "Using TRAWL (required by DataNodes)"
+        if isinstance(attempt, int) and isinstance(total, int) and total > 0:
+            return f"Trying {resolver_name} (resolver {attempt} of {total})"
+        return f"Trying {resolver_name}"
+    prefixes = {
+        "fallback_queued": "Trying",
+        "resolving": "Resolving",
+        "downloading": "Downloading from",
+        "validating": "Validating",
+    }
+    prefix = prefixes.get(stage)
+    if prefix and host_label:
+        suffix = " download" if stage == "validating" else ""
+        return f"{prefix} {host_label}{suffix}"
+    return stage.replace("_", " ").capitalize()
+
+
+def _direct_host_label(host_kind: str) -> str:
+    labels = {
+        "mega": "MEGA",
+        "pixeldrain": "PixelDrain",
+        "rootz": "Rootz",
+        "mediafire": "MediaFire",
+        "terabox": "TeraBox",
+        "datanodes": "DataNodes",
+        "generic_https": "HTTPS",
+    }
+    return labels.get(host_kind, host_kind.replace("_", " ").title())
+
+
+def _direct_source_label(provider_identity: str, host_kind: str) -> str:
+    provider_labels = {
+        "pullbox.getcomics": "GetComics",
+        "pullbox.annas_archive": "Anna's Archive",
+        "pullbox.libgen": "Library Genesis",
+    }
+    provider = provider_labels.get(
+        provider_identity,
+        provider_identity.removeprefix("pullbox.").replace("_", " ").title(),
+    )
+    host = _direct_host_label(host_kind)
+    return f"{provider} via {host}" if host else provider
 
 
 async def _sync_issue_status(
