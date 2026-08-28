@@ -225,11 +225,12 @@ _CANCELLABLE_STATES = frozenset(
 
 
 async def _cancel_on_client(download: DownloadHistory, session: DbSession) -> None:
-    """Best-effort cancellation on the download client.
+    """Cancel on the download client before changing local state.
 
     Builds a provider registry, locates the client for the download's type,
-    and calls ``remove_download``. Failures are logged but never raised —
-    the user's intent is to remove the download regardless of client state.
+    and calls ``remove_download``. Legacy clients remain best effort, while
+    AirDC++ cancellation must be confirmed because its exact remote bundle can
+    otherwise continue downloading after Pullbox reports it as cancelled.
     """
     if download.download_client is DownloadClientType.DIRECT:
         attempt_id = _direct_attempt_id(download.external_id)
@@ -277,13 +278,15 @@ async def _cancel_on_client(download: DownloadHistory, session: DbSession) -> No
             else None
         )
         if supervisor is None or supervisor.state is not AirDcppSupervisorState.READY:
-            acquisition.client_state = "cancel_requested"
             logger.warning(
                 "cancel_airdcpp_client_unavailable",
                 download_id=download.id,
                 client_config_id=acquisition.client_config_id,
             )
-            return
+            raise HTTPException(
+                status_code=503,
+                detail="AirDC++ is unavailable; the download was not cancelled.",
+            )
         bundle_id = acquisition.bundle_id
         # Release the route transaction before the external mutation.
         await session.commit()
@@ -291,15 +294,17 @@ async def _cancel_on_client(download: DownloadHistory, session: DbSession) -> No
             await supervisor.api_client.remove_queue_bundle(bundle_id)
         except AirDcppEntityNotFoundError:
             pass
-        except Exception:
-            acquisition.client_state = "cancel_requested"
+        except Exception as exc:
             logger.warning(
                 "cancel_airdcpp_failed",
                 download_id=download.id,
                 client_config_id=acquisition.client_config_id,
                 exc_info=True,
             )
-            return
+            raise HTTPException(
+                status_code=502,
+                detail="AirDC++ could not confirm cancellation; the download remains active.",
+            ) from exc
         acquisition.client_state = "cancelled"
         acquisition.next_retry_at = None
         acquisition.reconciliation_error = None
@@ -613,7 +618,10 @@ async def retry_download(
         return {"status": "sent"}
 
     if download.download_client is DownloadClientType.AIRDCPP:
-        from pullbox.models.airdcpp import AirDcppAcquisition
+        from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry
+        from pullbox.models.airdcpp import AirDcppAcquisition, AirDcppClientSettings
+        from pullbox.providers.airdcpp.errors import AirDcppError
+        from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
 
         acquisition = (
             await session.execute(
@@ -622,12 +630,71 @@ async def retry_download(
                 )
             )
         ).scalar_one_or_none()
-        if acquisition is None or acquisition.bundle_id is None:
+        if acquisition is None:
             raise HTTPException(
                 status_code=409,
                 detail="The AirDC++ queue provenance is unavailable.",
             )
         now = datetime.now(UTC)
+        missing_bundle = (
+            acquisition.client_state == "missing"
+            or acquisition.reconciliation_error == "external_bundle_missing"
+        )
+        if acquisition.bundle_id is None and not missing_bundle:
+            raise HTTPException(
+                status_code=409,
+                detail="The AirDC++ queue provenance is unavailable.",
+            )
+        if missing_bundle:
+            client_config_id = acquisition.client_config_id
+            supervisor_registry = get_airdcpp_supervisor_registry()
+            supervisor = (
+                supervisor_registry.get(client_config_id)
+                if supervisor_registry is not None and client_config_id is not None
+                else None
+            )
+            if supervisor is None or supervisor.state is not AirDcppSupervisorState.READY:
+                raise HTTPException(
+                    status_code=503,
+                    detail="AirDC++ is unavailable; the missing queue item was not recreated.",
+                )
+            settings = await session.scalar(
+                select(AirDcppClientSettings).where(
+                    AirDcppClientSettings.client_config_id == client_config_id
+                )
+            )
+            queue_priority = settings.queue_priority if settings is not None else None
+            await session.commit()
+            try:
+                added = await supervisor.api_client.create_file_bundle(
+                    tth=acquisition.tth,
+                    size=acquisition.size_bytes,
+                    target_name=acquisition.original_name,
+                    priority=queue_priority,
+                )
+            except AirDcppError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail="AirDC++ could not recreate the missing queue item.",
+                ) from exc
+            except Exception as exc:
+                logger.warning(
+                    "airdcpp_missing_bundle_recreation_failed",
+                    download_id=download.id,
+                    client_config_id=client_config_id,
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="AirDC++ could not recreate the missing queue item.",
+                ) from exc
+            acquisition.bundle_id = added.id
+            acquisition.remote_target = None
+            acquisition.last_reconciled_at = None
+            route_snapshot = dict(acquisition.route_snapshot or {})
+            route_snapshot.pop("queue", None)
+            acquisition.route_snapshot = route_snapshot
+            download.external_id = f"airdcpp:{client_config_id}:bundle:{added.id}"
         acquisition.client_state = "source_search_pending"
         acquisition.retry_count = 0
         acquisition.next_retry_at = now

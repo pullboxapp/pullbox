@@ -58,6 +58,9 @@ imports, and unified background operation progress.
   remains visible through acquisition and processing transitions.
 - Aligned AirDC++ client and queue priority controls with the shared settings
   contract.
+- Kept AirDC++ cancellations active until the exact remote bundle is confirmed
+  removed, and recreated externally removed bundles from durable provenance on
+  retry.
 
 ### Performance
 
