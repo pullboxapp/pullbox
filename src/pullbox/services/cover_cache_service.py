@@ -21,12 +21,22 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 _SERIES_COVER_LOCKS: dict[int, asyncio.Lock] = {}
+_SUPPORTED_COVER_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
 
 def find_cover_file(directory: Path, stem: str) -> Path | None:
     """Look for a cover file with any common image extension."""
     for ext in (".jpg", ".jpeg", ".png", ".webp"):
         candidate = directory / f"{stem}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def find_imported_series_cover(directory: Path) -> Path | None:
+    """Return Mylar's full-size local cover or its thumbnail fallback."""
+    for file_name in ("cover.jpg", "folder.jpg"):
+        candidate = directory / file_name
         if candidate.is_file():
             return candidate
     return None
@@ -71,6 +81,48 @@ async def resolve_series_cover_file(session: AsyncSession, series: Series) -> Pa
             return cover
 
     return None
+
+
+async def cache_imported_series_cover(
+    session: AsyncSession,
+    series: Series,
+    source_path: Path,
+) -> Path | None:
+    """Copy discovered local artwork into Pullbox's managed cover cache."""
+    try:
+        source = source_path.expanduser().resolve(strict=True)
+    except OSError:
+        return None
+    if not source.is_file() or source.suffix.lower() not in _SUPPORTED_COVER_SUFFIXES:
+        return None
+
+    covers_base = await resolve_covers_dir(session)
+    covers_dir = covers_base / str(series.id)
+    existing = find_cover_file(covers_dir, "series")
+    if existing is not None:
+        series.cover_path = f"/api/v1/series/{series.id}/cover"
+        return existing
+
+    destination = covers_dir / f"series{source.suffix.lower()}"
+    temporary = covers_dir / f".{destination.name}.tmp"
+
+    def _copy() -> None:
+        covers_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, temporary)
+        temporary.replace(destination)
+
+    try:
+        await asyncio.to_thread(_copy)
+    except OSError:
+        logger.exception(
+            "imported_series_cover_cache_failed",
+            series_id=series.id,
+            source_path=str(source),
+        )
+        return None
+
+    series.cover_path = f"/api/v1/series/{series.id}/cover"
+    return destination
 
 
 async def purge_series_cover_cache(
