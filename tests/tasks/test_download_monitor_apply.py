@@ -45,6 +45,10 @@ async def test_apply_monitor_updates_handles_removed_externally() -> None:
     session = _FakeSession()
     cleared: list[int] = []
     summaries: list[tuple[object, dict[str, object]]] = []
+    projected: list[tuple[object, object | None]] = []
+
+    async def publish_progress(_session, download, progress) -> None:  # type: ignore[no-untyped-def]
+        projected.append((download, progress))
 
     result = await download_monitor_apply.apply_monitor_updates(
         session,
@@ -63,6 +67,7 @@ async def test_apply_monitor_updates_handles_removed_externally() -> None:
             (download, payload)
         ),
         event_logger=_FakeLogger(),
+        publish_progress=publish_progress,
     )
 
     assert result.completed == 0
@@ -72,3 +77,4 @@ async def test_apply_monitor_updates_handles_removed_externally() -> None:
     assert session.issue.status == IssueStatus.WANTED
     assert cleared == [1]
     assert summaries[0][1]["outcome"] == "removed_externally"
+    assert projected == [(session.download, None)]

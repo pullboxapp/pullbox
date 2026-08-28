@@ -367,7 +367,7 @@ class TestFilesystemImport:
     """Scenario A: Full filesystem scan -> match -> import lifecycle."""
 
     async def test_a_full_lifecycle(self, db_session, tmp_path) -> None:
-        """Create job -> scan 3 dirs -> match via CV -> confirm all -> import all."""
+        """Create job -> scan trusted folders -> confirm all -> import all."""
         library_root = await _setup_comics_directory(db_session, tmp_path / "library")
         source = tmp_path / "import"
 
@@ -375,9 +375,9 @@ class TestFilesystemImport:
         _make_comic_dirs(
             source,
             [
-                ("Batman (2016)", 3),
-                ("Saga (2012)", 2),
-                ("Invincible (2003)", 1),
+                ("Batman (2016) 97508", 3),
+                ("Saga (2012) 42692", 2),
+                ("Invincible (2003) 18816", 1),
             ],
         )
 
@@ -637,6 +637,147 @@ class TestFilesystemImport:
         assert series_item.status == ImportSeriesStatus.NO_MATCH
         assert series_item.diagnostics["kind"] == "series_conflict"
         assert series_item.diagnostics["reason"] == "trusted_source_identity_conflict"
+
+    async def test_pullbox_folder_identity_reaches_review_without_provider_calls(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        source = tmp_path / "import"
+        series_dir = source / "Batman (2016) 97508"
+        _write_cbz(series_dir / "Batman 001 (2016).cbz")
+        _write_cbz(series_dir / "Batman 002 (2016).cbz")
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(source),
+                source_type=ImportSourceType.FILESYSTEM,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+        await db_session.refresh(job)
+
+        assert job.status == ImportJobStatus.REVIEW
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.raw_series_name == "Batman"
+        assert series_item.raw_year == 2016
+        assert series_item.cv_id == 97508
+        assert series_item.cv_match_method == "folder_cv_id"
+        file_result = await db_session.execute(
+            sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+        )
+        imported_files = list(file_result.scalars().all())
+        assert {item.status for item in imported_files} == {ImportedFileStatus.MATCHED}
+        assert {item.match_method for item in imported_files} == {
+            "import_reconcile_provisional_issue"
+        }
+
+    async def test_unknown_folder_reaches_series_review_without_provider_calls(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        source = tmp_path / "import"
+        series_dir = source / "Carthago Omnibus (2020) Omnibus"
+        _write_cbz(series_dir / "Carthago Omnibus 001 (2020).cbz")
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(source),
+                source_type=ImportSourceType.FILESYSTEM,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+        await db_session.refresh(job)
+
+        assert job.status == ImportJobStatus.REVIEW
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.NO_MATCH
+        assert series_item.diagnostics["kind"] == "series_no_match"
+        assert series_item.diagnostics["reason"] == "trusted_source_identity_missing"
+        assert series_item.diagnostics["provider_lookup_deferred"] is True
+
+    async def test_pullbox_folder_and_sidecar_disagreement_requires_review(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        source = tmp_path / "import"
+        series_dir = source / "Batman (2016) 97508"
+        series_dir.mkdir(parents=True)
+        (series_dir / "series.json").write_text('{"comicid": 11111}')
+        _write_cbz(series_dir / "Batman 001 (2016).cbz")
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(source),
+                source_type=ImportSourceType.FILESYSTEM,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.NO_MATCH
+        assert series_item.diagnostics["reason"] == "trusted_source_identity_conflict"
+        assert series_item.diagnostics["identity_conflicts"] == [
+            {
+                "field": "comicvine_series_id",
+                "first": 97508,
+                "conflicting": 11111,
+            }
+        ]
 
 
 # ── Scenario B: Mylar3 Import ─────────────────────────────────────────
@@ -1093,11 +1234,11 @@ class TestDeduplication:
         _make_comic_dirs(
             source,
             [
-                ("Batman (2016)", 3),
-                ("Saga (2012)", 2),
-                ("Invincible (2003)", 1),
-                ("X-Men (2019)", 4),
-                ("Spider-Man (2022)", 2),
+                ("Batman (2016) 97508", 3),
+                ("Saga (2012) 42692", 2),
+                ("Invincible (2003) 18816", 1),
+                ("X-Men (2019) 77059", 4),
+                ("Spider-Man (2022) 88123", 2),
             ],
         )
 
@@ -1233,9 +1374,9 @@ class TestPartialFailure:
         _make_comic_dirs(
             source,
             [
-                ("Batman (2016)", 3),
-                ("Saga (2012)", 2),
-                ("Invincible (2003)", 1),
+                ("Batman (2016) 97508", 3),
+                ("Saga (2012) 42692", 2),
+                ("Invincible (2003) 18816", 1),
             ],
         )
 

@@ -88,6 +88,9 @@ from pullbox.services.search_service import (
 )
 from pullbox.services.search_source_selection import select_search_source
 from pullbox.services.search_types import SearchEvalKwargs
+from pullbox.services.secondary_operation_progress import (
+    project_issue_import_operation_progress,
+)
 from pullbox.tasks.direct_acquisition_task import get_direct_acquisition_runner
 from pullbox.tasks.issue_import_task import (
     cancel_issue_import_run,
@@ -1199,9 +1202,13 @@ async def start_import_file_for_issue(
     issue_id: int,
     body: ManualFileImportRequest,
     _user: AuthenticatedUser,
+    session: DbSession,
 ) -> ManualFileImportProgressResponse:
     """Start a background manual import for the issue-detail UI."""
-    return await start_issue_import_run(issue_id, body)
+    progress = await start_issue_import_run(issue_id, body)
+    await project_issue_import_operation_progress(session, progress)
+    await session.commit()
+    return progress
 
 
 @router.post(
@@ -1211,9 +1218,13 @@ async def start_import_file_for_issue(
 async def cancel_import_file_for_issue(
     issue_id: int,
     _user: AuthenticatedUser,
+    session: DbSession,
 ) -> ManualFileImportProgressResponse:
     """Cancel a background manual import for the issue-detail UI."""
-    return await cancel_issue_import_run(issue_id)
+    progress = await cancel_issue_import_run(issue_id)
+    await project_issue_import_operation_progress(session, progress)
+    await session.commit()
+    return progress
 
 
 @router.get(
@@ -1223,10 +1234,13 @@ async def cancel_import_file_for_issue(
 async def get_import_file_for_issue_progress(
     issue_id: int,
     _user: AuthenticatedUser,
+    session: DbSession,
 ) -> ManualFileImportProgressResponse:
     """Return the latest live progress snapshot for one manual issue import."""
     progress = get_issue_import_progress_state(issue_id)
     if progress is not None:
+        await project_issue_import_operation_progress(session, progress)
+        await session.commit()
         return progress
     return ManualFileImportProgressResponse(
         issue_id=issue_id,

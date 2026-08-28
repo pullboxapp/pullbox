@@ -286,6 +286,13 @@ class TestSeriesRouteContracts:
         assert 'id="series-results-body"' in response.text
         assert 'data-testid="header-donations-button"' in response.text
         assert 'data-testid="header-theme-toggle"' in response.text
+        assert 'data-testid="header-activity"' in response.text
+        assert 'data-testid="header-activity-popover"' in response.text
+        assert 'data-testid="header-activity-operation"' in response.text
+        assert 'data-testid="header-activity-overall-progress"' in response.text
+        assert 'data-testid="header-activity-item-progress"' in response.text
+        assert 'data-testid="header-activity-view-details"' in response.text
+        assert 'aria-label="Background activity"' in response.text
         assert 'data-testid="live-updates-toggle"' not in response.text
         assert 'data-testid="page-footer-dock"' in response.text
         assert 'data-testid="page-dock-inner"' in response.text

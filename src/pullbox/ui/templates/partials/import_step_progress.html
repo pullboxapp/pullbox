@@ -16,6 +16,37 @@
   data-testid="import-collection-progress"
   class="space-y-6"
 >
+  {% if progress_mode|default("scan") == "import" %}
+  <section
+    data-testid="import-background-notice"
+    class="rounded-xl border border-pb-info/40 bg-pb-info/10 px-4 py-4"
+    aria-labelledby="import-background-notice-title"
+  >
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="min-w-0">
+        <h2 id="import-background-notice-title" class="text-sm font-semibold text-pb-text">
+          Importing in the background
+        </h2>
+        <p class="mt-1 max-w-3xl text-sm leading-6 text-pb-text-sec">
+          You can safely leave this page. Pullbox will continue moving, copying, converting, and renaming files, while the header activity indicator keeps you updated.
+        </p>
+      </div>
+      <div class="flex shrink-0 flex-wrap items-center gap-2">
+        <a
+          href="/library"
+          data-testid="import-background-library-link"
+          class="btn-ghost btn-sm inline-flex items-center justify-center"
+        >Library</a>
+        <a
+          href="/"
+          data-testid="import-background-dashboard-link"
+          class="btn-ghost btn-sm inline-flex items-center justify-center"
+        >Dashboard</a>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
   <div
     x-show="showActionBar()"
     x-cloak

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from pullbox.services.import_duplicates import DuplicateMergeProfile
 
 
-_TRUSTED_SERIES_MATCH_METHODS = frozenset({"mylar3_cv_id", "comicinfo_cv_id"})
+_TRUSTED_SERIES_MATCH_METHODS = frozenset({"mylar3_cv_id", "comicinfo_cv_id", "folder_cv_id"})
 
 
 @dataclass(frozen=True, slots=True)

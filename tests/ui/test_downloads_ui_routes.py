@@ -27,7 +27,16 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue
+from pullbox.models.operation_progress import (
+    OperationProgressState,
+    OperationProgressType,
+)
 from pullbox.models.series import Series
+from pullbox.services.operation_progress import (
+    OperationProgressMeasure,
+    OperationProgressUpdate,
+    publish_operation_progress,
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -824,7 +833,7 @@ class TestDownloadsRouteContracts:
             < status_html.index("Batman 001 (2024) (Digital).cbz")
         )
 
-    async def test_download_progress_map_batches_queue_overlay_by_client(
+    async def test_download_progress_map_reads_projection_without_polling_clients(
         self,
         sec_db,
         monkeypatch,
@@ -832,140 +841,73 @@ class TestDownloadsRouteContracts:
         import pullbox.composition.providers as registry_module
         from pullbox.tasks.download_task import ProgressSnapshot
 
-        await _seed_multi_active_download_queue_data(sec_db)
-
-        fake_client = SimpleNamespace(
-            client_type=DownloadClientType.SABNZBD.value,
-            get_queue=AsyncMock(
-                return_value=[
-                    SimpleNamespace(
-                        external_id="queue-batch-a",
-                        progress=0.61,
-                        speed_bytes=1_048_576,
-                        eta_seconds=90,
-                        size_bytes=90_000_000,
-                        client_state="Downloading",
-                        state="downloading",
-                    ),
-                    SimpleNamespace(
-                        external_id="queue-batch-b",
-                        progress=1.0,
-                        speed_bytes=None,
-                        eta_seconds=None,
-                        size_bytes=95_000_000,
-                        client_state="Extracting",
-                        state="downloading",
-                    ),
-                ]
-            ),
-            get_download_status=AsyncMock(),
-        )
-
-        async def _fake_register(session, registry):  # type: ignore[no-untyped-def]
-            del session
-            registry.register_download_client(1, fake_client)
-            return []
-
-        monkeypatch.setattr(registry_module, "register_download_clients", _fake_register)
-
+        await _seed_download_queue_contract_data(sec_db)
         async with sec_db() as session:
-            queue_items = list(
-                (
-                    await session.execute(
-                        select(DownloadHistory)
-                        .where(DownloadHistory.state == DownloadState.DOWNLOADING)
-                        .order_by(DownloadHistory.id.asc())
+            queue_item = (
+                await session.execute(
+                    select(DownloadHistory).where(
+                        DownloadHistory.state == DownloadState.DOWNLOADING
                     )
                 )
-                .scalars()
-                .all()
+            ).scalar_one()
+            await publish_operation_progress(
+                session,
+                OperationProgressUpdate(
+                    operation_type=OperationProgressType.DOWNLOAD,
+                    operation_key=str(queue_item.id),
+                    revision=4,
+                    state=OperationProgressState.RUNNING,
+                    phase="downloading",
+                    title=queue_item.title,
+                    message="Downloading",
+                    source_label="Main Usenet",
+                    overall=OperationProgressMeasure(
+                        current=75_000_000,
+                        total=100_000_000,
+                        unit="bytes",
+                    ),
+                    rate=2_000_000,
+                    rate_unit="bytes_per_second",
+                    eta_seconds=13,
+                ),
             )
+            await session.commit()
 
+        register = AsyncMock(side_effect=AssertionError("UI must not poll download clients"))
+        monkeypatch.setattr(registry_module, "register_download_clients", register)
+        async with sec_db() as session:
+            queue_item = (
+                await session.execute(
+                    select(DownloadHistory).where(
+                        DownloadHistory.state == DownloadState.DOWNLOADING
+                    )
+                )
+            ).scalar_one()
             progress_map = await ui_routes._load_download_progress_map(
                 session,
-                queue_items,
+                [queue_item],
                 fallback_progress={
-                    queue_items[0].id: ProgressSnapshot(
-                        progress=0.72,
-                        speed_bytes=500_000,
-                        eta_seconds=120,
-                        size_bytes=90_000_000,
-                        updated_at=12.0,
+                    queue_item.id: ProgressSnapshot(
+                        progress=0.2,
+                        speed_bytes=100,
+                        eta_seconds=300,
+                        size_bytes=100_000_000,
+                        updated_at=1.0,
                         client_state="Downloading",
                     )
                 },
             )
 
-        fake_client.get_queue.assert_awaited_once()
-        fake_client.get_download_status.assert_not_called()
-        assert progress_map[queue_items[0].id].progress == pytest.approx(0.72)
-        assert progress_map[queue_items[0].id].speed_bytes == 1_048_576
-        assert progress_map[queue_items[1].id].progress == pytest.approx(1.0)
-        assert progress_map[queue_items[1].id].client_state == "Extracting"
-        assert progress_map[queue_items[1].id].speed_bytes is None
-        assert progress_map[queue_items[1].id].eta_seconds is None
+        snapshot = progress_map[queue_item.id]
+        assert snapshot.progress == pytest.approx(0.75)
+        assert snapshot.bytes_transferred == 75_000_000
+        assert snapshot.speed_bytes == 2_000_000
+        assert snapshot.eta_seconds == 13
+        assert snapshot.client_state == "Downloading"
+        assert snapshot.source_label == "Main Usenet"
+        register.assert_not_awaited()
 
-    async def test_download_progress_map_falls_back_to_usenet_status_when_queue_misses(
-        self,
-        sec_db,
-        monkeypatch,
-    ) -> None:  # type: ignore[no-untyped-def]
-        import pullbox.composition.providers as registry_module
-
-        await _seed_multi_active_download_queue_data(sec_db)
-
-        fake_client = SimpleNamespace(
-            client_type=DownloadClientType.SABNZBD.value,
-            get_queue=AsyncMock(return_value=[]),
-            get_download_status=AsyncMock(
-                side_effect=[
-                    SimpleNamespace(
-                        external_id="queue-batch-a",
-                        progress=1.0,
-                        speed_bytes=None,
-                        eta_seconds=None,
-                        size_bytes=90_000_000,
-                        client_state="Extracting",
-                        state="finalizing",
-                    ),
-                    RuntimeError("not found"),
-                ]
-            ),
-        )
-
-        async def _fake_register(session, registry):  # type: ignore[no-untyped-def]
-            del session
-            registry.register_download_client(1, fake_client)
-            return []
-
-        monkeypatch.setattr(registry_module, "register_download_clients", _fake_register)
-
-        async with sec_db() as session:
-            queue_items = list(
-                (
-                    await session.execute(
-                        select(DownloadHistory)
-                        .where(DownloadHistory.state == DownloadState.DOWNLOADING)
-                        .order_by(DownloadHistory.id.asc())
-                    )
-                )
-                .scalars()
-                .all()
-            )
-
-            progress_map = await ui_routes._load_download_progress_map(
-                session,
-                queue_items,
-                fallback_progress={},
-            )
-
-        fake_client.get_queue.assert_awaited_once()
-        assert fake_client.get_download_status.await_count == 2
-        assert progress_map[queue_items[0].id].progress == pytest.approx(1.0)
-        assert progress_map[queue_items[0].id].client_state == "Extracting"
-        assert queue_items[1].id not in progress_map
-
-    async def test_download_progress_map_keeps_scheduler_fallback_when_client_fetch_fails(
+    async def test_download_progress_map_keeps_scheduler_fallback_without_client_poll(
         self,
         sec_db,
         monkeypatch,
@@ -975,17 +917,8 @@ class TestDownloadsRouteContracts:
 
         await _seed_multi_active_download_queue_data(sec_db)
 
-        fake_client = SimpleNamespace(
-            client_type=DownloadClientType.SABNZBD.value,
-            get_queue=AsyncMock(side_effect=RuntimeError("client unavailable")),
-        )
-
-        async def _fake_register(session, registry):  # type: ignore[no-untyped-def]
-            del session
-            registry.register_download_client(1, fake_client)
-            return []
-
-        monkeypatch.setattr(registry_module, "register_download_clients", _fake_register)
+        register = AsyncMock(side_effect=AssertionError("UI must not poll download clients"))
+        monkeypatch.setattr(registry_module, "register_download_clients", register)
 
         async with sec_db() as session:
             queue_items = list(
@@ -1014,8 +947,8 @@ class TestDownloadsRouteContracts:
                 fallback_progress={queue_items[0].id: fallback},
             )
 
-        fake_client.get_queue.assert_awaited_once()
         assert progress_map[queue_items[0].id] == fallback
+        register.assert_not_awaited()
 
     async def test_download_progress_map_reads_direct_durable_snapshot_without_client_poll(
         self,

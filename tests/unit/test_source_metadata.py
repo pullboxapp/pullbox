@@ -106,6 +106,25 @@ class TestArchiveMetadataExtraction:
             },
         ]
 
+    def test_conflicting_series_json_and_cvinfo_ids_are_recorded(self, tmp_path: Path) -> None:
+        folder = tmp_path / "Batman (2016)"
+        folder.mkdir()
+        (folder / "series.json").write_text(json.dumps({"comicid": 97508}))
+        (folder / "cvinfo").write_text("comicid: 11111")
+        archive = folder / "Batman 001.cbz"
+        _write_cbz(archive)
+
+        metadata = SourceMetadataExtractor().from_archive_path(archive)
+
+        assert metadata.comicvine_series_id == 97508
+        assert metadata.diagnostics["identity_conflicts"] == [
+            {
+                "field": "comicvine_series_id",
+                "series.json": 97508,
+                "cvinfo": 11111,
+            }
+        ]
+
     def test_comicinfo_can_supply_series_issue_and_year(self, tmp_path: Path) -> None:
         folder = tmp_path / "Batman (2016)"
         folder.mkdir()

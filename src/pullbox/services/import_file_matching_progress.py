@@ -58,7 +58,8 @@ if TYPE_CHECKING:
 
 def _file_match_item_heartbeat_progress(elapsed_seconds: int) -> int:
     """Return item-local progress while issue targets are loading."""
-    return min(90, 15 + (max(elapsed_seconds, 1) // 5) * 15)
+    heartbeat_count = max((max(elapsed_seconds, 1) + 4) // 5, 1)
+    return min(45, 5 + heartbeat_count * 10)
 
 
 def build_file_matching_progress_emitter(
@@ -87,17 +88,23 @@ def build_file_matching_progress_emitter(
         message: str,
         current_item_stage: str = "file_matching",
         current_item_progress_pct: int | None = None,
+        current_work_unit_progress_pct: int | None = None,
         live_only: bool = False,
     ) -> None:
         if progress_callback is None:
             return
 
+        work_unit_progress_pct = (
+            current_work_unit_progress_pct
+            if current_work_unit_progress_pct is not None
+            else current_item_progress_pct
+        )
         completed_weight = (
             scan_review_completed_weight(
                 scan_review_plan,
                 phase="file_matching",
                 completed_items=completed_units,
-                current_item_progress_pct=current_item_progress_pct,
+                current_item_progress_pct=work_unit_progress_pct,
             )
             if scan_review_plan is not None
             else None
@@ -124,7 +131,7 @@ def build_file_matching_progress_emitter(
                     else max(total_file_phase_units, 1)
                 ),
                 current_unit_progress_pct=(
-                    None if scan_review_plan is not None else current_item_progress_pct
+                    None if scan_review_plan is not None else work_unit_progress_pct
                 ),
             )
             if estimate_remaining_work_seconds is not None
@@ -188,7 +195,28 @@ async def load_file_match_target_index_with_progress(
     heartbeat_seconds: float | None = None,
 ) -> FileMatchTargetIndex:
     """Load issue targets with visible Step 2 heartbeat progress."""
-    if progress_callback is None or item.series_id is not None or metadata_provider is None:
+    if progress_callback is None:
+        return await load_file_match_target_index(
+            session,
+            item,
+            duplicate_series=duplicate_series,
+            metadata_provider=metadata_provider,
+            files=files_to_match,
+        )
+
+    await emit_file_matching_progress(
+        item,
+        completed_units,
+        message=(
+            f"Loading issue targets for {item.raw_series_name} "
+            f"(series {series_idx + 1}/{total_series})..."
+        ),
+        current_item_stage="file_matching",
+        current_item_progress_pct=5,
+        current_work_unit_progress_pct=0,
+    )
+
+    if item.series_id is not None or metadata_provider is None:
         return await load_file_match_target_index(
             session,
             item,
@@ -201,15 +229,6 @@ async def load_file_match_target_index_with_progress(
         heartbeat_seconds
         if heartbeat_seconds is not None
         else _FILE_MATCH_PROGRESS_HEARTBEAT_SECONDS
-    )
-    await emit_file_matching_progress(
-        item,
-        completed_units,
-        message=(
-            f"Loading issue targets for {item.raw_series_name} "
-            f"(series {series_idx + 1}/{total_series})..."
-        ),
-        current_item_stage="file_matching",
     )
 
     async def _load_targets() -> FileMatchTargetIndex:
@@ -246,6 +265,7 @@ async def load_file_match_target_index_with_progress(
                 ),
                 current_item_stage="file_matching",
                 current_item_progress_pct=_file_match_item_heartbeat_progress(elapsed_seconds),
+                current_work_unit_progress_pct=_file_match_item_heartbeat_progress(elapsed_seconds),
                 live_only=True,
             )
         return await task

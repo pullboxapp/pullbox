@@ -300,6 +300,7 @@ async def _seed_import_job(
     *,
     status: ImportJobStatus = ImportJobStatus.PENDING,
     source_path: str = "/tmp/comics",
+    source_type: ImportSourceType = ImportSourceType.FILESYSTEM,
     with_series: int = 0,
     with_logs: int = 0,
 ) -> int:
@@ -307,7 +308,7 @@ async def _seed_import_job(
     async with factory() as session:
         job = ImportJob(
             source_path=source_path,
-            source_type=ImportSourceType.FILESYSTEM,
+            source_type=source_type,
             status=status,
         )
         session.add(job)
@@ -624,6 +625,123 @@ class TestGetImportJob:
         """GET /import/{id} returns 404 for unknown id."""
         resp = await client.get("/api/v1/import/99999")
         assert resp.status_code == 404
+
+
+class TestGetActiveImportActivity:
+    """Test the shell-level active import discovery endpoint."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source_type", "source_path"),
+        [
+            (ImportSourceType.FILESYSTEM, "/tmp/folder-import"),
+            (ImportSourceType.MYLAR3, "/tmp/mylar.db"),
+        ],
+    )
+    async def test_active_import_is_source_agnostic(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        source_type: ImportSourceType,
+        source_path: str,
+    ) -> None:
+        job_id = await _seed_import_job(
+            _db_factory,
+            status=ImportJobStatus.IMPORTING,
+            source_path=source_path,
+            source_type=source_type,
+        )
+        async with _db_factory() as session:
+            job = await session.get(ImportJob, job_id)
+            assert job is not None
+            job.progress_snapshot = {
+                "snapshot_version": 2,
+                "status": ImportJobStatus.IMPORTING.value,
+                "mode": "import",
+                "phase": "importing",
+                "progress": 42,
+                "message": "Copying issue into the library...",
+                "current_series_name": "Batman",
+                "current_file_name": "Batman 001.cbz",
+                "current_file_stage": "transferring",
+                "current_file_progress_current": 420,
+                "current_file_progress_total": 1000,
+                "current_file_progress_pct": 42,
+                "current_file_progress_unit": "bytes",
+                "estimated_seconds_remaining": 90,
+            }
+            await session.commit()
+
+        response = await client.get("/api/v1/import/active")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["queued_count"] == 0
+        assert payload["job"]["id"] == job_id
+        assert payload["job"]["source_type"] == source_type.value
+        assert payload["job"]["progress_snapshot"]["current_file_name"] == "Batman 001.cbz"
+
+    @pytest.mark.asyncio
+    async def test_review_job_is_not_reported_as_background_activity(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _seed_import_job(_db_factory, status=ImportJobStatus.REVIEW)
+
+        response = await client.get("/api/v1/import/active")
+
+        assert response.status_code == 200
+        assert response.json() == {"job": None, "queued_count": 0}
+
+    @pytest.mark.asyncio
+    async def test_additional_background_imports_are_reported_as_queued(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        first_job_id = await _seed_import_job(
+            _db_factory,
+            status=ImportJobStatus.IMPORTING,
+        )
+        await _seed_import_job(
+            _db_factory,
+            status=ImportJobStatus.PENDING,
+            source_type=ImportSourceType.MYLAR3,
+        )
+
+        response = await client.get("/api/v1/import/active")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["job"]["id"] == first_job_id
+        assert payload["queued_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_latest_failed_import_remains_available_for_review(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        job_id = await _seed_import_job(
+            _db_factory,
+            status=ImportJobStatus.FAILED,
+            source_type=ImportSourceType.MYLAR3,
+        )
+
+        response = await client.get("/api/v1/import/active")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["job"]["id"] == job_id
+        assert payload["job"]["status"] == ImportJobStatus.FAILED.value
+        assert payload["queued_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_active_import_requires_authentication(self, unauth_client: AsyncClient) -> None:
+        response = await unauth_client.get("/api/v1/import/active")
+
+        assert response.status_code == 401
 
 
 # ── Tests: GET /import/{id}/preview ──────────────────────────────────

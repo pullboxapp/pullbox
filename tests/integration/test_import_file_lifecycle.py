@@ -7,6 +7,7 @@ source-safe copy behavior, renaming, manual import, and Phase 1 regression.
 
 from __future__ import annotations
 
+import json
 import os
 import zipfile
 from pathlib import Path
@@ -18,6 +19,7 @@ from sqlalchemy import select as sa_select
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+from pullbox.core.collection_scanner import CollectionScanner
 from pullbox.core.events import EventBus
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.models.config import SystemConfig
@@ -157,6 +159,9 @@ def _mock_cv_provider(
     mock.search_series = AsyncMock(side_effect=search_side_effect)
     mock.get_series = AsyncMock(side_effect=get_side_effect)
     mock.get_issues_for_series = AsyncMock(side_effect=issues_side_effect)
+    mock._fixture_series_ids = {
+        key.casefold(): int(results[0].provider_id) for key, results in _search.items() if results
+    }
     return mock
 
 
@@ -294,6 +299,25 @@ async def _run_full_pipeline(
     source_type: ImportSourceType = ImportSourceType.FILESYSTEM,
 ) -> ImportJob:
     """Create job → start scan (scan → analyze → match → file_match → review)."""
+    if source_type == ImportSourceType.FILESYSTEM:
+        provider = svc._metadata_service._provider
+        fixture_series_ids = getattr(provider, "_fixture_series_ids", {})
+        if isinstance(fixture_series_ids, dict):
+            scanner = CollectionScanner()
+            for folder in Path(source_path).rglob("*"):
+                if not folder.is_dir() or not any(
+                    child.is_file() and child.suffix.lower() in {".cbz", ".cbr", ".pdf"}
+                    for child in folder.iterdir()
+                ):
+                    continue
+                sidecar_path = folder / "series.json"
+                if sidecar_path.exists():
+                    continue
+                series_name, _, _ = scanner._extract_folder_identity(folder.name)
+                series_name = series_name.casefold()
+                series_id = fixture_series_ids.get(series_name)
+                if isinstance(series_id, int):
+                    sidecar_path.write_text(json.dumps({"comicid": series_id}))
     request = ImportJobCreate(source_path=source_path, source_type=source_type)
     job = await svc.create_job(session, request)
     await svc.start_scan(session, job.id)
@@ -2069,10 +2093,10 @@ class TestEdgeCases:
                 ConfirmImportRequest(series_ids=[99999]),
             )
 
-    async def test_edge_file_resolution_when_issue_not_found_in_db(
+    async def test_edge_provisional_issue_is_created_when_catalog_is_not_hydrated(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        """File matched pre-import but issue doesn't exist in DB → file FAILED."""
+        """A locally identified issue imports before provider catalog hydration."""
         comics_dir = tmp_path / "library"
         await _setup_comics_directory(db_session, comics_dir)
 
@@ -2111,14 +2135,14 @@ class TestEdgeCases:
         confirm_req = ConfirmImportRequest(series_ids=[s.id for s in imp_series])
         await svc.confirm_import(db_session, job.id, confirm_req)
 
-        # Create series with only issue #1 (not #999)
+        # Simulate background catalog hydration having populated only issue #1.
         cv_to_series[97508] = (
             await _create_series_with_issues(
                 db_session,
                 "Batman",
                 2016,
                 97508,
-                [(1.0, 100001)],  # No issue #999!
+                [(1.0, 100001)],
             )
         )[0]
 
@@ -2126,20 +2150,18 @@ class TestEdgeCases:
         await db_session.refresh(job)
 
         assert job.status == ImportJobStatus.COMPLETED
-        assert job.total_files_imported == 1
-        assert job.total_files_failed == 1
-
-        # Verify the #999 file is FAILED
-        result = await db_session.execute(
-            sa_select(ImportedFile).where(ImportedFile.status == ImportedFileStatus.FAILED)
+        assert job.total_files_imported == 2
+        assert job.total_files_failed == 0
+        provisional_issue = await db_session.scalar(
+            sa_select(Issue).where(Issue.issue_number == 999.0)
         )
-        failed = result.scalars().all()
-        assert len(failed) == 1
+        assert provisional_issue is not None
+        assert provisional_issue.comicvine_id is None
 
-    async def test_edge_series_with_no_confirmed_files(
+    async def test_edge_series_with_no_matched_files_keeps_series_confirmation(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        """Series with only NO_MATCH files cannot be confirmed for import."""
+        """A trusted series remains confirmable while its files stay excluded."""
         comics_dir = tmp_path / "library"
         await _setup_comics_directory(db_session, comics_dir)
 
@@ -2174,8 +2196,10 @@ class TestEdgeCases:
         )
         imp_series = series_result.scalars().all()
         confirm_req = ConfirmImportRequest(series_ids=[s.id for s in imp_series])
-        with pytest.raises(ValidationError, match="Select at least one matched series"):
-            await svc.confirm_import(db_session, job.id, confirm_req)
+        confirmed_job = await svc.confirm_import(db_session, job.id, confirm_req)
+
+        assert confirmed_job.status == ImportJobStatus.IMPORTING
+        assert all(item.status == ImportSeriesStatus.CONFIRMED for item in imp_series)
 
     async def test_edge_multiple_series_mixed_success(
         self, db_session: AsyncSession, tmp_path: Path
@@ -2218,9 +2242,9 @@ class TestEdgeCases:
 
         job = await _run_full_pipeline(svc, db_session, str(source))
 
-        assert job.series_matched == 2
-        assert job.series_no_match == 1
-        # Batman: 2 matched, Saga: 1 matched + 1 no_match, X-Men: 1 no_match
+        assert job.series_matched == 3
+        assert job.series_no_match == 0
+        # All series identities are local; X-Men still has no importable issue file.
         assert job.total_files_matched == 3
         assert job.total_files_no_match == 2
 

@@ -17,7 +17,16 @@ class _FakeClient:
 
     async def get_download_status(self, external_id: str):
         self.status_calls.append(external_id)
-        return SimpleNamespace(client_state="Downloading")
+        return SimpleNamespace(
+            state="downloading",
+            progress=0.25,
+            speed_bytes=1024,
+            eta_seconds=30,
+            size_bytes=4096,
+            downloaded_path=None,
+            error_message=None,
+            client_state="Downloading",
+        )
 
 
 class _FakeService:
@@ -39,6 +48,7 @@ class _FakeLogger:
 async def test_poll_download_clients_matches_missing_external_id_by_title() -> None:
     """The polling phase should preserve title matching before status checks."""
     from pullbox.tasks import download_monitor_poll
+    from pullbox.tasks.download_monitor_updates import build_status_update
 
     client = _FakeClient()
 
@@ -55,16 +65,26 @@ async def test_poll_download_clients_matches_missing_external_id_by_title() -> N
         ],
         _FakeService(client),
         record_download_progress=lambda download_id, status, event_logger: False,
-        build_status_update=lambda **kwargs: {
-            "id": kwargs["download_id"],
-            "client_state": kwargs["status"].client_state,
-        },
+        build_status_update=build_status_update,
         build_status_check_error_update=lambda **kwargs: None,
         event_logger=_FakeLogger(),
     )
 
     assert updates == [
         {"id": 7, "external_id": "matched-hash"},
-        {"id": 7, "client_state": "Downloading"},
+        {
+            "id": 7,
+            "client_state": "Downloading",
+            "state": "downloading",
+            "progress_snapshot": {
+                "progress": 0.25,
+                "speed_bytes": 1024,
+                "eta_seconds": 30,
+                "size_bytes": 4096,
+                "bytes_transferred": 1024,
+                "client_state": "Downloading",
+                "is_indeterminate": False,
+            },
+        },
     ]
     assert client.status_calls == ["matched-hash"]

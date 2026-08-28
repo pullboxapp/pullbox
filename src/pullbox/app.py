@@ -847,6 +847,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             )
         finally:
             set_direct_acquisition_runner(None)
+    from pullbox.services.operation_progress_dispatch import drain_operation_progress_updates
+
+    await drain_operation_progress_updates()
     await dispose_engine()
     logger.info("application_stopped")
 

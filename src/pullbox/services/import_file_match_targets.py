@@ -33,7 +33,7 @@ PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD = "provider_zero_issue_single_issue"
 PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND = "provider_missing_issue_placeholder"
 PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD = "import_reconcile_provisional_issue"
 _PLACEHOLDER_ISSUE_TYPES = frozenset({IssueType.ONE_SHOT, IssueType.SPECIAL})
-_TRUSTED_SERIES_MATCH_METHODS = frozenset({"mylar3_cv_id", "comicinfo_cv_id"})
+_TRUSTED_SERIES_MATCH_METHODS = frozenset({"mylar3_cv_id", "comicinfo_cv_id", "folder_cv_id"})
 _TRUSTED_IDENTITY_SIGNALS = frozenset({"mylar3", "comicinfo", "sidecar"})
 
 

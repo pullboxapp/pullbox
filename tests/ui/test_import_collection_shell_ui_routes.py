@@ -652,6 +652,35 @@ async def _seed_unsorted_conflict_review_job(sec_db) -> int:  # type: ignore[no-
 class TestImportShellRouteContracts:
     """Verify the unified Import page renders a stable workspace shell."""
 
+    async def test_app_shell_tracks_global_activity_across_navigation(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = script.index("function appShell()")
+        end = script.index("function _readJsonBody")
+        shell_controller = script[start:end]
+
+        assert 'fetch("/api/v1/activity"' in shell_controller
+        assert 'new EventSource("/api/v1/activity/stream")' in shell_controller
+        assert 'source.addEventListener("progress", refreshFromEvent);' in shell_controller
+        assert 'fetch("/api/v1/activity/" + operationId + "/acknowledge"' in shell_controller
+        assert "activityOverallLabel: function" in shell_controller
+        assert "activityItemLabel: function" in shell_controller
+        assert "activityRateEtaLabel: function" in shell_controller
+        assert "activityOverallIndeterminate: function" in shell_controller
+        assert "activityItemIndeterminate: function" in shell_controller
+        assert "scheduleActivityPoll(3000)" in shell_controller
+        assert 'fetch("/api/v1/import/active"' not in shell_controller
+
+    async def test_step_two_ephemeral_progress_uses_its_real_workflow_status(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = script.index("applyEphemeralFileProgressNow: function")
+        end = script.index("showActionBar: function", start)
+        handler = script[start:end]
+
+        assert '"file_matching"' in handler
+        assert "this.jobStatus = activeStatus;" in handler
+        assert "this.phase = String(data.phase || activeStatus);" in handler
+        assert 'this.jobStatus = "importing";' not in handler
+
     async def test_import_footer_pagination_has_delegated_click_handler(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
 

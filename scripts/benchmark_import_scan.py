@@ -123,7 +123,7 @@ def _build_tree(
         title = f"Series {series_idx:04d}"
         year = 2000 + (series_idx % 20)
         series_provider_id = 100000 + series_idx
-        folder = root / f"{title} ({year})"
+        folder = root / f"{title} ({year}) {series_provider_id}"
         folder.mkdir(parents=True, exist_ok=True)
         for file_idx in range(1, files_per_series + 1):
             archive_path = folder / f"{title} #{file_idx:03d}.cbz"

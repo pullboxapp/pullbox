@@ -321,6 +321,8 @@ async def run_import_file_matching(
                 f"Matching files to issues for {imp_series.raw_series_name} "
                 f"({len(files)} file{'s' if len(files) != 1 else ''})..."
             ),
+            current_item_progress_pct=50,
+            current_work_unit_progress_pct=0,
         )
         series_processed += 1
         for file_idx, imp_file in enumerate(files, start=1):
@@ -420,7 +422,8 @@ async def run_import_file_matching(
                 completed_file_phase_units,
                 message=(f"Matched file {file_idx}/{len(files)} for {imp_series.raw_series_name}"),
                 current_item_stage="file_matching",
-                current_item_progress_pct=round((file_idx / max(len(files), 1)) * 100),
+                current_item_progress_pct=50 + round((file_idx / max(len(files), 1)) * 50),
+                current_work_unit_progress_pct=0,
                 live_only=True,
             )
 

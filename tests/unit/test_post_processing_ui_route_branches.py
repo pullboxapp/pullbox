@@ -41,7 +41,10 @@ class RecordingTemplates:
 def configured_post_processing_routes(monkeypatch: pytest.MonkeyPatch) -> RecordingTemplates:
     templates = RecordingTemplates()
 
-    async def _live_status_map(items: list[DownloadHistory]) -> dict[int, dict[str, object]]:
+    async def _live_status_map(
+        _session: object,
+        items: list[DownloadHistory],
+    ) -> dict[int, dict[str, object]]:
         return {item.id: {"phase_label": "Importing"} for item in items if item.id is not None}
 
     monkeypatch.setattr(post_processing_routes, "_get_templates", lambda: templates)
@@ -96,7 +99,7 @@ async def test_post_processing_runtime_dependency_guards(
         elif callable_name == "_client_label":
             callable_obj("sabnzbd")
         elif callable_name == "_live_status_map":
-            await callable_obj([])
+            await callable_obj(SimpleNamespace(), [])
         else:
             callable_obj()
 
@@ -112,7 +115,10 @@ def test_configure_post_processing_routes_sets_runtime_dependencies() -> None:
         "_sidebar_badge_no_store_headers": post_processing_routes._sidebar_badge_no_store_headers,
     }
 
-    async def _live_status_map(_items: list[DownloadHistory]) -> dict[int, dict[str, object]]:
+    async def _live_status_map(
+        _session: object,
+        _items: list[DownloadHistory],
+    ) -> dict[int, dict[str, object]]:
         return {}
 
     try:

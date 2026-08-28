@@ -5,6 +5,7 @@ from __future__ import annotations
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from playwright.sync_api import expect
 
 from tests.e2e.conftest import wait_for_htmx
 from tests.e2e.pages.app_shell import AppShellPage
@@ -66,6 +67,86 @@ class TestSidebarShell:
         assert shell.link("health").is_visible()
         assert shell.badge("intervention").count() == 1
         assert shell.badge("health").count() == 1
+
+    def test_global_activity_popover_renders_shared_operation_progress(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        authed_page.route(
+            "**/api/v1/activity",
+            lambda route: route.fulfill(
+                json={
+                    "active_count": 1,
+                    "spinner_count": 1,
+                    "attention_count": 0,
+                    "operations": [
+                        {
+                            "id": 41,
+                            "operation_type": "download",
+                            "operation_key": "download-41",
+                            "state": "running",
+                            "phase": "downloading",
+                            "title": "Batman 041",
+                            "message": "Receiving from PixelDrain",
+                            "source_label": "PixelDrain",
+                            "detail_url": "/downloads",
+                            "tone": "info",
+                            "attention_required": False,
+                            "acknowledged_at": None,
+                            "overall": {
+                                "current": 40,
+                                "total": 100,
+                                "percent": 40,
+                                "unit": "bytes",
+                                "indeterminate": False,
+                            },
+                            "item": {
+                                "key": "batman-041.cbz",
+                                "label": "Batman 041.cbz",
+                                "phase": "transferring",
+                                "message": "Receiving",
+                                "current": None,
+                                "total": None,
+                                "percent": None,
+                                "unit": "bytes",
+                                "indeterminate": True,
+                            },
+                            "rate": 2097152,
+                            "rate_unit": "bytes_per_second",
+                            "eta_seconds": 120,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/series")
+        activity_button = authed_page.get_by_role("button", name="Background activity")
+        operation = authed_page.locator("[data-testid='header-activity-operation']")
+        expect(activity_button).to_have_attribute("aria-expanded", "false")
+        expect(operation).to_have_count(1)
+        activity_button.click()
+
+        popover = authed_page.locator("[data-testid='header-activity-popover']")
+        expect(activity_button).to_have_attribute("aria-expanded", "true")
+        expect(popover).to_be_visible()
+        assert operation.get_by_text("Batman 041", exact=True).is_visible()
+        assert operation.get_by_text("PixelDrain", exact=True).is_visible()
+        assert operation.get_by_text("Batman 041.cbz", exact=True).is_visible()
+        assert (
+            operation.locator(
+                "[data-testid='header-activity-overall-progress'] [role='progressbar']:visible"
+            ).get_attribute("aria-valuenow")
+            == "40"
+        )
+        assert (
+            operation.locator(
+                "[data-testid='header-activity-item-progress'] [role='progressbar']:visible"
+            ).get_attribute("aria-valuenow")
+            is None
+        )
 
     def test_sidebar_collapse_toggle_keeps_shell_stable(
         self,

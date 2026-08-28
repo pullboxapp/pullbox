@@ -280,6 +280,7 @@ class MetadataSignal(enum.StrEnum):
     COMICINFO = "comicinfo"
     SIDECAR = "sidecar"
     FOLDER_HINT = "folder_hint"
+    PULLBOX_FOLDER = "pullbox_folder"
     MYLAR3 = "mylar3"
 
 
@@ -446,7 +447,12 @@ class SourceMetadataExtractor:
         series_status = None
         issue_count_hint = None
         signals = dict(metadata.signals)
-        identity_conflicts: list[dict[str, object]] = []
+        sidecar_conflicts = sidecar.get("identity_conflicts")
+        identity_conflicts: list[dict[str, object]] = (
+            [dict(conflict) for conflict in sidecar_conflicts if isinstance(conflict, dict)]
+            if isinstance(sidecar_conflicts, list)
+            else []
+        )
         diagnostics: dict[str, object] = {
             "folder_name": folder_name,
             "sidecar_files_present": sorted(sidecar["files_present"]),
@@ -653,6 +659,7 @@ class SourceMetadataExtractor:
             "issue_count": None,
             "series_name": None,
             "year": None,
+            "identity_conflicts": [],
         }
         for sidecar_name in ("series.json", "cvinfo"):
             path = folder / sidecar_name
@@ -661,11 +668,27 @@ class SourceMetadataExtractor:
             payload["files_present"].append(sidecar_name)
             raw_text = path.read_text(errors="replace")
             sidecar_data = self._parse_sidecar(raw_text)
-            payload["series_id"] = payload["series_id"] or _as_int(
+            sidecar_series_id = _as_int(
                 sidecar_data.get("comicid")
                 or sidecar_data.get("comicvine_id")
                 or sidecar_data.get("series_id")
             )
+            if (
+                sidecar_series_id is not None
+                and payload["series_id"] is not None
+                and sidecar_series_id != payload["series_id"]
+            ):
+                first_source = str(payload.get("series_id_source") or "sidecar")
+                payload["identity_conflicts"].append(
+                    {
+                        "field": "comicvine_series_id",
+                        first_source: payload["series_id"],
+                        sidecar_name: sidecar_series_id,
+                    }
+                )
+            elif sidecar_series_id is not None and payload["series_id"] is None:
+                payload["series_id"] = sidecar_series_id
+                payload["series_id_source"] = sidecar_name
             payload["issue_id"] = payload["issue_id"] or _as_int(
                 sidecar_data.get("issueid") or sidecar_data.get("comicvine_issue_id")
             )

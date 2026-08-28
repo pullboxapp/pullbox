@@ -43,6 +43,10 @@ def trusted_known_cv_id_without_fetch(
     series_id_signal = source_metadata.signals.get("comicvine_series_id")
     if series_id_signal == MetadataSignal.SIDECAR:
         return True
+    if series_id_signal == MetadataSignal.PULLBOX_FOLDER:
+        return (
+            source_metadata.diagnostics.get("comicvine_series_id_source") == "pullbox_folder_name"
+        )
     return series_id_signal in {None, MetadataSignal.COMICINFO} and source_metadata.diagnostics.get(
         "comicvine_series_id_source"
     ) in {"comicvine_volume_url", "comicvine_note_id"}

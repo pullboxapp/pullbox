@@ -54,6 +54,10 @@ def test_import_scan_benchmark_exits_cleanly() -> None:
     assert report["files_per_series"] == 1
     assert report["total_files_matched"] == 1
     assert report["archive_entry_issue_hint_count"] == 1
+    assert report["provider_search_calls"] == 0
+    assert report["provider_get_series_calls"] == 0
+    assert report["provider_issue_summary_calls"] == 0
+    assert report["provider_issue_number_calls"] == 0
 
 
 def test_import_scan_benchmark_uses_stable_provider_ids_for_multi_series() -> None:
@@ -70,6 +74,10 @@ def test_import_scan_benchmark_uses_stable_provider_ids_for_multi_series() -> No
     assert report["total_files_matched"] == 16
     assert report["total_files_conflict"] == 0
     assert report["archive_entry_issue_hint_count"] == 16
+    assert report["provider_search_calls"] == 0
+    assert report["provider_get_series_calls"] == 0
+    assert report["provider_issue_summary_calls"] == 0
+    assert report["provider_issue_number_calls"] == 0
 
 
 def test_import_scan_benchmark_uses_trusted_folder_metadata_without_provider_calls() -> None:

@@ -26,6 +26,7 @@ _CONFIDENCE_RANKS = {"high": 3, "medium": 2, "low": 1}
 _CV_ONLY_MATCH_METHODS = frozenset(
     {
         "comicinfo_cv_id",
+        "folder_cv_id",
         "exact_title_year",
         "explicit_issue_series_split",
         "mylar3_cv_id",

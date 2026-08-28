@@ -16,6 +16,11 @@ from starlette.responses import Response
 from pullbox.api.deps import AuthenticatedUser, DbSession
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue
+from pullbox.models.operation_progress import (
+    OperationProgress,
+    OperationProgressState,
+    OperationProgressType,
+)
 from pullbox.models.series import Series
 from pullbox.services.download_history_classification import (
     post_processing_failure_clause as shared_post_processing_failure_clause,
@@ -44,6 +49,7 @@ _POST_PROCESSING_TABS = {"queue", "history"}
 class _LoadPostProcessingLiveStatusMap(Protocol):
     def __call__(
         self,
+        session: AsyncSession,
         active_items: Sequence[DownloadHistory],
     ) -> Awaitable[dict[int, dict[str, object]]]: ...
 
@@ -115,12 +121,13 @@ def _recent_completion_ids() -> set[int]:
 
 
 async def _live_status_map(
+    session: AsyncSession,
     active_items: Sequence[DownloadHistory],
 ) -> dict[int, dict[str, object]]:
     if _load_live_status_map is None:
         msg = "post-processing routes have not been configured with live status loading"
         raise RuntimeError(msg)
-    return await _load_live_status_map(active_items)
+    return await _load_live_status_map(session, active_items)
 
 
 async def load_post_processing_client_options(
@@ -290,7 +297,7 @@ async def load_post_processing_status_context(session: AsyncSession) -> dict[str
         )
         recent_imported_items = list(recent_result.unique().scalars().all())
 
-    live_status_map = await _live_status_map(active_items)
+    live_status_map = await _live_status_map(session, active_items)
     active_items.sort(
         key=lambda item: (
             0 if item.id in live_status_map else 1,
@@ -326,63 +333,44 @@ async def load_post_processing_status_context(session: AsyncSession) -> dict[str
 
 
 async def load_post_processing_live_status_map(
+    session: AsyncSession,
     active_items: Sequence[DownloadHistory],
 ) -> dict[int, dict[str, object]]:
-    """Return live post-processing UI status for actively processing downloads."""
-    from pullbox.tasks.download_task import PostProcessingPhase, get_all_post_processing_progress
-
-    phase_progress_map: dict[PostProcessingPhase, tuple[float, str]] = {
-        PostProcessingPhase.RESOLVING_SOURCE: (18.0, "Step 1 of 5"),
-        PostProcessingPhase.VALIDATING_FILES: (36.0, "Step 2 of 5"),
-        PostProcessingPhase.PREPARING_DESTINATION: (54.0, "Step 3 of 5"),
-        PostProcessingPhase.REGISTERING_LIBRARY_FILE: (92.0, "Step 5 of 5"),
-        PostProcessingPhase.IMPORT_COMPLETE: (100.0, "Complete"),
-    }
-
-    snapshots = get_all_post_processing_progress()
-    now_epoch = datetime.now(UTC).timestamp()
+    """Return durable post-processing status without fabricated phase percentages."""
+    item_ids = {str(item.id): item.id for item in active_items}
+    if not item_ids:
+        return {}
+    operations = (
+        await session.execute(
+            select(OperationProgress).where(
+                OperationProgress.operation_type == OperationProgressType.POST_PROCESSING,
+                OperationProgress.operation_key.in_(item_ids),
+            )
+        )
+    ).scalars()
+    now = datetime.now(UTC)
     live_status_map: dict[int, dict[str, object]] = {}
-
-    for item in active_items:
-        snapshot = snapshots.get(item.id)
-        if snapshot is None:
+    for operation in operations:
+        download_id = item_ids.get(operation.operation_key)
+        if download_id is None:
             continue
-        transfer_progress_pct: float | None = None
-        phase_progress_pct: float | None = None
-        phase_progress_label: str | None = None
-        if not snapshot.phase.shows_transfer_metrics:
-            phase_progress_pct, phase_progress_label = phase_progress_map.get(
-                snapshot.phase,
-                (0.0, "Pending"),
-            )
-        if (
-            snapshot.transfer_total_bytes
-            and snapshot.transfer_done_bytes is not None
-            and snapshot.transfer_total_bytes > 0
-        ):
-            transfer_progress_pct = round(
-                min(
-                    max(
-                        (snapshot.transfer_done_bytes / snapshot.transfer_total_bytes) * 100,
-                        0.0,
-                    ),
-                    100.0,
-                ),
-                1,
-            )
-        live_status_map[item.id] = {
-            "phase_label": snapshot.phase_label,
-            "status_label": snapshot.phase.status_label,
-            "shows_transfer_metrics": snapshot.phase.shows_transfer_metrics,
-            "elapsed_seconds": max(0, int(now_epoch - snapshot.started_at_epoch)),
-            "state_tone": snapshot.state_tone,
-            "phase_progress_pct": phase_progress_pct,
-            "phase_progress_label": phase_progress_label,
-            "transfer_progress_pct": transfer_progress_pct,
-            "transfer_done_bytes": snapshot.transfer_done_bytes,
-            "transfer_total_bytes": snapshot.transfer_total_bytes,
-            "transfer_speed_bytes": snapshot.transfer_speed_bytes,
-            "transfer_eta_seconds": snapshot.transfer_eta_seconds,
+        is_complete = operation.state is OperationProgressState.COMPLETED
+        shows_transfer = operation.phase == "transferring_file"
+        started_at = operation.started_at or operation.last_event_at
+        live_status_map[download_id] = {
+            "phase_label": operation.message,
+            "status_label": operation.message,
+            "shows_transfer_metrics": shows_transfer,
+            "elapsed_seconds": max(0, int((now - started_at).total_seconds())),
+            "state_tone": "success" if is_complete else "active",
+            "phase_progress_pct": 100.0 if is_complete else None,
+            "phase_progress_label": "Complete" if is_complete else "In progress",
+            "progress_indeterminate": operation.overall_indeterminate and not is_complete,
+            "transfer_progress_pct": (operation.overall_percent if shows_transfer else None),
+            "transfer_done_bytes": operation.overall_current,
+            "transfer_total_bytes": operation.overall_total,
+            "transfer_speed_bytes": int(operation.rate) if operation.rate is not None else None,
+            "transfer_eta_seconds": operation.eta_seconds,
         }
 
     return live_status_map
@@ -583,7 +571,7 @@ async def htmx_pp_queue_detail(
     if dl is None:
         raise HTTPException(status_code=404, detail="Post-processing queue item not found")
 
-    live_status_map = await _live_status_map([dl])
+    live_status_map = await _live_status_map(session, [dl])
     return _templates().TemplateResponse(
         request,
         "partials/pp_queue_detail.html",
