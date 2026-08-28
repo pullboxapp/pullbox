@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 import structlog
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.providers.base import (
     IndexerCapabilities,
     ProviderHealthResult,
@@ -279,7 +280,9 @@ class ProwlarrIndexer:
                     seeders=item.get("seeders") if is_torrent else None,
                     leechers=item.get("leechers") if is_torrent else None,
                     grabs=item.get("grabs"),
-                    is_torrent=is_torrent,
+                    protocol=(
+                        AcquisitionProtocol.TORRENT if is_torrent else AcquisitionProtocol.USENET
+                    ),
                     category=_join_categories(item.get("categories", [])),
                     published_at=published_at,
                     info_url=info_url,

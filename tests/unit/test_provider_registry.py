@@ -155,6 +155,21 @@ class TestGetClientForType:
         assert result.client_type == "sabnzbd"
 
 
+class TestGetDownloadClient:
+    """Tests for exact persisted configuration lookup."""
+
+    def test_returns_only_the_requested_configuration(self) -> None:
+        reg = ProviderRegistry()
+        first = _mock_client("sabnzbd")
+        second = _mock_client("sabnzbd")
+        reg.register_download_client(11, first, priority=50)
+        reg.register_download_client(22, second, priority=10)
+
+        assert reg.get_download_client(11) is first
+        assert reg.get_download_client(22) is second
+        assert reg.get_download_client(33) is None
+
+
 class TestSamePriorityTiebreaker:
     """Two clients with the same priority → first registered wins."""
 

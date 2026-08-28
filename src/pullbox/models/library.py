@@ -49,6 +49,7 @@ class LibraryFile(Base, IdentityMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_library_files_path", "file_path", unique=True),
         Index("ix_library_files_match", "match_confidence"),
+        Index("ix_library_files_issue", "issue_id"),
     )
 
     # File information

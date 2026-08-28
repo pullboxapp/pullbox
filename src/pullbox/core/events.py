@@ -13,6 +13,7 @@ import inspect
 from collections import defaultdict
 from collections.abc import Callable  # noqa: TC003 - used at runtime in type annotations
 from dataclasses import dataclass
+from datetime import datetime  # noqa: TC003 - used at runtime in type annotations
 from typing import Any
 
 import structlog
@@ -129,6 +130,29 @@ class HealthCheckCompleted:
     component: str
     status: str
     message: str
+
+
+@dataclass(frozen=True)
+class ReaderCompletionChanged:
+    """Emitted after one user's explicit completion state commits."""
+
+    user_id: int
+    issue_id: int
+    state_version: int
+    completed: bool
+    occurred_at: datetime
+    origin: str
+
+
+@dataclass(frozen=True)
+class ReaderWantToReadChanged:
+    """Emitted after one user's private reading queue state commits."""
+
+    user_id: int
+    issue_id: int
+    state_version: int
+    enabled: bool
+    occurred_at: datetime
 
 
 # ---------------------------------------------------------------------------

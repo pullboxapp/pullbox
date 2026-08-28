@@ -29,6 +29,30 @@
         <h2 id="comic-reader-title" x-text="readerTitle || 'Comic reader'">Comic reader</h2>
         <p x-text="readerIssueLabel"></p>
       </div>
+      <nav class="comic-reader__issue-navigation" aria-label="Issue navigation">
+        <button
+          type="button"
+          data-testid="comic-reader-previous-issue"
+          class="comic-reader__button"
+          @click="readerPreviousIssue()"
+          :disabled="readerIssueTransitioning || readerCompletionUpdating || readerLoading || readerPageLoading || !readerAdjacentIssue('previous')"
+          :aria-label="readerIssueControlLabel('previous')"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+          <span>Previous issue</span>
+        </button>
+        <button
+          type="button"
+          data-testid="comic-reader-next-issue"
+          class="comic-reader__button"
+          @click="readerNextIssue()"
+          :disabled="readerIssueTransitioning || readerCompletionUpdating || readerLoading || readerPageLoading || !readerAdjacentIssue('next')"
+          :aria-label="readerIssueControlLabel('next')"
+        >
+          <span>Next issue</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6" /></svg>
+        </button>
+      </nav>
       <div class="comic-reader__top-actions">
         <button
           type="button"
@@ -94,10 +118,42 @@
         <span x-text="readerErrorMessage"></span>
         <div class="comic-reader__state-actions">
           <button type="button" data-testid="comic-reader-retry" class="comic-reader__button" @click="retryReaderPage()">Retry</button>
-          <a href="/api/v1/issues/{{ issue.id }}/download-file" download class="comic-reader__button">Download</a>
+          <a
+            data-testid="comic-reader-active-download"
+            :href="readerManifest && readerManifest.download_url ? readerManifest.download_url : '#'"
+            download
+            class="comic-reader__button"
+          >Download</a>
           <button type="button" class="comic-reader__button" @click="closeReader()">Close</button>
         </div>
       </div>
+      <section
+        x-show="readerCompletionVisible"
+        x-cloak
+        data-testid="comic-reader-completion"
+        class="comic-reader__completion"
+        aria-labelledby="comic-reader-completion-title"
+      >
+        <strong id="comic-reader-completion-title" x-text="'Finished ' + readerIssueLabel"></strong>
+        <p x-show="!readerAdjacentIssue('next')">You’re caught up in this series.</p>
+        <div class="comic-reader__state-actions">
+          <button
+            x-show="readerAdjacentIssue('next')"
+            type="button"
+            data-testid="comic-reader-read-next"
+            class="comic-reader__button comic-reader__button--prominent"
+            @click="readerNextIssue()"
+            :disabled="readerIssueTransitioning || readerCompletionUpdating"
+          >Read next issue</button>
+          <button
+            type="button"
+            data-testid="comic-reader-mark-unread"
+            class="comic-reader__button"
+            @click="readerMarkUnread()"
+            :disabled="readerCompletionUpdating"
+          >Mark unread</button>
+        </div>
+      </section>
       <aside
         x-show="readerHelpVisible"
         x-cloak
@@ -180,7 +236,7 @@
           data-testid="comic-reader-previous"
           class="comic-reader__button"
           @click="readerPrevious()"
-          :disabled="readerPageIndex <= 0 || readerLoading"
+          :disabled="readerPageIndex <= 0 || readerLoading || readerIssueTransitioning"
           aria-label="Previous page"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
@@ -217,7 +273,7 @@
           data-testid="comic-reader-next"
           class="comic-reader__button"
           @click="readerNext()"
-          :disabled="readerPageIndex >= readerPageCount - 1 || readerLoading"
+          :disabled="readerPageIndex >= readerPageCount - 1 || readerLoading || readerIssueTransitioning"
           aria-label="Next page"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6" /></svg>
@@ -231,6 +287,21 @@
       aria-live="polite"
       aria-atomic="true"
       x-text="readerPageStatus()"
+    ></p>
+    <p
+      data-testid="comic-reader-issue-status"
+      class="sr-only"
+      aria-live="polite"
+      aria-atomic="true"
+      x-text="readerIssueStatusMessage"
+    ></p>
+    <p
+      x-show="readerIssueSwitchError"
+      x-cloak
+      data-testid="comic-reader-switch-error"
+      class="comic-reader__save-status"
+      role="alert"
+      x-text="readerIssueSwitchError"
     ></p>
     <p x-show="readerProgressSaveFailed" class="comic-reader__save-status" role="status">
       Reading position not saved yet. Pullbox will retry.

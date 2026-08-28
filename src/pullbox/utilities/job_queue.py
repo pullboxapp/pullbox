@@ -19,6 +19,7 @@ import structlog
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
 
+from pullbox.services.utility_operation_progress import project_utility_operation_progress
 from pullbox.utilities.job_queue_batch_processing import process_dispatch_batches
 from pullbox.utilities.job_queue_config import (
     get_utility_log_level,
@@ -106,6 +107,28 @@ class JobQueueManager:
             return cls(executor_registry=self._registry)  # type: ignore[call-arg]
         return cls()
 
+    async def _project_dispatch_progress(
+        self,
+        job_id: str,
+        current_item_id: str | None = None,
+    ) -> None:
+        """Publish one utility snapshot from durable queue state."""
+        async with self._session_factory() as session:
+            job = await session.get(UtilityJob, job_id)
+            if job is None:
+                return
+            current_item = (
+                await session.get(UtilityJobItem, current_item_id)
+                if current_item_id is not None
+                else None
+            )
+            await project_utility_operation_progress(
+                session,
+                job,
+                current_item=current_item,
+            )
+            await session.commit()
+
     async def _create_rollback_job(
         self,
         session: AsyncSession,
@@ -137,6 +160,7 @@ class JobQueueManager:
         )
         session.add(rollback_job)
         await session.flush()
+        await project_utility_operation_progress(session, rollback_job)
         logger.info(
             "rollback_job_created",
             rollback_job_id=rollback_job.id,
@@ -221,6 +245,7 @@ class JobQueueManager:
         )
         session.add(job)
         await session.flush()
+        await project_utility_operation_progress(session, job)
 
         logger.info(
             "job_created",
@@ -257,6 +282,10 @@ class JobQueueManager:
                     started_job = start_result.started_job
                     if started_job is None:
                         continue
+                    current_job = await session.get(UtilityJob, started_job.job_id)
+                    if current_job is not None:
+                        await project_utility_operation_progress(session, current_job)
+                        await session.commit()
 
                 job_id = started_job.job_id
                 job_type = started_job.job_type
@@ -321,6 +350,7 @@ class JobQueueManager:
                         worker_pool=worker_pool,
                         get_utility_log_level=get_utility_log_level,
                         persist_log=self._persist_utility_log,
+                        project_progress=self._project_dispatch_progress,
                         logger=logger,
                         timestamp_factory=lambda: datetime.now(UTC).isoformat(),
                     )
@@ -342,6 +372,10 @@ class JobQueueManager:
                     )
                     if finalization.log_event is not None:
                         logger.info(finalization.log_event, **finalization.log_context)
+                    finalized_job = await session.get(UtilityJob, job_id)
+                    if finalized_job is not None:
+                        await project_utility_operation_progress(session, finalized_job)
+                        await session.commit()
 
     # ── Startup Recovery ───────────────────────────────────────
 
@@ -362,6 +396,7 @@ class JobQueueManager:
         for job in interrupted:
             job.state = JobState.PAUSED
             job.paused_at = datetime.now(UTC).isoformat()
+            await project_utility_operation_progress(session, job)
             logger.info("job_recovered", job_id=job.id, old_state="RUNNING/PAUSING")
 
         # Reset any IN_PROGRESS items to PENDING
@@ -404,6 +439,7 @@ class JobQueueManager:
             raise ValueError(f"Job not found: {job_id}")
         self.transition(job, JobState.PAUSING)
         await session.flush()
+        await project_utility_operation_progress(session, job)
 
     async def resume_job(self, session: AsyncSession, job_id: str) -> None:
         """Resume a paused job by re-queuing ahead of fresh work.
@@ -428,6 +464,7 @@ class JobQueueManager:
         job.state = JobState.QUEUED
         ordered_jobs = build_resume_queue_order(job, queued_jobs)
         await resequence_queued_jobs(session, ordered_jobs)
+        await project_utility_operation_progress(session, job)
 
         logger.info("job_resumed", job_id=job_id, queue_position=job.queue_position)
 
@@ -465,6 +502,7 @@ class JobQueueManager:
             self.transition(job, JobState.CANCELLED)
 
         await session.flush()
+        await project_utility_operation_progress(session, job)
 
         if rollback:
             await self._create_rollback_job(session, job)

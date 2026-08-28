@@ -16,9 +16,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.events import EventBus
 from pullbox.models import Base
-from pullbox.models.download import DownloadClientType, DownloadState
+from pullbox.models.client import DownloadClientConfig
+from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
 from pullbox.providers.base import (
@@ -276,6 +278,15 @@ class TestClientTypeAffinity:
         dl_client = _mock_client("deluge")
         reg.register_download_client(1, tr, priority=10)
         reg.register_download_client(2, dl_client, priority=50)
+        session.add(
+            DownloadClientConfig(
+                id=1,
+                name="Transmission",
+                client_type=DownloadClientType.TRANSMISSION,
+                url="http://transmission.test",
+            )
+        )
+        await session.flush()
 
         svc = DownloadService(registry=reg, event_bus=EventBus())
 
@@ -283,10 +294,76 @@ class TestClientTypeAffinity:
         release = _make_release("Test", is_torrent=True)
         dl = await svc.send_to_client(session, release, issue.id)
         assert dl.download_client == DownloadClientType.TRANSMISSION
+        assert dl.download_client_config_id == 1
+        assert dl.protocol is AcquisitionProtocol.TORRENT
 
         # get_client_for_download should return Transmission, not Deluge
         client = svc.get_client_for_download(dl)
         assert client is tr
+
+    async def test_exact_config_id_wins_over_same_type_fallback(
+        self,
+        issue: Issue,
+    ) -> None:
+        reg = ProviderRegistry()
+        first = _mock_client("sabnzbd")
+        second = _mock_client("sabnzbd")
+        reg.register_download_client(1, first, priority=10)
+        reg.register_download_client(2, second, priority=50)
+        svc = DownloadService(registry=reg, event_bus=EventBus())
+        download = DownloadHistory(
+            issue_id=issue.id,
+            title="Exact client",
+            download_url="https://example.test/exact-client",
+            download_client=DownloadClientType.SABNZBD,
+            download_client_config_id=2,
+        )
+
+        assert svc.get_client_for_download(download) is second
+
+    async def test_manual_retry_uses_persisted_client_config_id(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+    ) -> None:
+        reg = ProviderRegistry()
+        first = _mock_client("sabnzbd")
+        second = _mock_client("sabnzbd")
+        reg.register_download_client(1, first, priority=10)
+        reg.register_download_client(2, second, priority=50)
+        svc = DownloadService(registry=reg, event_bus=EventBus())
+        session.add_all(
+            [
+                DownloadClientConfig(
+                    id=1,
+                    name="First SABnzbd",
+                    client_type=DownloadClientType.SABNZBD,
+                    url="http://sabnzbd-first.test",
+                ),
+                DownloadClientConfig(
+                    id=2,
+                    name="Second SABnzbd",
+                    client_type=DownloadClientType.SABNZBD,
+                    url="http://sabnzbd-second.test",
+                ),
+            ]
+        )
+        await session.flush()
+        download = DownloadHistory(
+            issue_id=issue.id,
+            title="Exact retry",
+            download_url="https://example.test/exact-retry",
+            download_client=DownloadClientType.SABNZBD,
+            download_client_config_id=2,
+            state=DownloadState.FAILED,
+        )
+        session.add(download)
+        await session.flush()
+
+        await svc.manual_retry(session, download.id)
+
+        second.add_nzb.assert_awaited_once()
+        first.add_nzb.assert_not_awaited()
 
     async def test_nzbget_download_polled_from_nzbget(
         self,

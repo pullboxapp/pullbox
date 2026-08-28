@@ -18,6 +18,7 @@ from pullbox.core.collection_scanner import COMIC_EXTENSIONS, DiscoveredFile, Di
 from pullbox.core.exceptions import MylarReadError
 from pullbox.core.naming import parse_filename
 from pullbox.core.release_parser import normalize_issue_number
+from pullbox.models.issue import IssueType
 
 logger = structlog.get_logger(__name__)
 
@@ -32,6 +33,22 @@ class _MylarIssueRecord:
     title: str | None
     release_date: str | None
     location: str | None
+    issue_type: IssueType = IssueType.ISSUE
+    series_name: str | None = None
+
+
+@dataclass(slots=True)
+class _MylarReleaseSeries:
+    """Files attached to a separate ComicVine release series in Mylar."""
+
+    cv_id: int
+    name: str
+    year: int | None
+    publisher: str | None
+    source_folder: str
+    source_folder_relative: str
+    series_status: str | None
+    files: list[DiscoveredFile]
 
 
 class Mylar3Reader:
@@ -111,6 +128,7 @@ class Mylar3Reader:
         """Convert Mylar3 database rows to DiscoveredSeries instances."""
         results: list[DiscoveredSeries] = []
         seen_cv_ids: set[int] = set()
+        release_series: dict[int, _MylarReleaseSeries] = {}
 
         for row in rows:
             cv_id = self._parse_cv_id(row["ComicID"])
@@ -152,6 +170,48 @@ class Mylar3Reader:
                         series_status=series_status,
                     )
 
+            if cv_id is not None and discovered_files:
+                parent_files: list[DiscoveredFile] = []
+                records_by_issue_id = {record.issue_id: record for record in series_issue_records}
+                for discovered_file in discovered_files:
+                    release_cv_id = discovered_file.comicvine_series_id
+                    if release_cv_id is None or release_cv_id == cv_id:
+                        parent_files.append(discovered_file)
+                        continue
+                    issue_record = (
+                        records_by_issue_id.get(discovered_file.comicvine_issue_id)
+                        if discovered_file.comicvine_issue_id is not None
+                        else None
+                    )
+                    if issue_record is None or issue_record.issue_type != IssueType.ANNUAL:
+                        parent_files.append(discovered_file)
+                        continue
+                    release = release_series.get(release_cv_id)
+                    if release is None:
+                        release = _MylarReleaseSeries(
+                            cv_id=release_cv_id,
+                            name=(
+                                issue_record.series_name
+                                or discovered_file.parsed_series
+                                or f"{row['ComicName'] or 'Unknown'} Annual"
+                            ),
+                            year=self._release_year(
+                                issue_record.release_date,
+                                discovered_file.parsed_year,
+                            ),
+                            publisher=row["ComicPublisher"],
+                            source_folder=resolved_location or "",
+                            source_folder_relative=location or "",
+                            series_status=series_status,
+                            files=[],
+                        )
+                        release_series[release_cv_id] = release
+                    release.files.append(discovered_file)
+                discovered_files = parent_files
+                sample_paths = [item.file_path for item in discovered_files[:5]]
+                file_count = len(discovered_files)
+                has_files = bool(discovered_files)
+
             diagnostics: dict[str, object] = {}
             if series_status:
                 diagnostics["series_status"] = series_status
@@ -174,6 +234,44 @@ class Mylar3Reader:
                 )
             )
 
+        results_by_cv_id = {
+            result.mylar3_cv_id: result for result in results if result.mylar3_cv_id is not None
+        }
+        for release_cv_id, release in release_series.items():
+            existing = results_by_cv_id.get(release_cv_id)
+            if existing is not None:
+                known_paths = {item.file_path for item in existing.files}
+                existing.files.extend(
+                    item for item in release.files if item.file_path not in known_paths
+                )
+                existing.file_count = len(existing.files)
+                existing.sample_paths = [item.file_path for item in existing.files[:5]]
+                existing.has_files = bool(existing.files)
+                existing.diagnostics["source_issue_type"] = IssueType.ANNUAL.value
+                continue
+
+            release_diagnostics: dict[str, object] = {
+                "issue_count_hint": len(release.files),
+                "source_issue_type": IssueType.ANNUAL.value,
+            }
+            if release.series_status:
+                release_diagnostics["series_status"] = release.series_status
+            discovered = DiscoveredSeries(
+                raw_series_name=release.name,
+                raw_year=release.year,
+                raw_publisher=release.publisher,
+                file_count=len(release.files),
+                sample_paths=[item.file_path for item in release.files[:5]],
+                source_folder=release.source_folder,
+                source_folder_relative=release.source_folder_relative,
+                has_files=bool(release.files),
+                files=release.files,
+                mylar3_cv_id=release.cv_id,
+                diagnostics=release_diagnostics,
+            )
+            results.append(discovered)
+            results_by_cv_id[release_cv_id] = discovered
+
         logger.info(
             "mylar3_read_completed",
             total_series=len(results),
@@ -181,6 +279,13 @@ class Mylar3Reader:
         )
 
         return results
+
+    def _release_year(self, release_date: str | None, parsed_year: int | None) -> int | None:
+        if release_date and len(release_date) >= 4:
+            parsed = self._parse_year(release_date[:4])
+            if parsed is not None:
+                return parsed
+        return parsed_year
 
     def _parse_cv_id(self, comic_id: str | None) -> int | None:
         """Parse 'CV-47050' to 47050. Returns None if malformed."""
@@ -253,11 +358,16 @@ class Mylar3Reader:
             parsed_series: str | None = None
             parsed_issue_number: float | None = None
             parsed_year: int | None = None
+            issue_type = IssueType.ISSUE
             issue_number_raw: str | None = None
             if parsed:
                 parsed_series = parsed.series
                 parsed_issue_number = parsed.issue_number
                 parsed_year = parsed.year
+                try:
+                    issue_type = IssueType(parsed.issue_type)
+                except ValueError:
+                    issue_type = IssueType.ISSUE
                 if parsed.issue_number == int(parsed.issue_number):
                     issue_number_raw = str(int(parsed.issue_number))
                 else:
@@ -274,6 +384,8 @@ class Mylar3Reader:
             comicvine_issue_id: int | None = None
             comicvine_series_id: int | None = None
             if issue_record is not None:
+                if issue_record.issue_type != IssueType.ISSUE:
+                    issue_type = issue_record.issue_type
                 comicvine_issue_id = issue_record.issue_id
                 comicvine_series_id = issue_record.series_cv_id
                 metadata_signals["comicvine_issue_id"] = "mylar3"
@@ -298,6 +410,7 @@ class Mylar3Reader:
                     has_comicinfo=False,
                     comicvine_issue_id=comicvine_issue_id,
                     issue_number_raw=issue_number_raw,
+                    issue_type=issue_type,
                     comicvine_series_id=comicvine_series_id,
                     series_status=series_status,
                     issue_count_hint=issue_count_hint,
@@ -376,10 +489,15 @@ class Mylar3Reader:
             },
         ):
             return
-        for row in conn.execute(
-            "SELECT IssueID, ComicID, Issue_Number, IssueName, IssueDate, "
-            "Location, ReleaseComicID FROM annuals"
-        ).fetchall():
+        annual_columns = self._table_columns(conn, "annuals")
+        query = (
+            "SELECT IssueID, ComicID, Issue_Number, IssueName, IssueDate, Location, "
+            "ReleaseComicID, ReleaseComicName FROM annuals"
+            if "ReleaseComicName" in annual_columns
+            else "SELECT IssueID, ComicID, Issue_Number, IssueName, IssueDate, Location, "
+            "ReleaseComicID, NULL AS ReleaseComicName FROM annuals"
+        )
+        for row in conn.execute(query).fetchall():
             owning_comic_id = self._parse_cv_id(row["ComicID"])
             issue_id = self._parse_positive_int(row["IssueID"])
             release_comic_id = self._parse_cv_id(row["ReleaseComicID"])
@@ -393,6 +511,8 @@ class Mylar3Reader:
                     title=row["IssueName"],
                     release_date=row["IssueDate"],
                     location=row["Location"],
+                    issue_type=IssueType.ANNUAL,
+                    series_name=row["ReleaseComicName"],
                 )
             )
 
@@ -402,16 +522,16 @@ class Mylar3Reader:
         table_name: str,
         required_columns: set[str],
     ) -> bool:
+        return required_columns.issubset(self._table_columns(conn, table_name))
+
+    def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         if table_name == "issues":
             rows = conn.execute("PRAGMA table_info(issues)").fetchall()
         elif table_name == "annuals":
             rows = conn.execute("PRAGMA table_info(annuals)").fetchall()
         else:
-            return False
-        if not rows:
-            return False
-        columns = {str(row["name"]) for row in rows}
-        return required_columns.issubset(columns)
+            return set()
+        return {str(row["name"]) for row in rows}
 
     def _get_file_count(self, location: str | None) -> int:
         """Count comic files in a directory if it exists. Returns 0 otherwise."""

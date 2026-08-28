@@ -60,6 +60,37 @@ class ArtifactTransferLimiter:
             host.release()
 
 
+class DirectProviderTransferLimiter:
+    """Serialize remote acquisition work independently for each direct provider."""
+
+    def __init__(self, *, per_provider_limit: int = 1) -> None:
+        if per_provider_limit < 1:
+            raise ValueError("Default per-provider transfer limit must be at least 1.")
+        self._per_provider_limit = per_provider_limit
+        self._providers: dict[str, asyncio.Semaphore] = {}
+
+    @asynccontextmanager
+    async def slot(
+        self,
+        provider_identity: str,
+        *,
+        cancel_event: asyncio.Event | None = None,
+    ) -> AsyncIterator[None]:
+        """Wait for one provider lane without contacting the remote provider."""
+        normalized_identity = provider_identity.strip()
+        if not normalized_identity:
+            raise ValueError("Direct provider identity cannot be empty.")
+        provider = self._providers.setdefault(
+            normalized_identity,
+            asyncio.Semaphore(self._per_provider_limit),
+        )
+        await _acquire_with_cancel(provider, cancel_event)
+        try:
+            yield
+        finally:
+            provider.release()
+
+
 async def _acquire_with_cancel(
     semaphore: asyncio.Semaphore,
     cancel_event: asyncio.Event | None,

@@ -203,6 +203,7 @@ async def process_dispatch_batches(
     persist_log: Callable[..., None],
     logger: Any,
     timestamp_factory: Callable[[], str],
+    project_progress: Callable[[str, str | None], Awaitable[None]] | None = None,
 ) -> None:
     """Checkpoint, lease, and process pending utility items in batches."""
     for batch_start in range(0, len(pending_items), batch_size):
@@ -226,6 +227,9 @@ async def process_dispatch_batches(
                 started_at=timestamp_factory(),
             )
 
+        if project_progress is not None and batch_items:
+            await project_progress(job_id, batch_items[0].id)
+
         await process_dispatch_batch(
             session_factory=session_factory,
             job_id=job_id,
@@ -241,3 +245,5 @@ async def process_dispatch_batches(
             logger=logger,
             timestamp_factory=timestamp_factory,
         )
+        if project_progress is not None:
+            await project_progress(job_id, None)

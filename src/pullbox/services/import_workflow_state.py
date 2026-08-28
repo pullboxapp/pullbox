@@ -607,6 +607,10 @@ async def persist_progress_snapshot(
     payload["control_state"] = import_control_state_for_job(job)
     payload["error_message"] = job.error_message
     job.progress_snapshot = payload
+    from pullbox.services.import_operation_progress import build_import_operation_update
+    from pullbox.services.operation_progress import publish_operation_progress
+
+    await publish_operation_progress(session, build_import_operation_update(job, event))
     await session.flush()
 
 
@@ -656,8 +660,6 @@ async def emit_live_progress(
     started_at: datetime | None = None,
 ) -> None:
     """Publish an explicit live-only event without writing a durable snapshot."""
-    if progress_callback is None:
-        return
     if job.status in _PROTECTED_RUNTIME_STATUSES and event.status != job.status:
         return
 
@@ -675,7 +677,12 @@ async def emit_live_progress(
     event.last_checkpoint_at = datetime.now(UTC)
     event.control_state = import_control_state_for_job(job)
     apply_progress_event_contract(job, event, started_at=started_at)
-    await progress_callback(event)
+    from pullbox.services.import_operation_progress import build_import_operation_update
+    from pullbox.services.operation_progress_dispatch import queue_operation_progress
+
+    await queue_operation_progress(build_import_operation_update(job, event))
+    if progress_callback is not None:
+        await progress_callback(event)
 
 
 async def emit_progress(
@@ -705,6 +712,10 @@ async def emit_progress(
     event.control_state = import_control_state_for_job(job)
     await persist_progress_snapshot(session, job, event)
     await session.commit()
+    from pullbox.services.import_operation_progress import build_import_operation_update
+    from pullbox.services.operation_progress_dispatch import notify_activity_changed
+
+    await notify_activity_changed(build_import_operation_update(job, event))
     if progress_callback is not None:
         await progress_callback(event)
 

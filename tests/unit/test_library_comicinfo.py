@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
@@ -138,12 +139,14 @@ async def test_prepare_source_artifact_cleans_temp_dir_when_converter_fails(
     assert not temp_dir.exists()
 
 
-def test_apply_comicinfo_requires_cbz_artifact(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_apply_comicinfo_requires_cbz_artifact(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError, match="requires a CBZ artifact"):
-        apply_comicinfo_to_imported_artifact(tmp_path / "issue.cbr", {})
+        await apply_comicinfo_to_imported_artifact(tmp_path / "issue.cbr", {})
 
 
-def test_apply_comicinfo_delegates_to_embedder(
+@pytest.mark.asyncio
+async def test_apply_comicinfo_delegates_to_embedder_without_blocking_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,6 +154,8 @@ def test_apply_comicinfo_delegates_to_embedder(
     artifact.write_bytes(b"cbz")
     progress_calls: list[tuple[str, int, int, str]] = []
     embed_calls: list[tuple[Path, dict[str, Any]]] = []
+    event_loop_thread_id = threading.get_ident()
+    embed_thread_ids: list[int] = []
 
     def fake_embed(
         artifact_path: Path,
@@ -158,19 +163,21 @@ def test_apply_comicinfo_delegates_to_embedder(
         *,
         progress_callback: Any = None,
     ) -> None:
+        embed_thread_ids.append(threading.get_ident())
         embed_calls.append((artifact_path, comicinfo_payload))
         assert progress_callback is not None
         progress_callback("comicinfo", 1, 1, "done")
 
     monkeypatch.setattr(library_comicinfo, "embed_comicinfo_in_cbz", fake_embed)
 
-    apply_comicinfo_to_imported_artifact(
+    await apply_comicinfo_to_imported_artifact(
         artifact,
         {"Series": "King Dracula"},
         progress_callback=lambda *args: progress_calls.append(args),
     )
 
     assert embed_calls == [(artifact, {"Series": "King Dracula"})]
+    assert embed_thread_ids != [event_loop_thread_id]
     assert progress_calls == [("comicinfo", 1, 1, "done")]
 
 
@@ -220,7 +227,14 @@ async def test_build_comicinfo_payload_for_issue_uses_series_issue_and_page_meta
     await db_session.flush()
     source_path = tmp_path / "King Dracula 004.cbz"
     source_path.write_bytes(b"cbz")
-    monkeypatch.setattr(library_comicinfo, "inspect_archive_page_count", lambda _path: 31)
+    event_loop_thread_id = threading.get_ident()
+    inspection_thread_ids: list[int] = []
+
+    def inspect_page_count(_path: Path) -> int:
+        inspection_thread_ids.append(threading.get_ident())
+        return 31
+
+    monkeypatch.setattr(library_comicinfo, "inspect_archive_page_count", inspect_page_count)
 
     payload = await build_comicinfo_payload_for_issue(
         db_session,
@@ -241,6 +255,7 @@ async def test_build_comicinfo_payload_for_issue_uses_series_issue_and_page_meta
     assert payload["Volume"] == 2025
     assert payload["Web"] == "https://comicvine.gamespot.com/king-dracula-4/4000-1122334/"
     assert payload["Notes"] == "[cv_vol_id:165993] [cv_issue_id:1122334]"
+    assert inspection_thread_ids != [event_loop_thread_id]
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import gc
 import io
 import threading
 import time
@@ -11,6 +12,7 @@ import zipfile
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import psutil
 import pytest
 from PIL import Image
 
@@ -47,6 +49,8 @@ def _record(source: Path, root: Path) -> ReaderSourceRecord:
         issue_id=7,
         issue_title="A Reader Issue",
         issue_number="1",
+        issue_number_value=1.0,
+        series_id=3,
         series_title="Reader Series",
         library_file_id=11,
         file_path=str(source),
@@ -366,6 +370,52 @@ async def test_cache_diagnostics_and_clear_are_bounded_to_generated_reader_files
     assert cleared.files_removed == 1
     assert after.cache_file_count == 0
     assert source.is_file()
+
+
+@pytest.mark.asyncio
+async def test_fifty_issue_manifests_keep_server_resources_bounded(tmp_path: Path) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    service = ReaderContentService(
+        cache_dir=tmp_path / "cache",
+        max_open_sources=3,
+        max_workers=2,
+    )
+    process = psutil.Process()
+    before_rss = process.memory_info().rss
+    before_fds = process.num_fds()
+    before_children = len(process.children())
+
+    for issue_id in range(1, 52):
+        source = root / f"issue-{issue_id}.cbz"
+        _write_cbz(source, page_count=2)
+        record = dataclasses.replace(
+            _record(source, root),
+            issue_id=issue_id,
+            library_file_id=issue_id,
+        )
+        manifest = await service.get_manifest(resolve_reader_source(record))
+        assert manifest.page_count == 2
+
+    gc.collect()
+    await asyncio.sleep(0)
+    diagnostics = await service.get_diagnostics()
+    after_rss = process.memory_info().rss
+    after_fds = process.num_fds()
+    after_children = len(process.children())
+
+    assert diagnostics.open_source_count == 3
+    assert diagnostics.open_source_count <= diagnostics.max_open_sources
+    assert diagnostics.cache_file_count == 0
+    assert after_fds <= before_fds + 2
+    assert after_children == before_children
+    assert after_rss - before_rss < 32 * 1024 * 1024
+    print(
+        "reader_resource_scale "
+        f"switches=50 open_sources={diagnostics.open_source_count} "
+        f"fd_delta={after_fds - before_fds} child_delta={after_children - before_children} "
+        f"rss_delta_bytes={after_rss - before_rss}"
+    )
 
 
 def test_content_revision_changes_when_source_changes(tmp_path: Path) -> None:

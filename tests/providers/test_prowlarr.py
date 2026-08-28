@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.providers.base import SearchQuery
 from pullbox.providers.indexer.prowlarr import ProwlarrError, ProwlarrIndexer
 
@@ -161,6 +162,7 @@ class TestSearch:
         assert nzb.seeders is None
         assert nzb.leechers is None
         assert nzb.is_torrent is False
+        assert nzb.protocol is AcquisitionProtocol.USENET
         assert nzb.category == "Books/Comics,Magazines"
         assert nzb.info_url == "https://nzbgeek.example/details/123"
         assert nzb.published_at is not None
@@ -172,6 +174,7 @@ class TestSearch:
         assert torrent.leechers == 3
         assert torrent.grabs is None
         assert torrent.is_torrent is True
+        assert torrent.protocol is AcquisitionProtocol.TORRENT
         assert torrent.info_url == "https://torrent.example/details/456"
         assert torrent.published_at is None
 

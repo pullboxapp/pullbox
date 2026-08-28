@@ -286,7 +286,8 @@ External integrations are split into provider families:
 
 - Metadata providers under `src/pullbox/providers/metadata/`.
 - Indexer providers under `src/pullbox/providers/indexer/`.
-- Download client providers under `src/pullbox/providers/download/`.
+- Download client providers under `src/pullbox/providers/download/` and the
+  session-oriented AirDC++ adapter under `src/pullbox/providers/airdcpp/`.
 
 The active implementation includes:
 
@@ -294,10 +295,13 @@ The active implementation includes:
 - Pullbox Data public release payloads for What's New and opt-in telemetry.
 - Newznab, Torznab, Prowlarr, and Jackett indexers.
 - SABnzbd, NZBGet, qBittorrent, Transmission, and Deluge download clients.
+- Experimental AirDC++ search, queue reconciliation, and completed-file import.
 
 Provider composition happens through `src/pullbox/composition/providers.py`.
 Enabled database configuration is read, secrets are decrypted, clients are
 constructed, and provider instances are registered for service use.
+AirDC++ uses `src/pullbox/composition/airdcpp.py` because its authenticated REST
+session and WebSocket lifecycle are supervised per exact configured client.
 
 **Required standard**
 

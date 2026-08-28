@@ -1,6 +1,14 @@
 {% from "components/status_badge.html" import status_badge %}
+{% set reading = issue_reading_views.get(issue.id) %}
 
-<tr id="issue-{{ issue.id }}" data-testid="series-issue-row">
+<tr
+  id="issue-{{ issue.id }}"
+  data-testid="series-issue-row"
+  data-reading-refresh-root="series-issue"
+  data-reading-refresh-url="/htmx/issues/{{ issue.id }}/reading-row"
+  data-reading-issue-id="{{ issue.id }}"
+  x-data="readingStateActions()"
+>
   <td class="series-domain-issue-num">
     <a
       id="series-issue-number-link-{{ issue.id }}"
@@ -22,16 +30,62 @@
     >
       {% if issue.title %}{{ issue.title }}{% else %}<span class="text-pb-text-dim italic">No title available</span>{% endif %}
     </a>
+    {% if reader_enabled %}
+    <div class="series-domain-issue-reading-mobile sm:hidden" data-testid="series-issue-reading-mobile">
+      {% if reading and reading.state_label %}
+        {{ reading.progress_label or reading.state_label }}
+        {% if reading.want_to_read %}<span> · Want to Read</span>{% endif %}
+      {% else %}
+        <span aria-hidden="true">—</span><span class="sr-only">No reading state</span>
+      {% endif %}
+    </div>
+    {% endif %}
   </td>
   <td class="series-domain-issue-date hidden sm:table-cell">
     {{ issue.release_date or "—" }}
   </td>
+  {% if reader_enabled %}
+  <td class="series-domain-issue-reading hidden sm:table-cell" data-testid="series-issue-reading">
+    {% if reading and reading.completed %}
+      <span class="pill pill-success">Read</span>
+    {% elif reading and reading.progress_label %}
+      <div class="series-domain-reading-progress" aria-label="{{ reading.state_label }}">
+        <span>{{ reading.progress_label }}</span>
+        <span class="series-domain-reading-progress-track" aria-hidden="true">
+          <span class="series-domain-reading-progress-fill" style="width: {{ reading.progress_percent }}%"></span>
+        </span>
+      </div>
+    {% else %}
+      <span aria-hidden="true">—</span><span class="sr-only">No reading state</span>
+    {% endif %}
+    {% if reading and reading.want_to_read %}
+      <span class="series-domain-reading-queue">Want to Read</span>
+    {% endif %}
+  </td>
+  {% endif %}
   <td class="series-domain-issue-status">
     {{ status_badge(issue.status.value) }}
   </td>
   <td class="series-domain-issue-actions-cell hidden sm:table-cell">
-    {% if issue.status.value in ["wanted", "skipped", "unknown"] %}
     <div class="series-domain-issue-actions">
+    {% if reader_enabled and reading and reading.primary_label %}
+      <a
+        href="/issues/{{ issue.id }}?read=1"
+        hx-boost="false"
+        data-testid="series-issue-read"
+        data-reading-interaction
+        aria-label="{{ reading.primary_label }} {{ series.title }} #{{ issue.issue_number|issue_num }}"
+        class="series-domain-issue-action-btn"
+        data-tip="{{ reading.primary_label }}"
+        data-tip-pos="left"
+        data-tip-size="narrow"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 5.25A2.25 2.25 0 014.5 3h5.25A2.25 2.25 0 0112 5.25V21a2.25 2.25 0 00-2.25-2.25H4.5A2.25 2.25 0 012.25 16.5V5.25zM21.75 5.25A2.25 2.25 0 0019.5 3h-5.25A2.25 2.25 0 0012 5.25V21a2.25 2.25 0 012.25-2.25h5.25a2.25 2.25 0 002.25-2.25V5.25z" />
+        </svg>
+      </a>
+    {% endif %}
+    {% if issue.status.value in ["wanted", "skipped", "unknown"] %}
       <button data-testid="series-issue-auto-search"
               aria-label="Search"
               @click="runIssueAutoSearch({
@@ -61,7 +115,59 @@
           <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z"/>
         </svg>
       </button>
-    </div>
     {% endif %}
+      {% if reader_enabled %}
+      <div
+        data-testid="series-issue-reading-menu"
+        data-reading-interaction
+        class="relative"
+        @keydown.escape="readingMenuOpen = false"
+      >
+        <button
+          type="button"
+          class="series-domain-issue-action-btn"
+          aria-label="Reading options for {{ series.title }} #{{ issue.issue_number|issue_num }}"
+          :aria-expanded="readingMenuOpen ? 'true' : 'false'"
+          @click="readingMenuOpen = !readingMenuOpen"
+          data-tip="Reading options"
+          data-tip-pos="left"
+          data-tip-size="narrow"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.75a.75.75 0 100-1.5.75.75 0 000 1.5zM12 12.75a.75.75 0 100-1.5.75.75 0 000 1.5zM12 18.75a.75.75 0 100-1.5.75.75 0 000 1.5z" />
+          </svg>
+        </button>
+        <div
+          x-show="readingMenuOpen"
+          x-cloak
+          @click.outside="readingMenuOpen = false"
+          class="series-domain-reading-menu"
+          role="menu"
+        >
+          {% if reading and reading.completion_action_label %}
+          <button
+            type="button"
+            role="menuitem"
+            @click="readingMenuOpen = false; setCompletion($event.currentTarget, {{ reading.completion_action_value|tojson }})"
+            :disabled="busy"
+          >{{ reading.completion_action_label }}</button>
+          {% endif %}
+          <button
+            type="button"
+            role="menuitem"
+            @click="readingMenuOpen = false; setWantToRead($event.currentTarget, {{ reading.queue_action_value|tojson }})"
+            :disabled="busy"
+          >{{ reading.queue_action_label }}</button>
+        </div>
+      </div>
+      {% endif %}
+      <span
+        x-show="statusMessage"
+        x-text="statusMessage"
+        x-bind:role="statusIsError ? 'alert' : 'status'"
+        x-bind:aria-live="statusIsError ? 'assertive' : 'polite'"
+        class="sr-only"
+      ></span>
+    </div>
   </td>
 </tr>

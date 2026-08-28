@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -306,6 +306,78 @@ async def plan_direct_acquisition(
             },
         )
         raise
+
+
+async def plan_direct_acquisition_with_provider_fallback(
+    session: AsyncSession,
+    *,
+    acquisition_id: int,
+    pinned_route_identity: str | None = None,
+    planner: Callable[..., Awaitable[DirectAcquisitionPlanningResult]] | None = None,
+    skip_selected_attempt: bool = False,
+) -> DirectAcquisitionPlanningResult:
+    """Plan one logical result, trying its opaque provider alternates in order."""
+    selected_attempt = await _load_attempt(session, acquisition_id)
+    raw_alternate_ids = selected_attempt.candidate_snapshot.get("alternate_attempt_ids", [])
+    alternate_ids = (
+        [value for value in raw_alternate_ids if isinstance(value, int) and value > 0]
+        if isinstance(raw_alternate_ids, list) and pinned_route_identity is None
+        else []
+    )
+    plan = planner or plan_direct_acquisition
+    first_error: DirectAcquisitionPlanningError | None = None
+    candidate_ids = alternate_ids if skip_selected_attempt else [acquisition_id, *alternate_ids]
+
+    for candidate_id in candidate_ids:
+        candidate = await _load_attempt(session, candidate_id)
+        if candidate.issue_id != selected_attempt.issue_id:
+            continue
+        candidate.replace_existing_file = selected_attempt.replace_existing_file
+        try:
+            planned = await plan(
+                session,
+                acquisition_id=candidate.id,
+                pinned_route_identity=(
+                    pinned_route_identity if candidate.id == acquisition_id else None
+                ),
+            )
+        except DirectAcquisitionPlanningError as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+        if candidate.id != acquisition_id:
+            advance_acquisition_progress(
+                selected_attempt,
+                revision=selected_attempt.progress_revision + 1,
+                snapshot={
+                    **selected_attempt.progress_snapshot,
+                    "schema_version": 1,
+                    "stage": "provider_fallback",
+                    "fallback_attempt_id": candidate.id,
+                    "fallback_provider_identity": candidate.provider_identity,
+                },
+            )
+            advance_acquisition_progress(
+                candidate,
+                revision=candidate.progress_revision + 1,
+                snapshot={
+                    **candidate.progress_snapshot,
+                    "schema_version": 1,
+                    "fallback_from_attempt_id": selected_attempt.id,
+                    "fallback_from_provider_identity": selected_attempt.provider_identity,
+                },
+            )
+            await session.flush()
+        return planned
+
+    if first_error is not None:
+        raise first_error
+    raise DirectAcquisitionPlanningError(
+        "provider_fallback_unavailable",
+        "No provider route remains available for this direct result.",
+        failure_class=DirectArtifactFailureClass.PROVIDER_UNAVAILABLE,
+        intervention=False,
+    )
 
 
 async def resolve_planned_artifact_source(

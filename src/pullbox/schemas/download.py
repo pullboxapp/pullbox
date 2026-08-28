@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.models.direct_acquisition import DirectArtifactHostKind
 from pullbox.models.download import DownloadClientType, DownloadState
 
@@ -26,6 +27,7 @@ class DownloadQueueItem(BaseModel):
     title: str
     state: DownloadState
     download_client: DownloadClientType
+    protocol: AcquisitionProtocol
     external_id: str | None = None
     file_size: int | None = Field(None, description="File size in bytes")
     sent_at: datetime | None = None
@@ -43,6 +45,7 @@ class DownloadHistoryItem(BaseModel):
     title: str
     state: DownloadState
     download_client: DownloadClientType
+    protocol: AcquisitionProtocol
     file_size: int | None = None
     error_message: str | None = None
     sent_at: datetime | None = None

@@ -3,29 +3,71 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time as _time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.database import get_session_factory
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
+from pullbox.services.post_processing_operation_progress import (
+    project_post_processing_operation_progress,
+)
 from pullbox.tasks.post_processing_progress import (
     PostProcessingPhase,
     _clear_post_processing,
     _mark_post_processing_complete,
     _set_post_processing_phase,
+    get_all_post_processing_progress,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
 
 logger = structlog.get_logger(__name__)
 
 RunPostProcessing = Callable[[AsyncSession, DownloadHistory], Awaitable[None]]
 _process_completed_lock = asyncio.Lock()
+_POST_PROCESSING_CLAIM_LEASE = timedelta(minutes=15)
+
+
+async def _claim_completed_download(
+    session: AsyncSession,
+    download_id: int,
+    *,
+    now: datetime,
+) -> str | None:
+    """Atomically lease one completed row before any post-processing I/O."""
+    token = secrets.token_urlsafe(24)
+    stale_before = now - _POST_PROCESSING_CLAIM_LEASE
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(DownloadHistory)
+            .where(
+                DownloadHistory.id == download_id,
+                DownloadHistory.state == DownloadState.COMPLETED,
+                DownloadHistory.imported_at.is_(None),
+                or_(
+                    DownloadHistory.post_processing_claim_token.is_(None),
+                    DownloadHistory.post_processing_claimed_at.is_(None),
+                    DownloadHistory.post_processing_claimed_at <= stale_before,
+                ),
+            )
+            .values(
+                post_processing_claim_token=token,
+                post_processing_claimed_at=now,
+            )
+        ),
+    )
+    await session.commit()
+    return token if result.rowcount == 1 else None
 
 
 async def process_completed(
@@ -58,6 +100,12 @@ async def process_completed(
                         select(DownloadHistory.id).where(
                             DownloadHistory.state == DownloadState.COMPLETED,
                             DownloadHistory.imported_at.is_(None),
+                            or_(
+                                DownloadHistory.post_processing_claim_token.is_(None),
+                                DownloadHistory.post_processing_claimed_at.is_(None),
+                                DownloadHistory.post_processing_claimed_at
+                                <= datetime.now(UTC) - _POST_PROCESSING_CLAIM_LEASE,
+                            ),
                         )
                     )
                     download_ids = [row[0] for row in result.all()]
@@ -86,6 +134,13 @@ async def process_completed(
                 handoff_start: float | None = None
                 async with factory(autoflush=False) as session:
                     try:
+                        claim_token = await _claim_completed_download(
+                            session,
+                            dl_id,
+                            now=datetime.now(UTC),
+                        )
+                        if claim_token is None:
+                            continue
                         download = await session.get(DownloadHistory, dl_id)
                         if (
                             not download
@@ -116,7 +171,14 @@ async def process_completed(
                         # State stays at COMPLETED; imported_at marks success.
                         download.imported_at = datetime.now(UTC)
                         download.error_message = None
+                        download.post_processing_claim_token = None
+                        download.post_processing_claimed_at = None
                         _mark_post_processing_complete(dl_id)
+                        await project_post_processing_operation_progress(
+                            session,
+                            download,
+                            get_all_post_processing_progress().get(dl_id),
+                        )
                         processed += 1
                         log.info(
                             "post_processing_handoff_complete",
@@ -147,10 +209,17 @@ async def process_completed(
                                 if dl:
                                     dl.state = DownloadState.FAILED
                                     dl.error_message = str(exc) or "Post-processing failed"
+                                    dl.post_processing_claim_token = None
+                                    dl.post_processing_claimed_at = None
 
                                     issue = await err_session.get(Issue, dl.issue_id)
                                     if issue and issue.status == IssueStatus.DOWNLOADING:
                                         issue.status = IssueStatus.WANTED
+
+                                    await project_post_processing_operation_progress(
+                                        err_session,
+                                        dl,
+                                    )
 
                                 await err_session.commit()
                             except Exception:

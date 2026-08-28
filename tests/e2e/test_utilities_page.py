@@ -821,10 +821,11 @@ class TestUtilitiesPage:
             () => {
               const root = document.querySelector("[data-testid='utilities-permissions-page']");
               const data = window.Alpine.$data(root);
-              data.applySelectedFolders({
-                mode: "directories",
-                directories: [{ path: "/library/Batman (2016)", name: "Batman (2016)" }]
-              });
+              data.scope = "folder";
+              data.selectedFolders = [
+                { path: "/tmp/pullbox-e2e-library/01-batman", name: "01-batman" }
+              ];
+              data.selectedFolder = "/tmp/pullbox-e2e-library/01-batman";
               data.runMode = "apply";
               data.confirmApply = false;
               data.validationError = "";

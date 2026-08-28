@@ -46,6 +46,7 @@ from pullbox.models.config import SystemConfig
 from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import Series
 from pullbox.services import search_runtime as _search_runtime
+from pullbox.services.airdcpp_automatic_search import attach_automatic_airdcpp_search
 from pullbox.services.blocklist_service import BlocklistService
 from pullbox.services.direct_acquisition_planner_service import plan_direct_acquisition
 from pullbox.services.direct_discovery_retention import prune_unstarted_direct_discoveries
@@ -276,6 +277,11 @@ async def _persist_wanted_search_outcome(
 ) -> tuple[int, int, int]:
     """Route and persist one completed wanted-search outcome."""
 
+    outcome = await attach_automatic_airdcpp_search(
+        session,
+        outcome,
+        validator_kwargs=runtime.validator_kwargs,
+    )
     target = outcome.target
     issue_grabbed = 0
     issue_queued = 0
@@ -284,7 +290,9 @@ async def _persist_wanted_search_outcome(
     direct_results = (
         len(direct_outcome.matched) + len(direct_outcome.rejected) if direct_outcome else 0
     )
-    total_results = len(outcome.raw_results) + direct_results
+    dc_outcome = outcome.dc_outcome
+    dc_results = len(dc_outcome.matched) + len(dc_outcome.rejected) if dc_outcome else 0
+    total_results = len(outcome.raw_results) + direct_results + dc_results
     action_status = "no_results" if total_results == 0 else "no_match"
     try:
         search_log = await session.get(SearchLog, pending_log_id) if pending_log_id else None
@@ -397,6 +405,11 @@ async def _persist_series_search_outcome(
 ) -> tuple[int, int, int]:
     """Route and persist one completed series-search outcome."""
 
+    primary_outcome = await attach_automatic_airdcpp_search(
+        session,
+        primary_outcome,
+        validator_kwargs=runtime.validator_kwargs,
+    )
     target = primary_outcome.target
     issue_log = log.bind(issue_id=target.issue_id, issue_number=target.issue_number)
     issue_log.info(
@@ -478,6 +491,13 @@ async def _persist_series_search_outcome(
                 confidence=routed.best_confidence,
                 search_pass=selected_pass,
             )
+        elif routed.source_kind == "dc":
+            issue_log.info(
+                "search_series_issue_dc_evaluated",
+                action_status=routed.action_status,
+                confidence=routed.best_confidence,
+                search_pass=selected_pass,
+            )
         else:
             selected = select_search_source(
                 selected_outcome,
@@ -532,8 +552,11 @@ async def _persist_series_search_outcome(
         direct_results = (
             len(direct_outcome.matched) + len(direct_outcome.rejected) if direct_outcome else 0
         )
-        total_found += direct_results
+        dc_outcome = selected_outcome.dc_outcome
+        dc_results = len(dc_outcome.matched) + len(dc_outcome.rejected) if dc_outcome else 0
+        total_found += direct_results + dc_results
         details["direct_results_count"] = direct_results
+        details["dc_results_count"] = dc_results
         if routed.source_kind is not None:
             details["acquisition_method"] = routed.source_kind
 

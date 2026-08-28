@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
-from urllib.parse import urlsplit
 
 from sqlalchemy import select
 
@@ -34,13 +33,21 @@ from pullbox.services.direct_provider_quota import (
     provider_supports_quota,
     set_automatic_quota_reserve,
 )
+from pullbox.services.direct_provider_source_origin import (
+    DirectProviderSourceOriginError,
+    configured_direct_provider_source_domain,
+    validate_direct_provider_source_origin,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from pullbox.providers.direct.endpoint import ValidatedProviderEndpoint
+    from pullbox.providers.direct.endpoint import (
+        ProviderEndpointResolver,
+        ValidatedProviderEndpoint,
+    )
 
 
 class DirectProviderRegistrationError(RuntimeError):
@@ -382,6 +389,7 @@ async def update_direct_provider(
     secret_configuration: Mapping[str, str | None] | None = None,
     resolver_enabled: bool | None = None,
     automatic_quota_reserve_value: int | None = None,
+    source_origin_resolver: ProviderEndpointResolver | None = None,
 ) -> DirectProviderRecord:
     """Update native provider settings while keeping secrets write-only."""
     config = await _get_config(session, provider_config_id)
@@ -400,7 +408,11 @@ async def update_direct_provider(
         manifest = _stored_manifest(config)
         controls = {control.name: control for control in manifest.configuration_controls}
         if public_configuration is not None:
-            public_values = _validate_public_configuration(public_configuration, controls)
+            public_values = await _validate_public_configuration(
+                public_configuration,
+                controls,
+                source_origin_resolver=source_origin_resolver,
+            )
             metadata = _metadata(config)
             metadata["public_values"] = public_values
             config.configuration_metadata = metadata
@@ -495,16 +507,7 @@ def _health_error_code(
 
 
 def _configured_source_domain(config: DirectProviderConfig) -> str | None:
-    raw_public = _metadata(config).get("public_values", {})
-    if not isinstance(raw_public, dict):
-        return None
-    raw_domain = raw_public.get("domain")
-    if not isinstance(raw_domain, str):
-        return None
-    try:
-        return urlsplit(raw_domain).hostname
-    except ValueError:
-        return None
+    return configured_direct_provider_source_domain(config)
 
 
 def _configured_source_is_unreachable(
@@ -604,9 +607,11 @@ def _record(config: DirectProviderConfig) -> DirectProviderRecord:
     )
 
 
-def _validate_public_configuration(
+async def _validate_public_configuration(
     values: Mapping[str, object],
     controls: Mapping[str, DirectConfigurationControl],
+    *,
+    source_origin_resolver: ProviderEndpointResolver | None,
 ) -> dict[str, str | int | float | bool]:
     result: dict[str, str | int | float | bool] = {}
     for name, value in values.items():
@@ -616,6 +621,16 @@ def _validate_public_configuration(
         if control.secret:
             raise DirectProviderRegistrationError(name, "Secret field requires a write-only value.")
         _validate_control_value(control, value)
+        if control.source_origin and isinstance(value, str):
+            try:
+                value = (
+                    await validate_direct_provider_source_origin(
+                        value,
+                        resolver=source_origin_resolver,
+                    )
+                ).url
+            except DirectProviderSourceOriginError as exc:
+                raise DirectProviderRegistrationError(name, str(exc)) from exc
         if not isinstance(value, (str, int, float, bool)):
             raise DirectProviderRegistrationError(name, "Provider configuration value is invalid.")
         result[name] = value

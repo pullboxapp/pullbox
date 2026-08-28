@@ -160,6 +160,36 @@ async def test_client_authenticates_and_validates_all_four_operations() -> None:
     assert seen_paths == ["/v1/manifest", "/v1/health", "/v1/search", "/v1/resolve"]
 
 
+async def test_owned_http_client_uses_the_configured_request_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_timeout: httpx.Timeout | None = None
+    real_async_client = httpx.AsyncClient
+
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
+        nonlocal captured_timeout
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, httpx.Timeout)
+        captured_timeout = timeout
+        return real_async_client(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=_manifest())),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(client_module.httpx, "AsyncClient", client_factory)
+    client = DirectProviderClient(
+        endpoint="https://provider.example",
+        bearer_token=TOKEN,
+        resolver=_resolve_public,
+        request_timeout_seconds=45.0,
+    )
+    try:
+        assert captured_timeout is not None
+        assert captured_timeout.read == 45.0
+    finally:
+        await client.aclose()
+
+
 async def test_client_revalidates_dns_before_every_operation() -> None:
     resolutions = 0
 
@@ -429,6 +459,7 @@ async def test_client_logs_only_classified_failure_details() -> None:
         (401, "source_authentication_required", False),
         (503, "source_unavailable", True),
         (503, "source_malformed_response", False),
+        (503, "source_contract_changed", False),
         (404, "candidate_not_found", False),
     ],
 )

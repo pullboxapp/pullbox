@@ -134,6 +134,12 @@
             <span class="series-wall-overlay-meta-value"><strong>{{ item.wanted_count }}</strong></span>
           </span>
         {% endif %}
+        {% if reader_enabled and item.readable_count > 0 %}
+          <span class="series-wall-overlay-stat" data-testid="series-grid-hover-reading">
+            <span class="series-wall-overlay-meta-label">Reading</span>
+            <span class="series-wall-overlay-meta-value">Read {{ item.read_count }}/{{ item.readable_count }}</span>
+          </span>
+        {% endif %}
       </div>
       <div class="series-wall-overlay-actions">
         {% if item.wanted_count > 0 and s.monitored %}

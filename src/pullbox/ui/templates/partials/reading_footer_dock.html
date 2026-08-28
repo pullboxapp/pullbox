@@ -1,0 +1,20 @@
+{% from "components/page_dock.html" import page_dock %}
+
+{% set status_items = [
+  {"led": "green" if total else "off", "label": reading_view|replace("-", " "), "value": total|string ~ (" issue" if total == 1 else " issues")},
+] %}
+<div data-testid="reading-footer-dock">
+  <div data-testid="reading-pagination">
+    {{ page_dock(
+      page=page,
+      total_pages=total_pages,
+      base_url=pagination_base_url,
+      status_items=status_items,
+      hx_target="#reading-results-bundle",
+      hx_swap="outerHTML",
+      hx_select="#reading-results-bundle",
+      hx_select_oob="#page-footer-dock",
+      hx_push_url="true"
+    ) }}
+  </div>
+</div>

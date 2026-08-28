@@ -4,6 +4,7 @@ Pullbox ORM models — imports all models so Alembic autogenerate discovers them
 Import Base from here for migration target_metadata.
 """
 
+from pullbox.models.airdcpp import AirDcppAcquisition, AirDcppClientSettings
 from pullbox.models.audit_log import AuditEventType, AuditLog
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin
 from pullbox.models.blocklist import BlocklistEntry, BlocklistReason
@@ -51,6 +52,13 @@ from pullbox.models.indexer import IndexerConfig, IndexerSource, IndexerType
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.matching_suggestion import MatchingSuggestion, SuggestionStatus
+from pullbox.models.operation_progress import (
+    OperationProgress,
+    OperationProgressState,
+    OperationProgressTone,
+    OperationProgressType,
+    OperationProgressVisibility,
+)
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.provider_cache import MetadataProviderCacheEntry
 from pullbox.models.publisher import Publisher
@@ -79,6 +87,8 @@ from pullbox.utilities.models import (
 
 __all__ = [
     "APIKey",
+    "AirDcppAcquisition",
+    "AirDcppClientSettings",
     "AuditEventType",
     "AuditLog",
     "Base",
@@ -141,6 +151,11 @@ __all__ = [
     "MatchConfidence",
     "MatchingSuggestion",
     "MetadataProviderCacheEntry",
+    "OperationProgress",
+    "OperationProgressState",
+    "OperationProgressTone",
+    "OperationProgressType",
+    "OperationProgressVisibility",
     "PendingMatch",
     "PendingMatchStatus",
     "Publisher",

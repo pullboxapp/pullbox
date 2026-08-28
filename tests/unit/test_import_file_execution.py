@@ -1935,9 +1935,102 @@ class TestImportExecutionAutoflushDiscipline:
             ("finalizing", 0, 4, "steps", True, 0),
             ("finalizing", 1, 4, "steps", True, 0),
             ("finalizing", 2, 4, "steps", True, 0),
-            ("finalizing", 3, 4, "steps", True, 0),
+            ("finalizing", 3, 4, "steps", True, 1),
             ("finalizing", 4, 4, "steps", False, 1),
         ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_stage", ["workspace_cleanup", "terminal_progress"])
+    async def test_post_commit_housekeeping_failure_keeps_imported_artifact(
+        self,
+        db_session: AsyncSession,
+        failure_stage: str,
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from pullbox.models.library import FileFormat
+        from pullbox.services.import_file_execution import process_import_series_files
+
+        job, imp_series, imp_files, _series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+
+        async def _register_file(
+            session: AsyncSession,
+            source_path: Path,
+            issue_arg: Issue,
+            confidence: MatchConfidence,
+            **_kwargs: object,
+        ) -> LibraryFile:
+            library_file = LibraryFile(
+                file_path=str(source_path),
+                file_name=Path(source_path).name,
+                file_size=1024,
+                file_format=FileFormat.CBZ,
+                file_modified_at=datetime.now(tz=UTC),
+                match_confidence=confidence,
+                issue_id=issue_arg.id,
+                library_root_id=1,
+            )
+            session.add(library_file)
+            await session.flush()
+            return library_file
+
+        def _cleanup_prepared_file(_prepared: object) -> None:
+            if failure_stage == "workspace_cleanup":
+                raise OSError("workspace cleanup failed")
+
+        async def _report_file_progress(
+            *,
+            imp_file: ImportedFile,
+            file_index: int,
+            total_files: int,
+            stage: str,
+            current: int,
+            total: int,
+            unit: str,
+            live_only: bool = False,
+        ) -> None:
+            _ = imp_file, file_index, total_files, total, unit
+            if failure_stage == "terminal_progress" and stage == "finalizing" and not live_only:
+                raise RuntimeError("terminal progress failed")
+
+        with patch(
+            "pullbox.services.import_file_execution._cleanup_failed_library_artifact"
+        ) as failed_artifact_cleanup:
+            files_imported, files_failed = await process_import_series_files(
+                db_session,
+                job,
+                imp_series,
+                load_media_settings=AsyncMock(return_value={"skip_existing_files": "false"}),
+                load_trash_dir=AsyncMock(return_value=Path("/tmp/pullbox-trash")),
+                load_ingest_policy=AsyncMock(return_value=object()),
+                load_permission_policy=AsyncMock(return_value=object()),
+                raise_if_cancelled=AsyncMock(),
+                prepare_file=AsyncMock(
+                    return_value=SimpleNamespace(
+                        registration_source=imp_files[0].file_path,
+                        original_source=Path(imp_files[0].file_path),
+                        converted=False,
+                    )
+                ),
+                build_comicinfo_payload=AsyncMock(return_value=None),
+                apply_comicinfo=lambda *_args, **_kwargs: None,
+                cleanup_prepared_file=_cleanup_prepared_file,
+                record_action=AsyncMock(),
+                log_event=AsyncMock(),
+                register_file=_register_file,
+                move_to_trash=lambda *args, **kwargs: Path("/tmp/trash.cbz"),
+                report_file_progress=_report_file_progress,
+            )
+
+        await db_session.refresh(imp_files[0])
+        assert files_imported == 1
+        assert files_failed == 0
+        assert imp_files[0].status == ImportedFileStatus.IMPORTED
+        assert imp_files[0].library_file_id is not None
+        failed_artifact_cleanup.assert_not_called()
 
 
 class TestOneFileFailsOthersContinue:

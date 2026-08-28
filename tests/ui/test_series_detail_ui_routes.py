@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -30,6 +31,40 @@ def _series_alternate_names_html(html: str) -> str:
     start = html.index('data-testid="series-detail-alternate-names"')
     end = html.index('data-testid="series-detail-hero-actions-panel"', start)
     return html[start:end]
+
+
+def _series_detail_content_html(html: str) -> str:
+    """Return page-specific content without shared shell recovery scripts."""
+    start = html.index('data-testid="series-detail-page"')
+    end = html.index('data-testid="page-footer-dock"', start)
+    return html[start:end]
+
+
+class _SelectRecorder:
+    """Capture SELECT statements emitted by the test app engine."""
+
+    def __init__(self, async_engine) -> None:  # type: ignore[no-untyped-def]
+        self._engine = async_engine.sync_engine
+        self.statements: list[str] = []
+
+    def __enter__(self) -> _SelectRecorder:
+        event.listen(self._engine, "before_cursor_execute", self._record)
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        event.remove(self._engine, "before_cursor_execute", self._record)
+
+    def _record(
+        self,
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            self.statements.append(statement)
 
 
 @pytest.fixture
@@ -122,7 +157,11 @@ async def seeded_series_detail_ui_data(sec_db) -> dict[str, int]:  # type: ignor
         )
 
         await session.commit()
-        return {"series_id": series.id, "paused_series_id": child.id}
+        return {
+            "series_id": series.id,
+            "paused_series_id": child.id,
+            "owned_issue_id": owned_issue.id,
+        }
 
 
 @pytest.mark.asyncio
@@ -249,9 +288,86 @@ class TestSeriesDetailRouteContracts:
         assert "page-dock-inner page-dock-inner-status-only" in response.text
         assert 'data-testid="page-dock-pagination"' not in response.text
         assert "transition:true" not in response.text
-        assert "window.location.reload()" not in response.text
+        assert "window.location.reload()" not in _series_detail_content_html(response.text)
         assert "window.__autoSearching" not in response.text
         assert "htmx.ajax('POST', '/htmx/series/" not in response.text
+
+    async def test_series_issue_rows_render_reading_state_and_distinct_series_summary(
+        self,
+        authenticated_client,
+        sec_db,
+        sec_user,
+        seeded_series_detail_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.reader import IssueReaderState
+
+        now = datetime.now(UTC)
+        issue_id = seeded_series_detail_ui_data["owned_issue_id"]
+        async with sec_db() as session:
+            session.add(
+                IssueReaderState(
+                    user_id=sec_user.id,
+                    issue_id=issue_id,
+                    last_page_index=1,
+                    content_revision="series-detail-revision",
+                    page_count=5,
+                    progress_updated_at=now,
+                    last_opened_at=now,
+                    want_to_read=True,
+                    want_to_read_updated_at=now,
+                )
+            )
+            await session.commit()
+
+        response = await authenticated_client.get(
+            f"/series/{seeded_series_detail_ui_data['series_id']}"
+        )
+
+        assert response.status_code == 200
+        assert 'Reading<span class="sr-only"> state</span>' in response.text
+        assert 'data-testid="series-reading-summary"' in response.text
+        assert "Read 0 of 1 readable" in response.text
+        assert 'data-testid="series-issue-reading"' in response.text
+        assert "Page 2/5" in response.text
+        assert 'data-testid="series-issue-read"' in response.text
+        assert 'aria-label="Continue Batman #1"' in response.text
+        assert 'data-testid="series-issue-reading-menu"' in response.text
+        assert "In Want to Read" in response.text
+        assert "window.pullboxSeriesIssuesCanPoll()" in response.text
+
+    async def test_series_detail_reader_queries_are_bounded_to_one_map_and_one_aggregate(
+        self,
+        authenticated_client,
+        sec_db,
+        seeded_series_detail_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        engine = sec_db.kw["bind"]
+        with _SelectRecorder(engine) as recorder:
+            response = await authenticated_client.get(
+                f"/series/{seeded_series_detail_ui_data['series_id']}"
+            )
+
+        assert response.status_code == 200
+        reader_queries = [
+            statement for statement in recorder.statements if "issue_reader_states" in statement
+        ]
+        assert len(reader_queries) == 2
+        assert any("issue_reader_states.issue_id IN" in statement for statement in reader_queries)
+        assert any("GROUP BY issues.series_id" in statement for statement in reader_queries)
+
+    async def test_series_issue_reading_fragment_refreshes_only_the_changed_row(
+        self,
+        authenticated_client,
+        seeded_series_detail_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        issue_id = seeded_series_detail_ui_data["owned_issue_id"]
+
+        response = await authenticated_client.get(f"/htmx/issues/{issue_id}/reading-row")
+
+        assert response.status_code == 200
+        assert response.text.count('data-testid="series-issue-row"') == 1
+        assert f'data-reading-refresh-url="/htmx/issues/{issue_id}/reading-row"' in response.text
+        assert 'data-testid="series-detail-issues-section"' not in response.text
 
     async def test_pull_list_origin_changes_the_series_detail_back_link(
         self,

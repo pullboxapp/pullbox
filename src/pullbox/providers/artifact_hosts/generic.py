@@ -13,6 +13,7 @@ from pullbox.providers.artifact_hosts.contract import (
     ArtifactHostResolutionError,
     HostResolutionRequest,
     ResolvedTransfer,
+    sanitize_provider_headers,
 )
 from pullbox.providers.artifact_hosts.helpers import (
     filename_from_content_disposition,
@@ -38,6 +39,8 @@ _HTML_CONTENT_TYPES = frozenset(
         "text/html",
     }
 )
+_GENERIC_HTTPS_USER_AGENT = "Mozilla/5.0 (compatible; Pullbox/1.1; +https://pullbox.app)"
+_UNRELIABLE_RANGE_HOST_SUFFIXES = ("booksdl.lc",)
 
 
 class GenericHttpsAdapter:
@@ -66,13 +69,22 @@ class GenericHttpsAdapter:
             expected_kind=self.host_kind,
             credentials=credentials,
         )
+        provider_headers = sanitize_provider_headers(request.provider_headers)
+        transfer_headers = {
+            **provider_headers,
+            "User-Agent": _GENERIC_HTTPS_USER_AGENT,
+        }
         response = await request_bounded(
             self._http_client,
             "GET",
             url,
             resolver=self._resolver,
             allowed_domains=None,
-            headers={"Accept": "application/octet-stream", "Range": "bytes=0-0"},
+            headers={
+                **transfer_headers,
+                "Accept": "application/octet-stream",
+                "Range": "bytes=0-0",
+            },
             read_body=False,
         )
         if (
@@ -120,7 +132,7 @@ class GenericHttpsAdapter:
         return ResolvedTransfer(
             host_kind=self.host_kind,
             url=response.url,
-            headers={},
+            headers=transfer_headers,
             expected_size=response_size(response, request.expected_size),
             checksum=request.checksum,
             etag=response.headers.get("etag") or request.etag,
@@ -134,5 +146,13 @@ class GenericHttpsAdapter:
                 response.status_code == 206
                 or response.headers.get("accept-ranges", "").lower() == "bytes"
             ),
+            prefer_single_response=_has_unreliable_range_support(response.url),
             allowed_domains=((urlsplit(response.url).hostname or "").lower().rstrip("."),),
         )
+
+
+def _has_unreliable_range_support(url: object) -> bool:
+    host = (urlsplit(str(url)).hostname or "").lower().rstrip(".")
+    return any(
+        host == suffix or host.endswith(f".{suffix}") for suffix in _UNRELIABLE_RANGE_HOST_SUFFIXES
+    )

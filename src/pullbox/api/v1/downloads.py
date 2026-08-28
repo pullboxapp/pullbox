@@ -6,11 +6,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import joinedload, selectinload
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.exceptions import NotFoundError
 from pullbox.models.blocklist import BlocklistReason
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
+from pullbox.providers.base import DownloadClient, ProviderRegistry
 from pullbox.providers.download.qbittorrent import QBittorrentError
 from pullbox.providers.indexer.newznab import NewznabError
 from pullbox.schemas.blocklist import BlocklistEntryResponse
@@ -51,6 +53,7 @@ def _enrich_download(download: DownloadHistory) -> dict[str, object]:
         "title": download.title,
         "state": download.state,
         "download_client": download.download_client,
+        "protocol": download.protocol,
         "external_id": download.external_id,
         "file_size": download.file_size,
         "error_message": download.error_message,
@@ -86,6 +89,16 @@ def _blocklist_entry_to_response(entry: object) -> BlocklistEntryResponse:
         created_at=entry.created_at,
         updated_at=entry.updated_at,
     )
+
+
+def _registered_client_for_download(
+    registry: ProviderRegistry,
+    download: DownloadHistory,
+) -> DownloadClient | None:
+    """Resolve exact client identity, with type fallback for historical rows."""
+    if download.download_client_config_id is not None:
+        return registry.get_download_client(download.download_client_config_id)
+    return registry.get_client_for_type(str(download.download_client))
 
 
 # ── Queue ────────────────────────────────────────────────────────────
@@ -212,11 +225,12 @@ _CANCELLABLE_STATES = frozenset(
 
 
 async def _cancel_on_client(download: DownloadHistory, session: DbSession) -> None:
-    """Best-effort cancellation on the download client.
+    """Cancel on the download client before changing local state.
 
     Builds a provider registry, locates the client for the download's type,
-    and calls ``remove_download``. Failures are logged but never raised —
-    the user's intent is to remove the download regardless of client state.
+    and calls ``remove_download``. Legacy clients remain best effort, while
+    AirDC++ cancellation must be confirmed because its exact remote bundle can
+    otherwise continue downloading after Pullbox reports it as cancelled.
     """
     if download.download_client is DownloadClientType.DIRECT:
         attempt_id = _direct_attempt_id(download.external_id)
@@ -241,16 +255,76 @@ async def _cancel_on_client(download: DownloadHistory, session: DbSession) -> No
         )
         return
 
+    if download.download_client is DownloadClientType.AIRDCPP:
+        from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry
+        from pullbox.models.airdcpp import AirDcppAcquisition
+        from pullbox.providers.airdcpp.errors import AirDcppEntityNotFoundError
+        from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
+
+        acquisition = (
+            await session.execute(
+                select(AirDcppAcquisition).where(
+                    AirDcppAcquisition.download_history_id == download.id
+                )
+            )
+        ).scalar_one_or_none()
+        if acquisition is None or acquisition.bundle_id is None:
+            logger.warning("cancel_airdcpp_reference_invalid", download_id=download.id)
+            return
+        air_registry = get_airdcpp_supervisor_registry()
+        supervisor = (
+            air_registry.get(acquisition.client_config_id)
+            if air_registry is not None and acquisition.client_config_id is not None
+            else None
+        )
+        if supervisor is None or supervisor.state is not AirDcppSupervisorState.READY:
+            logger.warning(
+                "cancel_airdcpp_client_unavailable",
+                download_id=download.id,
+                client_config_id=acquisition.client_config_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="AirDC++ is unavailable; the download was not cancelled.",
+            )
+        bundle_id = acquisition.bundle_id
+        # Release the route transaction before the external mutation.
+        await session.commit()
+        try:
+            await supervisor.api_client.remove_queue_bundle(bundle_id)
+        except AirDcppEntityNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning(
+                "cancel_airdcpp_failed",
+                download_id=download.id,
+                client_config_id=acquisition.client_config_id,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="AirDC++ could not confirm cancellation; the download remains active.",
+            ) from exc
+        acquisition.client_state = "cancelled"
+        acquisition.next_retry_at = None
+        acquisition.reconciliation_error = None
+        logger.info(
+            "airdcpp_bundle_cancelled",
+            download_id=download.id,
+            bundle_id=bundle_id,
+            client_config_id=acquisition.client_config_id,
+        )
+        return
+
     if not download.external_id:
         return
 
     from pullbox.composition.providers import register_download_clients
-    from pullbox.providers.base import ProviderRegistry
 
     registry = ProviderRegistry()
     await register_download_clients(session, registry)
 
-    client = registry.get_client_for_type(str(download.download_client))
+    client = _registered_client_for_download(registry, download)
 
     if not client:
         logger.warning(
@@ -406,6 +480,8 @@ async def retry_post_processing(
         )
 
     download.state = DownloadState.COMPLETED
+    download.post_processing_claim_token = None
+    download.post_processing_claimed_at = None
     await session.flush()
 
     # Trigger post-processing immediately
@@ -494,7 +570,6 @@ async def retry_download(
 
     from pullbox.composition.providers import register_download_clients, register_indexers
     from pullbox.composition.services import build_download_service
-    from pullbox.providers.base import ProviderRegistry
 
     download = await session.get(DownloadHistory, download_id)
     if not download:
@@ -542,12 +617,112 @@ async def retry_download(
         )
         return {"status": "sent"}
 
+    if download.download_client is DownloadClientType.AIRDCPP:
+        from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry
+        from pullbox.models.airdcpp import AirDcppAcquisition, AirDcppClientSettings
+        from pullbox.providers.airdcpp.errors import AirDcppError
+        from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
+
+        acquisition = (
+            await session.execute(
+                select(AirDcppAcquisition).where(
+                    AirDcppAcquisition.download_history_id == download.id
+                )
+            )
+        ).scalar_one_or_none()
+        if acquisition is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The AirDC++ queue provenance is unavailable.",
+            )
+        now = datetime.now(UTC)
+        missing_bundle = (
+            acquisition.client_state == "missing"
+            or acquisition.reconciliation_error == "external_bundle_missing"
+        )
+        if acquisition.bundle_id is None and not missing_bundle:
+            raise HTTPException(
+                status_code=409,
+                detail="The AirDC++ queue provenance is unavailable.",
+            )
+        if missing_bundle:
+            client_config_id = acquisition.client_config_id
+            supervisor_registry = get_airdcpp_supervisor_registry()
+            supervisor = (
+                supervisor_registry.get(client_config_id)
+                if supervisor_registry is not None and client_config_id is not None
+                else None
+            )
+            if supervisor is None or supervisor.state is not AirDcppSupervisorState.READY:
+                raise HTTPException(
+                    status_code=503,
+                    detail="AirDC++ is unavailable; the missing queue item was not recreated.",
+                )
+            settings = await session.scalar(
+                select(AirDcppClientSettings).where(
+                    AirDcppClientSettings.client_config_id == client_config_id
+                )
+            )
+            queue_priority = settings.queue_priority if settings is not None else None
+            await session.commit()
+            try:
+                added = await supervisor.api_client.create_file_bundle(
+                    tth=acquisition.tth,
+                    size=acquisition.size_bytes,
+                    target_name=acquisition.original_name,
+                    priority=queue_priority,
+                )
+            except AirDcppError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail="AirDC++ could not recreate the missing queue item.",
+                ) from exc
+            except Exception as exc:
+                logger.warning(
+                    "airdcpp_missing_bundle_recreation_failed",
+                    download_id=download.id,
+                    client_config_id=client_config_id,
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="AirDC++ could not recreate the missing queue item.",
+                ) from exc
+            acquisition.bundle_id = added.id
+            acquisition.remote_target = None
+            acquisition.last_reconciled_at = None
+            route_snapshot = dict(acquisition.route_snapshot or {})
+            route_snapshot.pop("queue", None)
+            acquisition.route_snapshot = route_snapshot
+            download.external_id = f"airdcpp:{client_config_id}:bundle:{added.id}"
+        acquisition.client_state = "source_search_pending"
+        acquisition.retry_count = 0
+        acquisition.next_retry_at = now
+        acquisition.reconciliation_error = None
+        download.state = DownloadState.RETRY_PENDING
+        download.retry_count = 0
+        download.next_retry_at = now
+        download.error_message = None
+        download.completed_at = None
+        issue = await session.get(Issue, download.issue_id)
+        if issue and issue.status in (IssueStatus.WANTED, IssueStatus.OWNED):
+            issue.status = IssueStatus.DOWNLOADING
+        await session.flush()
+        logger.info(
+            "airdcpp_download_retry_queued",
+            download_id=download.id,
+            acquisition_id=acquisition.id,
+            bundle_id=acquisition.bundle_id,
+            client_config_id=acquisition.client_config_id,
+        )
+        return {"status": "sent"}
+
     # Build provider registry and get the right client
     registry = ProviderRegistry()
     await register_download_clients(session, registry)
     await register_indexers(session, registry)
 
-    client = registry.get_client_for_type(str(download.download_client))
+    client = _registered_client_for_download(registry, download)
     if not client:
         raise HTTPException(
             status_code=503,
@@ -555,9 +730,9 @@ async def retry_download(
         )
 
     # Re-send to client
-    dl_type = DownloadClientType(str(download.download_client))
+    protocol = AcquisitionProtocol(download.protocol)
     try:
-        if dl_type.is_torrent:
+        if protocol is AcquisitionProtocol.TORRENT:
             external_id = await build_download_service(registry).add_torrent_to_client(
                 client,
                 url=download.download_url,
@@ -565,15 +740,21 @@ async def retry_download(
                 indexer_id=download.indexer_id,
                 download_id=download.id,
             )
-        else:
+        elif protocol is AcquisitionProtocol.USENET:
             external_id = await client.add_nzb(download.download_url, download.title)
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Unsupported acquisition protocol: {protocol.value}",
+            )
     except (NewznabError, QBittorrentError) as exc:
         logger.warning(
             "download_retry_client_rejected",
             download_id=download.id,
             issue_id=download.issue_id,
             indexer_id=download.indexer_id,
-            client_type=dl_type.value,
+            client_type=str(download.download_client),
+            protocol=protocol.value,
             error=str(exc),
         )
         raise HTTPException(status_code=502, detail=str(exc)) from exc

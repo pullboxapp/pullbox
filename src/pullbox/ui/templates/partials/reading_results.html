@@ -1,0 +1,27 @@
+<div
+  id="reading-results-bundle"
+  data-testid="reading-results"
+  data-reading-refresh-root
+  data-reading-refresh-url="{{ request.url.path }}?view={{ reading_view }}&per_page={{ per_page }}&page={{ page }}"
+>
+  {% if reading_cards %}
+    <section class="reading-card-grid" aria-label="Reading results">
+      {% for reading_card in reading_cards %}
+        {% set reading_card_index = loop.index0 %}
+        {% include "partials/reading_issue_card.html" %}
+      {% endfor %}
+    </section>
+  {% else %}
+    <section
+      data-testid="reading-empty-{{ reading_view }}"
+      class="reading-empty-state"
+      aria-labelledby="reading-empty-title"
+    >
+      <svg class="reading-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 19.5V6.75A2.25 2.25 0 016.75 4.5h10.5a2.25 2.25 0 012.25 2.25V19.5m-15 0h15m-15 0A1.5 1.5 0 003 21h18a1.5 1.5 0 00-1.5-1.5M8.25 9h7.5m-7.5 3h5.25"/>
+      </svg>
+      <h2 id="reading-empty-title">{{ empty_title }}</h2>
+      <p>{{ empty_copy }}</p>
+    </section>
+  {% endif %}
+</div>

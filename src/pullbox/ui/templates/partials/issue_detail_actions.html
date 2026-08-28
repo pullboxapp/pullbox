@@ -19,7 +19,7 @@
   </button>
   {% endif %}
   {% if issue.status.value == "owned" and issue.library_file %}
-  {% if reader_enabled and issue.library_file.file_format.value in ["cbz", "cbr", "cb7", "cbt", "pdf"] %}
+  {% if reader_enabled and issue_reading.primary_label %}
   <button
     type="button"
     data-testid="issue-action-read"
@@ -29,7 +29,7 @@
     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
       <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 5.25A2.25 2.25 0 014.5 3h5.25A2.25 2.25 0 0112 5.25V21a2.25 2.25 0 00-2.25-2.25H4.5A2.25 2.25 0 012.25 16.5V5.25zM21.75 5.25A2.25 2.25 0 0019.5 3h-5.25A2.25 2.25 0 0012 5.25V21a2.25 2.25 0 012.25-2.25h5.25a2.25 2.25 0 002.25-2.25V5.25z" />
     </svg>
-    Read
+    {{ issue_reading.primary_label }}
   </button>
   {% endif %}
   <a
@@ -45,6 +45,38 @@
     Download
   </a>
   {% endif %}
+
+  {% if reader_enabled %}
+  <button
+    type="button"
+    data-testid="issue-action-want-to-read"
+    @click="setWantToRead($event.currentTarget, {{ issue_reading.queue_action_value|tojson }})"
+    :disabled="busy"
+    class="{{ secondary_action_classes }} disabled:cursor-wait"
+  >
+    {{ issue_reading.queue_action_label }}
+  </button>
+
+  {% if issue_reading.completion_action_label %}
+  <button
+    type="button"
+    data-testid="issue-action-completion"
+    @click="setCompletion($event.currentTarget, {{ issue_reading.completion_action_value|tojson }})"
+    :disabled="busy"
+    class="{{ secondary_action_classes }} disabled:cursor-wait"
+  >
+    {{ issue_reading.completion_action_label }}
+  </button>
+  {% endif %}
+  {% endif %}
+
+  <span
+    x-show="statusMessage"
+    x-text="statusMessage"
+    x-bind:role="statusIsError ? 'alert' : 'status'"
+    x-bind:aria-live="statusIsError ? 'assertive' : 'polite'"
+    class="sr-only"
+  ></span>
   <button
     @click="openImportFileBrowser()"
     data-testid="issue-action-import"

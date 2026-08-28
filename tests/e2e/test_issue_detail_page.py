@@ -21,6 +21,7 @@ def _mock_reader(
     *,
     initial_page: int = 0,
     fail_once: set[int] | None = None,
+    completed: bool = False,
 ):  # type: ignore[no-untyped-def]
     progress_writes: list[dict[str, object]] = []
     remaining_failures = set(fail_once or set())
@@ -36,6 +37,9 @@ def _mock_reader(
             "/api/v1/reader/issues/1/pages/{page_index}?revision=reader-test-revision"
         ),
         "progress_url": "/api/v1/reader/issues/1/progress",
+        "state": {
+            "completed_at": "2026-08-03T00:00:00Z" if completed else None,
+        },
     }
     page.route(
         "**/api/v1/reader/issues/1/manifest",
@@ -56,6 +60,8 @@ def _mock_reader(
         payload = json.loads(route.request.post_data or "{}")
         progress_writes.append(payload)
         manifest["initial_page_index"] = int(payload["page_index"])
+        if payload.get("reread_started"):
+            manifest["state"]["completed_at"] = None
         route.fulfill(
             status=200,
             content_type="application/json",
@@ -68,6 +74,7 @@ def _mock_reader(
                         "2026-08-03T00:00:00Z" if payload["completion_candidate"] else None
                     ),
                     "updated_at": "2026-08-03T00:00:00Z",
+                    "state": manifest["state"],
                 }
             ),
         )
@@ -78,6 +85,148 @@ def _mock_reader(
         save_progress,
     )
     return progress_writes
+
+
+def _mock_cross_issue_reader(
+    page,
+    *,
+    issue_count: int = 3,
+    progress_failures: set[int] | None = None,
+    manifest_failures: set[int] | None = None,
+    page_failures: set[int] | None = None,
+):  # type: ignore[no-untyped-def]
+    traces: dict[str, list[object]] = {
+        "manifest_requests": [],
+        "page_requests": [],
+        "progress_writes": [],
+        "completion_writes": [],
+    }
+    failed_progress = set(progress_failures or set())
+    failed_manifests = set(manifest_failures or set())
+    failed_pages = set(page_failures or set())
+    completed: set[int] = set()
+
+    def issue_id_from_url(url: str) -> int:
+        return int(url.split("/reader/issues/", 1)[1].split("/", 1)[0])
+
+    def adjacent(issue_id: int) -> dict[str, object]:
+        return {
+            "issue_id": issue_id,
+            "issue_label": f"Batman #{issue_id}",
+            "title": f"I Am Gotham {issue_id}",
+            "manifest_url": f"/api/v1/reader/issues/{issue_id}/manifest",
+            "issue_detail_url": f"/issues/{issue_id}",
+            "download_url": f"/api/v1/issues/{issue_id}/download-file",
+        }
+
+    def state(issue_id: int) -> dict[str, object]:
+        return {
+            "page_index": 1 if issue_id in completed else 0,
+            "page_count": 2,
+            "progress_updated_at": "2026-08-25T00:00:00Z",
+            "last_opened_at": "2026-08-25T00:00:00Z",
+            "completed_at": ("2026-08-25T00:00:00Z" if issue_id in completed else None),
+            "completion_updated_at": ("2026-08-25T00:00:00Z" if issue_id in completed else None),
+            "want_to_read": False,
+            "want_to_read_updated_at": None,
+            "state_version": 2 if issue_id in completed else 1,
+        }
+
+    def manifest(issue_id: int) -> dict[str, object]:
+        revision = f"reader-revision-{issue_id}"
+        return {
+            "issue_id": issue_id,
+            "title": f"I Am Gotham {issue_id}",
+            "issue_label": f"Batman #{issue_id}",
+            "format": "cbz",
+            "page_count": 2,
+            "revision": revision,
+            "initial_page_index": 0,
+            "page_url_template": (
+                f"/api/v1/reader/issues/{issue_id}/pages/{{page_index}}?revision={revision}"
+            ),
+            "progress_url": f"/api/v1/reader/issues/{issue_id}/progress",
+            "completion_url": f"/api/v1/reader/issues/{issue_id}/completion",
+            "want_to_read_url": f"/api/v1/reader/issues/{issue_id}/want-to-read",
+            "issue_detail_url": f"/issues/{issue_id}",
+            "download_url": f"/api/v1/issues/{issue_id}/download-file",
+            "state": state(issue_id),
+            "previous_issue": adjacent(issue_id - 1) if issue_id > 1 else None,
+            "next_issue": adjacent(issue_id + 1) if issue_id < issue_count else None,
+        }
+
+    def serve_manifest(route) -> None:  # type: ignore[no-untyped-def]
+        issue_id = issue_id_from_url(route.request.url)
+        traces["manifest_requests"].append(issue_id)
+        if issue_id in failed_manifests:
+            route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"detail": "The next comic is temporarily unavailable."}),
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(manifest(issue_id)),
+        )
+
+    def serve_page(route) -> None:  # type: ignore[no-untyped-def]
+        issue_id = issue_id_from_url(route.request.url)
+        page_index = int(route.request.url.split("/pages/", 1)[1].split("?", 1)[0])
+        traces["page_requests"].append((issue_id, page_index))
+        if issue_id in failed_pages and page_index == 0:
+            route.fulfill(status=422, content_type="application/json", body="{}")
+            return
+        route.fulfill(status=200, content_type="image/png", body=_READER_PAGE_PNG)
+
+    def save_progress(route) -> None:  # type: ignore[no-untyped-def]
+        issue_id = issue_id_from_url(route.request.url)
+        payload = json.loads(route.request.post_data or "{}")
+        traces["progress_writes"].append((issue_id, payload))
+        if issue_id in failed_progress:
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"detail": "Reading position was not saved."}),
+            )
+            return
+        if payload.get("completion_candidate"):
+            completed.add(issue_id)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "page_index": payload["page_index"],
+                    "page_count": 2,
+                    "revision": f"reader-revision-{issue_id}",
+                    "completed_at": state(issue_id)["completed_at"],
+                    "updated_at": "2026-08-25T00:00:00Z",
+                    "state": state(issue_id),
+                }
+            ),
+        )
+
+    def save_completion(route) -> None:  # type: ignore[no-untyped-def]
+        issue_id = issue_id_from_url(route.request.url)
+        payload = json.loads(route.request.post_data or "{}")
+        traces["completion_writes"].append((issue_id, payload))
+        if payload.get("completed"):
+            completed.add(issue_id)
+        else:
+            completed.discard(issue_id)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"changed": True, "state": state(issue_id)}),
+        )
+
+    page.route("**/api/v1/reader/issues/*/manifest", serve_manifest)
+    page.route("**/api/v1/reader/issues/*/pages/*", serve_page)
+    page.route("**/api/v1/reader/issues/*/progress", save_progress)
+    page.route("**/api/v1/reader/issues/*/completion", save_completion)
+    return traces
 
 
 pytestmark = pytest.mark.e2e
@@ -96,10 +245,285 @@ class TestIssueDetailPage:
 
         issue.open_reader()
 
-        assert issue.reader_status.inner_text() == "Page 1 of 3"
+        assert issue.reader_status.inner_text() == "Page 2 of 3"
         assert issue.reader_page.get_attribute("src") is not None
+        next_page = authed_page.locator("[data-testid='comic-reader-next']")
+        expect(next_page).to_be_enabled()
+        next_page.click()
+        expect(issue.reader_status).to_have_text("Page 3 of 3")
+
+    def test_reader_switches_issues_only_after_saving_and_preserves_preferences(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        traces = _mock_cross_issue_reader(authed_page)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+        previous_issue = authed_page.locator("[data-testid='comic-reader-previous-issue']")
+        next_issue = authed_page.locator("[data-testid='comic-reader-next-issue']")
+
+        expect(previous_issue).to_be_disabled()
+        expect(next_issue).to_have_attribute("aria-label", "Next issue, Batman #2")
+        assert traces["page_requests"] == [(1, 0), (1, 1)]
+        authed_page.locator("[data-testid='comic-reader-direction']").click()
+        authed_page.locator("[data-testid='comic-reader-fit-width']").click()
+        authed_page.wait_for_timeout(850)
+
+        next_issue.click()
+
+        expect(authed_page.locator("#comic-reader-title")).to_have_text("I Am Gotham 2")
+        expect(issue.reader_status).to_have_text("Page 1 of 2")
+        expect(authed_page.locator("[data-testid='comic-reader-issue-status']")).to_have_text(
+            "Opened Batman #2, page 1 of 2"
+        )
+        expect(
+            authed_page.locator("[data-testid='comic-reader-active-download']")
+        ).to_have_attribute("href", "/api/v1/issues/2/download-file")
+        assert issue.reader_page.get_attribute("data-fit-mode") == "width"
+        assert (
+            authed_page.locator("[data-testid='comic-reader-direction']").get_attribute(
+                "aria-pressed"
+            )
+            == "true"
+        )
+        expect(authed_page.locator("[data-testid='comic-reader-viewport']")).to_be_focused()
+        assert traces["page_requests"] == [(1, 0), (1, 1), (2, 0), (2, 1)]
+        issue.close_reader()
+        expect(issue.read_button).to_be_focused()
+        assert authed_page.url.endswith("/issues/1")
+
+    def test_reader_switches_issues_from_the_keyboard(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        traces = _mock_cross_issue_reader(authed_page)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+        next_issue = authed_page.locator("[data-testid='comic-reader-next-issue']")
+
+        next_issue.focus()
+        expect(next_issue).to_be_focused()
+        next_issue.press("Enter")
+
+        expect(authed_page.locator("#comic-reader-title")).to_have_text("I Am Gotham 2")
+        expect(authed_page.locator("[data-testid='comic-reader-viewport']")).to_be_focused()
+        assert traces["manifest_requests"] == [1, 2]
+
+    def test_reader_blocks_issue_switch_when_progress_cannot_be_saved(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        _mock_cross_issue_reader(authed_page, progress_failures={1})
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+        authed_page.wait_for_timeout(850)
+
+        authed_page.locator("[data-testid='comic-reader-next-issue']").click()
+
+        expect(authed_page.locator("#comic-reader-title")).to_have_text("I Am Gotham 1")
+        expect(issue.reader_status).to_have_text("Page 1 of 2")
+        expect(authed_page.locator("[data-testid='comic-reader-switch-error']")).to_have_text(
+            "Your reading position hasn’t saved yet. Try again before changing issues."
+        )
+
+    def test_reader_retains_current_issue_when_target_manifest_fails(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        _mock_cross_issue_reader(authed_page, manifest_failures={2})
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+        authed_page.wait_for_timeout(850)
+
+        authed_page.locator("[data-testid='comic-reader-next-issue']").click()
+
+        expect(authed_page.locator("#comic-reader-title")).to_have_text("I Am Gotham 1")
+        expect(issue.reader_page).to_be_visible()
+        expect(authed_page.locator("[data-testid='comic-reader-switch-error']")).to_have_text(
+            "The next comic is temporarily unavailable."
+        )
+
+    def test_reader_retains_current_issue_when_target_first_page_fails(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        _mock_cross_issue_reader(authed_page, page_failures={2})
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+        original_page_url = issue.reader_page.get_attribute("src")
+        authed_page.wait_for_timeout(850)
+
+        authed_page.locator("[data-testid='comic-reader-next-issue']").click()
+
+        expect(authed_page.locator("[data-testid='comic-reader-switch-error']")).to_have_text(
+            "The next comic page could not be displayed."
+        )
+        expect(authed_page.locator("#comic-reader-title")).to_have_text("I Am Gotham 1")
+        expect(issue.reader_page).to_have_attribute("src", original_page_url or "")
+        expect(issue.reader_page).to_be_visible()
+
+    def test_reader_shows_completion_state_and_can_open_the_next_issue(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        traces = _mock_cross_issue_reader(authed_page)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+
         authed_page.locator("[data-testid='comic-reader-next']").click()
-        expect(issue.reader_status).to_have_text("Page 2 of 3")
+        expect(issue.reader_status).to_have_text("Page 2 of 2")
+        authed_page.wait_for_timeout(850)
+
+        completion = authed_page.locator("[data-testid='comic-reader-completion']")
+        expect(completion).to_be_visible()
+        expect(completion).to_contain_text("Finished Batman #1")
+        expect(authed_page.locator("[data-testid='comic-reader-read-next']")).to_have_text(
+            "Read next issue"
+        )
+        assert traces["progress_writes"][-1][0] == 1  # type: ignore[index]
+        authed_page.locator("[data-testid='comic-reader-read-next']").click()
+        expect(authed_page.locator("#comic-reader-title")).to_have_text("I Am Gotham 2")
+
+    def test_reader_caught_up_state_can_be_marked_unread(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        traces = _mock_cross_issue_reader(authed_page, issue_count=1)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+
+        authed_page.locator("[data-testid='comic-reader-next']").click()
+        authed_page.wait_for_timeout(850)
+        completion = authed_page.locator("[data-testid='comic-reader-completion']")
+        expect(completion).to_contain_text("You’re caught up in this series.")
+
+        authed_page.locator("[data-testid='comic-reader-mark-unread']").click()
+
+        expect(completion).to_be_hidden()
+        assert traces["completion_writes"] == [(1, {"completed": False})]
+        expect(authed_page.locator("[data-testid='comic-reader-issue-status']")).to_have_text(
+            "Batman #1 marked unread"
+        )
+
+    def test_reader_ignores_rapid_duplicate_issue_switches(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        traces = _mock_cross_issue_reader(authed_page)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+
+        authed_page.evaluate(
+            """() => {
+                const root = document.querySelector('[data-testid="issue-detail-page"]');
+                const state = root && root._x_dataStack ? root._x_dataStack[0] : null;
+                return Promise.all([state.readerNextIssue(), state.readerNextIssue()]);
+            }"""
+        )
+
+        expect(authed_page.locator("#comic-reader-title")).to_have_text("I Am Gotham 2")
+        assert traces["manifest_requests"] == [1, 2]
+
+    def test_reader_releases_issue_resources_across_fifty_explicit_switches(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        traces = _mock_cross_issue_reader(authed_page, issue_count=51)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+        assert {request[0] for request in traces["page_requests"]} == {1}  # type: ignore[index]
+
+        for issue_id in range(2, 52):
+            assert all(
+                request[0] < issue_id
+                for request in traces["page_requests"]  # type: ignore[index]
+            )
+            authed_page.locator("[data-testid='comic-reader-next-issue']").click()
+            expect(authed_page.locator("#comic-reader-title")).to_have_text(
+                f"I Am Gotham {issue_id}"
+            )
+
+        resources = authed_page.evaluate(
+            """() => {
+                const root = document.querySelector('[data-testid="issue-detail-page"]');
+                const state = root && root._x_dataStack ? root._x_dataStack[0] : null;
+                return state ? {
+                    prefetchImages: state.readerPrefetchImages.length,
+                    manifestController: Boolean(state.readerManifestController),
+                    progressController: Boolean(state.readerProgressController),
+                } : null;
+            }"""
+        )
+        assert resources is not None
+        assert resources["prefetchImages"] <= 1
+        assert resources["manifestController"] is False
+        assert resources["progressController"] is False
+        assert {request[0] for request in traces["page_requests"]} == set(range(1, 52))  # type: ignore[index]
+
+    def test_read_query_opens_once_and_restores_focus_to_the_canonical_action(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        _mock_reader(authed_page)
+        issue = IssueDetailPage(authed_page, seeded_server)
+
+        issue.navigate("/issues/1?read=1")
+        issue.wait_until_ready()
+        issue.reader_dialog.wait_for(state="visible", timeout=5000)
+        issue.reader_page.wait_for(state="visible", timeout=5000)
+
+        assert authed_page.url.endswith("/issues/1")
+        issue.close_reader()
+        expect(issue.read_button).to_be_focused()
+
+    def test_reading_state_action_refreshes_only_the_issue_hero(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+        seeded_reader_state_guard: None,
+    ) -> None:
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        authed_page.evaluate(
+            """() => document.querySelector('[data-testid="issue-detail-page"]')
+                ?.setAttribute('data-reading-shell', 'preserved')"""
+        )
+
+        completion = authed_page.locator("[data-testid='issue-action-completion']").first
+        expect(completion).to_have_text("Mark read")
+        completion.click()
+
+        expect(authed_page.locator("[data-testid='issue-reading-state']").first).to_have_text(
+            "Read"
+        )
+        expect(authed_page.locator("[data-testid='issue-action-completion']").first).to_have_text(
+            "Mark unread"
+        )
+        assert issue.page_shell.get_attribute("data-reading-shell") == "preserved"
+
+        authed_page.locator("[data-testid='issue-action-completion']").first.click()
+        expect(authed_page.locator("[data-testid='issue-action-completion']").first).to_have_text(
+            "Mark read"
+        )
 
     def test_reader_opens_navigates_and_restores_exact_issue_context(
         self,
@@ -123,7 +547,7 @@ class TestIssueDetailPage:
 
         assert authed_page.url == original_url
         assert authed_page.evaluate("window.scrollY") == original_scroll
-        assert issue.read_button.evaluate("element => element === document.activeElement")
+        expect(issue.read_button).to_be_focused()
 
     def test_reader_keyboard_direction_and_sizing_controls(
         self,
@@ -233,6 +657,39 @@ class TestIssueDetailPage:
         issue.open_reader()
         expect(issue.reader_status).to_have_text("Page 3 of 3")
 
+    def test_completed_issue_leaves_read_only_after_reread_page_settles(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        progress_writes = _mock_reader(authed_page, completed=True)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+
+        assert progress_writes == []
+        authed_page.wait_for_timeout(850)
+
+        assert progress_writes[-1]["page_index"] == 0
+        assert progress_writes[-1]["completion_candidate"] is False
+        assert progress_writes[-1]["reread_started"] is True
+
+    def test_failed_reread_page_keeps_completed_state_unchanged(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        progress_writes = _mock_reader(authed_page, completed=True, fail_once={0})
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.read_button.click()
+        issue.reader_dialog.wait_for(state="visible", timeout=5000)
+
+        authed_page.wait_for_timeout(850)
+
+        assert progress_writes == []
+        expect(authed_page.get_by_text("Page 1 could not be displayed.")).to_be_visible()
+
     def test_reader_page_jump_input_is_bounded_and_blocks_shortcuts_while_typing(
         self,
         authed_page,
@@ -323,7 +780,7 @@ class TestIssueDetailPage:
 
     @pytest.mark.parametrize(
         ("width", "height"),
-        [(390, 844), (844, 390), (820, 1180)],
+        [(320, 568), (568, 320), (390, 844), (844, 390), (820, 1180)],
     )
     def test_reader_is_full_viewport_and_controls_remain_reachable(
         self,
@@ -352,6 +809,51 @@ class TestIssueDetailPage:
             assert control_box["y"] >= 0
             assert control_box["x"] + control_box["width"] <= width + 1
             assert control_box["y"] + control_box["height"] <= height + 1
+
+    def test_reader_reflows_at_200_percent_equivalent_without_horizontal_overflow(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        authed_page.set_viewport_size({"width": 320, "height": 568})
+        _mock_cross_issue_reader(authed_page)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+
+        geometry = authed_page.evaluate(
+            """() => ({
+                documentWidth: document.documentElement.scrollWidth,
+                viewportWidth: document.documentElement.clientWidth,
+                issueControlsVisible: Array.from(
+                    document.querySelectorAll('[data-testid="comic-reader-previous-issue"], [data-testid="comic-reader-next-issue"]')
+                ).every((control) => {
+                    const rect = control.getBoundingClientRect();
+                    return rect.left >= 0 && rect.right <= window.innerWidth;
+                }),
+            })"""
+        )
+
+        assert geometry["documentWidth"] <= geometry["viewportWidth"]
+        assert geometry["issueControlsVisible"] is True
+
+    def test_reader_controls_remain_usable_with_reduced_motion(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        authed_page.emulate_media(reduced_motion="reduce")
+        _mock_cross_issue_reader(authed_page)
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(1)
+        issue.open_reader()
+
+        next_issue = authed_page.locator("[data-testid='comic-reader-next-issue']")
+        expect(next_issue).to_be_visible()
+        next_issue.click()
+
+        expect(authed_page.locator("#comic-reader-title")).to_have_text("I Am Gotham 2")
+        expect(authed_page.locator("[data-testid='comic-reader-close']")).to_be_visible()
 
     def test_copy_path_tooltip_renders_on_hover(
         self,

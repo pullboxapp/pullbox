@@ -60,26 +60,41 @@ def _resolve_git_dir(repo_root: Path) -> Path | None:
 
 def _read_git_ref(git_dir: Path, ref: str) -> str | None:
     """Read a git ref from loose refs or packed-refs."""
-    ref_path = git_dir / ref
-    if ref_path.exists():
+    ref_dirs = [git_dir]
+    commondir_path = git_dir / "commondir"
+    if commondir_path.exists():
         try:
-            value = ref_path.read_text(encoding="utf-8").strip()
+            common_value = commondir_path.read_text(encoding="utf-8").strip()
         except OSError:
-            value = ""
-        return value or None
+            common_value = ""
+        if common_value:
+            common_dir = Path(common_value)
+            if not common_dir.is_absolute():
+                common_dir = (git_dir / common_dir).resolve()
+            if common_dir != git_dir:
+                ref_dirs.append(common_dir)
 
-    packed_refs = git_dir / "packed-refs"
-    if packed_refs.exists():
-        try:
-            for line in packed_refs.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or line.startswith("^"):
-                    continue
-                parts = line.split(" ", 1)
-                if len(parts) == 2 and parts[1] == ref:
-                    return parts[0]
-        except OSError:
-            return None
+    for ref_dir in ref_dirs:
+        ref_path = ref_dir / ref
+        if ref_path.exists():
+            try:
+                value = ref_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                value = ""
+            return value or None
+
+        packed_refs = ref_dir / "packed-refs"
+        if packed_refs.exists():
+            try:
+                for line in packed_refs.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or line.startswith("^"):
+                        continue
+                    parts = line.split(" ", 1)
+                    if len(parts) == 2 and parts[1] == ref:
+                        return parts[0]
+            except OSError:
+                return None
     return None
 
 

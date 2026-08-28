@@ -3,7 +3,14 @@
 {% set issue_comicvine_link = issue.comicvine_url or ("https://comicvine.gamespot.com/issue/4000-" ~ issue.comicvine_id ~ "/" if issue.comicvine_id else None) %}
 {% set issue_title_parts = issue.series.title.split(" ", 1) %}
 
-<section data-testid="issue-detail-hero" class="detail-hero-shell">
+<section
+  data-testid="issue-detail-hero"
+  data-reading-refresh-root="issue-detail"
+  data-reading-refresh-url="/htmx/issues/{{ issue.id }}/reading"
+  data-reading-issue-id="{{ issue.id }}"
+  x-data="readingStateActions()"
+  class="detail-hero-shell"
+>
   <div class="series-domain-hero-inner issue-domain-hero-inner">
     <div class="series-domain-cover-column issue-domain-cover-column">
       <div data-testid="issue-detail-cover-frame" class="series-domain-cover-frame issue-domain-cover-frame">
@@ -64,6 +71,11 @@
           {% endif %}
           {% if issue.series.year_start %}
           <span class="pill pill-neutral">{{ issue.series.year_start }}</span>
+          {% endif %}
+          {% if reader_enabled and issue_reading.state_label %}
+          <span data-testid="issue-reading-state" class="pill pill-info">
+            {{ issue_reading.state_label }}
+          </span>
           {% endif %}
         </div>
       </div>

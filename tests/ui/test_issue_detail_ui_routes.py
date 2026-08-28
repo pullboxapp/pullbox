@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -14,6 +15,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 pytest_plugins = ["conftest_security"]
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-issue-detail-ui-tests")
+
+
+def _issue_detail_content_html(html: str) -> str:
+    """Return page-specific content without shared shell recovery scripts."""
+    start = html.index('data-testid="issue-detail-page"')
+    end = html.index('data-testid="page-footer-dock"', start)
+    return html[start:end]
 
 
 @pytest.fixture
@@ -197,7 +205,148 @@ class TestIssueDetailRouteContracts:
         assert "page-dock-inner page-dock-inner-status-only" in response.text
         assert 'data-testid="page-dock-pagination"' not in response.text
         assert "transition:true" not in response.text
-        assert "window.location.reload()" not in response.text
+        assert "window.location.reload()" not in _issue_detail_content_html(response.text)
+
+    async def test_issue_detail_renders_private_progress_and_targeted_state_actions(
+        self,
+        authenticated_client,
+        sec_db,
+        sec_user,
+        seeded_issue_detail_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.reader import IssueReaderState
+
+        now = datetime.now(UTC)
+        issue_id = seeded_issue_detail_ui_data["owned_issue_id"]
+        async with sec_db() as session:
+            session.add(
+                IssueReaderState(
+                    user_id=sec_user.id,
+                    issue_id=issue_id,
+                    last_page_index=1,
+                    content_revision="issue-detail-revision",
+                    page_count=5,
+                    progress_updated_at=now,
+                    last_opened_at=now,
+                    want_to_read=True,
+                    want_to_read_updated_at=now,
+                )
+            )
+            await session.commit()
+
+        response = await authenticated_client.get(f"/issues/{issue_id}")
+
+        assert response.status_code == 200
+        assert 'data-testid="issue-reading-state"' in response.text
+        assert re.search(
+            r'data-testid="issue-reading-state"[^>]*>\s*Page 2 of 5\s*</span>',
+            response.text,
+        )
+        assert 'data-testid="issue-action-read"' in response.text
+        assert re.search(
+            r'data-testid="issue-action-read"[\s\S]*?Continue\s*</button>',
+            response.text,
+        )
+        assert 'data-testid="issue-action-want-to-read"' in response.text
+        assert "In Want to Read" in response.text
+        assert 'data-testid="issue-action-completion"' in response.text
+        assert "Mark read" in response.text
+        assert 'data-reading-refresh-root="issue-detail"' in response.text
+        assert f'data-reading-refresh-url="/htmx/issues/{issue_id}/reading"' in response.text
+        assert 'x-data="readingStateActions()"' in response.text
+
+    async def test_issue_detail_omits_other_users_private_reading_state(
+        self,
+        authenticated_client,
+        sec_db,
+        seeded_issue_detail_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.reader import IssueReaderState
+        from pullbox.models.user import User
+        from pullbox.services.auth_service import AuthService
+
+        now = datetime.now(UTC)
+        issue_id = seeded_issue_detail_ui_data["owned_issue_id"]
+        async with sec_db() as session:
+            other_user = User(
+                username="other-reader",
+                password_hash=AuthService.hash_password("Other@1234"),
+            )
+            session.add(other_user)
+            await session.flush()
+            session.add(
+                IssueReaderState(
+                    user_id=other_user.id,
+                    issue_id=issue_id,
+                    last_page_index=3,
+                    content_revision="private-revision",
+                    page_count=5,
+                    progress_updated_at=now,
+                    last_opened_at=now,
+                )
+            )
+            await session.commit()
+
+        response = await authenticated_client.get(f"/issues/{issue_id}")
+
+        assert response.status_code == 200
+        assert 'data-testid="issue-reading-state"' not in response.text
+        assert "Page 4 of 5" not in response.text
+        assert re.search(r'data-testid="issue-action-read"[\s\S]*?Read\s*</button>', response.text)
+
+    async def test_read_query_deep_opens_only_for_allowlisted_value_and_readable_issue(
+        self,
+        authenticated_client,
+        seeded_issue_detail_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        issue_id = seeded_issue_detail_ui_data["owned_issue_id"]
+        valid = await authenticated_client.get(f"/issues/{issue_id}?read=1")
+        ignored = await authenticated_client.get(f"/issues/{issue_id}?read=yes")
+        unavailable = await authenticated_client.get(
+            f"/issues/{seeded_issue_detail_ui_data['wanted_issue_id']}?read=1"
+        )
+
+        assert valid.status_code == 200
+        assert "openReaderOnLoad: true" in valid.text
+        assert "openReaderOnLoad: false" in ignored.text
+        assert "openReaderOnLoad: false" in unavailable.text
+        assert 'data-testid="issue-reader-unavailable-message"' in unavailable.text
+        assert "A readable file is not available for this issue." in unavailable.text
+
+    async def test_issue_reading_fragment_uses_the_same_private_canonical_state(
+        self,
+        authenticated_client,
+        sec_db,
+        sec_user,
+        seeded_issue_detail_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.reader import IssueReaderState
+
+        now = datetime.now(UTC)
+        issue_id = seeded_issue_detail_ui_data["owned_issue_id"]
+        async with sec_db() as session:
+            session.add(
+                IssueReaderState(
+                    user_id=sec_user.id,
+                    issue_id=issue_id,
+                    completed_at=now,
+                    completion_updated_at=now,
+                    state_version=2,
+                )
+            )
+            await session.commit()
+
+        response = await authenticated_client.get(f"/htmx/issues/{issue_id}/reading")
+
+        assert response.status_code == 200
+        assert response.text.count('data-testid="issue-detail-hero"') == 1
+        assert 'data-testid="issue-reading-state"' in response.text
+        assert re.search(r'data-testid="issue-reading-state"[^>]*>\s*Read\s*</span>', response.text)
+        assert re.search(
+            r'data-testid="issue-action-read"[\s\S]*?Read again\s*</button>',
+            response.text,
+        )
+        assert "Mark unread" in response.text
 
     async def test_wanted_issue_renders_import_action_without_library_file_section(
         self,
@@ -254,6 +403,8 @@ class TestIssueDetailRouteContracts:
 
         assert response.status_code == 200
         assert 'data-testid="issue-action-read"' not in response.text
+        assert 'data-testid="issue-action-want-to-read"' not in response.text
+        assert 'data-testid="issue-action-completion"' not in response.text
         assert 'data-testid="comic-reader-dialog"' not in response.text
 
     async def test_missing_issue_metadata_uses_persistent_comicvine_cache(

@@ -75,6 +75,17 @@ def _set_orphan_recovery_state(
     return next_state
 
 
+async def _queue_orphan_recovery_progress(
+    progress: OrphanRecoveryProgressResponse,
+) -> None:
+    from pullbox.services.operation_progress_dispatch import queue_operation_progress
+    from pullbox.services.secondary_operation_progress import (
+        build_orphan_recovery_operation_update,
+    )
+
+    await queue_operation_progress(build_orphan_recovery_operation_update(progress))
+
+
 async def _run_orphan_recovery(
     imported_series_id: int,
     request_payload: dict[str, Any],
@@ -137,7 +148,7 @@ async def _run_orphan_recovery(
                     total_files=total_files,
                 )
 
-            _set_orphan_recovery_state(
+            completed = _set_orphan_recovery_state(
                 imported_series_id,
                 state="running",
                 message=f"Preparing recovery for {item.cv_title or item.raw_series_name}...",
@@ -168,13 +179,14 @@ async def _run_orphan_recovery(
                 failed_count=int(payload["failed_count"]),
                 files_remaining=int(payload["files_remaining"]),
             )
+            await _queue_orphan_recovery_progress(completed)
         except Exception as exc:
             logger.exception(
                 "orphan_recovery_run_failed",
                 imported_series_id=imported_series_id,
             )
             await session.rollback()
-            _set_orphan_recovery_state(
+            failed = _set_orphan_recovery_state(
                 imported_series_id,
                 state="failed",
                 message="Recovery failed.",
@@ -182,3 +194,4 @@ async def _run_orphan_recovery(
                 current_file_stage=None,
                 current_file_progress_unit=None,
             )
+            await _queue_orphan_recovery_progress(failed)

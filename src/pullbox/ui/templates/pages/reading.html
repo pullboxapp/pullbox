@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "components/dropdown_select.html" import dropdown_select %}
+
+{% block title %}Reading — {{ instance_name() }}{% endblock %}
+{% block page_title %}Reading{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 pt-4 sm:pt-5{% endblock %}
+
+{% block content %}
+<div
+  data-testid="reading-page"
+  data-reading-view="{{ reading_view }}"
+  data-reading-per-page="{{ per_page }}"
+  class="reading-workspace"
+  hx-history="false"
+>
+  <header class="reading-workspace-header">
+    <div>
+      <h1 data-testid="reading-title" class="series-registry-title">READ<span>ING</span></h1>
+      <p class="series-registry-subtitle">Pick up a comic, choose what’s next, or revisit what you’ve read.</p>
+    </div>
+    <form id="reading-view-form" class="reading-page-size" action="/reading" method="get">
+      <input type="hidden" name="view" value="{{ reading_view }}">
+      <span class="series-toolbar-label">Per Page</span>
+      {{ dropdown_select(
+        name="per_page",
+        value=per_page|string,
+        size="sm",
+        options=[("24", "24"), ("48", "48"), ("100", "100")],
+        root_testid="reading-per-page-select",
+        hx_get="/reading",
+        hx_target="#reading-results-bundle",
+        hx_swap="outerHTML",
+        hx_include="#reading-view-form",
+        hx_push_url="true",
+        fit_width=true
+      ) }}
+    </form>
+  </header>
+
+  <nav class="reading-tabs" aria-label="Reading views">
+    {% set reading_tabs = [
+      ("continue", "Continue"),
+      ("want-to-read", "Want to Read"),
+      ("read", "Read"),
+    ] %}
+    {% for value, label in reading_tabs %}
+      <a
+        href="/reading?view={{ value }}&amp;per_page={{ per_page }}"
+        data-testid="reading-view-{{ value }}"
+        class="reading-tab{% if reading_view == value %} is-active{% endif %}"
+        {% if reading_view == value %}aria-current="page"{% endif %}
+      >{{ label }}</a>
+    {% endfor %}
+  </nav>
+
+  {% include "partials/reading_results.html" %}
+</div>
+{% endblock %}
+
+{% block footer_dock %}
+  {% include "partials/reading_footer_dock.html" %}
+{% endblock %}

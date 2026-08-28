@@ -50,6 +50,7 @@
               {% set state_tone = live.state_tone if live and live.state_tone is defined else "active" %}
               {% set phase_progress_pct = live.phase_progress_pct if live and live.phase_progress_pct is defined else none %}
               {% set phase_progress_label = live.phase_progress_label if live and live.phase_progress_label is defined else none %}
+              {% set progress_indeterminate = live.progress_indeterminate if live and live.progress_indeterminate is defined else false %}
               {% set transfer_progress_pct = live.transfer_progress_pct if live and live.transfer_progress_pct is defined else none %}
               {% set transfer_done_bytes = live.transfer_done_bytes if live and live.transfer_done_bytes is defined else none %}
               {% set transfer_total_bytes = live.transfer_total_bytes if live and live.transfer_total_bytes is defined else none %}
@@ -113,12 +114,12 @@
                   </td>
                   <td>
                     <div class="downloads-progress-cell">
-                      {% if progress_bar_pct is not none %}
+                      {% if progress_bar_pct is not none or progress_indeterminate %}
                         <span class="downloads-progress-track">
                           <span
                             data-testid="pp-queue-item-progress-bar"
-                            class="downloads-progress-fill {{ progress_tone }}"
-                            style="width: {{ progress_bar_pct }}%"
+                            class="downloads-progress-fill {{ progress_tone }}{% if progress_indeterminate %} is-indeterminate{% endif %}"
+                            style="width: {% if progress_indeterminate %}45{% else %}{{ progress_bar_pct }}{% endif %}%"
                           ></span>
                         </span>
                       {% endif %}

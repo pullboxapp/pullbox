@@ -29,6 +29,7 @@ dependencies = [
     "pydantic~=2.13",
     "pydantic-settings>=2.14.2,<3.0",
     "httpx~=0.28",
+    "websockets~=17.0",
     "idna>=3.15",  # transitive via httpx/requests — floor for CVE-2026-45409
     "jinja2~=3.1",
     "python-multipart>=0.0.26,<0.1",

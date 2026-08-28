@@ -5,6 +5,7 @@ from __future__ import annotations
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from playwright.sync_api import expect
 
 from tests.e2e.conftest import wait_for_htmx
 from tests.e2e.pages.app_shell import AppShellPage
@@ -16,6 +17,34 @@ pytestmark = pytest.mark.e2e
 
 class TestSidebarShell:
     """Behavior-first E2E checks for the persistent sidebar shell."""
+
+    def test_sidebar_shell_recovers_when_initial_stylesheet_request_fails(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        stylesheet_requests: list[str] = []
+
+        def fail_initial_stylesheet(route) -> None:  # type: ignore[no-untyped-def]
+            stylesheet_requests.append(route.request.url)
+            if len(stylesheet_requests) == 1:
+                route.abort()
+                return
+            route.continue_()
+
+        authed_page.route("**/static/css/tailwind.css*", fail_initial_stylesheet)
+
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/series")
+        authed_page.wait_for_function(
+            "document.documentElement.hasAttribute('data-pullbox-stylesheet-ready')",
+            timeout=5000,
+        )
+
+        assert len(stylesheet_requests) == 2
+        assert "pullbox_retry=" in stylesheet_requests[1]
+        assert authed_page.locator("body").get_attribute("data-shell-pending") is None
+        assert shell.sidebar.evaluate("node => getComputedStyle(node).position") == "fixed"
 
     def test_sidebar_shell_renders_standardized_regions(
         self,
@@ -38,6 +67,154 @@ class TestSidebarShell:
         assert shell.link("health").is_visible()
         assert shell.badge("intervention").count() == 1
         assert shell.badge("health").count() == 1
+
+    def test_global_activity_popover_renders_shared_operation_progress(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        authed_page.route(
+            "**/api/v1/activity",
+            lambda route: route.fulfill(
+                json={
+                    "active_count": 1,
+                    "spinner_count": 1,
+                    "attention_count": 0,
+                    "operations": [
+                        {
+                            "id": 41,
+                            "operation_type": "download",
+                            "operation_key": "download-41",
+                            "state": "running",
+                            "phase": "downloading",
+                            "title": "Batman 041",
+                            "message": "Receiving from PixelDrain",
+                            "source_label": "PixelDrain",
+                            "detail_url": "/downloads",
+                            "tone": "info",
+                            "attention_required": False,
+                            "acknowledged_at": None,
+                            "overall": {
+                                "current": 40,
+                                "total": 100,
+                                "percent": 40,
+                                "unit": "bytes",
+                                "indeterminate": False,
+                            },
+                            "item": {
+                                "key": "batman-041.cbz",
+                                "label": "Batman 041.cbz",
+                                "phase": "transferring",
+                                "message": "Receiving",
+                                "current": None,
+                                "total": None,
+                                "percent": None,
+                                "unit": "bytes",
+                                "indeterminate": True,
+                            },
+                            "rate": 2097152,
+                            "rate_unit": "bytes_per_second",
+                            "eta_seconds": 120,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/series")
+        activity_button = authed_page.get_by_role("button", name="Background activity")
+        operation = authed_page.locator("[data-testid='header-activity-operation']")
+        expect(activity_button).to_have_attribute("aria-expanded", "false")
+        expect(operation).to_have_count(1)
+        activity_button.click()
+
+        popover = authed_page.locator("[data-testid='header-activity-popover']")
+        expect(activity_button).to_have_attribute("aria-expanded", "true")
+        expect(popover).to_be_visible()
+        assert operation.get_by_text("Batman 041", exact=True).is_visible()
+        assert operation.get_by_text("PixelDrain", exact=True).is_visible()
+        assert operation.get_by_text("Batman 041.cbz", exact=True).is_visible()
+        overall_progress = operation.locator(
+            "[data-testid='header-activity-overall-progress'] [role='progressbar']:visible"
+        )
+        assert overall_progress.get_attribute("aria-valuenow") == "40"
+        progress_track = overall_progress.bounding_box()
+        progress_fill_locator = overall_progress.locator(":scope > div")
+        progress_fill = progress_fill_locator.bounding_box()
+        assert progress_track is not None
+        assert progress_fill is not None
+        assert 0.38 <= progress_fill["width"] / progress_track["width"] <= 0.42
+        track_color = overall_progress.evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        fill_color = progress_fill_locator.evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        assert fill_color not in {"transparent", "rgba(0, 0, 0, 0)"}
+        assert fill_color != track_color
+        assert (
+            operation.locator(
+                "[data-testid='header-activity-item-progress'] [role='progressbar']:visible"
+            ).get_attribute("aria-valuenow")
+            is None
+        )
+
+    def test_global_activity_popover_does_not_invent_missing_eta(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        states = ("queued", "retrying", "failed")
+        authed_page.route(
+            "**/api/v1/activity",
+            lambda route: route.fulfill(
+                json={
+                    "active_count": 2,
+                    "spinner_count": 2,
+                    "attention_count": 1,
+                    "operations": [
+                        {
+                            "id": index,
+                            "operation_type": "download",
+                            "operation_key": f"download-{index}",
+                            "state": state,
+                            "phase": state,
+                            "title": f"Download {state}",
+                            "message": state.title(),
+                            "source_label": "Direct download",
+                            "detail_url": "/downloads",
+                            "tone": "danger" if state == "failed" else "warning",
+                            "attention_required": state == "failed",
+                            "acknowledged_at": None,
+                            "overall": {
+                                "current": None,
+                                "total": None,
+                                "percent": None,
+                                "unit": "bytes",
+                                "indeterminate": True,
+                            },
+                            "item": None,
+                            "rate": None,
+                            "rate_unit": "bytes_per_second",
+                            "eta_seconds": None,
+                        }
+                        for index, state in enumerate(states, start=51)
+                    ],
+                }
+            ),
+        )
+
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/series")
+        activity_button = authed_page.get_by_role("button", name="Background activity")
+        operations = authed_page.locator("[data-testid='header-activity-operation']")
+        expect(operations).to_have_count(3)
+        activity_button.click()
+
+        popover = authed_page.locator("[data-testid='header-activity-popover']")
+        expect(popover).to_be_visible()
+        expect(popover.get_by_text("1 sec remaining", exact=True)).to_have_count(0)
 
     def test_sidebar_collapse_toggle_keeps_shell_stable(
         self,

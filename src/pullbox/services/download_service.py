@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import select
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.events import DownloadFailed, DownloadStarted, EventBus
 from pullbox.core.exceptions import NotFoundError, ProviderError
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
@@ -54,26 +55,35 @@ class DownloadService:
         Routes NZB releases to the NZB client (SABnzbd) and torrent
         releases to the torrent client (qBittorrent).
         """
-        log = logger.bind(issue_id=issue_id, title=release.title, is_torrent=release.is_torrent)
+        log = logger.bind(
+            issue_id=issue_id,
+            title=release.title,
+            protocol=release.protocol.value,
+        )
         log.info("download_send_start")
 
         if indexer_id is None:
             indexer_id = release.indexer_id
 
         # Select the appropriate client
-        client = self._select_client(release.is_torrent)
+        client = self._select_client(release.protocol)
         if not client:
-            protocol = "torrent" if release.is_torrent else "NZB"
-            raise ProviderError("download", f"No {protocol} download client configured")
+            raise ProviderError(
+                "download",
+                f"No {release.protocol.value} download client configured",
+            )
 
         # Record which client will handle this download
         client_type = DownloadClientType(client.client_type)
+        client_config_id = await self._persisted_config_id_for_client(session, client)
         download = DownloadHistory(
             issue_id=issue_id,
             indexer_id=indexer_id,
             title=release.title,
             download_url=release.download_url,
             download_client=client_type,
+            protocol=release.protocol,
+            download_client_config_id=client_config_id,
             state=DownloadState.QUEUED,
             file_size=release.size_bytes,
             replace_existing_file=replace_existing_file,
@@ -83,7 +93,7 @@ class DownloadService:
 
         # Send to client
         try:
-            if release.is_torrent:
+            if release.protocol is AcquisitionProtocol.TORRENT:
                 external_id = await self.add_torrent_to_client(
                     client,
                     url=release.download_url,
@@ -91,8 +101,13 @@ class DownloadService:
                     indexer_id=indexer_id,
                     download_id=download.id,
                 )
-            else:
+            elif release.protocol is AcquisitionProtocol.USENET:
                 external_id = await client.add_nzb(release.download_url, release.title)
+            else:
+                raise ProviderError(
+                    "download",
+                    f"Unsupported acquisition protocol: {release.protocol.value}",
+                )
 
             download.external_id = external_id
             download.state = DownloadState.SENT
@@ -383,8 +398,8 @@ class DownloadService:
         log: structlog.stdlib.BoundLogger,
     ) -> DownloadHistory:
         """Send a download to the appropriate client."""
-        is_torrent = DownloadClientType(str(download.download_client)).is_torrent
-        client = self._select_client(is_torrent)
+        protocol = AcquisitionProtocol(download.protocol)
+        client = self.get_client_for_download(download)
         if not client:
             download.state = DownloadState.FAILED
             download.error_message = "No download client available"
@@ -392,7 +407,7 @@ class DownloadService:
             return download
 
         try:
-            if is_torrent:
+            if protocol is AcquisitionProtocol.TORRENT:
                 external_id = await self.add_torrent_to_client(
                     client,
                     url=str(download.download_url),
@@ -400,8 +415,13 @@ class DownloadService:
                     indexer_id=download.indexer_id,
                     download_id=download.id,
                 )
-            else:
+            elif protocol is AcquisitionProtocol.USENET:
                 external_id = await client.add_nzb(str(download.download_url), str(download.title))
+            else:
+                raise ProviderError(
+                    "download",
+                    f"Unsupported acquisition protocol: {protocol.value}",
+                )
 
             download.external_id = external_id
             download.state = DownloadState.SENT
@@ -471,14 +491,46 @@ class DownloadService:
             clear_download_progress(download_id)
             raise
 
-    def _select_client(self, is_torrent: bool) -> DownloadClient | None:
-        """Select the appropriate download client based on release type."""
-        if is_torrent:
+    def _select_client(self, protocol: AcquisitionProtocol) -> DownloadClient | None:
+        """Select the highest-priority client for an acquisition protocol."""
+        if protocol is AcquisitionProtocol.TORRENT:
             return self._registry.get_torrent_client()
-        return self._registry.get_nzb_client()
+        if protocol is AcquisitionProtocol.USENET:
+            return self._registry.get_nzb_client()
+        return None
+
+    def _config_id_for_client(self, client: DownloadClient) -> int | None:
+        """Return the persisted config ID registered for one client instance."""
+        for config_id, registered_client in self._registry.get_download_client_items():
+            if registered_client is client:
+                return config_id
+        return None
+
+    async def _persisted_config_id_for_client(
+        self,
+        session: AsyncSession,
+        client: DownloadClient,
+    ) -> int | None:
+        """Return a registered ID only when its referenced config still exists."""
+        config_id = self._config_id_for_client(client)
+        if config_id is None:
+            return None
+
+        from pullbox.models.client import DownloadClientConfig
+
+        if await session.get(DownloadClientConfig, config_id) is None:
+            logger.warning(
+                "download_client_config_not_persisted",
+                client_config_id=config_id,
+                client_type=client.client_type,
+            )
+            return None
+        return config_id
 
     def get_client_for_download(self, download: DownloadHistory) -> DownloadClient | None:
-        """Get the client that handles a specific download by its client type."""
+        """Resolve the exact persisted client, with fallback for legacy null rows."""
+        if download.download_client_config_id is not None:
+            return self._registry.get_download_client(download.download_client_config_id)
         return self._registry.get_client_for_type(str(download.download_client))
 
     def get_client_for_type(self, client_type: object) -> DownloadClient | None:

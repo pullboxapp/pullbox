@@ -207,10 +207,18 @@
             <div class="flex flex-wrap items-center gap-2">
               <p class="text-sm font-semibold text-pb-text">{{ host_names[host_kind] }}</p>
               <span class="pill {{ 'pill-success' if host.enabled else 'pill-muted' }}">{{ 'Enabled' if host.enabled else 'Disabled' }}</span>
+              {% if host_kind == 'generic_https' %}
+              <span
+                class="pill pill-info"
+                data-testid="settings-direct-host-validation-generic_https"
+                title="Each final-file URL is validated when Pullbox uses it"
+              >Validated per download</span>
+              {% else %}
               <span
                 class="pill {{ state_pills.get(reachability_state, 'pill-muted') }}"
                 title="{{ 'Last checked ' ~ (host.last_checked_at|localtime) if host.last_checked_at else 'Not checked yet' }}"
               >{{ reachability_state|replace('_', ' ')|title }}</span>
+              {% endif %}
               <span class="pill pill-muted">Preference {{ host.preference }}</span>
             </div>
             <p class="mt-2 text-xs leading-5 text-pb-text-sec">{{ host_descriptions[host_kind] }}</p>
@@ -237,8 +245,10 @@
                 </dd>
               </div>
               <div>
-                <dt class="text-pb-text-dim">Last reachable</dt>
-                <dd class="mt-0.5 text-pb-text-sec">{{ host.last_reachable_at|localtime if host.last_reachable_at else 'Never' }}</dd>
+                <dt class="text-pb-text-dim">{{ 'Validation' if host_kind == 'generic_https' else 'Last reachable' }}</dt>
+                <dd class="mt-0.5 text-pb-text-sec">
+                  {{ 'Per download' if host_kind == 'generic_https' else (host.last_reachable_at|localtime if host.last_reachable_at else 'Never') }}
+                </dd>
               </div>
               <div>
                 <dt class="text-pb-text-dim">Last operational use</dt>
@@ -316,6 +326,12 @@
               <p class="rounded-lg border border-pb-border bg-pb-bg/30 p-3 text-xs text-pb-text-sec">This host supports anonymous access only and stores no account credential.</p>
             </template>
 
+            <template x-if="activeHost.host_kind === 'generic_https'">
+              <div class="inline-alert inline-alert-info">
+                <p class="text-xs">Generic HTTPS has no single endpoint to test. Pullbox validates each final-file URL when it is used.</p>
+              </div>
+            </template>
+
             <template x-for="field in activeHost.allowed_credential_fields" :key="field">
               <div class="space-y-2">
                 <label class="block text-xs font-medium text-pb-text-sec" x-text="hostCredentialLabel(field)"></label>
@@ -351,6 +367,7 @@
               type="button"
               class="btn-ghost btn-sm gap-1.5"
               data-testid="settings-direct-host-modal-test"
+              x-show="activeHost.host_kind !== 'generic_https'"
               :disabled="hostSaving || hostTesting"
               @click="testHost()"
             >
@@ -491,7 +508,7 @@
                       </select>
                     </template>
 
-                    <template x-if="control.input_format === 'uri' && control.choices.length && !control.secret">
+                    <template x-if="control.input_format === 'uri' && (control.choices.length || control.suggestions.length) && !control.secret">
                       <div
                         class="direct-provider-uri-control"
                         @click.outside="if (configurationChoiceOpen === control.name) configurationChoiceOpen = null"
@@ -545,7 +562,7 @@
                           :aria-label="`${control.title} options`"
                           :data-testid="`settings-direct-provider-control-${control.name}-options`"
                         >
-                          <template x-for="choice in control.choices" :key="String(choice)">
+                          <template x-for="choice in (control.suggestions.length ? control.suggestions : control.choices)" :key="String(choice)">
                             <button
                               type="button"
                               class="direct-provider-uri-option"
@@ -573,7 +590,7 @@
                       </div>
                     </template>
 
-                    <template x-if="!control.secret && control.value_type !== 'boolean' && !control.choices.length">
+                    <template x-if="!control.secret && control.value_type !== 'boolean' && !control.choices.length && !control.suggestions.length">
                       <div>
                         <input
                           class="input-pb"
@@ -858,7 +875,7 @@ function directProviderSettings(initialProviders, initialHosts) {
     },
 
     async testHost() {
-      if (this.hostSaving || this.hostTesting || !this.activeHost.host_kind) return;
+      if (this.hostSaving || this.hostTesting || !this.activeHost.host_kind || this.activeHost.host_kind === 'generic_https') return;
       this.hostTesting = true;
       this.hostError = '';
       this.hostTestMessage = '';

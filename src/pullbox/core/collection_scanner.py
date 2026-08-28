@@ -41,6 +41,10 @@ SCAN_PROGRESS_EMIT_INTERVAL_SECONDS = 0.25
 
 # Regex: folder name with a year token, optionally followed by release tags
 _FOLDER_YEAR_RE = re.compile(r"^(.+?)\s*[\[(](\d{4})[\])](?:\s*(?:\([^)]*\)|\[[^\]]*\]))*\s*$")
+_PULLBOX_FOLDER_CV_ID_RE = re.compile(
+    r"^(?P<name>.+?)\s+\((?P<year>(?:19|20)\d{2})\)\s+"
+    r"(?:(?P<bare_cv_id>\d{4,})|\[cv-(?P<bracketed_cv_id>\d{4,})\])\s*$"
+)
 
 # Comic file extensions (lowercase, with dot)
 COMIC_EXTENSIONS: frozenset[str] = frozenset(
@@ -110,6 +114,7 @@ class DiscoveredSeries:
     files: list[DiscoveredFile] = field(default_factory=list)
     has_files: bool = True
     mylar3_cv_id: int | None = None
+    folder_cv_id: int | None = None
     comicinfo_cv_id: int | None = None
     comicinfo_source: str | None = None
     diagnostics: dict[str, object] = field(default_factory=dict)
@@ -264,6 +269,7 @@ class CollectionScanner:
             folder_name: str,
             folder_year: int | None,
             folder_publisher: str | None,
+            folder_cv_id: int | None,
             allow_weak_file_identity: bool,
         ) -> list[DiscoveredSeries]:
             async with series_worker_sem:
@@ -279,6 +285,7 @@ class CollectionScanner:
                     folder_name=folder_name,
                     folder_year=folder_year,
                     folder_publisher=folder_publisher,
+                    folder_cv_id=folder_cv_id,
                     discovered_files=discovered_files,
                     allow_weak_file_identity=allow_weak_file_identity,
                 )
@@ -289,7 +296,7 @@ class CollectionScanner:
             if len(comic_files) < self._min_file_count:
                 continue
 
-            name, year = self._extract_from_folder_name(series_dir.name)
+            name, year, folder_cv_id = self._extract_folder_identity(series_dir.name)
             publisher = self._infer_publisher_from_hierarchy(series_dir, root)
             tasks.append(
                 asyncio.create_task(
@@ -299,6 +306,7 @@ class CollectionScanner:
                         folder_name=name,
                         folder_year=year,
                         folder_publisher=publisher,
+                        folder_cv_id=folder_cv_id,
                         allow_weak_file_identity=series_dir == root,
                     )
                 )
@@ -317,6 +325,7 @@ class CollectionScanner:
                         folder_name=loose_dir.name if loose_dir.name else "(root)",
                         folder_year=None,
                         folder_publisher=None,
+                        folder_cv_id=None,
                         allow_weak_file_identity=loose_dir == root,
                     )
                 )
@@ -364,7 +373,7 @@ class CollectionScanner:
         discovered_list: list[DiscoveredSeries] = []
 
         for series_dir, comic_files in sorted(dir_files.items()):
-            name, year = self._extract_from_folder_name(series_dir.name)
+            name, year, folder_cv_id = self._extract_folder_identity(series_dir.name)
             discovered_files = await self._build_discovered_files(
                 comic_files,
                 comicinfo_sem,
@@ -381,6 +390,7 @@ class CollectionScanner:
                     folder_name=name,
                     folder_year=year,
                     folder_publisher=publisher,
+                    folder_cv_id=folder_cv_id,
                     discovered_files=discovered_files,
                     allow_weak_file_identity=True,
                 )
@@ -543,6 +553,7 @@ class CollectionScanner:
         folder_name: str,
         folder_year: int | None,
         folder_publisher: str | None,
+        folder_cv_id: int | None,
         discovered_files: list[DiscoveredFile],
         allow_weak_file_identity: bool = False,
     ) -> list[DiscoveredSeries]:
@@ -684,6 +695,7 @@ class CollectionScanner:
                     source_folder=str(source_dir),
                     source_folder_relative=rel,
                     files=sorted(files, key=lambda df: df.file_name),
+                    folder_cv_id=folder_cv_id,
                     comicinfo_cv_id=comicinfo_cv_id,
                     comicinfo_source=comicinfo_source,
                     diagnostics={
@@ -693,6 +705,16 @@ class CollectionScanner:
                         ),
                         "series_status": series_status,
                         "issue_count_hint": issue_count_hint,
+                        **(
+                            {
+                                "folder_identity": {
+                                    "kind": "pullbox_series_folder",
+                                    "comicvine_series_id": folder_cv_id,
+                                }
+                            }
+                            if folder_cv_id is not None
+                            else {}
+                        ),
                     },
                 )
             )
@@ -842,6 +864,20 @@ class CollectionScanner:
         name = re.sub(r"[.,;:!]+$", "", name).strip()
 
         return name, year
+
+    def _extract_folder_identity(self, folder_name: str) -> tuple[str, int | None, int | None]:
+        """Extract a trusted ID from Pullbox's exact trailing folder-name contract."""
+        match = _PULLBOX_FOLDER_CV_ID_RE.match(folder_name)
+        if match is None:
+            name, year = self._extract_from_folder_name(folder_name)
+            return name, year, None
+        comicvine_id = match.group("bare_cv_id") or match.group("bracketed_cv_id")
+        assert comicvine_id is not None
+        return (
+            re.sub(r"\s{2,}", " ", match.group("name")).strip(),
+            int(match.group("year")),
+            int(comicvine_id),
+        )
 
     def _infer_publisher_from_hierarchy(self, series_dir: Path, root: Path) -> str | None:
         """Infer publisher from the folder one level above the series folder.

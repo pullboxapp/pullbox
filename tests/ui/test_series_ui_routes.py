@@ -286,6 +286,13 @@ class TestSeriesRouteContracts:
         assert 'id="series-results-body"' in response.text
         assert 'data-testid="header-donations-button"' in response.text
         assert 'data-testid="header-theme-toggle"' in response.text
+        assert 'data-testid="header-activity"' in response.text
+        assert 'data-testid="header-activity-popover"' in response.text
+        assert 'data-testid="header-activity-operation"' in response.text
+        assert 'data-testid="header-activity-overall-progress"' in response.text
+        assert 'data-testid="header-activity-item-progress"' in response.text
+        assert 'data-testid="header-activity-view-details"' in response.text
+        assert 'aria-label="Background activity"' in response.text
         assert 'data-testid="live-updates-toggle"' not in response.text
         assert 'data-testid="page-footer-dock"' in response.text
         assert 'data-testid="page-dock-inner"' in response.text
@@ -467,6 +474,86 @@ class TestSeriesRouteContracts:
         assert 'data-testid="series-compact-view"' not in response.text
         assert "Visual shelf" not in response.text
         assert "Cover-first browsing" not in response.text
+
+    async def test_list_and_grid_add_private_reading_aggregate_without_replacing_acquisition(
+        self,
+        authenticated_client,
+        sec_db,
+        sec_user,
+        seeded_series_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.issue import Issue
+        from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+        from pullbox.models.reader import IssueReaderState
+        from pullbox.models.series import Series
+
+        now = datetime.now(UTC)
+        async with sec_db() as session:
+            series = (
+                await session.execute(select(Series).where(Series.title == "Batman"))
+            ).scalar_one()
+            issue = (
+                await session.execute(
+                    select(Issue).where(
+                        Issue.series_id == series.id,
+                        Issue.issue_number == 1.0,
+                    )
+                )
+            ).scalar_one()
+            root = (await session.execute(select(LibraryRoot))).scalars().first()
+            assert root is not None
+            session.add_all(
+                [
+                    LibraryFile(
+                        issue_id=issue.id,
+                        library_root_id=root.id,
+                        file_path="/tmp/series-ui/01-batman/Batman 001.cbz",
+                        file_name="Batman 001.cbz",
+                        file_size=1024,
+                        file_format=FileFormat.CBZ,
+                        file_modified_at=now,
+                        match_confidence=MatchConfidence.HIGH,
+                    ),
+                    IssueReaderState(
+                        user_id=sec_user.id,
+                        issue_id=issue.id,
+                        completed_at=now,
+                        completion_updated_at=now,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        list_response = await authenticated_client.get("/series?q=Batman&per_page=20")
+        authenticated_client.cookies.set("series_view", "grid")
+        grid_response = await authenticated_client.get("/series?q=Batman&per_page=20")
+
+        assert list_response.status_code == 200
+        assert 'data-testid="series-list-reading"' in list_response.text
+        assert "Read 1/1" in list_response.text
+        assert 'style="width: 33%"' in list_response.text
+        assert grid_response.status_code == 200
+        assert 'data-testid="series-grid-hover-reading"' in grid_response.text
+        assert "Read 1/1" in grid_response.text
+        assert "stroke-dashoffset=" in grid_response.text
+
+    async def test_series_registry_adds_exactly_one_visible_reading_aggregate_query(
+        self,
+        authenticated_client,
+        sec_db,
+        seeded_series_ui_data,
+    ) -> None:  # type: ignore[no-untyped-def]
+        engine = sec_db.kw["bind"]
+        with SelectRecorder(engine) as recorder:
+            response = await authenticated_client.get("/series?sort=title&per_page=2")
+
+        assert response.status_code == 200
+        reader_queries = [
+            statement for statement in recorder.statements if "issue_reader_states" in statement
+        ]
+        assert len(reader_queries) == 1
+        assert "GROUP BY issues.series_id" in reader_queries[0]
+        assert "WHERE issues.series_id IN" in reader_queries[0]
 
     async def test_series_list_surfaces_catalog_sync_state(
         self,

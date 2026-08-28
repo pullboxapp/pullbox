@@ -14,7 +14,7 @@
      x-data="seriesIssuesPanel()"
      x-init="init()"
      hx-get="{{ _poll_url }}"
-     hx-trigger="every 3s [window.pullboxLiveUpdatesEnabled()], refresh"
+     hx-trigger="every 3s [window.pullboxSeriesIssuesCanPoll()], refresh"
      hx-swap="morph:outerHTML"
      hx-disinherit="hx-swap"
      class="series-domain-issues-wrap">
@@ -28,6 +28,7 @@
           <span class="pill pill-success">{{ owned_count }} owned</span>
           <span class="pill pill-info">{{ wanted_count }} wanted</span>
           <span class="pill pill-warning">{{ downloading_count }} dl</span>
+          {% include "partials/series_reading_summary.html" %}
         </div>
       </div>
       <div class="series-domain-issues-toolbar-right">
@@ -107,6 +108,11 @@
             {{ sort_header("issue_number", "#", width="w-16") }}
             {{ sort_header("title", "Title") }}
             {{ sort_header("release_date", "Released", extra_classes="hidden sm:table-cell", width="w-28") }}
+            {% if reader_enabled %}
+            <th class="table-head-cell table-head-cell-tight hidden sm:table-cell">
+              Reading<span class="sr-only"> state</span>
+            </th>
+            {% endif %}
             {{ sort_header("status", "Status", width="w-24") }}
             <th class="series-domain-table-head r hidden sm:table-cell">Actions</th>
           </tr>

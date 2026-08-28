@@ -62,6 +62,7 @@ RefreshTransfer = Callable[[], Awaitable[ResolvedTransfer]]
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _EXPIRED_URL_STATUSES = frozenset({401, 403, 410})
 _SENSITIVE_HEADER_NAMES = frozenset({"authorization", "cookie", "proxy-authorization"})
+_SINGLE_RESPONSE_CHUNK_SIZE_BYTES = 64 * 1024
 __all__ = [
     "ArtifactTransferCancelledError",
     "ArtifactTransferError",
@@ -184,16 +185,26 @@ class HttpArtifactTransport:
         active = resolved
         refreshed = False
         restarted_bad_range = False
+        stream_retries = 0
+        started_at = time.monotonic()
+        deadline = started_at + self._policy.total_timeout_seconds
 
         while True:
-            response = await _await_with_cancel(
-                partial(
-                    self._open_response,
-                    active,
-                    resume_offset=resume_offset,
-                ),
-                cancel_event,
-            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _timeout_error("artifact_transfer_total_timeout")
+            try:
+                response = await _await_with_cancel(
+                    partial(
+                        self._open_response,
+                        active,
+                        resume_offset=resume_offset,
+                    ),
+                    cancel_event,
+                    timeout=remaining,
+                )
+            except TimeoutError as exc:
+                raise _timeout_error("artifact_transfer_total_timeout") from exc
             try:
                 if response.status_code in _EXPIRED_URL_STATUSES and refresh_transfer is not None:
                     if refreshed:
@@ -224,16 +235,46 @@ class HttpArtifactTransport:
                 elif resume_offset == 0 and response.status_code != 200:
                     raise _http_status_error(response.status_code)
 
-                return await self._stream_response(
-                    response=response,
-                    resolved=active,
-                    destination=destination,
-                    quarantine_root=quarantine_root,
-                    resume_offset=resume_offset,
-                    progress_callback=progress_callback,
-                    cancel_event=cancel_event,
-                    pause_event=pause_event,
-                )
+                try:
+                    return await self._stream_response(
+                        response=response,
+                        resolved=active,
+                        destination=destination,
+                        quarantine_root=quarantine_root,
+                        resume_offset=resume_offset,
+                        progress_callback=progress_callback,
+                        cancel_event=cancel_event,
+                        pause_event=pause_event,
+                        started_at=started_at,
+                        deadline=deadline,
+                    )
+                except ArtifactTransferError as exc:
+                    if not active.prefer_single_response or not _can_retry_range_failure(
+                        exc,
+                        resolved=active,
+                        retries=stream_retries,
+                        policy=self._policy,
+                    ):
+                        raise
+                    partial_size = destination.stat().st_size if destination.exists() else 0
+                    if partial_size < resume_offset or (
+                        active.expected_size is not None and partial_size > active.expected_size
+                    ):
+                        raise _object_changed_error() from exc
+                    made_progress = partial_size > resume_offset
+                    stream_retries += 1
+                    checkpoint = HttpTransferCheckpoint(
+                        bytes_transferred=partial_size,
+                        expected_size=active.expected_size,
+                        etag=response.headers.get("etag") or active.etag,
+                        last_modified=(
+                            response.headers.get("last-modified") or active.last_modified
+                        ),
+                    )
+                    resume_offset = _eligible_resume_offset(active, checkpoint)
+                    if not made_progress:
+                        await _wait_for_range_retry(self._policy, stream_retries)
+                    continue
             finally:
                 await response.aclose()
 
@@ -334,6 +375,8 @@ class HttpArtifactTransport:
                         progress_callback=progress_callback,
                         cancel_event=cancel_event,
                         pause_event=pause_event,
+                        started_at=started_at,
+                        deadline=deadline,
                     )
                 if not _valid_bounded_response(
                     response,
@@ -542,6 +585,8 @@ class HttpArtifactTransport:
                     break
                 except TimeoutError as exc:
                     raise _timeout_error("artifact_transfer_idle_timeout") from exc
+                except httpx.HTTPError as exc:
+                    raise _artifact_host_unavailable_error() from exc
                 if not chunk:
                     continue
                 if transferred + len(chunk) > range_end + 1:
@@ -591,6 +636,8 @@ class HttpArtifactTransport:
         progress_callback: ProgressCallback | None,
         cancel_event: asyncio.Event | None,
         pause_event: asyncio.Event | None,
+        started_at: float,
+        deadline: float,
     ) -> ArtifactTransferResult:
         total = _response_total(response, resume_offset=resume_offset)
         expected = total if total is not None else resolved.expected_size
@@ -615,10 +662,8 @@ class HttpArtifactTransport:
         )
 
         transferred = resume_offset
-        start_time = time.monotonic()
-        last_progress_at = start_time
+        last_progress_at = time.monotonic()
         last_progress_bytes = transferred
-        deadline = start_time + self._policy.total_timeout_seconds
         etag = response.headers.get("etag") or resolved.etag
         last_modified = response.headers.get("last-modified") or resolved.last_modified
         filename = (
@@ -627,7 +672,9 @@ class HttpArtifactTransport:
             or filename_from_url(resolved.url)
         )
         handle: BinaryIO | None = None
-        iterator = response.aiter_bytes(self._policy.chunk_size_bytes).__aiter__()
+        iterator = response.aiter_bytes(
+            _stream_chunk_size_bytes(resolved, self._policy)
+        ).__aiter__()
 
         try:
             handle = open_quarantine_file(destination, append=resume_offset > 0)
@@ -656,6 +703,8 @@ class HttpArtifactTransport:
                     break
                 except TimeoutError as exc:
                     raise _timeout_error("artifact_transfer_idle_timeout") from exc
+                except httpx.HTTPError as exc:
+                    raise _artifact_host_unavailable_error() from exc
 
                 _raise_for_control(
                     cancel_event=cancel_event,
@@ -693,7 +742,7 @@ class HttpArtifactTransport:
                         progress_callback,
                         transferred=transferred,
                         total=expected,
-                        started_at=start_time,
+                        started_at=started_at,
                         now=now,
                     )
                     last_progress_at = now
@@ -708,7 +757,7 @@ class HttpArtifactTransport:
             progress_callback,
             transferred=transferred,
             total=expected,
-            started_at=start_time,
+            started_at=started_at,
             now=time.monotonic(),
         )
         return ArtifactTransferResult(
@@ -727,10 +776,20 @@ def _use_bounded_ranges(
     policy: ArtifactTransferPolicy,
 ) -> bool:
     return bool(
-        resolved.range_supported
+        not resolved.prefer_single_response
+        and resolved.range_supported
         and resolved.expected_size is not None
         and resolved.expected_size > _range_request_bytes(resolved, policy)
     )
+
+
+def _stream_chunk_size_bytes(
+    resolved: ResolvedTransfer,
+    policy: ArtifactTransferPolicy,
+) -> int:
+    if resolved.prefer_single_response:
+        return min(policy.chunk_size_bytes, _SINGLE_RESPONSE_CHUNK_SIZE_BYTES)
+    return policy.chunk_size_bytes
 
 
 def _range_request_bytes(

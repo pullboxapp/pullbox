@@ -17,6 +17,7 @@ from sqlalchemy.orm import joinedload
 
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
 from pullbox.core.page_sources import (
+    SUPPORTED_READER_FORMATS,
     PageSource,
     PageSourceError,
     PageSourceErrorCode,
@@ -31,9 +32,6 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-_READABLE_FORMATS = frozenset(
-    {FileFormat.CBZ, FileFormat.CBR, FileFormat.CB7, FileFormat.CBT, FileFormat.PDF}
-)
 _MEDIA_SUFFIXES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -80,6 +78,8 @@ class ReaderSourceRecord:
     issue_id: int
     issue_title: str | None
     issue_number: str
+    issue_number_value: float
+    series_id: int
     series_title: str
     library_file_id: int
     file_path: str
@@ -95,6 +95,8 @@ class ResolvedReaderSource:
     issue_id: int
     issue_title: str | None
     issue_number: str
+    issue_number_value: float
+    series_id: int
     series_title: str
     library_file_id: int
     path: Path
@@ -140,7 +142,7 @@ async def load_reader_source_record(session: AsyncSession, issue_id: int) -> Rea
             "This issue does not have a readable downloaded file.",
         )
     library_file = issue.library_file
-    if library_file.file_format not in _READABLE_FORMATS:
+    if library_file.file_format not in SUPPORTED_READER_FORMATS:
         raise PageSourceError(
             PageSourceErrorCode.UNSUPPORTED_FORMAT,
             "This downloaded format is not supported by the reader.",
@@ -149,6 +151,8 @@ async def load_reader_source_record(session: AsyncSession, issue_id: int) -> Rea
         issue_id=issue.id,
         issue_title=issue.title,
         issue_number=f"{issue.issue_number:g}",
+        issue_number_value=issue.issue_number,
+        series_id=issue.series_id,
         series_title=issue.series.title,
         library_file_id=library_file.id,
         file_path=library_file.file_path,
@@ -181,6 +185,8 @@ def resolve_reader_source(record: ReaderSourceRecord) -> ResolvedReaderSource:
         issue_id=record.issue_id,
         issue_title=record.issue_title,
         issue_number=record.issue_number,
+        issue_number_value=record.issue_number_value,
+        series_id=record.series_id,
         series_title=record.series_title,
         library_file_id=record.library_file_id,
         path=path,

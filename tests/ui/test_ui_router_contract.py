@@ -21,6 +21,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
     assert manifest == [
         ("/", ("GET",), "dashboard", "dashboard"),
         (
+            "/htmx/dashboard/continue-reading",
+            ("GET",),
+            "dashboard_continue_reading_partial",
+            "dashboard_continue_reading_partial",
+        ),
+        (
             "/htmx/dashboard/briefing",
             ("GET",),
             "dashboard_briefing_partial",
@@ -235,8 +241,33 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "update_pull_list_monitoring",
             "update_pull_list_monitoring",
         ),
+        ("/reading", ("GET",), "reading_workspace", "reading_workspace"),
         ("/htmx/series/search", ("GET",), "htmx_search_series", "htmx_search_series"),
         ("/issues/{issue_id}", ("GET",), "issue_detail", "issue_detail"),
+        (
+            "/htmx/issues/{issue_id}/reading",
+            ("GET",),
+            "htmx_issue_reading_hero",
+            "htmx_issue_reading_hero",
+        ),
+        (
+            "/htmx/issues/{issue_id}/reading-row",
+            ("GET",),
+            "htmx_issue_reading_row",
+            "htmx_issue_reading_row",
+        ),
+        (
+            "/htmx/issues/{issue_id}/dc-search-status",
+            ("GET",),
+            "htmx_issue_dc_search_status",
+            "htmx_issue_dc_search_status",
+        ),
+        (
+            "/htmx/issues/{issue_id}/dc-search-results",
+            ("GET",),
+            "htmx_issue_dc_search_results",
+            "htmx_issue_dc_search_results",
+        ),
         (
             "/htmx/issues/{issue_id}/toggle",
             ("POST",),

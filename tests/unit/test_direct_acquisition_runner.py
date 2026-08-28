@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
@@ -25,10 +26,14 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
+from pullbox.models.operation_progress import OperationProgress, OperationProgressType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.providers.artifact_hosts.contract import HostResolutionRequest
 from pullbox.services.direct_acquisition_switch import DirectSourceSwitchError
-from pullbox.services.direct_download_history_adapter import ensure_direct_download_history
+from pullbox.services.direct_download_history_adapter import (
+    ensure_direct_download_history,
+    sync_direct_download_history,
+)
 from pullbox.tasks.direct_acquisition_task import DirectAcquisitionRunner
 
 if TYPE_CHECKING:
@@ -165,6 +170,89 @@ async def test_history_adapter_collapses_legacy_duplicate_rows(
     assert blocklist_entry.download_history_id == history.id
 
 
+@pytest.mark.asyncio
+async def test_history_adapter_projects_direct_progress_to_shared_activity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        attempt = await session.get(DirectAcquisitionAttempt, 1)
+        artifact = await session.get(DirectArtifactAttempt, 1)
+        assert attempt is not None and artifact is not None
+        attempt.provider_identity = "pullbox.getcomics"
+        attempt.state = DirectAcquisitionState.DOWNLOADING
+        attempt.progress_snapshot = {
+            "stage": "downloading",
+            "host_kind": "pixeldrain",
+            "percent": 40,
+            "bytes_transferred": 40_000_000,
+            "total_bytes": 100_000_000,
+            "bytes_per_second": 2_000_000,
+            "eta_seconds": 30,
+        }
+        history = await sync_direct_download_history(
+            session,
+            attempt,
+            artifact,
+            at=datetime(2026, 8, 27, tzinfo=UTC),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        operation = (
+            await session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.DOWNLOAD,
+                    OperationProgress.operation_key == str(history.id),
+                )
+            )
+        ).scalar_one()
+
+    assert operation.overall_percent == pytest.approx(40.0)
+    assert operation.overall_current == 40_000_000
+    assert operation.overall_total == 100_000_000
+    assert operation.rate == 2_000_000
+    assert operation.eta_seconds == 30
+    assert operation.source_label == "GetComics via PixelDrain"
+    assert operation.message == "Downloading from PixelDrain"
+
+
+@pytest.mark.asyncio
+async def test_history_adapter_projects_provider_queue_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        attempt = await session.get(DirectAcquisitionAttempt, 1)
+        artifact = await session.get(DirectArtifactAttempt, 1)
+        assert attempt is not None and artifact is not None
+        attempt.provider_identity = "pullbox.libgen"
+        attempt.state = DirectAcquisitionState.QUEUED
+        attempt.progress_snapshot = {
+            "stage": "provider_queue",
+            "provider_name": "Library Genesis",
+            "host_kind": "generic_https",
+        }
+        history = await sync_direct_download_history(
+            session,
+            attempt,
+            artifact,
+            at=datetime(2026, 8, 28, tzinfo=UTC),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        operation = (
+            await session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.DOWNLOAD,
+                    OperationProgress.operation_key == str(history.id),
+                )
+            )
+        ).scalar_one()
+
+    assert operation.message == "Queued for Library Genesis"
+    assert operation.source_label == "Library Genesis via HTTPS"
+
+
 @dataclass
 class _Executor:
     started: asyncio.Event = field(default_factory=asyncio.Event)
@@ -245,6 +333,29 @@ class _FallbackExecutor:
                     is_selected=True,
                 )
             )
+        else:
+            attempt.state = DirectAcquisitionState.COMPLETED
+            artifact.state = DirectArtifactState.COMPLETED
+        await session.commit()
+
+
+@dataclass
+class _ProviderFallbackExecutor:
+    acquisition_ids: list[int] = field(default_factory=list)
+
+    async def execute(self, session: AsyncSession, **kwargs: Any) -> None:
+        acquisition_id = kwargs["acquisition_id"]
+        self.acquisition_ids.append(acquisition_id)
+        attempt = await session.get(DirectAcquisitionAttempt, acquisition_id)
+        artifact = await session.get(DirectArtifactAttempt, kwargs["artifact_id"])
+        assert attempt is not None and artifact is not None
+        if acquisition_id == 1:
+            attempt.state = DirectAcquisitionState.FAILED
+            attempt.failure_class = DirectArtifactFailureClass.PERMANENT_MIRROR
+            attempt.failure_code = "artifact_not_found"
+            artifact.state = DirectArtifactState.FAILED
+            artifact.failure_class = DirectArtifactFailureClass.PERMANENT_MIRROR
+            artifact.failure_code = "artifact_not_found"
         else:
             attempt.state = DirectAcquisitionState.COMPLETED
             artifact.state = DirectArtifactState.COMPLETED
@@ -446,6 +557,87 @@ async def test_runner_continues_automatically_with_queued_fallback_route(
         attempt = await session.get(DirectAcquisitionAttempt, 1)
         assert attempt is not None
         assert attempt.state is DirectAcquisitionState.COMPLETED
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runner_continues_with_hidden_provider_after_routes_are_exhausted(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        primary = await session.get(DirectAcquisitionAttempt, 1)
+        assert primary is not None
+        alternate = DirectAcquisitionAttempt(
+            id=2,
+            request_key="direct-runner:provider-fallback",
+            issue_id=1,
+            provider_identity="community.libgen",
+            provider_candidate_id="candidate-2",
+            state=DirectAcquisitionState.DISCOVERED,
+            requested_coverage={"issue_numbers": ["1"]},
+            candidate_snapshot={
+                "display_title": "Runner Series 001 (2026)",
+                "visible": False,
+                "primary_attempt_id": 1,
+            },
+            plan_snapshot={},
+            progress_snapshot={"stage": "discovered"},
+        )
+        session.add(alternate)
+        primary.candidate_snapshot = {
+            **primary.candidate_snapshot,
+            "visible": True,
+            "alternate_attempt_ids": [2],
+        }
+        await session.commit()
+
+    executor = _ProviderFallbackExecutor()
+    fallback_calls: list[int] = []
+
+    async def fallback_planner(
+        session: AsyncSession,
+        *,
+        acquisition_id: int,
+        skip_selected_attempt: bool,
+    ) -> object:
+        assert skip_selected_attempt is True
+        fallback_calls.append(acquisition_id)
+        alternate = await session.get(DirectAcquisitionAttempt, 2)
+        assert alternate is not None
+        alternate.state = DirectAcquisitionState.PLANNED
+        artifact = DirectArtifactAttempt(
+            acquisition_attempt_id=alternate.id,
+            sequence_no=0,
+            artifact_identity="route:provider-alternate",
+            route_kind=DirectArtifactRouteKind.DIRECT,
+            host_kind=DirectArtifactHostKind.GENERIC_HTTPS,
+            state=DirectArtifactState.PLANNED,
+            is_selected=True,
+        )
+        session.add(artifact)
+        await session.flush()
+        return SimpleNamespace(
+            attempt=alternate,
+            selected_artifact=artifact,
+            initial_source=_source("provider-alternate"),
+        )
+
+    runner = DirectAcquisitionRunner(
+        session_factory,
+        executor=executor,
+        source_resolver=AsyncMock(),
+        provider_fallback_planner=fallback_planner,
+    )
+
+    assert await runner.dispatch(1, 1, initial_source=_source("primary")) is True
+    await runner.wait_idle()
+
+    assert fallback_calls == [1]
+    assert executor.acquisition_ids == [1, 2]
+    async with session_factory() as session:
+        alternate = await session.get(DirectAcquisitionAttempt, 2)
+        assert alternate is not None
+        assert alternate.state is DirectAcquisitionState.COMPLETED
     await runner.aclose()
 
 

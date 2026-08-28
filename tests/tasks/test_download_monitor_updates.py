@@ -47,6 +47,15 @@ def test_completed_status_builds_completed_update_and_logs_detection() -> None:
     assert update["state"] == DownloadState.COMPLETED
     assert update["downloaded_path"] == "/downloads/book.cbz"
     assert "completed_at" in update
+    assert update["progress_snapshot"] == {
+        "progress": 1.0,
+        "speed_bytes": None,
+        "eta_seconds": None,
+        "size_bytes": None,
+        "bytes_transferred": None,
+        "client_state": "Completed",
+        "is_indeterminate": False,
+    }
     assert fake_logger.events == [
         (
             "download_completion_detected",
@@ -83,6 +92,15 @@ def test_finalizing_status_builds_finalizing_update() -> None:
     assert update == {
         "id": 14,
         "client_state": "Repairing",
+        "progress_snapshot": {
+            "progress": 0.0,
+            "speed_bytes": None,
+            "eta_seconds": None,
+            "size_bytes": None,
+            "bytes_transferred": None,
+            "client_state": "Repairing",
+            "is_indeterminate": True,
+        },
         "state": DownloadState.FINALIZING,
         "downloaded_path": "/downloads/book",
     }
@@ -116,8 +134,21 @@ def test_unmapped_status_preserves_existing_no_op_update_shape() -> None:
         event_logger=_FakeLogger(),
     )
 
-    assert healthy == {"id": 44, "client_state": "Queued"}
-    assert stalled == {"id": 44, "client_state": "Queued"}
+    expected = {
+        "id": 44,
+        "client_state": "Queued",
+        "progress_snapshot": {
+            "progress": 0.0,
+            "speed_bytes": None,
+            "eta_seconds": None,
+            "size_bytes": None,
+            "bytes_transferred": None,
+            "client_state": "Queued",
+            "is_indeterminate": True,
+        },
+    }
+    assert healthy == {**expected, "heartbeat": True}
+    assert stalled == expected
 
 
 def test_not_found_status_error_builds_removed_externally_update() -> None:

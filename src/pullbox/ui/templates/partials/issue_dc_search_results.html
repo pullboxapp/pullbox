@@ -1,0 +1,92 @@
+{# Direct Connect results render independently after existing sources. #}
+{% set result_count = outcome.matched|length + outcome.rejected|length %}
+<section class="issue-search-dc-results" aria-label="Direct Connect search results">
+  <div class="issue-search-dc-results-heading">
+    <span class="pill pill-info">Direct Connect</span>
+    <span class="downloads-mono-cell">{{ result_count }} results</span>
+    {% if outcome.partial %}<span class="pill pill-warning">Partial</span>{% endif %}
+  </div>
+
+  {% if outcome.matched or outcome.rejected %}
+    <div class="issue-search-results-table-wrap downloads-table-wrap">
+      <table class="downloads-table issue-search-results-table">
+        <thead>
+          <tr>
+            <th class="w-[76px]">Match</th>
+            <th>Release</th>
+            <th class="w-[104px]">Client</th>
+            <th class="w-[96px]">Sources</th>
+            <th class="w-[92px]">Slots</th>
+            <th class="w-[80px]">Size</th>
+            <th class="w-[110px]">Content</th>
+            <th class="is-right w-[118px]">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in dc_rows %}
+            {% set candidate = row.candidate %}
+            <tr data-testid="issue-search-dc-matched-row" class="matched-row">
+              <td><span class="pill pill-success">{{ candidate.validation.confidence.value|capitalize }}</span></td>
+              <td>
+                <span class="issue-search-release-title">{{ candidate.release.title }}</span>
+                <div class="issue-search-release-match">Direct Connect file result</div>
+              </td>
+              <td class="downloads-mono-cell">{{ candidate.release.indexer_name }}</td>
+              <td>{{ candidate.metrics.source_count }}</td>
+              <td>{{ candidate.metrics.free_slots }} / {{ candidate.metrics.total_slots }}</td>
+              <td class="downloads-mono-cell">{{ candidate.release.size_bytes|filesize }}</td>
+              <td class="downloads-mono-cell">TTH …{{ candidate.route.tth[-6:] }}</td>
+              <td
+                class="is-right"
+                x-data='window.issueSearchResultActions({
+                  issueId: {{ issue.id }},
+                  seriesId: {{ issue.series_id }},
+                  csrfToken: {{ csrf_token|tojson }}
+                })'
+              >
+                <button
+                  data-dc-route-token="{{ row.route_token }}"
+                  @click="grabRelease($el)"
+                  :disabled="grabbing"
+                  :class="grabbing ? 'opacity-50 cursor-wait' : 'cursor-pointer'"
+                  class="chip-btn chip-btn-sm chip-btn-info"
+                >
+                  <svg x-show="grabbing" x-cloak class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                  </svg>
+                  Grab
+                </button>
+              </td>
+            </tr>
+          {% endfor %}
+          {% for candidate in outcome.rejected %}
+            <tr data-testid="issue-search-dc-rejected-row" class="rejected-row issue-search-rejected-row">
+              <td><span class="pill pill-muted">Rejected</span></td>
+              <td>
+                <span class="issue-search-release-title issue-search-release-title-muted">{{ candidate.release.title }}</span>
+                <div class="issue-search-release-match">{{ candidate.validation.rejection_reason or 'Not a semantic match' }}</div>
+              </td>
+              <td class="downloads-mono-cell">{{ candidate.release.indexer_name }}</td>
+              <td>{{ candidate.metrics.source_count }}</td>
+              <td>{{ candidate.metrics.free_slots }} / {{ candidate.metrics.total_slots }}</td>
+              <td class="downloads-mono-cell">{{ candidate.release.size_bytes|filesize }}</td>
+              <td class="downloads-mono-cell">TTH …{{ candidate.route.tth[-6:] }}</td>
+              <td class="is-right"><span class="pill pill-muted">No action</span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="issue-search-empty-state is-compact" data-testid="issue-search-dc-empty-state">
+      {% if outcome.client_summaries and outcome.client_summaries|selectattr('status.value', 'equalto', 'zero_hubs')|list %}
+        <p class="issue-search-empty-title">No open hubs</p>
+        <p class="issue-search-empty-copy">AirDC++ is connected, but it doesn't have any open hubs to search. Open AirDC++ to check your hub connections.</p>
+      {% else %}
+        <p class="issue-search-empty-title">No Direct Connect results</p>
+        <p class="issue-search-empty-copy">Existing results from other sources remain available.</p>
+      {% endif %}
+    </div>
+  {% endif %}
+</section>

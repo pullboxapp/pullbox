@@ -35,7 +35,25 @@ from pullbox.services.direct_provider_registration import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def _public_source_resolver(_host: str, _port: int) -> Sequence[str]:
+    return ("93.184.216.34",)
+
+
+async def _private_source_resolver(_host: str, _port: int) -> Sequence[str]:
+    return ("127.0.0.1",)
+
+
+async def _mixed_source_resolver(_host: str, _port: int) -> Sequence[str]:
+    return ("93.184.216.34", "127.0.0.1")
+
+
+async def _unresolved_source_resolver(_host: str, _port: int) -> Sequence[str]:
+    raise OSError("source is temporarily unavailable")
 
 
 def _manifest(
@@ -493,6 +511,136 @@ async def test_configuration_updates_validate_controls_and_disable_until_reteste
             db_session,
             registered.id,
             public_configuration={"source_url": "https://annas-archive.gd.evil.example"},
+        )
+
+
+async def test_open_source_origin_accepts_safe_custom_url_and_rejects_private_dns(
+    db_session: AsyncSession,
+) -> None:
+    _FakeProviderClient.manifest_response = _manifest(
+        configuration_schema={
+            "type": "object",
+            "properties": {
+                "source_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "default": "https://source.example",
+                    "x-pullbox-suggestions": ["https://source.example"],
+                    "x-pullbox-source-origin": True,
+                }
+            },
+            "additionalProperties": False,
+        }
+    )
+    registered = await register_direct_provider(
+        db_session,
+        DirectProviderRegistrationInput(
+            endpoint="http://provider:8780",
+            bearer_token="registration-token-with-sufficient-length",
+            allow_private_http=True,
+            confirm_custom_provider=True,
+        ),
+        client_factory=_factory,
+    )
+
+    updated = await update_direct_provider(
+        db_session,
+        registered.id,
+        public_configuration={"source_url": "https://custom-source.example"},
+        source_origin_resolver=_public_source_resolver,
+    )
+
+    assert updated.public_configuration["source_url"] == "https://custom-source.example"
+
+    unavailable = await update_direct_provider(
+        db_session,
+        registered.id,
+        public_configuration={"source_url": "https://temporarily-unavailable.example"},
+        source_origin_resolver=_unresolved_source_resolver,
+    )
+
+    assert unavailable.public_configuration["source_url"] == (
+        "https://temporarily-unavailable.example"
+    )
+
+    with pytest.raises(DirectProviderRegistrationError, match="public network"):
+        await update_direct_provider(
+            db_session,
+            registered.id,
+            public_configuration={"source_url": "https://private-source.example"},
+            source_origin_resolver=_private_source_resolver,
+        )
+
+    with pytest.raises(DirectProviderRegistrationError, match="public network"):
+        await update_direct_provider(
+            db_session,
+            registered.id,
+            public_configuration={"source_url": "https://mixed-source.example"},
+            source_origin_resolver=_mixed_source_resolver,
+        )
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "http://source.example",
+        "https://user:secret@source.example",
+        "https://source.example/path",
+        "https://source.example?mirror=one",
+        "https://source.example#fragment",
+        "https://127.0.0.1",
+        "https://localhost",
+        "https://provider.localhost",
+        "https://2130706433",
+        "https://0x7f000001",
+        "https://017700000001",
+        "https://source.local",
+        "https://source.onion",
+        "https://source.internal",
+        "https://source.home.arpa",
+        "https://bad host.example",
+        "https://-bad.example",
+        "https://bad-.example",
+        "https://bad..example",
+        "https://singlelabel",
+    ],
+)
+async def test_open_source_origin_rejects_unsafe_url_shapes(
+    db_session: AsyncSession,
+    source_url: str,
+) -> None:
+    _FakeProviderClient.manifest_response = _manifest(
+        provider_id="community.unsafe",
+        configuration_schema={
+            "type": "object",
+            "properties": {
+                "source_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "x-pullbox-suggestions": ["https://source.example"],
+                    "x-pullbox-source-origin": True,
+                }
+            },
+            "additionalProperties": False,
+        },
+    )
+    registered = await register_direct_provider(
+        db_session,
+        DirectProviderRegistrationInput(
+            endpoint="http://provider:8780",
+            bearer_token="registration-token-with-sufficient-length",
+            allow_private_http=True,
+            confirm_custom_provider=True,
+        ),
+        client_factory=_factory,
+    )
+
+    with pytest.raises(DirectProviderRegistrationError):
+        await update_direct_provider(
+            db_session,
+            registered.id,
+            public_configuration={"source_url": source_url},
+            source_origin_resolver=_public_source_resolver,
         )
 
 

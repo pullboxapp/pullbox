@@ -51,7 +51,7 @@ def _request(
 
 
 def _user() -> SimpleNamespace:
-    return SimpleNamespace(username="admin")
+    return SimpleNamespace(id=1, username="admin")
 
 
 @pytest.mark.parametrize("column", [Series.status, Series.series_type])

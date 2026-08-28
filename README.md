@@ -183,6 +183,7 @@ read-only or runtime-managed inside Pullbox.
 | `PULLBOX_TEMP_DIR` | `/data/tmp` | Temporary working directory. |
 | `PULLBOX_BACKUP_DIR` | `/data/backups` | Database backup directory. |
 | `PULLBOX_BIND_ADDRESS` | `0.0.0.0` | Interface Pullbox binds inside the container. |
+| `PULLBOX_AIRDCPP_ENABLED` | `false` | Enables the experimental AirDC++ settings, search, queue, and import integration. |
 | `PULLBOX_PORT` | `8585` | Internal listener port. If changed, update the container-side port mapping too. |
 | `PULLBOX_BASE_URL` | `http://localhost:8585` | Public URL used in generated app links and startup output. |
 | `PULLBOX_INSTANCE_NAME` | `Pullbox` | Display name for the instance. |
@@ -266,6 +267,7 @@ live in the repo docs:
 - `docs/development/SECURITY_STANDARDS.md`
 - `docs/development/INFRASTRUCTURE.md`
 - `docs/development/DESIGN_SYSTEM.md`
+- `docs/features/airdcpp.md`
 - `docs/features/comic-reader.md`
 
 

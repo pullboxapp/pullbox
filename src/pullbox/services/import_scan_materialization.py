@@ -42,6 +42,9 @@ async def materialize_discovered_scan_results(
         if discovered.mylar3_cv_id:
             item.cv_id = discovered.mylar3_cv_id
             item.cv_match_method = "mylar3_cv_id"
+        elif discovered.folder_cv_id:
+            item.cv_id = discovered.folder_cv_id
+            item.cv_match_method = "folder_cv_id"
         elif discovered.comicinfo_cv_id:
             item.cv_id = discovered.comicinfo_cv_id
             item.cv_match_method = "comicinfo_cv_id"

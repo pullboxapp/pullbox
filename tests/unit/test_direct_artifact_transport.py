@@ -121,6 +121,146 @@ async def test_http_transport_resumes_only_with_stable_validator(
 
 
 @pytest.mark.asyncio
+async def test_http_transport_resumes_single_response_after_protocol_disconnect(
+    tmp_path: Path,
+) -> None:
+    payload = b"abcdefghijkl"
+    seen_ranges: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested = request.headers.get("range")
+        seen_ranges.append(requested)
+        if requested is None:
+            return httpx.Response(
+                200,
+                headers={
+                    "content-length": str(len(payload)),
+                    "etag": '"stable"',
+                },
+                stream=_PartialThenProtocolErrorStream(payload[:4]),
+            )
+        assert requested == "bytes=4-"
+        return httpx.Response(
+            206,
+            headers={
+                "content-range": f"bytes 4-{len(payload) - 1}/{len(payload)}",
+                "content-length": str(len(payload) - 4),
+                "etag": '"stable"',
+            },
+            content=payload[4:],
+        )
+
+    root, destination = _quarantine_paths(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await HttpArtifactTransport(
+            client=client,
+            resolver=_public_resolver,
+            policy=ArtifactTransferPolicy(
+                chunk_size_bytes=4,
+                range_retry_backoff_seconds=0,
+            ),
+        ).transfer(
+            resolved=_resolved(
+                expected_size=len(payload),
+                etag='"stable"',
+                checksum=f"md5:{hashlib.md5(payload, usedforsecurity=False).hexdigest()}",
+                range_supported=True,
+                prefer_single_response=True,
+            ),
+            destination=destination,
+            quarantine_root=root,
+        )
+
+    assert seen_ranges == [None, "bytes=4-"]
+    assert destination.read_bytes() == payload
+    assert result.bytes_transferred == len(payload)
+
+
+@pytest.mark.asyncio
+async def test_http_transport_limits_retries_when_single_response_host_restarts_partial(
+    tmp_path: Path,
+) -> None:
+    payload = b"abcdefghijkl"
+    seen_ranges: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_ranges.append(request.headers.get("range"))
+        return httpx.Response(
+            200,
+            headers={
+                "content-length": str(len(payload)),
+                "etag": '"stable"',
+            },
+            stream=_PartialThenProtocolErrorStream(payload[:4]),
+        )
+
+    root, destination = _quarantine_paths(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ArtifactTransferError) as captured:
+            async with asyncio.timeout(0.5):
+                await HttpArtifactTransport(
+                    client=client,
+                    resolver=_public_resolver,
+                    policy=ArtifactTransferPolicy(
+                        chunk_size_bytes=4,
+                        range_stall_retries=2,
+                        range_retry_backoff_seconds=0,
+                    ),
+                ).transfer(
+                    resolved=_resolved(
+                        expected_size=len(payload),
+                        etag='"stable"',
+                        checksum=f"md5:{hashlib.md5(payload, usedforsecurity=False).hexdigest()}",
+                        range_supported=True,
+                        prefer_single_response=True,
+                    ),
+                    destination=destination,
+                    quarantine_root=root,
+                )
+
+    assert captured.value.code == "artifact_host_unavailable"
+    assert seen_ranges == [None, "bytes=4-", "bytes=4-"]
+
+
+@pytest.mark.asyncio
+async def test_http_transport_reports_intermediate_progress_for_single_response_host(
+    tmp_path: Path,
+) -> None:
+    payload = b"x" * (128 * 1024)
+    snapshots: list[TransferProgressSnapshot] = []
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "content-length": str(len(payload)),
+                "etag": '"stable"',
+            },
+            content=payload,
+        )
+
+    root, destination = _quarantine_paths(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await HttpArtifactTransport(
+            client=client,
+            resolver=_public_resolver,
+            policy=ArtifactTransferPolicy(progress_interval_seconds=0),
+        ).transfer(
+            resolved=_resolved(
+                expected_size=len(payload),
+                checksum=f"md5:{hashlib.md5(payload, usedforsecurity=False).hexdigest()}",
+                range_supported=True,
+                prefer_single_response=True,
+            ),
+            destination=destination,
+            quarantine_root=root,
+            progress_callback=snapshots.append,
+        )
+
+    assert any(0 < snapshot.bytes_transferred < len(payload) for snapshot in snapshots)
+
+
+@pytest.mark.asyncio
 async def test_http_transport_slices_large_range_capable_artifact(
     tmp_path: Path,
 ) -> None:
@@ -1230,6 +1370,7 @@ def _resolved(
     etag: str | None = None,
     checksum: str | None = None,
     range_supported: bool = False,
+    prefer_single_response: bool = False,
     allowed_domains: tuple[str, ...] = ("example.com",),
 ) -> ResolvedTransfer:
     return ResolvedTransfer(
@@ -1239,6 +1380,7 @@ def _resolved(
         etag=etag,
         checksum=checksum,
         range_supported=range_supported,
+        prefer_single_response=prefer_single_response,
         allowed_domains=allowed_domains,
     )
 
@@ -1296,6 +1438,15 @@ class _PartialThenStalledStream(httpx.AsyncByteStream):
         yield self._partial
         await asyncio.sleep(30)
         yield b"never"
+
+
+class _PartialThenProtocolErrorStream(httpx.AsyncByteStream):
+    def __init__(self, partial: bytes) -> None:
+        self._partial = partial
+
+    async def __aiter__(self):  # type: ignore[no-untyped-def]
+        yield self._partial
+        raise httpx.RemoteProtocolError("peer closed the response early")
 
 
 class _CompleteThenStalledStream(httpx.AsyncByteStream):

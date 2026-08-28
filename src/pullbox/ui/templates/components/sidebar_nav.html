@@ -97,6 +97,8 @@
     <hr x-show="!showSidebarLabels" x-cloak data-sidebar-section-rule class="app-sidebar-section-rule">
   </div>
   {% for item in section['items'] %}
+    {% if item.enabled|default(true) %}
     {{ sidebar_link(item, request_path) }}
+    {% endif %}
   {% endfor %}
 {%- endmacro %}

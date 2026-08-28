@@ -17,6 +17,8 @@ import io
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -56,6 +58,57 @@ class TestRedactValue:
 
     def test_secret_substring_in_key(self) -> None:
         assert _redact_value("my_secret_thing", "val") == "[REDACTED]"
+
+
+@pytest.mark.asyncio
+async def test_download_history_redacts_airdcpp_remote_path_only() -> None:
+    from pullbox.models.download import DownloadClientType, DownloadState
+    from pullbox.services.diagnostic_service import _collect_download_history
+
+    air_path = "/srv/airdcpp/completed/private-hub/Secret Comic 001.cbz"
+    direct_path = "/downloads/public-example.cbz"
+    rows = [
+        SimpleNamespace(
+            id=1,
+            issue_id=11,
+            title="Secret Comic 001.cbz",
+            state=DownloadState.COMPLETED,
+            download_client=DownloadClientType.AIRDCPP,
+            file_size=123,
+            downloaded_path=air_path,
+            final_path=None,
+            error_message=None,
+            retry_count=0,
+            created_at=None,
+            completed_at=None,
+            imported_at=None,
+        ),
+        SimpleNamespace(
+            id=2,
+            issue_id=12,
+            title="Public Example.cbz",
+            state=DownloadState.COMPLETED,
+            download_client=DownloadClientType.DIRECT,
+            file_size=456,
+            downloaded_path=direct_path,
+            final_path=None,
+            error_message=None,
+            retry_count=0,
+            created_at=None,
+            completed_at=None,
+            imported_at=None,
+        ),
+    ]
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = rows
+    session = AsyncMock()
+    session.execute.return_value = result
+
+    collected = await _collect_download_history(session)
+
+    assert collected[0]["downloaded_path"] == "[REDACTED]"
+    assert air_path not in json.dumps(collected)
+    assert collected[1]["downloaded_path"] == direct_path
 
 
 class TestCollectLogFiles:

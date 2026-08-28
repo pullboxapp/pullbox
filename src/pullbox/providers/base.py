@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from pullbox.core.acquisition import AcquisitionProtocol
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -134,7 +136,7 @@ class SearchQuery:
     categories: list[str] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ReleaseResult:
     """A single release result from an indexer search."""
 
@@ -146,12 +148,57 @@ class ReleaseResult:
     seeders: int | None  # Torrent only
     leechers: int | None  # Torrent only
     grabs: int | None  # Usenet only
-    is_torrent: bool
+    protocol: AcquisitionProtocol
     category: str | None
     published_at: datetime | None
     info_url: str | None = None
     indexer_id: int | None = None
     ranking_priority: int = 25
+
+    def __init__(
+        self,
+        title: str,
+        indexer_name: str,
+        download_url: str,
+        size_bytes: int | None,
+        age_days: int | None,
+        seeders: int | None,
+        leechers: int | None,
+        grabs: int | None,
+        is_torrent: bool | None = None,
+        category: str | None = None,
+        published_at: datetime | None = None,
+        info_url: str | None = None,
+        indexer_id: int | None = None,
+        ranking_priority: int = 25,
+        *,
+        protocol: AcquisitionProtocol | None = None,
+    ) -> None:
+        """Create a result using an explicit protocol or the legacy torrent flag."""
+        if protocol is None:
+            if is_torrent is None:
+                raise TypeError("ReleaseResult requires protocol or is_torrent")
+            protocol = AcquisitionProtocol.TORRENT if is_torrent else AcquisitionProtocol.USENET
+
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "indexer_name", indexer_name)
+        object.__setattr__(self, "download_url", download_url)
+        object.__setattr__(self, "size_bytes", size_bytes)
+        object.__setattr__(self, "age_days", age_days)
+        object.__setattr__(self, "seeders", seeders)
+        object.__setattr__(self, "leechers", leechers)
+        object.__setattr__(self, "grabs", grabs)
+        object.__setattr__(self, "protocol", protocol)
+        object.__setattr__(self, "category", category)
+        object.__setattr__(self, "published_at", published_at)
+        object.__setattr__(self, "info_url", info_url)
+        object.__setattr__(self, "indexer_id", indexer_id)
+        object.__setattr__(self, "ranking_priority", ranking_priority)
+
+    @property
+    def is_torrent(self) -> bool:
+        """Return whether this result uses the BitTorrent protocol."""
+        return self.protocol is AcquisitionProtocol.TORRENT
 
 
 @dataclass(frozen=True)
@@ -334,6 +381,10 @@ class ProviderRegistry:
     def get_download_clients(self) -> list[DownloadClient]:
         """Get all registered download clients."""
         return list(self._download_clients.values())
+
+    def get_download_client(self, config_id: int) -> DownloadClient | None:
+        """Get one registered download client by its persisted config ID."""
+        return self._download_clients.get(config_id)
 
     def get_indexers(self) -> list[Indexer]:
         """Get all registered indexers."""

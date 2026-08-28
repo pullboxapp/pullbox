@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -52,6 +53,16 @@ class TestSidebarShellRouteContracts:
         assert "body[data-shell-pending] { visibility: hidden; }" in response.text
         assert "alpine:initialized" in response.text
         assert "document.documentElement.classList.add('boot-no-transitions')" in response.text
+        assert 'id="pullbox-app-stylesheet"' in response.text
+        assert 'onload="window.pullboxStylesheetLoaded(this)"' in response.text
+        assert 'onerror="window.pullboxStylesheetFailed(this)"' in response.text
+        assert "var appStylesReady = false" in response.text
+        assert "var stylesheetRetryLimit = 2" in response.text
+        assert "var stylesheetLoadTimeoutMs = 4000" in response.text
+        assert "window.pullboxArmStylesheetTimeout" in response.text
+        assert "--pb-surface-app" in response.text
+        assert "data-pullbox-stylesheet-ready" in response.text
+        assert "!appStylesReady" in response.text
         assert "document.fonts.ready" in response.text
         assert "window.Alpine.nextTick" in response.text
         assert "armBootTransitionRelease" in response.text
@@ -78,6 +89,7 @@ class TestSidebarShellRouteContracts:
         assert 'data-testid="sidebar-link-dashboard"' in response.text
         assert 'data-testid="sidebar-link-series"' in response.text
         assert 'data-testid="sidebar-link-library"' in response.text
+        assert 'data-testid="sidebar-link-reading"' in response.text
         assert 'data-testid="sidebar-link-pull-list"' in response.text
         assert 'data-testid="sidebar-link-whats-new"' in response.text
         assert 'data-testid="sidebar-link-import"' in response.text
@@ -92,6 +104,7 @@ class TestSidebarShellRouteContracts:
         assert ":title=\"sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'\"" not in response.text
         assert 'data-nav-link="true"' in response.text
         assert 'data-nav-path="/series"' in response.text
+        assert 'data-nav-path="/reading"' in response.text
         assert 'data-nav-path="/pull-list"' in response.text
         assert 'data-nav-path="/whats-new"' in response.text
         assert 'data-nav-match="prefix"' in response.text
@@ -150,6 +163,26 @@ class TestSidebarShellRouteContracts:
         assert SETTINGS_ICON_PATH in response.text
         assert "window.__autoSearching" not in response.text
         assert 'x-data="{ sidebarOpen:' not in response.text
+
+    async def test_reader_gate_hides_reading_sidebar_entry(
+        self,
+        authenticated_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.ui import routes
+
+        monkeypatch.setattr(
+            routes,
+            "get_settings",
+            lambda: SimpleNamespace(reader_enabled=False),
+            raising=False,
+        )
+
+        response = await authenticated_client.get("/series")
+
+        assert response.status_code == 200
+        assert 'data-testid="sidebar-link-reading"' not in response.text
+        assert 'data-nav-path="/reading"' not in response.text
 
     async def test_app_shell_fonts_use_stable_urls_and_swap_loading(
         self,

@@ -1,0 +1,10 @@
+{% if reader_enabled and series_reading_aggregate and series_reading_aggregate.readable_count > 0 %}
+<span
+  id="series-reading-summary"
+  data-testid="series-reading-summary"
+  class="pill pill-info"
+  {% if reading_summary_oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}
+>
+  Read {{ series_reading_aggregate.completed_count }} of {{ series_reading_aggregate.readable_count }} readable
+</span>
+{% endif %}

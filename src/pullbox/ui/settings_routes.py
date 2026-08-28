@@ -8,9 +8,11 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.config import get_settings
 from pullbox.core.naming import (
     resolve_collection_non_standard_file_template,
     resolve_single_non_standard_file_template,
@@ -280,12 +282,13 @@ async def load_settings_tab(request: Request, session: DbSession, tab: str) -> d
         ]
     elif tab == "clients":
         client_result = await session.execute(
-            select(DownloadClientConfig).order_by(
-                DownloadClientConfig.priority, DownloadClientConfig.name
-            )
+            select(DownloadClientConfig)
+            .options(selectinload(DownloadClientConfig.airdcpp_settings))
+            .order_by(DownloadClientConfig.priority, DownloadClientConfig.name)
         )
         clients: list[DownloadClientConfig] = list(client_result.scalars().all())
         ctx["clients"] = clients
+        ctx["airdcpp_enabled"] = get_settings().airdcpp_enabled
         ctx["client_status_seed"] = load_client_status_seed(request, clients)
         cfg_result = await session.execute(
             select(SystemConfig).where(

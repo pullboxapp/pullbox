@@ -37,6 +37,7 @@ async def check_download_clients(
 ) -> list[CheckOutcome]:
     """Test download clients as a grouped multi-entity health component."""
     from pullbox.models.client import DownloadClientConfig
+    from pullbox.models.download import DownloadClientType
 
     result = await session.execute(
         select(DownloadClientConfig).where(DownloadClientConfig.enabled.is_(True))
@@ -83,6 +84,8 @@ async def check_download_clients(
             outcome = bootstrap_outcome(config, bootstrap_by_id[config_key])
         elif config_key in clients_by_id:
             outcome = await check_subject(config, clients_by_id[config_key])
+        elif config.client_type is DownloadClientType.AIRDCPP:
+            outcome = _airdcpp_supervisor_outcome(config) or unknown_outcome(config)
         elif generic_bootstrap_error:
             outcome = bootstrap_outcome(config, generic_bootstrap_error)
         else:
@@ -152,6 +155,169 @@ async def check_download_clients(
     ]
 
 
+def _airdcpp_supervisor_outcome(config: Any) -> CheckOutcome | None:
+    """Project the live AirDC++ supervisor without another remote health call."""
+    from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry
+    from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
+
+    registry = get_airdcpp_supervisor_registry()
+    supervisor = registry.get(config.id) if registry is not None else None
+    if supervisor is None:
+        return None
+    health = supervisor.health
+    state = health.state
+    if state is AirDcppSupervisorState.READY:
+        status = HealthStatus.HEALTHY
+        message = "AirDC++ search and queue services are ready"
+        guidance = ""
+    elif state in {
+        AirDcppSupervisorState.CONNECTING,
+        AirDcppSupervisorState.COMPATIBLE_REST,
+        AirDcppSupervisorState.SOCKET_CONNECTING,
+        AirDcppSupervisorState.DEGRADED_SOCKET,
+    }:
+        status = HealthStatus.DEGRADED
+        message = "AirDC++ is reconnecting"
+        guidance = "Wait for the AirDC++ connection to recover, then refresh this check."
+    elif state is AirDcppSupervisorState.DISABLED:
+        status = HealthStatus.UNKNOWN
+        message = "AirDC++ supervisor is disabled"
+        guidance = "Enable this client in Settings > Download Clients."
+    else:
+        status = HealthStatus.UNHEALTHY
+        message = _airdcpp_health_message(state)
+        guidance = "Test this client in Settings > Download Clients and review its permissions."
+
+    compatible_status = (
+        HealthStatus.HEALTHY
+        if health.compatible
+        else (
+            HealthStatus.UNHEALTHY
+            if state is AirDcppSupervisorState.INCOMPATIBLE
+            else HealthStatus.UNKNOWN
+        )
+    )
+    permission_status = (
+        HealthStatus.UNHEALTHY
+        if state is AirDcppSupervisorState.PERMISSION_FAILED
+        else (HealthStatus.HEALTHY if health.compatible else HealthStatus.UNKNOWN)
+    )
+    socket_status = (
+        HealthStatus.HEALTHY
+        if state is AirDcppSupervisorState.READY
+        else (
+            HealthStatus.DEGRADED
+            if state
+            in {
+                AirDcppSupervisorState.SOCKET_CONNECTING,
+                AirDcppSupervisorState.DEGRADED_SOCKET,
+            }
+            else HealthStatus.UNKNOWN
+        )
+    )
+    cooldown_status = (
+        HealthStatus.UNHEALTHY
+        if state is AirDcppSupervisorState.UNSAFE_SEARCH_INTERVAL
+        else (
+            HealthStatus.HEALTHY
+            if health.remote_min_search_interval_seconds is not None
+            and health.remote_min_search_interval_seconds >= 45
+            else HealthStatus.UNKNOWN
+        )
+    )
+    sub_checks = (
+        SubCheckOutcome(
+            check_name="api_compatibility",
+            name="API compatibility",
+            status=compatible_status,
+            message=(
+                f"API v{health.api_version}, feature level {health.api_feature_level}"
+                if health.api_version is not None
+                else "Waiting for API compatibility check"
+            ),
+            subject_key=str(config.id),
+            subject_label=config.name,
+        ),
+        SubCheckOutcome(
+            check_name="permissions",
+            name="Permissions",
+            status=permission_status,
+            message=(
+                "Required least-privilege permissions available"
+                if permission_status is HealthStatus.HEALTHY
+                else "Required permissions are unavailable"
+            ),
+            subject_key=str(config.id),
+            subject_label=config.name,
+        ),
+        SubCheckOutcome(
+            check_name="socket",
+            name="Event connection",
+            status=socket_status,
+            message=(
+                "Connected"
+                if socket_status is HealthStatus.HEALTHY
+                else "Reconnecting or not yet connected"
+            ),
+            subject_key=str(config.id),
+            subject_label=config.name,
+        ),
+        SubCheckOutcome(
+            check_name="search_cooldown",
+            name="Hub search cooldown",
+            status=cooldown_status,
+            message=(
+                f"{health.remote_min_search_interval_seconds} seconds"
+                if health.remote_min_search_interval_seconds is not None
+                else "Not yet verified"
+            ),
+            subject_key=str(config.id),
+            subject_label=config.name,
+        ),
+    )
+    endpoint = _download_client_endpoint_details(config.url)
+    return CheckOutcome(
+        component="download_clients",
+        check_name="client_summary",
+        status=status,
+        message=message,
+        subject_key=str(config.id),
+        subject_label=config.name,
+        details={
+            "checks": [_serialize_sub_check(check) for check in sub_checks],
+            "client_type": config.client_type.value,
+            "url": config.url,
+            "protocol": endpoint["protocol"],
+            "host": endpoint["host"],
+            "port": endpoint["port"],
+            "supervisor_state": state.value,
+            "api_version": health.api_version,
+            "api_feature_level": health.api_feature_level,
+            "minimum_search_interval_seconds": health.remote_min_search_interval_seconds,
+            "reconnect_attempts": health.reconnect_attempts,
+            "last_ready_at": health.last_ready_at.isoformat() if health.last_ready_at else None,
+            "last_error_code": health.last_error_code,
+        },
+        actionable_guidance=guidance,
+        sub_checks=sub_checks,
+    )
+
+
+def _airdcpp_health_message(state: Any) -> str:
+    from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
+
+    return {
+        AirDcppSupervisorState.AUTHENTICATION_FAILED: "AirDC++ authentication failed",
+        AirDcppSupervisorState.PERMISSION_FAILED: "AirDC++ permissions are incomplete",
+        AirDcppSupervisorState.INCOMPATIBLE: "AirDC++ API version is incompatible",
+        AirDcppSupervisorState.UNSAFE_SEARCH_INTERVAL: (
+            "AirDC++ minimum search interval must be at least 45 seconds"
+        ),
+        AirDcppSupervisorState.UNAVAILABLE: "AirDC++ is unavailable",
+        AirDcppSupervisorState.STOPPING: "AirDC++ supervisor is stopping",
+    }.get(state, "AirDC++ needs attention")
+
+
 async def _check_direct_download_subjects(session: AsyncSession) -> list[CheckOutcome]:
     """Project persisted direct-provider and artifact-host health into this component.
 
@@ -160,7 +326,12 @@ async def _check_direct_download_subjects(session: AsyncSession) -> list[CheckOu
     keeps scheduled health non-destructive: it never resolves or downloads an
     artifact just to prove a source is available.
     """
-    from pullbox.models.direct_acquisition import DirectHostConfig, DirectProviderConfig
+    from pullbox.models.direct_acquisition import (
+        DirectArtifactHostKind,
+        DirectHostConfig,
+        DirectHostReachabilityState,
+        DirectProviderConfig,
+    )
 
     providers = list(
         (
@@ -173,7 +344,7 @@ async def _check_direct_download_subjects(session: AsyncSession) -> list[CheckOu
         .scalars()
         .all()
     )
-    hosts = list(
+    configured_hosts = list(
         (
             await session.execute(
                 select(DirectHostConfig)
@@ -184,6 +355,13 @@ async def _check_direct_download_subjects(session: AsyncSession) -> list[CheckOu
         .scalars()
         .all()
     )
+    hosts = []
+    for host in configured_hosts:
+        if host.host_kind is DirectArtifactHostKind.GENERIC_HTTPS:
+            host.reachability_state = DirectHostReachabilityState.NOT_CHECKED
+            continue
+        hosts.append(host)
+
     return [
         *(_direct_provider_outcome(provider) for provider in providers),
         *(_direct_artifact_host_outcome(host) for host in hosts),

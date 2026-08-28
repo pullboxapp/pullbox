@@ -22,6 +22,9 @@ pip-delete-this-directory.txt
 *.spec
 MANIFEST
 
+# Pullbox uses pip and pyproject metadata; local uv resolution is not a build input.
+uv.lock
+
 # Virtual environments
 .venv/
 venv/

@@ -94,6 +94,17 @@ class _FakeDirectRunner:
         await self.executor.aclose()
 
 
+class _FakeAirDcppRegistry:
+    instances: ClassVar[list[_FakeAirDcppRegistry]] = []
+
+    def __init__(self) -> None:
+        self.stopped = False
+        self.__class__.instances.append(self)
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
 class _FakeQueueManager:
     instances: ClassVar[list[_FakeQueueManager]] = []
 
@@ -130,6 +141,7 @@ class _FakeUpdateCheckService:
 
 def _settings(tmp_path, *, startup_update_check_enabled: bool) -> SimpleNamespace:
     return SimpleNamespace(
+        airdcpp_enabled=True,
         base_url="http://pullbox.test",
         bind_address="0.0.0.0",
         data_dir=tmp_path / "data",
@@ -161,6 +173,7 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
     _FakeDirectRuntime.instances.clear()
     _FakeDirectRunner.instances.clear()
     _FakeDirectRunner.registered.clear()
+    _FakeAirDcppRegistry.instances.clear()
     _FakeQueueManager.instances.clear()
     _FakeUpdateCheckService.instances.clear()
     app._startup_background_tasks.clear()
@@ -204,6 +217,10 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
             recover_pending_comicinfo_enrichment=lambda _factory: asyncio.sleep(0, result=4),
             recover_pending_catalog_hydration=lambda _factory: asyncio.sleep(0, result=5),
         )
+
+    async def start_airdcpp_registry(_factory: object, *, enabled: bool) -> object | None:
+        assert enabled is True
+        return _FakeAirDcppRegistry()
 
     monkeypatch.setattr(app, "get_runtime_settings", lambda: settings)
     monkeypatch.setattr(app, "configure_logging", lambda *args, **kwargs: None)
@@ -257,6 +274,10 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
     )
     monkeypatch.setattr("pullbox.composition.services.build_import_service", build_import_service)
     monkeypatch.setattr(
+        "pullbox.composition.airdcpp.start_airdcpp_supervisor_registry",
+        start_airdcpp_registry,
+    )
+    monkeypatch.setattr(
         "pullbox.services.restore_recovery_service.has_pending_restore_recovery",
         lambda: False,
     )
@@ -296,10 +317,12 @@ async def test_lifespan_starts_background_services_and_shuts_down_cleanly(
         assert patched_lifespan.scheduler.loaded is True
         assert patched_lifespan.scheduler.running is True
         assert patched_lifespan.scheduler.overrides is not None
+        assert patched_lifespan.scheduler.overrides["monitor_downloads"] == {"seconds": 3}
         assert patched_lifespan.scheduler.overrides["process_completed"] == {"seconds": 300}
         assert _FakeImportRunner.instances
         assert _FakeDirectRunner.instances
         assert _FakeDirectRunner.registered[-1] is _FakeDirectRunner.instances[-1]
+        assert _FakeAirDcppRegistry.instances
         assert _FakeQueueManager.instances
         assert set(_FakeQueueManager.instances[-1].executors) == {
             "db_check_cleanup",
@@ -317,6 +340,7 @@ async def test_lifespan_starts_background_services_and_shuts_down_cleanly(
     assert _FakeDirectRunner.instances[-1].closed is True
     assert _FakeDirectRuntime.instances[-1].closed is True
     assert _FakeDirectRunner.registered[-1] is None
+    assert _FakeAirDcppRegistry.instances[-1].stopped is True
 
 
 @pytest.mark.asyncio

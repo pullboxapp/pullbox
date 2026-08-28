@@ -1,0 +1,90 @@
+<article
+  data-testid="reading-card"
+  data-reading-issue-id="{{ reading_card.issue_id }}"
+  class="reading-card reading-card-view-{{ reading_card.view }}{% if reading_card.density == 'dashboard' %} reading-card-dashboard{% endif %}"
+  x-data="readingStateActions()"
+>
+  <a
+    href="{{ reading_card.primary_url }}"
+    hx-boost="false"
+    data-testid="reading-primary-{{ reading_card.issue_id }}"
+    class="reading-card-cover-link"
+    aria-label="{{ reading_card.primary_label }} {{ reading_card.series_title }} {{ reading_card.issue_label }}"
+  >
+    <span class="reading-card-cover-frame">
+      {% if reading_card.cover_url %}
+        <img
+          src="{{ reading_card.cover_url }}"
+          alt="{{ reading_card.series_title }} {{ reading_card.issue_label }} cover"
+          class="reading-card-cover"
+          loading="{{ 'eager' if reading_card_index|default(0) < 4 else 'lazy' }}"
+        >
+      {% else %}
+        <span class="reading-card-cover-placeholder" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.25v13m0-13C10.83 5.48 9.25 5 7.5 5S4.17 5.48 3 6.25v13C4.17 18.48 5.75 18 7.5 18s3.33.48 4.5 1.25m0-13C13.17 5.48 14.75 5 16.5 5S19.83 5.48 21 6.25v13C19.83 18.48 18.25 18 16.5 18s-3.33.48-4.5 1.25"/>
+          </svg>
+        </span>
+      {% endif %}
+    </span>
+  </a>
+
+  <div class="reading-card-body">
+    <div class="min-w-0">
+      <a href="/series/{{ reading_card.series_id }}" hx-boost="false" class="reading-card-series">{{ reading_card.series_title }}</a>
+      <p class="reading-card-issue">
+        <span>{{ reading_card.issue_label }}</span>{% if reading_card.issue_title %}<span class="reading-card-issue-title">{{ reading_card.issue_title }}</span>{% endif %}
+      </p>
+    </div>
+
+    <div class="reading-card-state-region">
+      <p data-testid="reading-state-{{ reading_card.issue_id }}" class="reading-card-state">
+        {{ reading_card.state_label }}
+      </p>
+      {% if reading_card.progress_percent > 0 and not reading_card.completed %}
+        <div
+          class="reading-card-progress"
+          role="progressbar"
+          aria-label="Reading progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="{{ reading_card.progress_percent }}"
+        >
+          <span style="width: {{ reading_card.progress_percent }}%"></span>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="reading-card-actions">
+      <a href="{{ reading_card.primary_url }}" hx-boost="false" class="btn-primary btn-sm reading-card-primary-action">{{ reading_card.primary_label }}</a>
+      {% if reading_card.completion_action_label %}
+        <button
+          type="button"
+          data-reading-action="completion"
+          class="btn-ghost btn-sm reading-card-completion-action"
+          x-bind:disabled="busy"
+          @click="setCompletion($el, {{ 'true' if reading_card.completion_action_value else 'false' }})"
+        >{{ reading_card.completion_action_label }}</button>
+      {% endif %}
+      {% if reading_card.queue_action_label %}
+        <button
+          type="button"
+          data-reading-action="want-to-read"
+          class="btn-ghost btn-sm reading-card-queue-action"
+          x-bind:disabled="busy"
+          @click="setWantToRead($el, {{ 'true' if reading_card.queue_action_value else 'false' }})"
+        >{{ reading_card.queue_action_label }}</button>
+      {% else %}
+        <span class="reading-card-queue-action-placeholder" aria-hidden="true"></span>
+      {% endif %}
+    </div>
+
+    <p
+      data-testid="reading-mutation-status-{{ reading_card.issue_id }}"
+      class="reading-card-mutation-status"
+      x-bind:role="statusIsError ? 'alert' : 'status'"
+      x-bind:aria-live="statusIsError ? 'assertive' : 'polite'"
+      x-text="statusMessage"
+    ></p>
+  </div>
+</article>

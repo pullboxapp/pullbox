@@ -178,6 +178,7 @@ def test_downloads_normalizers_and_filter_helpers_cover_edge_values() -> None:
     assert downloads_routes.normalize_download_history_sort("not-real") == "-updated_at"
     assert len(downloads_routes.get_download_history_order_by("-client")) == 3
     assert downloads_routes.download_client_type_label("sabnzbd") == "SABnzbd"
+    assert downloads_routes.download_client_type_label("airdcpp") == "AirDC++"
     assert downloads_routes.download_client_type_label("custom_client") == "Custom Client"
     assert downloads_routes.normalize_download_queue_client_state(" Repairing ") == "Repairing"
     assert downloads_routes.normalize_download_queue_client_state("   ") is None
@@ -209,6 +210,29 @@ def test_manual_torznab_resolver_stage_is_visible_for_queued_torrent() -> None:
     row = downloads_routes.build_download_queue_row_view(download, progress, None)
 
     assert row.primary_phase == "Trying Byparr (resolver 2 of 3)"
+
+
+def test_normalized_downloading_state_overrides_stale_queued_client_substate() -> None:
+    download = DownloadHistory(
+        issue_id=1,
+        title="AirDC++ fixture",
+        download_url="airdcpp://intent/ui-state",
+        download_client=DownloadClientType.AIRDCPP,
+        state=DownloadState.DOWNLOADING,
+    )
+    progress = SimpleNamespace(
+        progress=0.42,
+        speed_bytes=1_500_000,
+        eta_seconds=None,
+        client_state="Queued",
+        is_indeterminate=False,
+    )
+
+    row = downloads_routes.build_download_queue_row_view(download, progress, None)
+
+    assert row.primary_phase == "Downloading"
+    assert row.progress_label == "42%"
+    assert row.speed_bytes == 1_500_000
 
 
 @pytest.mark.asyncio

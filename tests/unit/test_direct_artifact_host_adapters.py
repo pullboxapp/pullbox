@@ -58,9 +58,14 @@ def _request(
 
 
 async def test_generic_https_accepts_a_probed_final_file_with_resume_validators() -> None:
+    observed_user_agent: str | None = None
+
     async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_user_agent
         assert request.method == "GET"
         assert request.headers["Range"] == "bytes=0-0"
+        observed_user_agent = request.headers["User-Agent"]
+        assert observed_user_agent.startswith("Mozilla/5.0")
         return httpx.Response(
             206,
             headers={
@@ -89,6 +94,7 @@ async def test_generic_https_accepts_a_probed_final_file_with_resume_validators(
     assert transfer.etag == '"fixture-etag"'
     assert transfer.checksum == "md5:11111111111111111111111111111111"
     assert transfer.range_supported is True
+    assert transfer.headers["User-Agent"] == observed_user_agent
 
 
 async def test_generic_https_accepts_large_files_when_server_ignores_range_probe() -> None:
@@ -118,6 +124,42 @@ async def test_generic_https_accepts_large_files_when_server_ignores_range_probe
     assert transfer.expected_size == file_size
     assert transfer.filename_hint == "large.cbz"
     assert transfer.range_supported is False
+
+
+async def test_generic_https_prefers_one_stream_for_booksdl_ranges() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            206,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Range": "bytes 0-0/59247008",
+                "Content-Length": "1",
+                "ETag": '"stable"',
+                "Last-Modified": "Mon, 24 Aug 2026 00:00:00 GMT",
+            },
+            content=b"P",
+            request=httpx.Request(
+                "GET",
+                "https://cdn4.booksdl.lc/get.php?token=opaque",
+            ),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transfer = await GenericHttpsAdapter(client, resolver=_resolve_public).resolve(
+            _request(
+                DirectArtifactHostKind.GENERIC_HTTPS,
+                "https://cdn4.booksdl.lc/get.php?token=opaque",
+                final=True,
+                checksum="md5:11111111111111111111111111111111",
+                expected_size=59_247_008,
+            ),
+            credentials={},
+        )
+
+    assert transfer.expected_size == 59_247_008
+    assert transfer.etag == '"stable"'
+    assert transfer.range_supported is True
+    assert transfer.prefer_single_response is True
 
 
 async def test_generic_https_rejects_an_html_landing_page() -> None:

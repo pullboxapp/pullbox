@@ -910,9 +910,14 @@ async def test_import_file_and_progress_route_branches(
         assert imported.library_file_id == 55
         assert imported.match_confidence == MatchConfidence.MANUAL.value
 
-    fallback_progress = await issues_api.get_import_file_for_issue_progress(issue_id, object())
-    assert fallback_progress.issue_id == issue_id
-    assert fallback_progress.state == "idle"
+    async with db_factory() as session:
+        fallback_progress = await issues_api.get_import_file_for_issue_progress(
+            issue_id,
+            object(),
+            session,
+        )
+        assert fallback_progress.issue_id == issue_id
+        assert fallback_progress.state == "idle"
 
 
 @pytest.mark.asyncio

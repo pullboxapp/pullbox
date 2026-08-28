@@ -258,7 +258,7 @@ async def _collect_download_history(session: AsyncSession) -> list[dict[str, obj
     """Return last 100 download history entries."""
     from sqlalchemy import select
 
-    from pullbox.models.download import DownloadHistory
+    from pullbox.models.download import DownloadClientType, DownloadHistory
 
     result = await session.execute(
         select(DownloadHistory).order_by(DownloadHistory.created_at.desc()).limit(100)
@@ -272,7 +272,11 @@ async def _collect_download_history(session: AsyncSession) -> list[dict[str, obj
             "state": str(d.state),
             "download_client": str(d.download_client),
             "file_size": d.file_size,
-            "downloaded_path": d.downloaded_path,
+            "downloaded_path": (
+                "[REDACTED]"
+                if d.download_client is DownloadClientType.AIRDCPP and d.downloaded_path
+                else d.downloaded_path
+            ),
             "final_path": d.final_path,
             "error_message": d.error_message,
             "retry_count": d.retry_count,

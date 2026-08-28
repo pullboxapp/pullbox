@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.providers.base import SearchQuery
 from pullbox.providers.indexer.newznab import NewznabError, NewznabIndexer
+from pullbox.providers.indexer.torznab import TorznabIndexer
 
 _NEWZNAB_NS = "http://www.newznab.com/DTD/2010/feeds/attributes/"
 
@@ -104,9 +106,25 @@ class TestSearch:
         assert result.seeders is None
         assert result.leechers is None
         assert result.is_torrent is False
+        assert result.protocol is AcquisitionProtocol.USENET
         assert result.category == "7030,8010"
         assert result.info_url == "https://indexer.example/details/123"
         assert result.published_at is not None
+
+    async def test_torznab_results_use_torrent_protocol(self) -> None:
+        indexer = TorznabIndexer(
+            name="Torrent Test",
+            url="https://indexer.example",
+            api_key="secret",
+            rate_limit_per_minute=6000,
+        )
+        indexer._request = AsyncMock(return_value=_rss_with_item())  # type: ignore[method-assign]
+
+        results = await indexer.search(SearchQuery(series_title="Batman", issue_number=1.0))
+
+        assert len(results) == 1
+        assert results[0].protocol is AcquisitionProtocol.TORRENT
+        assert results[0].is_torrent is True
 
     async def test_search_formats_decimal_issue_without_integer_coercion(self) -> None:
         indexer = _make_indexer()

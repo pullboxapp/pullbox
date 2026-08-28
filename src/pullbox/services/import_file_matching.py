@@ -35,6 +35,9 @@ from pullbox.services.import_file_match_provider_errors import (
     defer_file_matching_for_provider_error,
 )
 from pullbox.services.import_file_match_results import apply_file_match_series_summary
+from pullbox.services.import_file_match_targets import (
+    trusted_source_issue_identity_matches_target,
+)
 from pullbox.services.import_file_matching_progress import (
     build_file_matching_progress_emitter,
     load_file_match_target_index_with_progress,
@@ -318,6 +321,8 @@ async def run_import_file_matching(
                 f"Matching files to issues for {imp_series.raw_series_name} "
                 f"({len(files)} file{'s' if len(files) != 1 else ''})..."
             ),
+            current_item_progress_pct=50,
+            current_work_unit_progress_pct=0,
         )
         series_processed += 1
         for file_idx, imp_file in enumerate(files, start=1):
@@ -417,7 +422,8 @@ async def run_import_file_matching(
                 completed_file_phase_units,
                 message=(f"Matched file {file_idx}/{len(files)} for {imp_series.raw_series_name}"),
                 current_item_stage="file_matching",
-                current_item_progress_pct=round((file_idx / max(len(files), 1)) * 100),
+                current_item_progress_pct=50 + round((file_idx / max(len(files), 1)) * 50),
+                current_work_unit_progress_pct=0,
                 live_only=True,
             )
 
@@ -674,6 +680,12 @@ def _evaluate_file_match_candidate(
     metadata_conflict: dict[str, Any] | None = None
 
     if match_candidate is not None:
+        if trusted_source_issue_identity_matches_target(
+            imp_series,
+            imp_file,
+            match_candidate.matched_issue_cv_id,
+        ):
+            return match_candidate, None
         target_context = build_file_match_target_context(
             imp_series,
             imp_file,

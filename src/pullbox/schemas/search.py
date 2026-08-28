@@ -1,6 +1,7 @@
 """Search result schemas for ComicVine, indexer, and library searches."""
 
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -84,7 +85,10 @@ class SearchResultItem(BaseModel):
     quality_score: float = Field(description="Quality score (0-100)")
     auto_grabbable: bool = Field(description="Whether this result would be auto-grabbed")
     match_details: MatchDetails = Field(description="Details of how the release matched")
-    source_kind: str = Field(default="indexer", description="Indexer or direct provider source")
+    source_kind: Literal["indexer", "direct", "dc"] = Field(
+        default="indexer",
+        description="Typed indexer, direct-provider, or Direct Connect source",
+    )
     method: str = Field(default="Indexer", description="Acquisition method")
     direct_attempt_id: int | None = Field(
         default=None,
@@ -116,7 +120,10 @@ class RejectedResultItem(BaseModel):
     category: str | None = Field(None, description="Newznab category ID or name")
     rejection_reason: str = Field(description="Why this result was rejected")
     confidence: str | None = Field(None, description="Match confidence level if partially matched")
-    source_kind: str = Field(default="indexer", description="Indexer or direct provider source")
+    source_kind: Literal["indexer", "direct", "dc"] = Field(
+        default="indexer",
+        description="Typed indexer, direct-provider, or Direct Connect source",
+    )
     method: str = Field(default="Indexer", description="Acquisition method")
     direct_attempt_id: int | None = Field(
         default=None,
@@ -200,5 +207,26 @@ class DirectGrabResponse(BaseModel):
     issue_id: int
     acquisition_id: int
     artifact_id: int
+    title: str
+    status: str
+
+
+class DcGrabRequest(BaseModel):
+    """Queue one server-owned transient Direct Connect route."""
+
+    dc_route_token: str = Field(
+        min_length=20,
+        max_length=200,
+        description="Opaque server-side Direct Connect route grant",
+    )
+
+
+class DcGrabResponse(BaseModel):
+    """Durable acknowledgement for one Direct Connect queue intent."""
+
+    issue_id: int
+    acquisition_id: int
+    download_id: int
+    bundle_id: int | None
     title: str
     status: str

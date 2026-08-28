@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.encryption import _get_fernet
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
@@ -79,7 +80,13 @@ def _provider(identity: str, priority: int) -> DirectSearchProvider:
     )
 
 
-def _candidate(provider: DirectSearchProvider, title: str) -> DirectCandidate:
+def _candidate(
+    provider: DirectSearchProvider,
+    title: str,
+    *,
+    content_fingerprint: str | None = None,
+    provider_confidence: float = 0.95,
+) -> DirectCandidate:
     return DirectCandidate(
         provider_candidate_id=f"candidate:{provider.provider_identity}",
         source_reference=f"https://{provider.provider_identity}.example/release",
@@ -91,7 +98,8 @@ def _candidate(provider: DirectSearchProvider, title: str) -> DirectCandidate:
             year=2025,
             format="cbz",
         ),
-        provider_confidence=0.95,
+        provider_confidence=provider_confidence,
+        content_fingerprint=content_fingerprint,
         provenance={"fixture": True},
     )
 
@@ -216,7 +224,141 @@ async def test_fanout_is_concurrent_and_completion_order_does_not_change_results
         "pullbox.getcomics",
     ]
     assert all(item.validation.confidence is MatchConfidence.HIGH for item in outcome.matched)
+    assert all(item.release.protocol is AcquisitionProtocol.DIRECT for item in outcome.matched)
     assert outcome.failures == ()
+
+
+async def test_cross_provider_fingerprint_collapses_to_one_result_with_alternate() -> None:
+    _reset()
+    preferred = _provider("pullbox.libgen", 10)
+    alternate = _provider("pullbox.annas_archive", 20)
+    fingerprint = "md5:0123456789abcdef0123456789abcdef"
+    _Client.responses = {
+        preferred.provider_identity: [
+            _candidate(
+                preferred,
+                "Absolute Superman 009 (2025) (Digital)",
+                content_fingerprint=fingerprint,
+            )
+        ],
+        alternate.provider_identity: [
+            _candidate(
+                alternate,
+                "Absolute Superman 009 (2025) (Digital)",
+                content_fingerprint=fingerprint,
+            )
+        ],
+    }
+
+    outcome = await search_direct_issue_target(
+        _target(),
+        [alternate, preferred],
+        client_factory=_factory,
+    )
+
+    assert len(outcome.matched) == 1
+    assert outcome.matched[0].provider is preferred
+    assert [item.provider for item in outcome.matched[0].alternate_results] == [alternate]
+
+
+async def test_fingerprint_primary_prefers_candidate_confidence_before_provider_priority() -> None:
+    _reset()
+    configured_first = _provider("pullbox.getcomics", 10)
+    stronger_candidate = _provider("pullbox.libgen", 20)
+    fingerprint = f"md5:{'4' * 32}"
+    _Client.responses = {
+        configured_first.provider_identity: [
+            _candidate(
+                configured_first,
+                "Absolute Superman 009 (2025) (Digital)",
+                content_fingerprint=fingerprint,
+                provider_confidence=0.80,
+            )
+        ],
+        stronger_candidate.provider_identity: [
+            _candidate(
+                stronger_candidate,
+                "Absolute Superman 009 (2025) (Digital)",
+                content_fingerprint=fingerprint,
+                provider_confidence=0.99,
+            )
+        ],
+    }
+
+    outcome = await search_direct_issue_target(
+        _target(),
+        [configured_first, stronger_candidate],
+        client_factory=_factory,
+    )
+
+    assert len(outcome.matched) == 1
+    assert outcome.matched[0].provider is stronger_candidate
+    assert [item.provider for item in outcome.matched[0].alternate_results] == [configured_first]
+
+
+async def test_different_fingerprints_remain_distinct_results() -> None:
+    _reset()
+    first = _provider("pullbox.libgen", 10)
+    second = _provider("pullbox.annas_archive", 20)
+    _Client.responses = {
+        first.provider_identity: [
+            _candidate(
+                first,
+                "Absolute Superman 009 (2025)",
+                content_fingerprint=f"md5:{'1' * 32}",
+            )
+        ],
+        second.provider_identity: [
+            _candidate(
+                second,
+                "Absolute Superman 009 (2025)",
+                content_fingerprint=f"md5:{'2' * 32}",
+            )
+        ],
+    }
+
+    outcome = await search_direct_issue_target(
+        _target(),
+        [first, second],
+        client_factory=_factory,
+    )
+
+    assert len(outcome.matched) == 2
+    assert all(item.alternate_results == () for item in outcome.matched)
+
+
+async def test_fingerprint_never_promotes_a_semantically_rejected_candidate() -> None:
+    _reset()
+    accepted_provider = _provider("pullbox.libgen", 10)
+    rejected_provider = _provider("pullbox.annas_archive", 20)
+    fingerprint = f"md5:{'3' * 32}"
+    _Client.responses = {
+        accepted_provider.provider_identity: [
+            _candidate(
+                accepted_provider,
+                "Absolute Superman 009 (2025)",
+                content_fingerprint=fingerprint,
+            )
+        ],
+        rejected_provider.provider_identity: [
+            _candidate(
+                rejected_provider,
+                "Completely Different Series 009 (2025)",
+                content_fingerprint=fingerprint,
+            )
+        ],
+    }
+
+    outcome = await search_direct_issue_target(
+        _target(),
+        [accepted_provider, rejected_provider],
+        client_factory=_factory,
+    )
+
+    assert len(outcome.matched) == 1
+    assert outcome.matched[0].alternate_results == ()
+    assert len(outcome.rejected) == 1
+    assert outcome.rejected[0].alternate_results == ()
 
 
 async def test_one_provider_failure_is_isolated_and_redacted() -> None:
@@ -693,6 +835,7 @@ async def test_persisted_discovery_is_restart_safe_and_contains_no_urls_or_secre
     candidate = _candidate(provider, "Absolute Superman 009 (2025)").model_copy(
         update={
             "source_reference": "https://pullbox.getcomics.example/book?token=signed-secret",
+            "content_fingerprint": f"md5:{'5' * 32}",
             "provenance": {"token": "provider-secret", "layout": "fixture-v1"},
         }
     )
@@ -710,7 +853,112 @@ async def test_persisted_discovery_is_restart_safe_and_contains_no_urls_or_secre
     assert "https://" not in serialized
     assert "signed-secret" not in serialized
     assert "provider-secret" not in serialized
+    assert f"md5:{'5' * 32}" not in serialized
     assert stored.provider_candidate_id == candidate.provider_candidate_id
     assert stored.state.value == "discovered"
     assert stored.requested_coverage["issue_numbers"] == ["9"]
     assert stored.requested_coverage["volume"] is None
+
+
+async def test_fingerprint_alternates_are_persisted_but_only_primary_is_visible(
+    db_session: AsyncSession,
+) -> None:
+    series = Series(
+        comicvine_id=700_101,
+        title="Absolute Superman",
+        sort_title="Absolute Superman",
+        year_start=2025,
+        status=SeriesStatus.CONTINUING,
+        series_type=SeriesType.STANDARD,
+        monitored=True,
+        issue_count=1,
+    )
+    db_session.add(series)
+    await db_session.flush()
+    db_session.add(
+        Issue(
+            id=17,
+            series_id=series.id,
+            comicvine_id=700_117,
+            issue_number=9,
+            issue_type=IssueType.ISSUE,
+            status=IssueStatus.WANTED,
+        )
+    )
+    for provider_id, identity in (
+        (10, "pullbox.libgen"),
+        (20, "pullbox.annas_archive"),
+        (30, "pullbox.getcomics"),
+    ):
+        db_session.add(
+            DirectProviderConfig(
+                id=provider_id,
+                provider_id=identity,
+                display_name=identity,
+                endpoint=f"https://provider-{provider_id}.example",
+                enabled=True,
+                priority=provider_id,
+                state=DirectProviderState.HEALTHY,
+                trust_level=DirectProviderTrustLevel.VERIFIED_PULLBOX,
+            )
+        )
+    await db_session.flush()
+
+    primary_provider = _provider("pullbox.libgen", 10)
+    alternate_provider = _provider("pullbox.annas_archive", 20)
+    final_provider = _provider("pullbox.getcomics", 30)
+    fingerprint = f"md5:{'4' * 32}"
+    _reset()
+    _Client.responses = {
+        primary_provider.provider_identity: [
+            _candidate(
+                primary_provider,
+                "Absolute Superman 009 (2025)",
+                content_fingerprint=fingerprint,
+            )
+        ],
+        alternate_provider.provider_identity: [
+            _candidate(
+                alternate_provider,
+                "Absolute Superman 009 (2025)",
+                content_fingerprint=fingerprint,
+            )
+        ],
+        final_provider.provider_identity: [
+            _candidate(
+                final_provider,
+                "Absolute Superman 009 (2025)",
+                content_fingerprint=fingerprint,
+            )
+        ],
+    }
+    outcome = await search_direct_issue_target(
+        _target(),
+        [primary_provider, alternate_provider, final_provider],
+        client_factory=_factory,
+    )
+
+    discoveries = await persist_direct_search_discoveries(db_session, _target(), outcome)
+
+    assert len(discoveries) == 3
+    assert [discovery.visible for discovery in discoveries] == [True, False, False]
+    assert [discovery.result.provider.provider_identity for discovery in discoveries] == [
+        "pullbox.libgen",
+        "pullbox.annas_archive",
+        "pullbox.getcomics",
+    ]
+    primary = await db_session.get(DirectAcquisitionAttempt, discoveries[0].attempt_id)
+    alternate = await db_session.get(DirectAcquisitionAttempt, discoveries[1].attempt_id)
+    final = await db_session.get(DirectAcquisitionAttempt, discoveries[2].attempt_id)
+    assert primary is not None
+    assert alternate is not None
+    assert final is not None
+    assert primary.candidate_snapshot["visible"] is True
+    assert primary.candidate_snapshot["alternate_attempt_ids"] == [alternate.id, final.id]
+    assert alternate.candidate_snapshot["visible"] is False
+    assert alternate.candidate_snapshot["primary_attempt_id"] == primary.id
+    assert alternate.candidate_snapshot["alternate_attempt_ids"] == [final.id]
+    assert final.candidate_snapshot["visible"] is False
+    assert final.candidate_snapshot["primary_attempt_id"] == primary.id
+    assert final.candidate_snapshot["alternate_attempt_ids"] == []
+    assert fingerprint not in json.dumps(primary.candidate_snapshot, sort_keys=True)

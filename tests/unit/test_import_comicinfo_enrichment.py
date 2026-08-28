@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -144,8 +145,11 @@ async def test_run_import_comicinfo_enrichment_rewrites_pending_library_file(
         }
 
     applied: list[tuple[Path, dict[str, Any]]] = []
+    event_loop_thread_id = threading.get_ident()
+    apply_thread_ids: list[int] = []
 
     def apply_comicinfo(artifact_path: Path, payload: dict[str, Any]) -> None:
+        apply_thread_ids.append(threading.get_ident())
         assert payload_session is not None
         assert not payload_session.in_transaction()
         applied.append((artifact_path, dict(payload)))
@@ -202,6 +206,7 @@ async def test_run_import_comicinfo_enrichment_rewrites_pending_library_file(
         )
     ]
     assert "import_file_comicinfo_enrichment_completed" in log_events
+    assert apply_thread_ids != [event_loop_thread_id]
     assert lock_injected is True
     assert build_calls == 2
     async with session_factory() as session:

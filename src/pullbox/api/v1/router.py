@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from pullbox.api.v1.activity import router as activity_router
 from pullbox.api.v1.audit import router as audit_router
 from pullbox.api.v1.auth import router as auth_router
 from pullbox.api.v1.blocklist import router as blocklist_router
@@ -29,6 +30,7 @@ from pullbox.utilities.router import router as utilities_router
 
 v1_router = APIRouter(prefix="/api/v1")
 
+v1_router.include_router(activity_router)
 v1_router.include_router(audit_router)
 v1_router.include_router(blocklist_router)
 v1_router.include_router(auth_router)

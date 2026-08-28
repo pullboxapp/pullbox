@@ -23,6 +23,7 @@ from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.cover_url_service import build_series_cover_url
+from pullbox.services.reading_query_service import load_series_reading_aggregates
 from pullbox.ui.comicvine_series_search import (
     ADD_SERIES_PER_PAGE,
     COMICVINE_SERIES_SEARCH_LIMIT,
@@ -284,6 +285,11 @@ async def series_list(
     result = await session.execute(query)
     visible_series = list(result.unique().scalars().all())
     visible_series_ids = [series.id for series in visible_series]
+    visible_reading_aggregates = await load_series_reading_aggregates(
+        session,
+        user_id=user.id,
+        series_ids=tuple(visible_series_ids),
+    )
 
     visible_issue_counts: dict[int, tuple[int, int, int, date | None]] = {}
     if visible_series_ids:
@@ -352,6 +358,7 @@ async def series_list(
             acquisition_tone = "red"
 
         cover_src = series_cover_src(s)
+        reading_aggregate = visible_reading_aggregates.get(s.id)
         series_data.append(
             {
                 "series": s,
@@ -375,6 +382,15 @@ async def series_list(
                     "sync"
                     if active_view == "grid" and index < _GRID_SYNC_DECODE_COVER_COUNT
                     else "async"
+                ),
+                "readable_count": (
+                    reading_aggregate.readable_count if reading_aggregate is not None else 0
+                ),
+                "read_count": (
+                    reading_aggregate.completed_count if reading_aggregate is not None else 0
+                ),
+                "read_percent": (
+                    reading_aggregate.completion_percent if reading_aggregate is not None else 0
                 ),
             }
         )

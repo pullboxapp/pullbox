@@ -1,22 +1,24 @@
 {#- Settings: Download Clients tab -#}
 {% from "components/dropdown_select.html" import dropdown_select %}
 {% from "components/settings_shell.html" import section_card, section_header, settings_footer, settings_row, ui_icon %}
-{%- set client_icon_map = {'sabnzbd': 'SAB', 'nzbget': 'NZB', 'qbittorrent': 'qBt', 'transmission': 'TR', 'deluge': 'DL'} -%}
-{%- set client_proto_map = {'sabnzbd': 'Usenet', 'nzbget': 'Usenet', 'qbittorrent': 'Torrent', 'transmission': 'Torrent', 'deluge': 'Torrent'} -%}
-{%- set client_proto_pill_map = {'sabnzbd': 'pill-warning', 'nzbget': 'pill-warning', 'qbittorrent': 'pill-info', 'transmission': 'pill-info', 'deluge': 'pill-info'} -%}
+{%- set client_icon_map = {'sabnzbd': 'SAB', 'nzbget': 'NZB', 'qbittorrent': 'qBt', 'transmission': 'TR', 'deluge': 'DL', 'airdcpp': 'ADC'} -%}
+{%- set client_proto_map = {'sabnzbd': 'Usenet', 'nzbget': 'Usenet', 'qbittorrent': 'Torrent', 'transmission': 'Torrent', 'deluge': 'Torrent', 'airdcpp': 'Direct Connect'} -%}
+{%- set client_proto_pill_map = {'sabnzbd': 'pill-warning', 'nzbget': 'pill-warning', 'qbittorrent': 'pill-info', 'transmission': 'pill-info', 'deluge': 'pill-info', 'airdcpp': 'pill-purple'} -%}
 {%- set client_accent_map = {
   'sabnzbd': 'bg-pb-warning-dim text-pb-warning',
   'nzbget': 'bg-pb-warning-dim text-pb-warning',
   'qbittorrent': 'bg-pb-info-dim text-pb-info',
   'transmission': 'bg-pb-success-dim text-pb-success',
-  'deluge': 'bg-pb-purple-dim text-pb-purple'
+  'deluge': 'bg-pb-purple-dim text-pb-purple',
+  'airdcpp': 'bg-pb-info-dim text-pb-info'
 } -%}
 {%- set client_picker_hover_map = {
   'sabnzbd': 'hover:border-pb-warning/40 hover:bg-pb-warning-dim',
   'nzbget': 'hover:border-pb-warning/40 hover:bg-pb-warning-dim',
   'qbittorrent': 'hover:border-pb-info/40 hover:bg-pb-info-dim',
   'transmission': 'hover:border-pb-success/40 hover:bg-pb-success-dim',
-  'deluge': 'hover:border-pb-purple/40 hover:bg-pb-purple-dim'
+  'deluge': 'hover:border-pb-purple/40 hover:bg-pb-purple-dim',
+  'airdcpp': 'hover:border-pb-info/40 hover:bg-pb-info-dim'
 } -%}
 
 <div class="space-y-6 pt-6" x-data="clientsSettings()">
@@ -311,6 +313,11 @@
               </svg>
             </div>
           </template>
+          <template x-if="form.client_type === 'airdcpp'">
+            <div class="w-7 h-7 rounded-lg {{ client_accent_map['airdcpp'] }} flex items-center justify-center text-[9px] font-bold">
+              ADC
+            </div>
+          </template>
           <h3 class="text-sm font-semibold text-pb-text"
               x-text="modalMode === 'add'
                 ? (form.client_type ? 'Add ' + clientTypeLabel(form.client_type) : 'Add Download Client')
@@ -393,6 +400,18 @@
             <p class="text-[11px] mt-0.5" :class="existingTypes.includes('deluge') ? 'text-pb-text-dim' : 'text-pb-text-dim'"
                x-text="existingTypes.includes('deluge') ? 'Already configured' : 'BitTorrent download client'"></p>
           </button>
+          {% if airdcpp_enabled %}
+          <button @click="form.client_type = 'airdcpp'"
+                  data-testid="settings-clients-picker-airdcpp"
+                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all {{ client_picker_hover_map['airdcpp'] }}">
+            <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg {{ client_accent_map['airdcpp'] }} text-xs font-bold">
+              ADC
+            </div>
+            <p class="text-sm font-semibold text-pb-text">AirDC++</p>
+            <p class="text-[11px] mt-0.5 text-pb-text-dim"
+               x-text="existingTypes.includes('airdcpp') ? 'Another Direct Connect client' : 'Direct Connect client'"></p>
+          </button>
+          {% endif %}
         </div>
       </div>
 
@@ -532,6 +551,30 @@
             </div>
           </template>
 
+          {# AirDC++: dedicated least-privilege API user #}
+          <template x-if="form.client_type === 'airdcpp'">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Username</label>
+                <input type="text" x-model="form.username" placeholder="pullbox"
+                       name="airdcpp_username"
+                       autocomplete="username"
+                       class="input-pb">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-pb-text-sec mb-1.5">
+                  Password
+                  <template x-if="modalMode === 'edit' && form.has_password">
+                    <span class="text-pb-text-dim font-normal ml-1">(set — blank to keep)</span>
+                  </template>
+                </label>
+                <input type="password" x-model="form.password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;"
+                       autocomplete="new-password"
+                       class="input-pb">
+              </div>
+            </div>
+          </template>
+
           {# Deluge: password only #}
           <template x-if="form.client_type === 'deluge'">
             <div>
@@ -548,7 +591,7 @@
           </template>
 
           {# Category #}
-          <div>
+          <div x-show="form.client_type !== 'airdcpp'">
             <label class="block text-xs font-medium text-pb-text-sec mb-1.5">
               Category <span class="text-pb-text-dim font-normal">— optional</span>
             </label>
@@ -558,8 +601,130 @@
             <p class="text-[11px] text-pb-text-dim mt-1">Use the client category or label Pullbox should manage.</p>
           </div>
 
+          <template x-if="form.client_type === 'airdcpp'">
+            <div class="space-y-5" data-testid="settings-clients-airdcpp-fields">
+              <section class="space-y-3 border-t border-pb-border/50 pt-4">
+                <p class="text-[11px] text-pb-text-dim uppercase tracking-wider font-medium">Search</p>
+                <div class="grid grid-cols-2 gap-3">
+                  <label class="flex items-center gap-2 text-xs text-pb-text-sec">
+                    <input type="checkbox" x-model="form.airdcpp_search_enabled" class="peer toggle-input">
+                    <span class="toggle-switch"></span>
+                    Search enabled
+                  </label>
+                  <label class="flex items-center gap-2 text-xs text-pb-text-sec">
+                    <input type="checkbox" x-model="form.airdcpp_automatic_search_enabled" class="peer toggle-input">
+                    <span class="toggle-switch"></span>
+                    Automatic search
+                  </label>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Manual Collection</label>
+                    <input type="number" x-model.number="form.airdcpp_manual_collection_seconds" min="1" max="120" class="input-pb">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Automatic Collection</label>
+                    <input type="number" x-model.number="form.airdcpp_automatic_collection_seconds" min="1" max="120" class="input-pb">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Maximum Results</label>
+                    <input type="number" x-model.number="form.airdcpp_max_results" min="1" max="1000" class="input-pb">
+                  </div>
+                </div>
+              </section>
+
+              <section class="space-y-3 border-t border-pb-border/50 pt-4">
+                <p class="text-[11px] text-pb-text-dim uppercase tracking-wider font-medium">Downloads</p>
+                <div>
+                  <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Remote Download Root</label>
+                  <input type="text" x-model="form.remote_path" placeholder="/Downloads" autocomplete="off" class="input-pb font-mono">
+                  <p class="text-[11px] text-pb-text-dim mt-1">Absolute path reported by AirDC++.</p>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Pullbox-visible Local Root</label>
+                  <div class="flex items-center gap-1.5">
+                    <input type="text" x-model="form.download_dir" placeholder="/downloads/airdcpp" autocomplete="off" class="input-pb flex-1 font-mono">
+                    <button type="button" @click="openFileBrowser('download_dir', form.download_dir)" class="icon-btn icon-btn-sm shrink-0" title="Browse directories">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"/>
+                      </svg>
+                    </button>
+                  </div>
+                  <p class="text-[11px] text-pb-text-dim mt-1">Absolute path where Pullbox sees completed AirDC++ downloads.</p>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div data-testid="settings-clients-airdcpp-client-priority">
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Priority</label>
+                    <div class="flex items-center gap-2">
+                      <input type="number" x-model.number="form.priority" min="1" max="100"
+                             class="input-pb w-20">
+                      <span class="text-xs text-pb-text-dim">1 = highest, 100 = lowest</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Queue Priority</label>
+                    {{ dropdown_select(
+                      name="airdcpp_queue_priority",
+                      value="",
+                      options=[
+                        ("", "AirDC++ default"),
+                        ("-1", "Default"),
+                        ("0", "Paused (forced)"),
+                        ("1", "Paused"),
+                        ("2", "Lowest"),
+                        ("3", "Low"),
+                        ("4", "Normal"),
+                        ("5", "High"),
+                        ("6", "Highest"),
+                      ],
+                      root_testid="settings-clients-airdcpp-queue-priority-select",
+                      class_name="w-48",
+                      local_model="form.airdcpp_queue_priority"
+                    ) }}
+                  </div>
+                </div>
+              </section>
+
+              <section class="space-y-3 border-t border-pb-border/50 pt-4">
+                <p class="text-[11px] text-pb-text-dim uppercase tracking-wider font-medium">Advanced</p>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Minimum Search Interval</label>
+                    <input type="number" x-model.number="form.airdcpp_minimum_search_interval_seconds" min="45" max="3600" class="input-pb">
+                    <p class="text-[11px] text-pb-text-dim mt-1">Seconds; 45 is the hub-safety minimum.</p>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Retained Routes</label>
+                    <input type="number" x-model.number="form.airdcpp_max_retained_routes" min="1" max="2000" class="input-pb">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Concurrent Searches</label>
+                    <input type="number" x-model.number="form.airdcpp_max_concurrent_searches" min="1" max="4" class="input-pb">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Request Timeout</label>
+                    <input type="number" x-model.number="form.airdcpp_request_timeout_seconds" min="1" max="120" class="input-pb">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Dispatch Deadline</label>
+                    <input type="number" x-model.number="form.airdcpp_search_dispatch_deadline_seconds" min="5" max="300" class="input-pb">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Reconciliation Interval</label>
+                    <input type="number" x-model.number="form.airdcpp_reconciliation_interval_seconds" min="10" max="300" class="input-pb">
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Hub Allowlist <span class="text-pb-text-dim font-normal">— optional, one URL per line</span></label>
+                  <textarea x-model="form.airdcpp_hub_allowlist" rows="3" autocomplete="off" class="input-pb font-mono" placeholder="adcs://hub.example:1511"></textarea>
+                  <p class="text-[11px] text-pb-text-dim mt-1">Leave this empty to search every hub currently connected in AirDC++. Pullbox won't connect to hubs or manage their passwords.</p>
+                </div>
+              </section>
+            </div>
+          </template>
+
           {# Advanced collapsible section #}
-          <div x-data="{ open: false }">
+          <div x-data="{ open: false }" x-show="form.client_type !== 'airdcpp'">
             <button type="button" @click="open = !open"
                     class="flex items-center gap-1.5 text-xs text-pb-text-sec transition-colors hover:text-pb-text">
               <svg class="w-3.5 h-3.5 transition-transform duration-150" :class="open && 'rotate-90'"
@@ -829,6 +994,19 @@
             </svg>
             <span x-text="testMessage"></span>
           </div>
+          <template x-if="form.client_type === 'airdcpp' && testDetails">
+            <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[11px] text-pb-text-sec" data-testid="settings-clients-airdcpp-test-details">
+              <div><dt class="text-pb-text-dim">Client</dt><dd x-text="testDetails.client_version || 'Unavailable'"></dd></div>
+              <div><dt class="text-pb-text-dim">API</dt><dd x-text="testDetails.api_version != null ? `v${testDetails.api_version}, feature ${testDetails.api_feature_level}` : 'Unavailable'"></dd></div>
+              <div><dt class="text-pb-text-dim">Permissions</dt><dd x-text="(testDetails.permissions || []).join(', ') || 'Unavailable'"></dd></div>
+              <div><dt class="text-pb-text-dim">Connected hubs</dt><dd x-text="testDetails.connected_hub_count ?? 'Unavailable'"></dd></div>
+              <div><dt class="text-pb-text-dim">IPv4 mode</dt><dd x-text="testDetails.connectivity_mode_v4 || 'Unavailable'"></dd></div>
+              <div><dt class="text-pb-text-dim">Listener ports</dt><dd x-text="testDetails.tcp_port != null ? `TCP ${testDetails.tcp_port} / UDP ${testDetails.udp_port} / TLS ${testDetails.tls_port}` : 'Unavailable'"></dd></div>
+              <div><dt class="text-pb-text-dim">Queue read</dt><dd x-text="testDetails.queue_accessible ? 'Available' : 'Unavailable'"></dd></div>
+              <div><dt class="text-pb-text-dim">Path roots</dt><dd x-text="testDetails.path_mapping_configured ? 'Configured' : 'Needs attention'"></dd></div>
+              <div class="col-span-2 text-pb-text-dim">WebSocket is not tested here; actual transfer reachability is validated during a real download.</div>
+            </dl>
+          </template>
         </div>
 
         {# Save error banner #}
@@ -967,6 +1145,7 @@ function clientsSettings() {
     saving: false,
     testing: false,
     testMessage: '',
+    testDetails: null,
     testSuccess: false,
     modalError: '',
     _testGeneration: 0,
@@ -980,6 +1159,13 @@ function clientsSettings() {
       nzbget_priority: '', nzbget_post_processing: '',
       transmission_bandwidth_priority: '', transmission_seed_ratio_limit: 0, transmission_seed_idle_limit: 0,
       deluge_label: '', deluge_max_ratio: 0, deluge_move_completed_path: '',
+      airdcpp_search_enabled: true, airdcpp_automatic_search_enabled: false,
+      airdcpp_minimum_search_interval_seconds: 45,
+      airdcpp_manual_collection_seconds: 8, airdcpp_automatic_collection_seconds: 15,
+      airdcpp_max_results: 200, airdcpp_max_retained_routes: 400,
+      airdcpp_max_concurrent_searches: 1, airdcpp_request_timeout_seconds: 15,
+      airdcpp_search_dispatch_deadline_seconds: 45, airdcpp_reconciliation_interval_seconds: 30,
+      airdcpp_hub_allowlist: '', airdcpp_queue_priority: '',
     },
 
     blankForm() {
@@ -992,6 +1178,13 @@ function clientsSettings() {
         nzbget_priority: '', nzbget_post_processing: '',
         transmission_bandwidth_priority: '', transmission_seed_ratio_limit: 0, transmission_seed_idle_limit: 0,
         deluge_label: '', deluge_max_ratio: 0, deluge_move_completed_path: '',
+        airdcpp_search_enabled: true, airdcpp_automatic_search_enabled: false,
+        airdcpp_minimum_search_interval_seconds: 45,
+        airdcpp_manual_collection_seconds: 8, airdcpp_automatic_collection_seconds: 15,
+        airdcpp_max_results: 200, airdcpp_max_retained_routes: 400,
+        airdcpp_max_concurrent_searches: 1, airdcpp_request_timeout_seconds: 15,
+        airdcpp_search_dispatch_deadline_seconds: 45, airdcpp_reconciliation_interval_seconds: 30,
+        airdcpp_hub_allowlist: '', airdcpp_queue_priority: '',
       };
     },
 
@@ -1002,6 +1195,7 @@ function clientsSettings() {
       this._testGeneration++;
       this.testing = false;
       this.testMessage = '';
+      this.testDetails = null;
       this.modalError = '';
       this.showModal = true;
     },
@@ -1012,6 +1206,7 @@ function clientsSettings() {
       this._testGeneration++;
       this.testing = false;
       this.testMessage = '';
+      this.testDetails = null;
       this.modalError = '';
       fetch(`/api/v1/clients/${id}`, {
         headers: { 'X-CSRF-Token': '{{ csrf_token }}' },
@@ -1045,6 +1240,19 @@ function clientsSettings() {
             deluge_label: data.deluge_label || '',
             deluge_max_ratio: data.deluge_max_ratio || 0,
             deluge_move_completed_path: data.deluge_move_completed_path || '',
+            airdcpp_search_enabled: data.airdcpp?.search_enabled ?? true,
+            airdcpp_automatic_search_enabled: data.airdcpp?.automatic_search_enabled ?? false,
+            airdcpp_minimum_search_interval_seconds: data.airdcpp?.minimum_search_interval_seconds ?? 45,
+            airdcpp_manual_collection_seconds: data.airdcpp?.manual_collection_seconds ?? 8,
+            airdcpp_automatic_collection_seconds: data.airdcpp?.automatic_collection_seconds ?? 15,
+            airdcpp_max_results: data.airdcpp?.max_results ?? 200,
+            airdcpp_max_retained_routes: data.airdcpp?.max_retained_routes ?? 400,
+            airdcpp_max_concurrent_searches: data.airdcpp?.max_concurrent_searches ?? 1,
+            airdcpp_request_timeout_seconds: data.airdcpp?.request_timeout_seconds ?? 15,
+            airdcpp_search_dispatch_deadline_seconds: data.airdcpp?.search_dispatch_deadline_seconds ?? 45,
+            airdcpp_reconciliation_interval_seconds: data.airdcpp?.reconciliation_interval_seconds ?? 30,
+            airdcpp_hub_allowlist: (data.airdcpp?.hub_allowlist || []).join('\n'),
+            airdcpp_queue_priority: data.airdcpp?.queue_priority ?? '',
           };
           this.showModal = true;
         })
@@ -1058,13 +1266,14 @@ function clientsSettings() {
       this._testGeneration++;
       this.testing = false;
       this.testMessage = '';
+      this.testDetails = null;
       this.modalError = '';
     },
 
     clientTypeLabel(type) {
       const labels = {
         sabnzbd: 'SABnzbd', nzbget: 'NZBGet', qbittorrent: 'qBittorrent',
-        transmission: 'Transmission', deluge: 'Deluge',
+        transmission: 'Transmission', deluge: 'Deluge', airdcpp: 'AirDC++',
       };
       return labels[type] || type;
     },
@@ -1109,6 +1318,25 @@ function clientsSettings() {
         body.deluge_label = this.form.deluge_label || null;
         body.deluge_max_ratio = this.form.deluge_max_ratio || null;
         body.deluge_move_completed_path = this.form.deluge_move_completed_path || null;
+      } else if (this.form.client_type === 'airdcpp') {
+        body.username = this.form.username || null;
+        if (this.form.password) body.password = this.form.password;
+        body.category = null;
+        body.airdcpp = {
+          search_enabled: this.form.airdcpp_search_enabled,
+          automatic_search_enabled: this.form.airdcpp_automatic_search_enabled,
+          minimum_search_interval_seconds: Number(this.form.airdcpp_minimum_search_interval_seconds),
+          manual_collection_seconds: Number(this.form.airdcpp_manual_collection_seconds),
+          automatic_collection_seconds: Number(this.form.airdcpp_automatic_collection_seconds),
+          max_results: Number(this.form.airdcpp_max_results),
+          max_retained_routes: Number(this.form.airdcpp_max_retained_routes),
+          max_concurrent_searches: Number(this.form.airdcpp_max_concurrent_searches),
+          request_timeout_seconds: Number(this.form.airdcpp_request_timeout_seconds),
+          search_dispatch_deadline_seconds: Number(this.form.airdcpp_search_dispatch_deadline_seconds),
+          reconciliation_interval_seconds: Number(this.form.airdcpp_reconciliation_interval_seconds),
+          hub_allowlist: this.form.airdcpp_hub_allowlist.split(/\r?\n/).map(value => value.trim()).filter(Boolean),
+          queue_priority: this.form.airdcpp_queue_priority !== '' ? Number(this.form.airdcpp_queue_priority) : null,
+        };
       }
 
       const isAdd = this.modalMode === 'add';
@@ -1181,6 +1409,7 @@ function clientsSettings() {
 
     testModal() {
       this.testMessage = '';
+      this.testDetails = null;
       this.testSuccess = false;
 
       if (!this.form.client_type || !this.form.url) {
@@ -1202,6 +1431,26 @@ function clientsSettings() {
       if (this.form.api_key) body.api_key = this.form.api_key;
       if (this.form.username) body.username = this.form.username;
       if (this.form.password) body.password = this.form.password;
+      body.category = this.form.client_type === 'airdcpp' ? null : (this.form.category || null);
+      body.download_dir = this.form.download_dir || null;
+      body.remote_path = this.form.remote_path || null;
+      if (this.form.client_type === 'airdcpp') {
+        body.airdcpp = {
+          search_enabled: this.form.airdcpp_search_enabled,
+          automatic_search_enabled: this.form.airdcpp_automatic_search_enabled,
+          minimum_search_interval_seconds: Number(this.form.airdcpp_minimum_search_interval_seconds),
+          manual_collection_seconds: Number(this.form.airdcpp_manual_collection_seconds),
+          automatic_collection_seconds: Number(this.form.airdcpp_automatic_collection_seconds),
+          max_results: Number(this.form.airdcpp_max_results),
+          max_retained_routes: Number(this.form.airdcpp_max_retained_routes),
+          max_concurrent_searches: Number(this.form.airdcpp_max_concurrent_searches),
+          request_timeout_seconds: Number(this.form.airdcpp_request_timeout_seconds),
+          search_dispatch_deadline_seconds: Number(this.form.airdcpp_search_dispatch_deadline_seconds),
+          reconciliation_interval_seconds: Number(this.form.airdcpp_reconciliation_interval_seconds),
+          hub_allowlist: this.form.airdcpp_hub_allowlist.split(/\r?\n/).map(value => value.trim()).filter(Boolean),
+          queue_priority: this.form.airdcpp_queue_priority !== '' ? Number(this.form.airdcpp_queue_priority) : null,
+        };
+      }
 
       let testUrl = '/api/v1/clients/test';
       if (this.modalMode === 'edit' && this.editingId) {
@@ -1216,21 +1465,29 @@ function clientsSettings() {
         },
         body: JSON.stringify(body),
       })
-        .then(r => r.json())
+        .then(async r => {
+          const data = await r.json();
+          if (!r.ok) throw new Error(data?.detail || 'Test request failed.');
+          return data;
+        })
         .then(data => {
           // Discard if user switched to a different modal context
           if (testGeneration !== this._testGeneration) return;
           this.testSuccess = data.healthy;
+          this.testDetails = this.form.client_type === 'airdcpp' ? data : null;
           const ms = data.response_time_ms ? ` (${pbFormatDurationMs(data.response_time_ms)})` : '';
-          this.testMessage = data.healthy
+          this.testMessage = this.form.client_type === 'airdcpp'
+            ? `${data.message || (data.healthy ? 'Connected' : 'Needs attention')}${ms}.`
+            : data.healthy
             ? `Connected successfully${ms}.`
             : (data.message || 'Connection failed.');
           if (this.editingId) this.setClientResult(this.editingId, { healthy: data.healthy, message: data.message || '' });
         })
-        .catch(() => {
+        .catch(error => {
           if (testGeneration !== this._testGeneration) return;
           this.testSuccess = false;
-          this.testMessage = 'Test request failed — check Pullbox logs.';
+          this.testDetails = null;
+          this.testMessage = error.message || 'Test request failed — check Pullbox logs.';
         })
         .finally(() => {
           if (testGeneration !== this._testGeneration) return;

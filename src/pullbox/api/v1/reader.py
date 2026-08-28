@@ -10,16 +10,26 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from pullbox.api.deps import AuthenticatedStreamUser, get_request_session_factory
 from pullbox.config import get_settings
+from pullbox.core.events import (
+    ReaderCompletionChanged,
+    ReaderWantToReadChanged,
+    get_event_bus,
+)
 from pullbox.core.page_sources import PageSourceError, PageSourceErrorCode, ReaderResourceLimits
 from pullbox.core.page_sources.capabilities import inspect_reader_capabilities
 from pullbox.schemas.reader import (
+    ReaderAdjacentIssueResponse,
     ReaderCacheClearResponse,
     ReaderCacheDiagnosticsResponse,
     ReaderCapabilitiesResponse,
+    ReaderCompletionUpdate,
     ReaderFormatCapabilityResponse,
     ReaderManifestResponse,
     ReaderProgressResponse,
     ReaderProgressUpdate,
+    ReaderStateMutationResponse,
+    ReaderStateResponse,
+    ReaderWantToReadUpdate,
 )
 from pullbox.services.reader_content_service import (
     ReaderContentService,
@@ -30,9 +40,20 @@ from pullbox.services.reader_content_service import (
     resolve_reader_source,
 )
 from pullbox.services.reader_state_service import (
+    ReaderStateEventDescriptor,
+    ReaderStateEventKind,
+    ReaderStateSnapshot,
+    ReaderStateTransition,
     ReaderStateValidationError,
     load_reader_state,
-    update_reader_state,
+    set_reader_completion,
+    set_want_to_read,
+    update_reader_progress,
+)
+from pullbox.services.reading_query_service import (
+    AdjacentIssueReference,
+    load_adjacent_readable_issues,
+    load_reader_issue_access,
 )
 
 router = APIRouter(prefix="/reader", tags=["reader"], include_in_schema=False)
@@ -121,13 +142,13 @@ async def reader_manifest(
     factory = get_request_session_factory(request)
     async with factory() as session:
         state = await load_reader_state(session, user_id=_user.id, issue_id=issue_id)
-    initial_page_index = 0
-    if (
-        state is not None
-        and state.content_revision == manifest.revision
-        and state.page_count == manifest.page_count
-    ):
-        initial_page_index = min(state.last_page_index, manifest.page_count - 1)
+        adjacent = await load_adjacent_readable_issues(
+            session,
+            series_id=source.series_id,
+            current_issue_number=source.issue_number_value,
+            current_issue_id=issue_id,
+        )
+    initial_page_index = _manifest_initial_page(state, current_page_count=manifest.page_count)
     response = ReaderManifestResponse(
         issue_id=manifest.issue_id,
         title=manifest.title,
@@ -140,6 +161,13 @@ async def reader_manifest(
             f"/api/v1/reader/issues/{issue_id}/pages/{{page_index}}?revision={manifest.revision}"
         ),
         progress_url=f"/api/v1/reader/issues/{issue_id}/progress",
+        completion_url=f"/api/v1/reader/issues/{issue_id}/completion",
+        want_to_read_url=f"/api/v1/reader/issues/{issue_id}/want-to-read",
+        issue_detail_url=f"/issues/{issue_id}",
+        download_url=f"/api/v1/issues/{issue_id}/download-file",
+        state=_state_response(state),
+        previous_issue=_adjacent_response(adjacent.previous),
+        next_issue=_adjacent_response(adjacent.next),
     )
     return JSONResponse(
         content=response.model_dump(mode="json"),
@@ -207,7 +235,7 @@ async def reader_progress(
     factory = get_request_session_factory(request)
     try:
         async with factory() as session:
-            snapshot = await update_reader_state(
+            transition = await update_reader_progress(
                 session,
                 user_id=user.id,
                 issue_id=issue_id,
@@ -217,6 +245,7 @@ async def reader_progress(
                 completion_candidate=payload.completion_candidate,
                 expected_revision=manifest.revision,
                 expected_page_count=manifest.page_count,
+                reread_started=payload.reread_started,
             )
             await session.commit()
     except ReaderStateValidationError as exc:
@@ -225,13 +254,183 @@ async def reader_progress(
             status_code=status_code,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
+    await _emit_reader_events(transition.events)
+    snapshot = transition.after
+    if (
+        snapshot.last_page_index is None
+        or snapshot.page_count is None
+        or snapshot.content_revision is None
+    ):  # pragma: no cover - a validated progress command always writes the triple
+        raise RuntimeError("Progress command returned state without progress.")
     return ReaderProgressResponse(
         page_index=snapshot.last_page_index,
         page_count=snapshot.page_count,
         revision=snapshot.content_revision,
         completed_at=snapshot.completed_at,
         updated_at=snapshot.updated_at,
+        state=_state_response(snapshot),
     )
+
+
+@router.put(
+    "/issues/{issue_id}/completion",
+    response_model=ReaderStateMutationResponse,
+)
+async def reader_completion(
+    request: Request,
+    issue_id: int,
+    payload: ReaderCompletionUpdate,
+    user: AuthenticatedStreamUser,
+) -> ReaderStateMutationResponse:
+    """Set explicit completion intent for an existing catalog issue."""
+    _require_reader_enabled()
+    factory = get_request_session_factory(request)
+    async with factory() as session:
+        access = await load_reader_issue_access(session, issue_id=issue_id)
+        if access is None:
+            raise HTTPException(status_code=404, detail="Issue not found")
+        transition = await set_reader_completion(
+            session,
+            user_id=user.id,
+            issue_id=issue_id,
+            completed=payload.completed,
+        )
+        await session.commit()
+    await _emit_reader_events(transition.events)
+    return _mutation_response(transition)
+
+
+@router.put(
+    "/issues/{issue_id}/want-to-read",
+    response_model=ReaderStateMutationResponse,
+)
+async def reader_want_to_read(
+    request: Request,
+    issue_id: int,
+    payload: ReaderWantToReadUpdate,
+    user: AuthenticatedStreamUser,
+) -> ReaderStateMutationResponse:
+    """Set private queue intent, requiring readability only when adding."""
+    _require_reader_enabled()
+    factory = get_request_session_factory(request)
+    async with factory() as session:
+        access = await load_reader_issue_access(session, issue_id=issue_id)
+        if access is None:
+            raise HTTPException(status_code=404, detail="Issue not found")
+        if payload.want_to_read and not access.readable:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "issue_not_readable",
+                    "message": "This issue does not have a supported downloaded file.",
+                },
+            )
+        transition = await set_want_to_read(
+            session,
+            user_id=user.id,
+            issue_id=issue_id,
+            enabled=payload.want_to_read,
+        )
+        await session.commit()
+    await _emit_reader_events(transition.events)
+    return _mutation_response(transition)
+
+
+def _manifest_initial_page(
+    state: ReaderStateSnapshot | None,
+    *,
+    current_page_count: int,
+) -> int:
+    if state is None or not state.has_progress:
+        return 0
+    if state.is_completed or state.last_page_index is None or state.page_count is None:
+        return 0
+    if state.last_page_index >= state.page_count - 1:
+        return 0
+    if state.page_count != current_page_count:
+        return 0
+    return max(0, min(state.last_page_index, current_page_count - 1))
+
+
+def _state_response(state: ReaderStateSnapshot | None) -> ReaderStateResponse:
+    if state is None:
+        return ReaderStateResponse(
+            page_index=None,
+            page_count=None,
+            progress_updated_at=None,
+            last_opened_at=None,
+            completed_at=None,
+            completion_updated_at=None,
+            want_to_read=False,
+            want_to_read_updated_at=None,
+            state_version=0,
+        )
+    return ReaderStateResponse(
+        page_index=state.last_page_index,
+        page_count=state.page_count,
+        progress_updated_at=state.progress_updated_at,
+        last_opened_at=state.last_opened_at,
+        completed_at=state.completed_at,
+        completion_updated_at=state.completion_updated_at,
+        want_to_read=state.want_to_read,
+        want_to_read_updated_at=state.want_to_read_updated_at,
+        state_version=state.state_version,
+    )
+
+
+def _adjacent_response(
+    adjacent: AdjacentIssueReference | None,
+) -> ReaderAdjacentIssueResponse | None:
+    if adjacent is None:
+        return None
+    issue_id = adjacent.issue_id
+    return ReaderAdjacentIssueResponse(
+        issue_id=issue_id,
+        issue_label=f"#{adjacent.issue_number:g}",
+        title=adjacent.title,
+        manifest_url=f"/api/v1/reader/issues/{issue_id}/manifest",
+        issue_detail_url=f"/issues/{issue_id}",
+        download_url=f"/api/v1/issues/{issue_id}/download-file",
+    )
+
+
+def _mutation_response(transition: ReaderStateTransition) -> ReaderStateMutationResponse:
+    return ReaderStateMutationResponse(
+        changed=transition.changed,
+        state=_state_response(transition.after),
+    )
+
+
+async def _emit_reader_events(
+    descriptors: tuple[ReaderStateEventDescriptor, ...],
+) -> None:
+    event_bus = get_event_bus()
+    for descriptor in descriptors:
+        if descriptor.kind is ReaderStateEventKind.COMPLETION_CHANGED:
+            if descriptor.completed is None or descriptor.origin is None:
+                continue
+            await event_bus.emit(
+                ReaderCompletionChanged(
+                    user_id=descriptor.user_id,
+                    issue_id=descriptor.issue_id,
+                    state_version=descriptor.state_version,
+                    completed=descriptor.completed,
+                    occurred_at=descriptor.occurred_at,
+                    origin=descriptor.origin.value,
+                )
+            )
+        elif descriptor.kind is ReaderStateEventKind.WANT_TO_READ_CHANGED:
+            if descriptor.want_to_read is None:
+                continue
+            await event_bus.emit(
+                ReaderWantToReadChanged(
+                    user_id=descriptor.user_id,
+                    issue_id=descriptor.issue_id,
+                    state_version=descriptor.state_version,
+                    enabled=descriptor.want_to_read,
+                    occurred_at=descriptor.occurred_at,
+                )
+            )
 
 
 def _raise_reader_busy(exc: ReaderWorkerBusyError) -> Never:

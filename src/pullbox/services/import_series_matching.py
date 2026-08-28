@@ -33,6 +33,10 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import IssueType
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services.import_known_cv_match import (
+    ComicVineMatchEvaluation,
+    known_cv_id_evaluation_from_source,
+)
 from pullbox.services.import_progress_runtime import (
     ScanReviewFileMatchProfile,
     ScanReviewSeriesMatchProfile,
@@ -49,12 +53,79 @@ logger = structlog.get_logger(__name__)
 _MATCH_PROGRESS_HEARTBEAT_SECONDS = 5.0
 _VOLUME_SUBTITLE_SPLIT_THRESHOLD = 0.95
 _TITLE_ARTICLES = frozenset({"a", "an", "the"})
-_DIRECT_CV_ID_MATCH_METHODS = frozenset({"mylar3_cv_id", "comicinfo_cv_id"})
+_DIRECT_CV_ID_MATCH_METHODS = frozenset({"mylar3_cv_id", "comicinfo_cv_id", "folder_cv_id"})
 
 
 def _matching_item_heartbeat_progress(elapsed_seconds: int) -> int:
     """Return item-local progress for an in-flight ComicVine series match."""
     return min(90, 15 + (max(elapsed_seconds, 1) // 5) * 15)
+
+
+def _filesystem_source_identity_evaluation(
+    item: ImportedSeries,
+    source_metadata: SourceMetadata,
+    *,
+    match_threshold: float,
+) -> ComicVineMatchEvaluation:
+    """Classify a filesystem series from trusted local identity only."""
+    normalized_query = NameMatcher.normalize(source_metadata.series_name or item.raw_series_name)
+    identity_conflicts = source_metadata.diagnostics.get("identity_conflicts")
+    if isinstance(identity_conflicts, list) and identity_conflicts:
+        return ComicVineMatchEvaluation(
+            match=None,
+            diagnostics={
+                "kind": "series_conflict",
+                "reason": "trusted_source_identity_conflict",
+                "raw_name": item.raw_series_name,
+                "raw_year": item.raw_year,
+                "normalized_query": normalized_query,
+                "threshold": round(match_threshold, 4),
+                "identity_conflicts": [
+                    dict(conflict) for conflict in identity_conflicts if isinstance(conflict, dict)
+                ],
+                "provider_lookup_deferred": True,
+                "top_candidates": [],
+            },
+        )
+
+    cv_id = source_metadata.comicvine_series_id or item.cv_id
+    match_method = item.cv_match_method
+    if match_method not in _DIRECT_CV_ID_MATCH_METHODS:
+        signal = source_metadata.signals.get("comicvine_series_id")
+        match_method = (
+            {
+                MetadataSignal.MYLAR3: "mylar3_cv_id",
+                MetadataSignal.COMICINFO: "comicinfo_cv_id",
+                MetadataSignal.SIDECAR: "comicinfo_cv_id",
+                MetadataSignal.PULLBOX_FOLDER: "folder_cv_id",
+            }.get(signal)
+            if signal is not None
+            else None
+        )
+    if cv_id is not None and match_method in _DIRECT_CV_ID_MATCH_METHODS:
+        return known_cv_id_evaluation_from_source(
+            int(cv_id),
+            match_method=match_method,
+            raw_name=item.raw_series_name,
+            raw_year=item.raw_year,
+            normalized_query=normalized_query,
+            source_metadata=source_metadata,
+            match_threshold=match_threshold,
+        )
+
+    return ComicVineMatchEvaluation(
+        match=None,
+        diagnostics={
+            "kind": "series_no_match",
+            "reason": "trusted_source_identity_missing",
+            "raw_name": item.raw_series_name,
+            "raw_year": item.raw_year,
+            "normalized_query": normalized_query,
+            "threshold": round(match_threshold, 4),
+            "provider_lookup_deferred": True,
+            "top_candidates": [],
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -83,8 +154,6 @@ if TYPE_CHECKING:
     from typing import Protocol
 
     from sqlalchemy.ext.asyncio import AsyncSession
-
-    from pullbox.services.import_matching import ComicVineMatchEvaluation
 
     SourceMetadataForSeriesFunc = Callable[
         [AsyncSession, ImportedSeries],
@@ -207,6 +276,7 @@ async def run_import_series_matching(
     estimate_remaining_seconds: EstimateRemainingFunc,
     job_stats: JobStatsFunc,
     maybe_slow_item_delay: SlowItemDelayFunc,
+    provider_free_filesystem: bool = False,
     estimate_remaining_work_seconds: EstimateRemainingWorkFunc | None = None,
     progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None = None,
 ) -> None:
@@ -229,9 +299,16 @@ async def run_import_series_matching(
         for imp_file in pending_files:
             diagnostics = dict(imp_file.diagnostics or {})
             diagnostics.setdefault("kind", "series_no_match_file")
+            local_identity_missing = (
+                dict(item.diagnostics or {}).get("reason") == "trusted_source_identity_missing"
+            )
             diagnostics.setdefault(
                 "rejection_reason",
-                "Series could not be matched to ComicVine during import review.",
+                (
+                    "No trusted local series identity was found. Match this series in Step 3."
+                    if local_identity_missing
+                    else "Series could not be matched to ComicVine during import review."
+                ),
             )
             imp_file.status = ImportedFileStatus.NO_MATCH
             imp_file.include_in_import = False
@@ -481,21 +558,31 @@ async def run_import_series_matching(
             series_source_metadata = await source_metadata_for_series(session, item)
             source_metadata_duration_ms += (time.monotonic() - source_metadata_started_at) * 1000
             evaluation_started_at = time.monotonic()
-            evaluation = await evaluate_match_with_progress(
-                item,
-                idx,
-                provider=metadata_provider,
-                raw_name=item.raw_series_name,
-                raw_year=item.raw_year,
-                source_metadata=series_source_metadata,
-                mylar3_cv_id=item.cv_id if item.cv_match_method == "mylar3_cv_id" else None,
-                comicinfo_cv_id=item.cv_id if item.cv_match_method == "comicinfo_cv_id" else None,
-                match_threshold=job.cv_match_threshold,
-            )
+            if provider_free_filesystem:
+                evaluation = _filesystem_source_identity_evaluation(
+                    item,
+                    series_source_metadata,
+                    match_threshold=job.cv_match_threshold,
+                )
+            else:
+                evaluation = await evaluate_match_with_progress(
+                    item,
+                    idx,
+                    provider=metadata_provider,
+                    raw_name=item.raw_series_name,
+                    raw_year=item.raw_year,
+                    source_metadata=series_source_metadata,
+                    mylar3_cv_id=item.cv_id if item.cv_match_method == "mylar3_cv_id" else None,
+                    comicinfo_cv_id=(
+                        item.cv_id if item.cv_match_method == "comicinfo_cv_id" else None
+                    ),
+                    match_threshold=job.cv_match_threshold,
+                )
             provider_evaluation_duration_ms += (time.monotonic() - evaluation_started_at) * 1000
             cv_result = evaluation.match
             if (
                 cv_result is None
+                and not provider_free_filesystem
                 and load_deferred_source_metadata_for_series is not None
                 and await _series_has_deferred_archive_metadata(session, item)
             ):
@@ -568,18 +655,19 @@ async def run_import_series_matching(
             item.status = ImportSeriesStatus.MATCHED
             item.diagnostics = evaluation.diagnostics if evaluation is not None else {}
             matched_count += 1
-            rebucket_started_at = time.monotonic()
-            rebucket_result = await _rebucket_collection_volume_subtitle_series_with_progress(
-                item,
-                idx,
-            )
-            rebucket_duration_ms += (time.monotonic() - rebucket_started_at) * 1000
-            rebucket_evaluated_files += rebucket_result.evaluated_file_count
-            if rebucket_result.created_series_count:
-                matched_count += rebucket_result.created_series_count
-                if rebucket_result.removed_source_series:
-                    matched_count -= 1
-                    continue
+            if not provider_free_filesystem:
+                rebucket_started_at = time.monotonic()
+                rebucket_result = await _rebucket_collection_volume_subtitle_series_with_progress(
+                    item,
+                    idx,
+                )
+                rebucket_duration_ms += (time.monotonic() - rebucket_started_at) * 1000
+                rebucket_evaluated_files += rebucket_result.evaluated_file_count
+                if rebucket_result.created_series_count:
+                    matched_count += rebucket_result.created_series_count
+                    if rebucket_result.removed_source_series:
+                        matched_count -= 1
+                        continue
 
             pending_detail_logs.append(
                 {

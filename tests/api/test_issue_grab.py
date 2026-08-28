@@ -244,6 +244,7 @@ def _mock_registry(*, nzb: AsyncMock | None = None, torrent: AsyncMock | None = 
     registry = AsyncMock()
     registry.get_nzb_client = lambda: nzb
     registry.get_torrent_client = lambda: torrent
+    registry.get_download_client_items = lambda: []
     registry.get_indexer = lambda _config_id: None
     return registry
 

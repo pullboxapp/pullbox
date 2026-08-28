@@ -66,6 +66,21 @@ class TestSeededServer:
         assert resp.status_code == 200
         assert "pullbox_session" in resp.cookies
 
+    def test_seeded_server_uses_isolated_api_rate_limit_budget(
+        self,
+        seeded_server: str,
+        auth_session_cookie: dict[str, str],
+    ) -> None:
+        """Shared E2E traffic cannot exhaust production-sized API limits."""
+        resp = httpx.get(
+            f"{seeded_server}/api/v1/system/usage-stats",
+            cookies={auth_session_cookie["name"]: auth_session_cookie["value"]},
+            timeout=5.0,
+        )
+
+        assert resp.status_code == 200
+        assert resp.headers["x-ratelimit-limit"] == "10000"
+
 
 class TestPageFixture:
     """Verify the page fixture provides a working Playwright page."""

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import zipfile
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,11 @@ from pullbox.models.direct_acquisition import (
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.operation_progress import (
+    OperationProgress,
+    OperationProgressState,
+    OperationProgressType,
+)
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.providers.artifact_hosts.contract import (
@@ -74,6 +80,7 @@ from pullbox.services.direct_acquisition_planner_service import (
 from pullbox.services.direct_artifact_post_processing import DirectPostProcessingResult
 from pullbox.services.direct_artifact_quarantine import DirectArtifactQuarantine
 from pullbox.services.direct_configuration_service import update_host_credentials
+from pullbox.services.operation_progress_dispatch import drain_operation_progress_updates
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -289,6 +296,45 @@ class _SuccessfulTransport:
         )
 
 
+class _InitialProgressTransport(_SuccessfulTransport):
+    def __init__(self, attempt: DirectAcquisitionAttempt) -> None:
+        super().__init__()
+        self._attempt = attempt
+        self.initial_progress: dict[str, object] | None = None
+        self.initial_etag: str | None = None
+
+    async def transfer(self, **kwargs: Any) -> ArtifactTransferResult:
+        self.initial_progress = dict(self._attempt.progress_snapshot)
+        self.initial_etag = self._attempt.artifact_attempts[0].etag
+        return await super().transfer(**kwargs)
+
+
+@dataclass
+class _ProviderSlotProbe:
+    active: bool = False
+    identities: list[str] = field(default_factory=list)
+
+    @asynccontextmanager
+    async def slot(self, provider_identity: str, **_kwargs: Any):  # type: ignore[no-untyped-def]
+        assert self.active is False
+        self.identities.append(provider_identity)
+        self.active = True
+        try:
+            yield
+        finally:
+            self.active = False
+
+
+class _ProviderAwareTransport(_SuccessfulTransport):
+    def __init__(self, probe: _ProviderSlotProbe) -> None:
+        super().__init__()
+        self._probe = probe
+
+    async def transfer(self, **kwargs: Any) -> ArtifactTransferResult:
+        assert self._probe.active is True
+        return await super().transfer(**kwargs)
+
+
 class _FailingTransport:
     def __init__(self, error: BaseException, *, write_partial: bool = False) -> None:
         self.error = error
@@ -456,16 +502,22 @@ async def test_executor_completes_with_durable_redacted_progress(
     await session.commit()
     artifact = attempt.artifact_attempts[0]
     source_calls = 0
+    observed_download_history_id: int | None = None
 
     async def source_factory() -> HostResolutionRequest:
         nonlocal source_calls
         source_calls += 1
         return _source_request()
 
+    async def post_processor(*_args: Any, **kwargs: Any) -> DirectPostProcessingResult:
+        nonlocal observed_download_history_id
+        observed_download_history_id = kwargs["download_history_id"]
+        return await _successful_post_processor()
+
     result = await _executor(
         tmp_path,
         transport=_SuccessfulTransport(),
-        post_processor=_successful_post_processor,
+        post_processor=post_processor,
     ).execute(
         session,
         acquisition_id=attempt.id,
@@ -492,6 +544,108 @@ async def test_executor_completes_with_durable_redacted_progress(
     assert refreshed_history.final_path == "/library/Issue 1.cbz"
     assert refreshed_history.imported_at == NOW
     assert refreshed_history.error_message is None
+    assert observed_download_history_id == refreshed_history.id
+
+    await drain_operation_progress_updates()
+    post_processing_operations = list(
+        (
+            await session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.POST_PROCESSING
+                )
+            )
+        ).scalars()
+    )
+    assert len(post_processing_operations) == 1
+    post_processing_operation = post_processing_operations[0]
+    assert post_processing_operation.operation_key == str(refreshed_history.id)
+    assert post_processing_operation.state is OperationProgressState.COMPLETED
+    assert post_processing_operation.overall_percent == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_executor_publishes_known_size_before_first_transfer_byte(
+    session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    attempt = _attempt()
+    artifact = attempt.artifact_attempts[0]
+    artifact.expected_size = 59_247_008
+    artifact.etag = None
+    session.add(attempt)
+    await session.commit()
+    transport = _InitialProgressTransport(attempt)
+
+    await _executor(
+        tmp_path,
+        transport=transport,
+        post_processor=_successful_post_processor,
+    ).execute(
+        session,
+        acquisition_id=attempt.id,
+        artifact_id=artifact.id,
+        source_factory=_async_source,
+    )
+
+    assert transport.initial_progress == {
+        "schema_version": 1,
+        "stage": "downloading",
+        "artifact_attempt_id": artifact.id,
+        "host_kind": "generic_https",
+        "bytes_transferred": 0,
+        "total_bytes": 59_247_008,
+        "percent": 0,
+        "bytes_per_second": None,
+        "eta_seconds": None,
+        "source_slow": False,
+    }
+    assert transport.initial_etag == '"stable"'
+
+
+@pytest.mark.asyncio
+async def test_executor_holds_provider_slot_through_transfer_only(
+    session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    attempt = _attempt()
+    attempt.provider_identity = "pullbox.libgen"
+    artifact = attempt.artifact_attempts[0]
+    session.add(attempt)
+    await session.commit()
+    probe = _ProviderSlotProbe()
+    resolved = ResolvedTransfer(
+        host_kind=DirectArtifactHostKind.GENERIC_HTTPS,
+        url="https://libgen.gl/get.php?md5=fixture",
+        allowed_domains=("libgen.gl",),
+        transport_protocol=ArtifactTransferProtocol.HTTPS,
+    )
+
+    async def source_factory() -> HostResolutionRequest:
+        assert probe.active is True
+        assert attempt.progress_snapshot["stage"] == "resolving"
+        return _source_request()
+
+    async def post_processor(*_args: Any, **_kwargs: Any) -> DirectPostProcessingResult:
+        assert probe.active is False
+        return await _successful_post_processor()
+
+    result = await DirectAcquisitionExecutor(
+        host_resolver=_FakeResolver(resolved),
+        http_transport=_ProviderAwareTransport(probe),
+        mega_runner=object(),
+        quarantine=DirectArtifactQuarantine(tmp_path / "quarantine"),
+        provider_limiter=probe,  # type: ignore[arg-type]
+        post_processor=post_processor,
+        now=lambda: NOW,
+    ).execute(
+        session,
+        acquisition_id=attempt.id,
+        artifact_id=artifact.id,
+        source_factory=source_factory,
+    )
+
+    assert result.state is DirectAcquisitionState.COMPLETED
+    assert probe.identities == ["pullbox.libgen"]
 
 
 @pytest.mark.asyncio
@@ -538,6 +692,12 @@ async def test_executor_routes_contiguous_pack_to_pack_post_processor(
 
     assert result.state is DirectAcquisitionState.COMPLETED
     assert observed["expected_issue_numbers"] == frozenset({"1", "2"})
+    history = (
+        await session.execute(
+            select(DownloadHistory).where(DownloadHistory.external_id == f"direct:{attempt.id}")
+        )
+    ).scalar_one()
+    assert observed["download_history_id"] == history.id
 
 
 @pytest.mark.asyncio
@@ -1686,6 +1846,20 @@ async def test_post_processing_failure_keeps_valid_artifact_for_intervention(
     assert pending.status == PendingMatchStatus.PENDING
     assert pending.download_url == f"pullbox-direct://attempt/{attempt.id}"
     assert pending.match_details["failure_code"] == "direct_post_processing_failed"
+    history = (
+        await session.execute(
+            select(DownloadHistory).where(DownloadHistory.external_id == f"direct:{attempt.id}")
+        )
+    ).scalar_one()
+    post_processing_operation = (
+        await session.execute(
+            select(OperationProgress).where(
+                OperationProgress.operation_type == OperationProgressType.POST_PROCESSING,
+                OperationProgress.operation_key == str(history.id),
+            )
+        )
+    ).scalar_one()
+    assert post_processing_operation.state is OperationProgressState.FAILED
 
 
 @pytest.mark.asyncio

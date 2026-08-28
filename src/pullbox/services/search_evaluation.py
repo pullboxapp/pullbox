@@ -32,11 +32,7 @@ def _release_source_rank(release: ReleaseResult, source_priority: list[str] | No
     normalized = normalize_source_priority(source_priority)
     if normalized is None:
         return 0
-    if release.download_url.startswith("direct://"):
-        source = "direct"
-    else:
-        source = "torrent" if release.is_torrent else "usenet"
-    return {value: index for index, value in enumerate(normalized)}[source]
+    return {value: index for index, value in enumerate(normalized)}[release.protocol.value]
 
 
 def _score_validation_result(

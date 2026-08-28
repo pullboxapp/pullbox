@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from datetime import datetime  # noqa: TC003 - Pydantic resolves this at runtime
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlsplit
 from uuid import UUID  # noqa: TC003 - Pydantic resolves this at runtime
 
 from pydantic import (
@@ -22,6 +24,7 @@ SUPPORTED_DIRECT_PROVIDER_PROTOCOLS = (DIRECT_PROVIDER_PROTOCOL_V1,)
 MAX_DIRECT_PROVIDER_RESULTS = 100
 
 _FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _ALLOWED_SCHEMA_KEYS = {
     "type",
     "title",
@@ -43,9 +46,18 @@ _ALLOWED_FIELD_KEYS = {
     "maxLength",
     "x-pullbox-secret",
     "x-pullbox-placeholder",
+    "x-pullbox-suggestions",
+    "x-pullbox-source-origin",
 }
 _ALLOWED_FIELD_TYPES = frozenset({"string", "boolean", "integer", "number"})
 _ALLOWED_INPUT_FORMATS = frozenset({"uri"})
+_SPECIAL_USE_SOURCE_SUFFIXES = (
+    "localhost",
+    "local",
+    "onion",
+    "internal",
+    "home.arpa",
+)
 
 
 class ProviderConfigurationSchemaError(ValueError):
@@ -89,6 +101,8 @@ class DirectConfigurationControl(DirectContractModel):
     min_length: int | None = None
     max_length: int | None = None
     placeholder: str | None = None
+    suggestions: tuple[str, ...] = ()
+    source_origin: bool = False
 
 
 class DirectProviderCapabilities(DirectContractModel):
@@ -212,6 +226,11 @@ class DirectCandidate(DirectContractModel):
     raw_title: str = Field(min_length=1, max_length=2_000)
     parsed: DirectParsedCandidate
     provider_confidence: float = Field(ge=0, le=1)
+    content_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^md5:[0-9a-f]{32}$",
+        repr=False,
+    )
     provenance: dict[str, DiagnosticScalar] = Field(default_factory=dict)
     can_resolve: bool = True
     expires_at: datetime | None = None
@@ -357,11 +376,28 @@ def validate_provider_configuration_schema(
         ):
             raise ProviderConfigurationSchemaError("Provider configuration choices are invalid.")
         choices = tuple(_typed_configuration_value(value, str(value_type)) for value in choices_raw)
+        suggestions = _uri_suggestions(
+            raw_field.get("x-pullbox-suggestions"),
+            value_type=value_type,
+            input_format=input_format,
+            secret=secret,
+        )
+        source_origin = raw_field.get("x-pullbox-source-origin", False)
+        if not isinstance(source_origin, bool):
+            raise ProviderConfigurationSchemaError("Provider source-origin control is invalid.")
+        if source_origin and (value_type != "string" or input_format != "uri" or secret):
+            raise ProviderConfigurationSchemaError("Provider source-origin control is invalid.")
         default = None
         if "default" in raw_field:
             default = _typed_configuration_value(raw_field["default"], str(value_type))
             if choices and default not in choices:
                 raise ProviderConfigurationSchemaError("Provider configuration default is invalid.")
+            if (source_origin or suggestions) and (
+                not isinstance(default, str) or not _is_safe_https_origin(default)
+            ):
+                raise ProviderConfigurationSchemaError(
+                    "Provider configuration URI default is unsafe."
+                )
         minimum = _number_or_none(raw_field.get("minimum"))
         maximum = _number_or_none(raw_field.get("maximum"))
         min_length = _integer_or_none(raw_field.get("minLength"))
@@ -396,9 +432,100 @@ def validate_provider_configuration_schema(
                 min_length=min_length,
                 max_length=max_length,
                 placeholder=_bounded_control_text(raw_field.get("x-pullbox-placeholder")),
+                suggestions=suggestions,
+                source_origin=source_origin,
             )
         )
     return tuple(controls)
+
+
+def _uri_suggestions(
+    raw: object,
+    *,
+    value_type: object,
+    input_format: object,
+    secret: bool,
+) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if value_type != "string" or input_format != "uri" or secret:
+        raise ProviderConfigurationSchemaError("Provider URI suggestions are invalid.")
+    if not isinstance(raw, list) or not raw or len(raw) > 20:
+        raise ProviderConfigurationSchemaError("Provider URI suggestions are invalid.")
+    suggestions: list[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not _is_safe_https_origin(value):
+            raise ProviderConfigurationSchemaError("Provider URI suggestions are invalid.")
+        if value in suggestions:
+            raise ProviderConfigurationSchemaError("Provider URI suggestions are duplicated.")
+        suggestions.append(value)
+    return tuple(suggestions)
+
+
+def _is_safe_https_origin(raw: str) -> bool:
+    if not raw or len(raw) > 2_000:
+        return False
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return False
+    hostname = parsed.hostname
+    if hostname is None:
+        return False
+    normalized_hostname = hostname.casefold().rstrip(".")
+    if not is_public_source_hostname_syntax(normalized_hostname):
+        return False
+
+    return bool(
+        parsed.scheme == "https"
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def is_public_source_hostname_syntax(hostname: str) -> bool:
+    """Reject IP literals, legacy numeric forms, and special-use namespaces."""
+    labels = hostname.split(".")
+    if (
+        len(hostname) > 253
+        or len(labels) < 2
+        or any(_DNS_LABEL.fullmatch(label) is None for label in labels)
+        or not any(character.isalpha() for character in labels[-1])
+    ):
+        return False
+    if any(
+        hostname == suffix or hostname.endswith(f".{suffix}")
+        for suffix in _SPECIAL_USE_SOURCE_SUFFIXES
+    ):
+        return False
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        return False
+    return not _looks_like_legacy_ipv4_literal(hostname)
+
+
+def _looks_like_legacy_ipv4_literal(hostname: str) -> bool:
+    labels = hostname.split(".")
+    if not 1 <= len(labels) <= 4:
+        return False
+    for label in labels:
+        if not label:
+            return False
+        if label.startswith("0x"):
+            digits = label[2:]
+            if not digits or any(character not in "0123456789abcdef" for character in digits):
+                return False
+        elif not label.isascii() or not label.isdigit():
+            return False
+    return True
 
 
 def _bounded_control_text(value: object) -> str | None:

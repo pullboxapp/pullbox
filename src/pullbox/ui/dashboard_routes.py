@@ -15,6 +15,7 @@ from sqlalchemy.orm import joinedload
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.config import get_settings
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.import_job import ImportJob, ImportJobStatus
 from pullbox.models.issue import Issue, IssueStatus
@@ -23,6 +24,7 @@ from pullbox.models.search_log import SearchLog
 from pullbox.models.series import Series
 from pullbox.services.dashboard_intelligence_service import DashboardIntelligence
 from pullbox.services.dashboard_storage_path import resolve_dashboard_storage_path
+from pullbox.services.reading_query_service import list_continue_reading
 from pullbox.ui.dashboard_display import (
     dashboard_completion_tone as dashboard_completion_tone,
 )
@@ -45,6 +47,7 @@ from pullbox.ui.dashboard_recent_activity import (
     build_download_recent_activity_item,
     build_import_recent_activity_item,
 )
+from pullbox.ui.reading_presenters import ReadingIssueCardView, present_reading_issues
 
 logger = structlog.get_logger(__name__)
 
@@ -188,6 +191,7 @@ async def dashboard(
     """Render the dashboard as an executive operations briefing."""
     dashboard_payload = await load_dashboard_intelligence(session, allow_rollup_refresh=True)
     dashboard_view = await build_dashboard_view(session, dashboard_payload)
+    continue_reading = await load_dashboard_continue_reading(session, user_id=user.id)
     return _templates().TemplateResponse(
         request,
         "pages/dashboard.html",
@@ -196,7 +200,44 @@ async def dashboard(
             user,
             dashboard=dashboard_payload,
             dashboard_view=dashboard_view,
+            continue_reading=continue_reading,
         ),
+    )
+
+
+async def load_dashboard_continue_reading(
+    session: AsyncSession,
+    *,
+    user_id: int,
+) -> tuple[ReadingIssueCardView, ...]:
+    """Load the bounded dashboard shelf without coupling it to operations data."""
+    if not get_settings().reader_enabled:
+        return ()
+    page = await list_continue_reading(
+        session,
+        user_id=user_id,
+        page=1,
+        per_page=8,
+    )
+    return present_reading_issues(page.items, density="dashboard")
+
+
+@router.get(
+    "/htmx/dashboard/continue-reading",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def dashboard_continue_reading_partial(
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Render the non-polling private Continue Reading shelf fragment."""
+    continue_reading = await load_dashboard_continue_reading(session, user_id=user.id)
+    return _templates().TemplateResponse(
+        request,
+        "partials/dashboard_continue_reading.html",
+        _ctx(request, user, continue_reading=continue_reading),
     )
 
 

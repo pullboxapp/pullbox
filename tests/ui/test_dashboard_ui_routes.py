@@ -337,6 +337,51 @@ class TestDashboardRouteContracts:
         assert 'data-testid="dashboard-downloads-panel"' not in response.text
         assert 'data-testid="dashboard-download-exceptions"' not in response.text
         assert 'data-testid="dashboard-recent-activity"' in response.text
+        assert 'data-testid="dashboard-continue-reading"' not in response.text
+
+    async def test_dashboard_continue_shelf_is_bounded_to_eight_cards(
+        self,
+        authenticated_client,
+        sec_db,
+        sec_user,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from tests.ui.test_reading_ui_routes import _seed_reading_items
+
+        await _seed_reading_items(sec_db, sec_user, count=9, mode="continue")
+
+        response = await authenticated_client.get("/")
+
+        assert response.status_code == 200
+        assert 'data-testid="dashboard-continue-reading"' in response.text
+        assert response.text.count('data-testid="reading-card"') == 8
+        assert "Continue reading" in response.text
+        assert 'href="/reading"' in response.text
+        assert "Open reading queue" in response.text
+        assert 'hx-trigger="every 3s"' not in response.text
+
+    async def test_reader_gate_hides_dashboard_continue_shelf(
+        self,
+        authenticated_client,
+        sec_db,
+        sec_user,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from tests.ui.test_reading_ui_routes import _seed_reading_items
+
+        await _seed_reading_items(sec_db, sec_user, count=1, mode="continue")
+        monkeypatch.setattr(
+            dashboard_routes,
+            "get_settings",
+            lambda: SimpleNamespace(reader_enabled=False),
+            raising=False,
+        )
+
+        response = await authenticated_client.get("/")
+
+        assert response.status_code == 200
+        assert 'data-testid="dashboard-continue-reading"' not in response.text
+        assert 'data-reading-action="want-to-read"' not in response.text
+        assert 'data-reading-action="completion"' not in response.text
 
     async def test_dashboard_storage_strip_measures_enabled_library_root(
         self,

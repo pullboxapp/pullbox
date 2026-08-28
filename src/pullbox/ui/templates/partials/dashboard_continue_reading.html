@@ -1,0 +1,24 @@
+{% if continue_reading %}
+<section
+  id="dashboard-continue-reading"
+  data-testid="dashboard-continue-reading"
+  data-reading-refresh-root
+  data-reading-refresh-url="/htmx/dashboard/continue-reading"
+  class="dashboard-section dashboard-reading-shelf"
+  aria-labelledby="dashboard-continue-reading-title"
+>
+  <div class="dashboard-reading-shelf-header">
+    <div>
+      <p class="dashboard-section__label">Your library</p>
+      <h2 id="dashboard-continue-reading-title">Continue reading</h2>
+    </div>
+    <a href="/reading" class="dashboard-reading-shelf-link">Open reading queue</a>
+  </div>
+  <div class="dashboard-reading-card-grid">
+    {% for reading_card in continue_reading %}
+      {% set reading_card_index = loop.index0 %}
+      {% include "partials/reading_issue_card.html" %}
+    {% endfor %}
+  </div>
+</section>
+{% endif %}

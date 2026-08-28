@@ -85,7 +85,12 @@ class DirectProviderClient:
         self._provider_id = provider_id
         self._owns_http_client = http_client is None
         self._http_client = http_client or httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0),
+            timeout=httpx.Timeout(
+                connect=5.0,
+                read=request_timeout_seconds,
+                write=10.0,
+                pool=5.0,
+            ),
             follow_redirects=False,
             trust_env=False,
         )
@@ -331,6 +336,10 @@ def _safe_provider_error(content: bytes) -> tuple[str, str, bool, int | None] | 
         ),
         "source_unavailable": ("Provider source is temporarily unavailable.", True),
         "source_malformed_response": ("Provider source returned an invalid response.", False),
+        "source_contract_changed": (
+            "Provider source layout no longer matches its supported contract.",
+            False,
+        ),
         "candidate_not_found": ("Provider candidate is no longer available.", False),
         "browser_challenge_required": (
             "Provider source access requires browser challenge handling.",

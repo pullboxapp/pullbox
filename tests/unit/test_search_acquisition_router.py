@@ -323,6 +323,84 @@ async def test_direct_planning_failure_creates_visible_intervention(
 
 
 @pytest.mark.asyncio
+async def test_automatic_direct_routing_uses_hidden_provider_fallback(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, provider, search_log_id = await _seed(db_factory)
+    alternate_provider = replace(
+        provider,
+        provider_config_id=2,
+        provider_identity="pullbox.libgen",
+        display_name="LibGen",
+        endpoint="http://libgen:8780",
+    )
+    outcome = _outcome(target, provider)
+    assert outcome.direct_outcome is not None
+    primary = outcome.direct_outcome.matched[0]
+    alternate = replace(
+        primary,
+        provider=alternate_provider,
+        candidate=primary.candidate.model_copy(update={"provider_candidate_id": "candidate-2"}),
+    )
+    outcome = replace(
+        outcome,
+        direct_outcome=replace(
+            outcome.direct_outcome,
+            matched=(replace(primary, alternate_results=(alternate,)),),
+            providers_searched=2,
+        ),
+    )
+    planner = AsyncMock(
+        side_effect=[
+            DirectAcquisitionPlanningError(
+                "provider_unavailable",
+                "The preferred provider is unavailable.",
+                failure_class=DirectArtifactFailureClass.PROVIDER_UNAVAILABLE,
+                intervention=False,
+            ),
+            SimpleNamespace(
+                attempt=SimpleNamespace(id=2),
+                selected_artifact=SimpleNamespace(id=22),
+                initial_source=None,
+            ),
+        ]
+    )
+    runner = SimpleNamespace(dispatch=AsyncMock())
+
+    async with db_factory() as session:
+        session.add(
+            DirectProviderConfig(
+                id=2,
+                provider_id=alternate_provider.provider_identity,
+                display_name=alternate_provider.display_name,
+                endpoint=alternate_provider.endpoint,
+                enabled=True,
+                priority=20,
+                state=DirectProviderState.HEALTHY,
+                trust_level=DirectProviderTrustLevel.VERIFIED_PULLBOX,
+            )
+        )
+        await session.commit()
+        routed = await route_search_acquisition(
+            session,
+            outcome=outcome,
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=AsyncMock(),
+            intervention_service=AsyncMock(),
+            runner=runner,
+            source_priority=["direct", "torrent", "usenet"],
+            planner=planner,
+        )
+
+    assert [call.kwargs["acquisition_id"] for call in planner.await_args_list] == [1, 2]
+    runner.dispatch.assert_awaited_once_with(2, 22, initial_source=None)
+    assert routed.action_status == "downloading"
+    assert routed.acquisition_id == 2
+
+
+@pytest.mark.asyncio
 async def test_non_intervention_direct_failure_falls_back_to_ranked_indexer(
     db_factory: async_sessionmaker[AsyncSession],
 ) -> None:

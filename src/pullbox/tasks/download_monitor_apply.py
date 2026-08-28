@@ -24,6 +24,7 @@ class MonitorApplyResult:
 HandleDownloadFailure = Callable[[AsyncSession, DownloadHistory, str], Awaitable[None]]
 ClearProgress = Callable[[int], None]
 EmitLifecycleSummary = Callable[..., None]
+PublishProgress = Callable[[AsyncSession, DownloadHistory, object | None], Awaitable[None]]
 
 
 async def apply_monitor_updates(
@@ -35,6 +36,7 @@ async def apply_monitor_updates(
     handle_download_failure: HandleDownloadFailure | None,
     emit_download_lifecycle_summary: EmitLifecycleSummary,
     event_logger: Any,
+    publish_progress: PublishProgress | None = None,
 ) -> MonitorApplyResult:
     """Apply collected monitor updates inside a short DB session."""
     completed = 0
@@ -136,5 +138,8 @@ async def apply_monitor_updates(
             # Successful poll but no state change; touch updated_at so time-based
             # stall detection does not fire on active downloads.
             dl.updated_at = datetime.now(UTC)
+
+        if publish_progress is not None:
+            await publish_progress(session, dl, update.get("progress_snapshot"))
 
     return MonitorApplyResult(completed=completed, failed=failed)

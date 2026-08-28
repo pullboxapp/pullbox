@@ -797,6 +797,76 @@ function readCsrfTokenFromBody() {
   }
 }
 
+function readingStateActions() {
+  return {
+    busy: false,
+    readingMenuOpen: false,
+    statusMessage: "",
+    statusIsError: false,
+
+    issueId: function () {
+      return this.$root.getAttribute("data-reading-issue-id") || "";
+    },
+
+    setCompletion: function (_button, completed) {
+      return this.updateReadingState("completion", { completed: completed });
+    },
+
+    setWantToRead: function (_button, wantToRead) {
+      return this.updateReadingState("want-to-read", { want_to_read: wantToRead });
+    },
+
+    updateReadingState: async function (action, payload) {
+      if (this.busy || !this.issueId()) {
+        return;
+      }
+
+      this.busy = true;
+      this.statusMessage = "Saving…";
+      this.statusIsError = false;
+      try {
+        var response = await fetch(
+          "/api/v1/reader/issues/" + this.issueId() + "/" + action,
+          {
+            method: "PUT",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": readCsrfTokenFromBody(),
+            },
+            body: JSON.stringify(payload),
+          }
+        );
+        if (!response.ok) {
+          throw new Error("reading-state-update-failed");
+        }
+        this.statusMessage = "Saved";
+        await this.refreshReadingSurface();
+      } catch (_error) {
+        this.statusMessage = "That reading update didn’t save. Try again.";
+        this.statusIsError = true;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    refreshReadingSurface: function () {
+      var root = this.$root.closest("[data-reading-refresh-root]");
+      if (!root || !window.htmx) {
+        return Promise.resolve();
+      }
+      var url = root.getAttribute("data-reading-refresh-url");
+      if (!url) {
+        return Promise.resolve();
+      }
+      return window.htmx.ajax("GET", url, {
+        target: root,
+        swap: "outerHTML",
+      });
+    },
+  };
+}
+
 function resolveHtmxSwapTarget(target) {
   if (!target) {
     return null;
@@ -3424,7 +3494,9 @@ function importProgressData(jobId, nextStep, sourceType) {
     pausing: false,
     optimisticPauseRequested: false,
     resuming: false,
+    cancelPrompting: false,
     cancelling: false,
+    cancelReturnStarted: false,
     continuing: false,
     controlState: {},
     stats: {
@@ -3658,6 +3730,12 @@ function importProgressData(jobId, nextStep, sourceType) {
     },
 
     showCancelAction: function () {
+      if (
+        (this.isScanMode() || this.isImportMode() || this.isRollbackMode()) &&
+        (this.cancelPrompting || this.cancelling)
+      ) {
+        return true;
+      }
       if (
         (this.isScanMode() || this.isImportMode() || this.isRollbackMode()) &&
         !this.completed &&
@@ -4155,7 +4233,12 @@ function importProgressData(jobId, nextStep, sourceType) {
       if (this.completed || this.failed) {
         return;
       }
-      if (String(data.status || "").toLowerCase() !== "importing") {
+      var activeStatus = String(data.status || "").toLowerCase();
+      if (
+        ["scanning", "analyzing", "matching", "file_matching", "importing", "rolling_back"].indexOf(
+          activeStatus,
+        ) === -1
+      ) {
         return;
       }
 
@@ -4174,9 +4257,9 @@ function importProgressData(jobId, nextStep, sourceType) {
         this.fileProgressRevision = incomingRevision;
       }
 
-      this.jobStatus = "importing";
-      this.phase = "importing";
-      this.phaseLabel = this.phaseLabelForKey("importing");
+      this.jobStatus = activeStatus;
+      this.phase = String(data.phase || activeStatus);
+      this.phaseLabel = this.phaseLabelForKey(this.phase);
       if (typeof data.progress === "number" && !Number.isNaN(data.progress)) {
         this.progress = Math.max(this.progress, Math.max(0, Math.min(100, Math.round(data.progress))));
       }
@@ -4795,6 +4878,24 @@ function importProgressData(jobId, nextStep, sourceType) {
       if (data.control_state && typeof data.control_state === "object") {
         this.controlState = data.control_state;
       }
+      var cancellationAction =
+        (data.control_state && typeof data.control_state.requested_action === "string"
+          ? data.control_state.requested_action
+          : typeof data.requested_action === "string"
+            ? data.requested_action
+            : ""
+        ).toLowerCase();
+      if (
+        this.jobStatus === "cancelling" ||
+        (this.jobStatus === "rolling_back" && cancellationAction === "cancel") ||
+        cancellationAction === "cancel"
+      ) {
+        this.cancelling = true;
+      } else if (
+        ["review", "completed", "failed", "cancelled", "rolled_back"].indexOf(this.jobStatus) !== -1
+      ) {
+        this.cancelling = false;
+      }
       if (this.optimisticPauseRequested) {
         var requestedAction =
           (data.control_state && typeof data.control_state.requested_action === "string"
@@ -4878,14 +4979,24 @@ function importProgressData(jobId, nextStep, sourceType) {
         return;
       }
 
-      if (data.status === "failed" || data.status === "cancelled") {
-      this.optimisticPauseRequested = false;
-      this.failed = true;
-      this.completed = false;
-      this.resetCurrentItemProgress();
-      this.emitFooterState();
-      this.stopPolling();
-      return;
+      if (data.status === "cancelled") {
+        this.optimisticPauseRequested = false;
+        this.failed = false;
+        this.completed = false;
+        this.resetCurrentItemProgress();
+        this.emitFooterState();
+        this.returnToImportStartAfterCancellation();
+        return;
+      }
+
+      if (data.status === "failed") {
+        this.optimisticPauseRequested = false;
+        this.failed = true;
+        this.completed = false;
+        this.resetCurrentItemProgress();
+        this.emitFooterState();
+        this.stopPolling();
+        return;
       }
 
       this.failed = false;
@@ -4900,6 +5011,19 @@ function importProgressData(jobId, nextStep, sourceType) {
         return;
       }
       this.applyJobState(snapshot, snapshot.recent_logs);
+    },
+
+    returnToImportStartAfterCancellation: function () {
+      if (this.cancelReturnStarted) {
+        return;
+      }
+      this.cancelReturnStarted = true;
+      this.cancelling = true;
+      this.stopPolling();
+      this.stopClock();
+      this.disconnectSSE("cancelled");
+      purgeImportClientState(this.jobId);
+      window.location.replace("/import?tab=collection");
     },
 
     startClock: function () {
@@ -4940,7 +5064,7 @@ function importProgressData(jobId, nextStep, sourceType) {
     init: function () {
       this.hydrateFromSnapshot();
       this.nowMs = Date.now();
-      if (this.completed || this.failed) {
+      if (this.completed || this.failed || this.cancelReturnStarted) {
         return;
       }
       this.startClock();
@@ -4996,6 +5120,10 @@ function importProgressData(jobId, nextStep, sourceType) {
         self.nowMs = Date.now();
         self.applyJobState(data, null);
 
+        if (self.cancelReturnStarted) {
+          return;
+        }
+
         if (self.nextStep === 5 && self.totalSelected === 0 && data.series_found) {
           self.totalSelected = data.series_found;
         }
@@ -5034,11 +5162,18 @@ function importProgressData(jobId, nextStep, sourceType) {
         var response = await fetch("/import/" + this.jobId + "/progress-state");
 
         if (!response.ok) {
+          if (response.status === 404 && this.cancelling) {
+            this.returnToImportStartAfterCancellation();
+          }
           return;
         }
 
         var job = await response.json();
         this.applyJobState(job, job.recent_logs || []);
+
+        if (this.cancelReturnStarted) {
+          return;
+        }
 
         if (this.isTerminalStatus(job.status, job.mode)) {
           this.stopPolling();
@@ -5199,7 +5334,12 @@ function importProgressData(jobId, nextStep, sourceType) {
     },
 
     cancelRun: async function () {
-      if (!this.jobId || this.cancelling || !this.showCancelAction()) {
+      if (
+        !this.jobId ||
+        this.cancelPrompting ||
+        this.cancelling ||
+        !this.showCancelAction()
+      ) {
         return;
       }
       var cancelTitle = this.isScanMode()
@@ -5212,12 +5352,18 @@ function importProgressData(jobId, nextStep, sourceType) {
         : this.isImportMode()
           ? "This will stop the current import, roll back any imported changes, and move the job to history."
           : "This will stop the current rollback run.";
-      var confirmed = await pbConfirm({
-        title: cancelTitle,
-        message: cancelMessage,
-        confirmText: this.cancelActionLabel(),
-        destructive: true,
-      });
+      this.cancelPrompting = true;
+      var confirmed = false;
+      try {
+        confirmed = await pbConfirm({
+          title: cancelTitle,
+          message: cancelMessage,
+          confirmText: this.cancelActionLabel(),
+          destructive: true,
+        });
+      } finally {
+        this.cancelPrompting = false;
+      }
       if (!confirmed) {
         return;
       }
@@ -5235,15 +5381,30 @@ function importProgressData(jobId, nextStep, sourceType) {
           });
           throw new Error(error.detail || "Failed to cancel " + this.runNoun() + ".");
         }
-        purgeImportClientState(this.jobId);
-        window.location.assign(this.isScanMode() ? "/import?tab=collection" : "/import?tab=history");
+        var job = await response.json().catch(function () {
+          return null;
+        });
+        if (!job) {
+          this.returnToImportStartAfterCancellation();
+          return;
+        }
+        var snapshot = this.jobReadToProgressState(job);
+        if (snapshot) {
+          this.applyJobState(snapshot, snapshot.recent_logs || []);
+        }
+        if (!this.cancelReturnStarted) {
+          this.startClock();
+          this.startPolling();
+          if (!this.evtSource) {
+            this.connectSSE();
+          }
+        }
       } catch (err) {
+        this.cancelling = false;
         showToast({
           message: (err && err.message) || "Failed to cancel " + this.runNoun() + ".",
           level: "error",
         });
-      } finally {
-        this.cancelling = false;
       }
     },
 
@@ -10495,6 +10656,14 @@ function appShell() {
     usageStatsLoaded: false,
     usageStatsSaving: false,
     donationsOpen: false,
+    activityOperations: [],
+    activityOpen: false,
+    activityActiveCount: 0,
+    activitySpinnerCount: 0,
+    activityAttentionCount: 0,
+    activitySource: null,
+    activityPollTimer: null,
+    activityRefreshing: false,
 
     get collapsed() {
       return !this.sidebarOpen && !this.sidebarMobileOpen;
@@ -10529,6 +10698,7 @@ function appShell() {
       };
 
       self.bootstrapUsageStatsPrompt();
+      self.bootstrapActivity();
     },
 
     destroy: function () {
@@ -10538,6 +10708,358 @@ function appShell() {
       if (window.__pullboxUpdateUsageStatsPreference) {
         delete window.__pullboxUpdateUsageStatsPreference;
       }
+      this.disconnectActivityStream();
+      this.clearActivityTimer();
+    },
+
+    clearActivityTimer: function () {
+      if (this.activityPollTimer) {
+        window.clearTimeout(this.activityPollTimer);
+        this.activityPollTimer = null;
+      }
+    },
+
+    scheduleActivityPoll: function (delayMs) {
+      var self = this;
+      self.clearActivityTimer();
+      self.activityPollTimer = window.setTimeout(function () {
+        self.activityPollTimer = null;
+        self.refreshActivity();
+      }, delayMs || 3000);
+    },
+
+    bootstrapActivity: function () {
+      this.connectActivityStream();
+      this.refreshActivity();
+    },
+
+    refreshActivity: function () {
+      var self = this;
+      if (self.activityRefreshing) {
+        return;
+      }
+      self.activityRefreshing = true;
+      fetch("/api/v1/activity", {
+        headers: { Accept: "application/json" },
+      })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("Failed to load background activity.");
+          }
+          return response.json();
+        })
+        .then(function (payload) {
+          self.activityOperations =
+            payload && Array.isArray(payload.operations) ? payload.operations : [];
+          self.activityActiveCount = Math.max(
+            0,
+            Number(payload && payload.active_count) || 0,
+          );
+          self.activitySpinnerCount = Math.max(
+            0,
+            Number(payload && payload.spinner_count) || 0,
+          );
+          self.activityAttentionCount = Math.max(
+            0,
+            Number(payload && payload.attention_count) || 0,
+          );
+        })
+        .catch(function () {
+          // Activity is supplemental; a transient failure must not interrupt the page.
+        })
+        .finally(function () {
+          self.activityRefreshing = false;
+          self.scheduleActivityPoll(3000);
+          if (!self.activitySource) {
+            self.connectActivityStream();
+          }
+        });
+    },
+
+    connectActivityStream: function () {
+      var self = this;
+      if (self.activitySource) {
+        return;
+      }
+      var source = new EventSource("/api/v1/activity/stream");
+      self.activitySource = source;
+      var refreshFromEvent = function () {
+        if (self.activitySource === source) {
+          self.refreshActivity();
+        }
+      };
+      source.addEventListener("ready", refreshFromEvent);
+      source.addEventListener("progress", refreshFromEvent);
+      source.onmessage = refreshFromEvent;
+      source.onerror = function () {
+        if (self.activitySource !== source) {
+          return;
+        }
+        self.disconnectActivityStream();
+      };
+    },
+
+    disconnectActivityStream: function () {
+      if (!this.activitySource) {
+        return;
+      }
+      try {
+        this.activitySource.close();
+      } catch (_) {
+        // Closing a stale activity stream is best-effort.
+      }
+      this.activitySource = null;
+    },
+
+    acknowledgeActivity: function (operationId) {
+      var self = this;
+      fetch("/api/v1/activity/" + operationId + "/acknowledge", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "X-CSRF-Token": readCsrfTokenFromBody(),
+        },
+      })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("Failed to dismiss activity.");
+          }
+          return response.json();
+        })
+        .then(function () {
+          self.refreshActivity();
+        })
+        .catch(function () {
+          if (typeof showToast === "function") {
+            showToast({
+              message: "Unable to dismiss this activity right now.",
+              level: "error",
+            });
+          }
+        });
+    },
+
+    activityBadgeCount: function () {
+      return this.activityAttentionCount > 0
+        ? this.activityAttentionCount
+        : this.activityActiveCount;
+    },
+
+    activityHasRecentSuccess: function () {
+      return this.activityOperations.some(function (operation) {
+        return operation && operation.state === "completed";
+      });
+    },
+
+    activityButtonLabel: function () {
+      if (this.activityAttentionCount > 0) {
+        return this.activityAttentionCount === 1
+          ? "1 activity needs attention"
+          : this.activityAttentionCount + " activities need attention";
+      }
+      if (this.activityActiveCount > 0) {
+        return this.activityActiveCount === 1
+          ? "1 background operation active"
+          : this.activityActiveCount + " background operations active";
+      }
+      if (this.activityHasRecentSuccess()) {
+        return "Background work completed";
+      }
+      return "Background activity";
+    },
+
+    activitySummaryLabel: function () {
+      if (this.activityAttentionCount > 0) {
+        return this.activityAttentionCount + " need attention";
+      }
+      if (this.activityActiveCount > 0) {
+        return this.activityActiveCount + " active";
+      }
+      if (this.activityOperations.length > 0) {
+        return "Recently completed";
+      }
+      return "Idle";
+    },
+
+    activitySourceLabel: function (operation) {
+      if (operation && operation.source_label) {
+        return operation.source_label;
+      }
+      var labels = {
+        import: "Import",
+        download: "Download",
+        post_processing: "Post-processing",
+        issue_import: "Manual import",
+        orphan_recovery: "Import recovery",
+        utility: "Utility",
+      };
+      return labels[operation && operation.operation_type] || "Background work";
+    },
+
+    activityStateLabel: function (operation) {
+      var labels = {
+        queued: "Queued",
+        running: "Working",
+        paused: "Paused",
+        retrying: "Retrying",
+        completed: "Complete",
+        failed: "Failed",
+        cancelled: "Cancelled",
+      };
+      return labels[operation && operation.state] || "Working";
+    },
+
+    activityOperationClass: function (operation) {
+      if (operation && operation.tone === "danger") {
+        return "border-pb-error/40";
+      }
+      if (operation && operation.tone === "warning") {
+        return "border-pb-warning/40";
+      }
+      if (operation && operation.tone === "success") {
+        return "border-pb-success/40";
+      }
+      return "border-pb-border";
+    },
+
+    activityToneTextClass: function (operation) {
+      if (operation && operation.tone === "danger") {
+        return "text-pb-error";
+      }
+      if (operation && operation.tone === "warning") {
+        return "text-pb-warning";
+      }
+      if (operation && operation.tone === "success") {
+        return "text-pb-success";
+      }
+      return "text-pb-interactive";
+    },
+
+    activityButtonClass: function () {
+      if (this.activityAttentionCount > 0) {
+        return "bg-pb-error/15 text-pb-error hover:bg-pb-error/25";
+      }
+      if (this.activitySpinnerCount > 0) {
+        return "bg-pb-interactive/15 text-pb-interactive hover:bg-pb-interactive/25";
+      }
+      if (this.activityHasRecentSuccess()) {
+        return "bg-pb-success/15 text-pb-success hover:bg-pb-success/25";
+      }
+      return "text-pb-text-sec hover:bg-pb-card-hover hover:text-pb-text";
+    },
+
+    activityOverallIndeterminate: function (operation) {
+      return !operation || !operation.overall || operation.overall.indeterminate === true;
+    },
+
+    activityItemIndeterminate: function (operation) {
+      return (
+        !operation ||
+        !operation.item ||
+        operation.item.indeterminate === true
+      );
+    },
+
+    activityOverallPercent: function (operation) {
+      var value = Number(operation && operation.overall && operation.overall.percent);
+      return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+    },
+
+    activityItemPercent: function (operation) {
+      var value = Number(operation && operation.item && operation.item.percent);
+      return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+    },
+
+    activityFormatMeasure: function (measure) {
+      if (!measure) {
+        return "";
+      }
+      var current = Number(measure.current);
+      var total = Number(measure.total);
+      var hasCurrent = measure.current != null && Number.isFinite(current);
+      var hasTotal = measure.total != null && Number.isFinite(total) && total > 0;
+      if (hasCurrent && hasTotal) {
+        if (
+          measure.unit === "bytes" &&
+          window._pb &&
+          typeof window._pb.formatBytes === "function"
+        ) {
+          return window._pb.formatBytes(current) + " / " + window._pb.formatBytes(total);
+        }
+        return Math.round(current) + " / " + Math.round(total) + (measure.unit ? " " + measure.unit : "");
+      }
+      var percent = Number(measure.percent);
+      if (measure.percent != null && Number.isFinite(percent)) {
+        return Math.round(percent) + "%";
+      }
+      if (hasCurrent) {
+        return Math.round(current) + (measure.unit ? " " + measure.unit : "");
+      }
+      return measure.indeterminate ? "Working" : "";
+    },
+
+    activityOverallLabel: function (operation) {
+      return this.activityFormatMeasure(operation && operation.overall);
+    },
+
+    activityItemLabel: function (operation) {
+      return this.activityFormatMeasure(operation && operation.item);
+    },
+
+    activityItemPhaseLabel: function (operation) {
+      var phase = String(
+        (operation && operation.item && operation.item.phase) ||
+        (operation && operation.phase) ||
+        "Current item",
+      );
+      return phase
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, function (letter) {
+          return letter.toUpperCase();
+        });
+    },
+
+    activityEtaLabel: function (seconds) {
+      if (seconds == null || seconds === "") {
+        return "";
+      }
+      var value = Number(seconds);
+      if (!Number.isFinite(value) || value <= 0) {
+        return "";
+      }
+      if (value < 60) {
+        return Math.max(1, Math.round(value)) + " sec remaining";
+      }
+      if (value < 3600) {
+        return Math.max(1, Math.round(value / 60)) + " min remaining";
+      }
+      var hours = Math.floor(value / 3600);
+      var minutes = Math.round((value % 3600) / 60);
+      return hours + " hr" + (minutes ? " " + minutes + " min" : "") + " remaining";
+    },
+
+    activityRateEtaLabel: function (operation) {
+      if (!operation) {
+        return "";
+      }
+      var parts = [];
+      var rate = Number(operation.rate);
+      if (operation.rate != null && Number.isFinite(rate) && rate >= 0) {
+        if (
+          operation.rate_unit === "bytes_per_second" &&
+          window._pb &&
+          typeof window._pb.formatBytes === "function"
+        ) {
+          parts.push(window._pb.formatBytes(rate) + "/s");
+        } else {
+          parts.push(Math.round(rate) + (operation.rate_unit ? " " + operation.rate_unit : ""));
+        }
+      }
+      var eta = this.activityEtaLabel(operation.eta_seconds);
+      if (eta) {
+        parts.push(eta);
+      }
+      return parts.join(" · ");
     },
 
     sidebarWidth: function () {
@@ -10802,6 +11324,7 @@ function issueSearchResultActions(config) {
       }
 
       var directAttemptId = parseInt(button.dataset.directAttempt, 10) || 0;
+      var dcRouteToken = button.dataset.dcRouteToken || "";
       var endpoint = "/api/v1/issues/" + cfg.issueId + "/grab";
       var payload = {
         download_url: button.dataset.url,
@@ -10815,6 +11338,9 @@ function issueSearchResultActions(config) {
       if (directAttemptId) {
         endpoint = "/api/v1/issues/" + cfg.issueId + "/direct-grab";
         payload = { direct_attempt_id: directAttemptId };
+      } else if (dcRouteToken) {
+        endpoint = "/api/v1/issues/" + cfg.issueId + "/dc-grab";
+        payload = { dc_route_token: dcRouteToken };
       }
 
       self.grabbing = true;
@@ -10829,7 +11355,9 @@ function issueSearchResultActions(config) {
         .then(function (response) {
           if (response.ok) {
             self.dispatchToast(
-              directAttemptId ? "Direct download queued" : "Grabbed successfully",
+              directAttemptId || dcRouteToken
+                ? "Direct download queued"
+                : "Grabbed successfully",
               "success"
             );
             self.grabbing = false;
@@ -14737,8 +15265,14 @@ function readerMixin(config) {
     readerErrorTitle: "Pullbox could not open this comic.",
     readerErrorMessage: "",
     readerManifest: null,
+    readerActiveIssueId: null,
     readerTitle: "",
     readerIssueLabel: "",
+    readerIssueTransitioning: false,
+    readerIssueStatusMessage: "",
+    readerIssueSwitchError: "",
+    readerCompletionVisible: false,
+    readerCompletionUpdating: false,
     readerPageIndex: 0,
     readerPageCount: 0,
     readerPageDraft: "1",
@@ -14756,6 +15290,7 @@ function readerMixin(config) {
     readerProgressSaveFailed: false,
     readerLastSettledPage: null,
     readerLastSettledCompletion: false,
+    readerRereadPending: false,
     readerLastSavedSignature: "",
     readerCurrentUserInitiated: false,
     readerFailedPageIndex: null,
@@ -14764,6 +15299,7 @@ function readerMixin(config) {
     readerSavedScrollY: 0,
     readerManifestController: null,
     readerProgressController: null,
+    readerIssueGeneration: 0,
     readerLoadGeneration: 0,
     readerSettledTimer: null,
     readerControlsTimer: null,
@@ -14779,7 +15315,9 @@ function readerMixin(config) {
         if (!self.readerOpen) return;
         if (document.visibilityState === "hidden") {
           self.clearReaderTimer("readerSettledTimer");
-          self.saveReaderProgress(true);
+          self.saveReaderProgress(true).catch(function () {
+            return null;
+          });
           return;
         }
         if (!self.readerPageLoading && !self.readerFatalError && self.readerPageCount) {
@@ -14790,6 +15328,23 @@ function readerMixin(config) {
         }
       };
       document.addEventListener("visibilitychange", self.readerVisibilityHandler);
+      if (cfg.openReaderOnLoad && typeof self.$nextTick === "function") {
+        cfg.openReaderOnLoad = false;
+        self.$nextTick(function () {
+          var opener = self.$root
+            ? self.$root.querySelector("[data-testid='issue-action-read']")
+            : null;
+          if (!opener || !self.$refs.readerDialog) return;
+          var currentUrl = new URL(window.location.href);
+          currentUrl.searchParams.delete("read");
+          window.history.replaceState(
+            window.history.state,
+            "",
+            currentUrl.pathname + currentUrl.search + currentUrl.hash
+          );
+          self.openReader({ currentTarget: opener });
+        });
+      }
     },
 
     destroy: function () {
@@ -14822,33 +15377,12 @@ function readerMixin(config) {
         });
       }
 
-      self.readerManifestController = new AbortController();
-      fetch(cfg.readerManifestUrl, {
-        method: "GET",
-        signal: self.readerManifestController.signal,
-      })
-        .then(function (response) {
-          if (!response.ok) {
-            return responseMessage(response, "The comic could not be prepared.").then(
-              function (message) {
-                throw new Error(message);
-              }
-            );
-          }
-          return response.json();
-        })
+      var generation = self.readerIssueGeneration + 1;
+      self.readerIssueGeneration = generation;
+      self.fetchReaderManifest(cfg.readerManifestUrl, generation)
         .then(function (manifest) {
-          if (!self.readerOpen) return;
-          var pageCount = Number(manifest.page_count);
-          if (!Number.isInteger(pageCount) || pageCount < 1 || !manifest.page_url_template) {
-            throw new Error("This comic does not contain any readable pages.");
-          }
-          self.readerManifest = manifest;
-          self.readerTitle = String(manifest.title || cfg.seriesTitle || "Comic reader");
-          self.readerIssueLabel = String(manifest.issue_label || cfg.issueLabel || "");
-          self.readerPageCount = pageCount;
-          var initialPage = clampPage(Number(manifest.initial_page_index) || 0, pageCount);
-          return self.loadReaderPage(initialPage, false);
+          if (!manifest) return false;
+          return self.activateReaderManifest(manifest, false);
         })
         .catch(function (error) {
           if (error && error.name === "AbortError") return;
@@ -14863,14 +15397,29 @@ function readerMixin(config) {
 
     resetReaderSession: function () {
       this.clearReaderWork();
+      this.readerFitMode = "page";
+      this.readerZoomPercent = 100;
+      this.readerDirection = "ltr";
+      this.readerControlsVisible = true;
+      this.readerHelpVisible = false;
+      this.resetReaderIssue();
+    },
+
+    resetReaderIssue: function () {
       this.readerLoading = false;
       this.readerPageLoading = false;
       this.readerFatalError = false;
       this.readerErrorTitle = "Pullbox could not open this comic.";
       this.readerErrorMessage = "";
       this.readerManifest = null;
+      this.readerActiveIssueId = null;
       this.readerTitle = "";
       this.readerIssueLabel = "";
+      this.readerIssueTransitioning = false;
+      this.readerIssueStatusMessage = "";
+      this.readerIssueSwitchError = "";
+      this.readerCompletionVisible = false;
+      this.readerCompletionUpdating = false;
       this.readerPageIndex = 0;
       this.readerPageCount = 0;
       this.readerPageDraft = "1";
@@ -14878,14 +15427,10 @@ function readerMixin(config) {
       this.readerImageUrl = "";
       this.readerImageNaturalWidth = 0;
       this.readerImageNaturalHeight = 0;
-      this.readerFitMode = "page";
-      this.readerZoomPercent = 100;
-      this.readerDirection = "ltr";
-      this.readerControlsVisible = true;
-      this.readerHelpVisible = false;
       this.readerProgressSaveFailed = false;
       this.readerLastSettledPage = null;
       this.readerLastSettledCompletion = false;
+      this.readerRereadPending = false;
       this.readerLastSavedSignature = "";
       this.readerCurrentUserInitiated = false;
       this.readerFailedPageIndex = null;
@@ -14893,13 +15438,18 @@ function readerMixin(config) {
     },
 
     clearReaderWork: function () {
-      if (this.readerManifestController) {
-        this.readerManifestController.abort();
-        this.readerManifestController = null;
-      }
+      this.readerIssueGeneration += 1;
+      this.clearReaderIssueWork();
       if (this.readerProgressController) {
         this.readerProgressController.abort();
         this.readerProgressController = null;
+      }
+    },
+
+    clearReaderIssueWork: function () {
+      if (this.readerManifestController) {
+        this.readerManifestController.abort();
+        this.readerManifestController = null;
       }
       this.readerLoadGeneration += 1;
       this.clearReaderTimer("readerSettledTimer");
@@ -14941,7 +15491,9 @@ function readerMixin(config) {
 
     closeReaderDialog: function () {
       var dialog = this.$refs.readerDialog;
-      this.saveReaderProgress(true);
+      this.saveReaderProgress(true).catch(function () {
+        return null;
+      });
       this.readerOpen = false;
       this.clearReaderWork();
       if (dialog && dialog.open) dialog.close();
@@ -14975,6 +15527,61 @@ function readerMixin(config) {
         "{page_index}",
         encodeURIComponent(String(pageIndex))
       );
+    },
+
+    fetchReaderManifest: async function (url, generation) {
+      if (!url) throw new Error("The comic could not be prepared.");
+      if (this.readerManifestController) this.readerManifestController.abort();
+      var controller = new AbortController();
+      this.readerManifestController = controller;
+      try {
+        var response = await fetch(url, {
+          method: "GET",
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          var message = await responseMessage(response, "The comic could not be prepared.");
+          throw new Error(message);
+        }
+        var manifest = await response.json();
+        if (generation !== this.readerIssueGeneration || !this.readerOpen) return null;
+        var pageCount = Number(manifest.page_count);
+        if (!Number.isInteger(pageCount) || pageCount < 1 || !manifest.page_url_template) {
+          throw new Error("This comic does not contain any readable pages.");
+        }
+        return manifest;
+      } finally {
+        if (this.readerManifestController === controller) {
+          this.readerManifestController = null;
+        }
+      }
+    },
+
+    activateReaderManifest: async function (manifest, announce) {
+      this.clearReaderIssueWork();
+      this.resetReaderIssue();
+      this.readerManifest = manifest;
+      this.readerRereadPending = Boolean(
+        manifest.state && manifest.state.completed_at
+      );
+      this.readerActiveIssueId = Number(manifest.issue_id) || null;
+      this.readerTitle = String(manifest.title || cfg.seriesTitle || "Comic reader");
+      this.readerIssueLabel = String(manifest.issue_label || cfg.issueLabel || "");
+      this.readerPageCount = Number(manifest.page_count);
+      this.readerLoading = true;
+      var initialPage = clampPage(
+        Number(manifest.initial_page_index) || 0,
+        this.readerPageCount
+      );
+      var loaded = await this.loadReaderPage(initialPage, false);
+      if (!loaded) return false;
+      if (announce) {
+        this.readerIssueStatusMessage =
+          "Opened " + this.readerIssueLabel + ", page " +
+          String(this.readerPageIndex + 1) + " of " + String(this.readerPageCount);
+      }
+      if (this.$refs.readerViewport) this.$refs.readerViewport.focus();
+      return true;
     },
 
     loadReaderPage: function (pageIndex, userInitiated) {
@@ -15063,11 +15670,13 @@ function readerMixin(config) {
         self.readerLastSettledPage = pageIndex;
         self.readerLastSettledCompletion =
           Boolean(userInitiated) && pageIndex === self.readerPageCount - 1;
-        self.saveReaderProgress(false);
+        self.saveReaderProgress(false).catch(function () {
+          return null;
+        });
       }, 750);
     },
 
-    saveReaderProgress: function (keepalive) {
+    saveReaderProgress: async function (keepalive) {
       var self = this;
       var manifest = self.readerManifest;
       if (
@@ -15076,48 +15685,235 @@ function readerMixin(config) {
         !manifest.progress_url ||
         !manifest.revision
       ) {
-        return;
+        return manifest && manifest.state ? manifest.state : null;
       }
       var payload = {
         revision: String(manifest.revision),
         page_index: self.readerLastSettledPage,
         page_count: self.readerPageCount,
         completion_candidate: Boolean(self.readerLastSettledCompletion),
+        reread_started: Boolean(
+          self.readerRereadPending &&
+          self.readerLastSettledPage === 0 &&
+          !self.readerLastSettledCompletion
+        ),
       };
       var signature = JSON.stringify(payload);
       if (!self.readerProgressSaveFailed && signature === self.readerLastSavedSignature) {
-        return;
+        return manifest.state || null;
       }
 
       if (!keepalive && self.readerProgressController) {
         self.readerProgressController.abort();
       }
       var controller = keepalive ? null : new AbortController();
-      self.readerProgressController = controller;
-      fetch(manifest.progress_url, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": self.csrfToken(),
-        },
-        body: signature,
-        keepalive: Boolean(keepalive),
-        signal: controller ? controller.signal : undefined,
-      })
-        .then(function (response) {
-          if (!response.ok) throw new Error("Reading position was not saved.");
-          self.readerLastSavedSignature = signature;
-          self.readerProgressSaveFailed = false;
-        })
-        .catch(function (error) {
-          if (error && error.name === "AbortError") return;
-          self.readerProgressSaveFailed = true;
-        })
-        .finally(function () {
-          if (self.readerProgressController === controller) {
-            self.readerProgressController = null;
-          }
+      if (controller) self.readerProgressController = controller;
+      try {
+        var response = await fetch(manifest.progress_url, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": self.csrfToken(),
+          },
+          body: signature,
+          keepalive: Boolean(keepalive),
+          signal: controller ? controller.signal : undefined,
         });
+        if (!response.ok) throw new Error("Reading position was not saved.");
+        var canonical = await response.json();
+        self.readerProgressSaveFailed = false;
+        if (canonical.state) manifest.state = canonical.state;
+        if (
+          payload.reread_started &&
+          canonical.state &&
+          !canonical.state.completed_at
+        ) {
+          self.readerRereadPending = false;
+          self.readerCompletionVisible = false;
+          self.readerLastSavedSignature = JSON.stringify({
+            revision: payload.revision,
+            page_index: payload.page_index,
+            page_count: payload.page_count,
+            completion_candidate: payload.completion_candidate,
+            reread_started: false,
+          });
+        } else {
+          self.readerLastSavedSignature = signature;
+        }
+        if (
+          payload.completion_candidate &&
+          canonical.state &&
+          canonical.state.completed_at
+        ) {
+          self.readerCompletionVisible = true;
+          self.readerIssueStatusMessage = "Finished " + self.readerIssueLabel;
+        }
+        return canonical.state || canonical;
+      } catch (error) {
+        if (!error || error.name !== "AbortError") self.readerProgressSaveFailed = true;
+        throw error;
+      } finally {
+        if (controller && self.readerProgressController === controller) {
+          self.readerProgressController = null;
+        }
+      }
+    },
+
+    readerAdjacentIssue: function (direction) {
+      if (!this.readerManifest) return null;
+      return direction === "previous"
+        ? this.readerManifest.previous_issue
+        : this.readerManifest.next_issue;
+    },
+
+    readerIssueControlLabel: function (direction) {
+      var adjacent = this.readerAdjacentIssue(direction);
+      var action = direction === "previous" ? "Previous issue" : "Next issue";
+      return adjacent && adjacent.issue_label
+        ? action + ", " + String(adjacent.issue_label)
+        : action;
+    },
+
+    readerPreviousIssue: function () {
+      return this.switchReaderIssue("previous");
+    },
+
+    readerNextIssue: function () {
+      return this.switchReaderIssue("next");
+    },
+
+    captureReaderIssue: function () {
+      return {
+        manifest: this.readerManifest,
+        activeIssueId: this.readerActiveIssueId,
+        title: this.readerTitle,
+        issueLabel: this.readerIssueLabel,
+        pageIndex: this.readerPageIndex,
+        pageCount: this.readerPageCount,
+        pageDraft: this.readerPageDraft,
+        imageUrl: this.readerImageUrl,
+        imageNaturalWidth: this.readerImageNaturalWidth,
+        imageNaturalHeight: this.readerImageNaturalHeight,
+        lastSettledPage: this.readerLastSettledPage,
+        lastSettledCompletion: this.readerLastSettledCompletion,
+        lastSavedSignature: this.readerLastSavedSignature,
+        currentUserInitiated: this.readerCurrentUserInitiated,
+        completionVisible: this.readerCompletionVisible,
+        rereadPending: this.readerRereadPending,
+      };
+    },
+
+    restoreReaderIssue: function (snapshot) {
+      this.readerManifest = snapshot.manifest;
+      this.readerActiveIssueId = snapshot.activeIssueId;
+      this.readerTitle = snapshot.title;
+      this.readerIssueLabel = snapshot.issueLabel;
+      this.readerPageIndex = snapshot.pageIndex;
+      this.readerPageCount = snapshot.pageCount;
+      this.readerPageDraft = snapshot.pageDraft;
+      this.readerImageUrl = snapshot.imageUrl;
+      this.readerImageNaturalWidth = snapshot.imageNaturalWidth;
+      this.readerImageNaturalHeight = snapshot.imageNaturalHeight;
+      this.readerLastSettledPage = snapshot.lastSettledPage;
+      this.readerLastSettledCompletion = snapshot.lastSettledCompletion;
+      this.readerLastSavedSignature = snapshot.lastSavedSignature;
+      this.readerCurrentUserInitiated = snapshot.currentUserInitiated;
+      this.readerCompletionVisible = snapshot.completionVisible;
+      this.readerRereadPending = snapshot.rereadPending;
+      this.readerLoading = false;
+      this.readerPageLoading = false;
+      this.readerFatalError = false;
+      this.readerFailedPageIndex = null;
+      this.readerErrorTitle = "Pullbox could not open this comic.";
+      this.readerErrorMessage = "";
+      if (this.readerManifest) this.prefetchReaderNeighbors(this.readerPageIndex);
+    },
+
+    switchReaderIssue: async function (direction) {
+      if (
+        this.readerIssueTransitioning ||
+        this.readerCompletionUpdating ||
+        this.readerLoading ||
+        this.readerPageLoading
+      ) {
+        return false;
+      }
+      var adjacent = this.readerAdjacentIssue(direction);
+      if (!adjacent || !adjacent.manifest_url) return false;
+
+      this.readerIssueTransitioning = true;
+      this.readerIssueSwitchError = "";
+      this.readerIssueStatusMessage =
+        "Opening " + String(adjacent.issue_label || "another issue") + "…";
+      this.clearReaderTimer("readerSettledTimer");
+      try {
+        await this.saveReaderProgress(false);
+      } catch (_saveError) {
+        this.readerIssueSwitchError =
+          "Your reading position hasn’t saved yet. Try again before changing issues.";
+        this.readerIssueStatusMessage = this.readerIssueSwitchError;
+        this.readerIssueTransitioning = false;
+        this.showReaderControls();
+        return false;
+      }
+
+      var previousIssue = this.captureReaderIssue();
+      var generation = this.readerIssueGeneration + 1;
+      this.readerIssueGeneration = generation;
+      try {
+        var manifest = await this.fetchReaderManifest(adjacent.manifest_url, generation);
+        if (!manifest) return false;
+        var loaded = await this.activateReaderManifest(manifest, true);
+        if (!loaded) {
+          this.clearReaderIssueWork();
+          this.restoreReaderIssue(previousIssue);
+          throw new Error("The next comic page could not be displayed.");
+        }
+        this.readerIssueTransitioning = false;
+        this.showReaderControls();
+        return loaded;
+      } catch (error) {
+        if (error && error.name === "AbortError") return false;
+        this.readerIssueSwitchError =
+          (error && error.message) || "The next comic could not be opened.";
+        this.readerIssueStatusMessage = this.readerIssueSwitchError;
+        this.readerIssueTransitioning = false;
+        this.showReaderControls();
+        return false;
+      }
+    },
+
+    readerMarkUnread: async function () {
+      if (
+        this.readerCompletionUpdating ||
+        !this.readerManifest ||
+        !this.readerManifest.completion_url
+      ) {
+        return;
+      }
+      this.readerCompletionUpdating = true;
+      try {
+        var response = await fetch(this.readerManifest.completion_url, {
+          method: "PUT",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": this.csrfToken(),
+          },
+          body: JSON.stringify({ completed: false }),
+        });
+        if (!response.ok) throw new Error("Reading status was not saved.");
+        var canonical = await response.json();
+        if (canonical.state) this.readerManifest.state = canonical.state;
+        this.readerRereadPending = false;
+        this.readerCompletionVisible = false;
+        this.readerIssueStatusMessage = this.readerIssueLabel + " marked unread";
+      } catch (error) {
+        this.readerIssueSwitchError =
+          (error && error.message) || "Reading status was not saved.";
+      } finally {
+        this.readerCompletionUpdating = false;
+      }
     },
 
     prefetchReaderNeighbors: function (pageIndex) {
@@ -15162,12 +15958,20 @@ function readerMixin(config) {
     },
 
     readerPrevious: function () {
-      if (this.readerPageLoading || this.readerPageIndex <= 0) return;
+      if (
+        this.readerIssueTransitioning ||
+        this.readerPageLoading ||
+        this.readerPageIndex <= 0
+      ) return;
       this.loadReaderPage(this.readerPageIndex - 1, true);
     },
 
     readerNext: function () {
-      if (this.readerPageLoading || this.readerPageIndex >= this.readerPageCount - 1) return;
+      if (
+        this.readerIssueTransitioning ||
+        this.readerPageLoading ||
+        this.readerPageIndex >= this.readerPageCount - 1
+      ) return;
       this.loadReaderPage(this.readerPageIndex + 1, true);
     },
 
@@ -16314,6 +17118,16 @@ function seriesIssuesPanel() {
   };
 }
 
+window.pullboxSeriesIssuesCanPoll = function () {
+  if (!window.pullboxLiveUpdatesEnabled()) return false;
+  var active = document.activeElement;
+  return !(
+    active &&
+    active.closest &&
+    active.closest("#series-issues-panel [data-reading-interaction]")
+  );
+};
+
 function issueSearchModal() {
   return {
     searchOpen: false,
@@ -16323,6 +17137,129 @@ function issueSearchModal() {
     searchSeriesYear: "",
     searching: false,
     swapListener: null,
+    dcSearching: false,
+    dcVisualMessage: "",
+    dcLiveMessage: "",
+    dcAbortController: null,
+
+    clearDcSearch: function () {
+      if (this.dcAbortController) {
+        this.dcAbortController.abort();
+        this.dcAbortController = null;
+      }
+      this.dcSearching = false;
+      this.dcVisualMessage = "";
+      this.dcLiveMessage = "";
+      var results = document.getElementById("issue-search-dc-results");
+      if (results) {
+        results.innerHTML = "";
+      }
+    },
+
+    applyDcProgress: function (progress) {
+      var state = progress && progress.state;
+      if (state === "cooldown") {
+        var seconds = Number(progress.remaining_seconds) || 0;
+        var template = "Direct Connect search will resume in {seconds} seconds to respect the 45-second hub cooldown.";
+        this.dcVisualMessage = template.replace("{seconds}", String(seconds));
+        if (!this.dcLiveMessage || this.dcLiveMessage.indexOf("cooldown") === -1) {
+          this.dcLiveMessage = this.dcVisualMessage;
+        }
+        return;
+      }
+      if (state === "starting") {
+        this.dcVisualMessage = "Waiting for AirDC++ to send the search…";
+        this.dcLiveMessage = "Direct Connect search started.";
+      } else if (state === "queued") {
+        this.dcVisualMessage = "AirDC++ queued this search to protect its hub connections. Pullbox will keep collecting results when it is sent.";
+      } else if (state === "collecting") {
+        this.dcVisualMessage = "Collecting Direct Connect results…";
+      } else if (state === "finishing") {
+        this.dcVisualMessage = "Finishing the search…";
+      } else if (state === "zero_hubs") {
+        this.dcVisualMessage = "AirDC++ is connected, but it doesn't have any open hubs to search. Open AirDC++ to check your hub connections.";
+      } else if (state === "failed") {
+        this.dcVisualMessage = "Direct Connect search is temporarily unavailable. Existing results are still available.";
+      }
+    },
+
+    consumeDcStream: async function (response) {
+      if (!response.body) {
+        throw new Error("Direct Connect search stream is unavailable");
+      }
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var frames = buffer.split("\n\n");
+        buffer = frames.pop() || "";
+        for (var i = 0; i < frames.length; i += 1) {
+          var dataLine = frames[i].split("\n").find(function (line) {
+            return line.indexOf("data: ") === 0;
+          });
+          if (!dataLine) continue;
+          var event = JSON.parse(dataLine.slice(6));
+          if (event.kind === "progress") {
+            this.applyDcProgress(event.progress);
+          } else if (event.kind === "results") {
+            var target = document.getElementById("issue-search-dc-results");
+            if (target) {
+              target.innerHTML = event.html;
+              if (window.htmx) window.htmx.process(target);
+              if (window.Alpine && typeof window.Alpine.initTree === "function") {
+                window.Alpine.initTree(target);
+              }
+            }
+            this.dcLiveMessage = event.summary;
+          }
+        }
+      }
+    },
+
+    startDcSearch: async function () {
+      this.clearDcSearch();
+      this.dcAbortController = new AbortController();
+      var signal = this.dcAbortController.signal;
+      var base = "/htmx/issues/" + this.searchIssueId;
+      try {
+        var statusResponse = await fetch(base + "/dc-search-status", {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+          signal: signal,
+        });
+        if (!statusResponse.ok) return;
+        var status = await statusResponse.json();
+        if (!status.available) return;
+        this.dcSearching = true;
+        if (status.remaining_seconds > 0) {
+          this.applyDcProgress({
+            state: "cooldown",
+            remaining_seconds: status.remaining_seconds,
+          });
+        } else {
+          this.applyDcProgress({ state: "starting" });
+        }
+        var response = await fetch(base + "/dc-search-results", {
+          credentials: "same-origin",
+          headers: { Accept: "text/event-stream" },
+          signal: signal,
+        });
+        if (!response.ok) throw new Error("Direct Connect search failed");
+        await this.consumeDcStream(response);
+      } catch (error) {
+        if (!signal.aborted) {
+          this.applyDcProgress({ state: "failed" });
+        }
+      } finally {
+        if (!signal.aborted) {
+          this.dcSearching = false;
+        }
+        this.dcAbortController = null;
+      }
+    },
 
     resetMeta: function () {
       var stats = document.getElementById("issue-search-modal-stats");
@@ -16348,6 +17285,7 @@ function issueSearchModal() {
         window.pbHideTooltip();
       }
       this.clearSwapListener();
+      this.clearDcSearch();
       this.searchIssueId = detail.issueId;
       this.searchIssueNum = detail.issueNum;
       this.searchSeriesTitle = detail.seriesTitle;
@@ -16364,6 +17302,7 @@ function issueSearchModal() {
         if (event.detail && event.detail.target && event.detail.target.id === "issue-search-modal-body") {
           self.searching = false;
           self.clearSwapListener();
+          self.startDcSearch();
         }
       };
       document.addEventListener("htmx:afterSwap", this.swapListener);
@@ -16379,6 +17318,7 @@ function issueSearchModal() {
       this.searchOpen = false;
       this.searching = false;
       this.clearSwapListener();
+      this.clearDcSearch();
       this.resetMeta();
     },
   };

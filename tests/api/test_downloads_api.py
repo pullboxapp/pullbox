@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from pullbox.api.v1 import downloads as downloads_api
 from pullbox.core.exceptions import NotFoundError
 from pullbox.models import Base
+from pullbox.models.airdcpp import AirDcppAcquisition
+from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
     DirectAcquisitionState,
@@ -30,6 +32,7 @@ from pullbox.models.indexer import IndexerConfig, IndexerSource, IndexerType
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
 from pullbox.models.user import APIKey, User
+from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
 from pullbox.providers.download.qbittorrent import QBittorrentError
 from pullbox.providers.indexer.newznab import NewznabError
 from pullbox.services.auth_service import AuthService
@@ -131,6 +134,7 @@ async def _seed_download(
     error_message: str | None = "Download failed",
     completed_at: datetime | None = None,
     indexer_id: int | None = None,
+    download_client_config_id: int | None = None,
 ) -> int:
     async with factory() as session:
         download = DownloadHistory(
@@ -144,12 +148,31 @@ async def _seed_download(
             error_message=error_message,
             completed_at=completed_at,
             indexer_id=indexer_id,
+            download_client_config_id=download_client_config_id,
         )
         session.add(download)
         await session.flush()
         download_id = download.id
         await session.commit()
         return download_id
+
+
+async def _seed_client_config(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    config_id: int,
+    client_type: DownloadClientType,
+) -> None:
+    async with factory() as session:
+        session.add(
+            DownloadClientConfig(
+                id=config_id,
+                name=f"Client {config_id}",
+                client_type=client_type,
+                url=f"http://client-{config_id}.test",
+            )
+        )
+        await session.commit()
 
 
 async def _seed_direct_download_with_routes(
@@ -279,6 +302,7 @@ class TestDownloadQueueAndHistory:
         assert response.status_code == 200
         data = response.json()
         assert {item["state"] for item in data} == {"queued", "finalizing"}
+        assert {item["protocol"] for item in data} == {"usenet"}
         assert data[0]["series_title"] == "Batman"
         assert data[0]["issue_number"] == 4.0
 
@@ -316,6 +340,7 @@ class TestDownloadQueueAndHistory:
         assert data["has_more"] is False
         assert len(data["items"]) == 2
         assert all(item["series_title"] == "Batman" for item in data["items"])
+        assert {item["protocol"] for item in data["items"]} == {"usenet"}
 
 
 class TestDownloadPostProcessingRetry:
@@ -757,6 +782,44 @@ class TestDownloadRouteFunctions:
         assert issue.status == IssueStatus.DOWNLOADING
 
     @pytest.mark.asyncio
+    async def test_retry_download_route_uses_exact_client_config(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _seed_client_config(
+            db_factory,
+            config_id=22,
+            client_type=DownloadClientType.SABNZBD,
+        )
+        issue_id = await _seed_issue(db_factory)
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            downloaded_path=None,
+            download_client_config_id=22,
+        )
+        first = AsyncMock(client_type="sabnzbd")
+        first.add_nzb = AsyncMock(return_value="wrong-client")
+        exact = AsyncMock(client_type="sabnzbd")
+        exact.add_nzb = AsyncMock(return_value="exact-client")
+
+        async with db_factory() as session:
+            with patch(
+                "pullbox.composition.providers.register_download_clients",
+                new_callable=AsyncMock,
+            ) as mock_register:
+
+                async def _register(_session: object, registry: object) -> None:
+                    registry.register_download_client(11, first)  # type: ignore[union-attr]
+                    registry.register_download_client(22, exact)  # type: ignore[union-attr]
+
+                mock_register.side_effect = _register
+                await downloads_api.retry_download(download_id, object(), session)  # type: ignore[arg-type]
+
+        exact.add_nzb.assert_awaited_once()
+        first.add_nzb.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_retry_download_route_sends_torrent(
         self,
         db_factory: async_sessionmaker[AsyncSession],
@@ -910,6 +973,45 @@ class TestDownloadRouteFunctions:
         assert deleted is None
 
     @pytest.mark.asyncio
+    async def test_cancel_download_route_uses_exact_client_config(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _seed_client_config(
+            db_factory,
+            config_id=22,
+            client_type=DownloadClientType.SABNZBD,
+        )
+        issue_id = await _seed_issue(db_factory, status=IssueStatus.DOWNLOADING)
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            state=DownloadState.DOWNLOADING,
+            error_message=None,
+            download_client_config_id=22,
+        )
+        first = AsyncMock(client_type="sabnzbd")
+        first.remove_download = AsyncMock(return_value=True)
+        exact = AsyncMock(client_type="sabnzbd")
+        exact.remove_download = AsyncMock(return_value=True)
+
+        async with db_factory() as session:
+            with patch(
+                "pullbox.composition.providers.register_download_clients",
+                new_callable=AsyncMock,
+            ) as mock_register:
+
+                async def _register(_session: object, registry: object) -> None:
+                    registry.register_download_client(11, first)  # type: ignore[union-attr]
+                    registry.register_download_client(22, exact)  # type: ignore[union-attr]
+
+                mock_register.side_effect = _register
+                await downloads_api.cancel_download(download_id, object(), session)  # type: ignore[arg-type]
+
+        exact.remove_download.assert_awaited_once()
+        first.remove_download.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_cancel_download_routes_direct_rows_to_native_runner(
         self,
         db_factory: async_sessionmaker[AsyncSession],
@@ -946,6 +1048,263 @@ class TestDownloadRouteFunctions:
         download = await _get_download(db_factory, download_id)
         assert download.state is DownloadState.FAILED
         assert download.error_message == "Cancelled by user"
+
+    @pytest.mark.asyncio
+    async def test_cancel_download_removes_exact_airdcpp_bundle_without_files(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        issue_id = await _seed_issue(db_factory, status=IssueStatus.DOWNLOADING)
+        config_id = 77
+        await _seed_client_config(
+            db_factory,
+            config_id=config_id,
+            client_type=DownloadClientType.AIRDCPP,
+        )
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            state=DownloadState.DOWNLOADING,
+            client_type=DownloadClientType.AIRDCPP,
+            external_id=f"airdcpp:{config_id}:bundle:91",
+            download_client_config_id=config_id,
+        )
+        async with db_factory() as session:
+            acquisition = AirDcppAcquisition(
+                download_history_id=download_id,
+                request_key="cancel-airdcpp",
+                client_config_id=config_id,
+                client_identity=f"airdcpp:{config_id}",
+                tth="CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y",
+                size_bytes=100_000_000,
+                original_name="Batman 004 (2025).cbz",
+                bundle_id=91,
+                client_state="queued",
+            )
+            session.add(acquisition)
+            await session.flush()
+            acquisition_id = acquisition.id
+            await session.commit()
+
+        api = AsyncMock()
+        supervisor = SimpleNamespace(
+            state=AirDcppSupervisorState.READY,
+            api_client=api,
+        )
+        registry = SimpleNamespace(
+            get=lambda selected: supervisor if selected == config_id else None
+        )
+        with (
+            patch(
+                "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+                return_value=registry,
+            ),
+            patch("pullbox.tasks.download_task._clear_progress"),
+        ):
+            async with db_factory() as session:
+                await downloads_api.cancel_download(download_id, object(), session)  # type: ignore[arg-type]
+                await session.commit()
+
+        api.remove_queue_bundle.assert_awaited_once_with(91)
+        async with db_factory() as session:
+            download = await session.get(DownloadHistory, download_id)
+            acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+            issue = await session.get(Issue, issue_id)
+            assert download is not None and acquisition is not None and issue is not None
+            assert download.state is DownloadState.FAILED
+            assert acquisition.client_state == "cancelled"
+            assert issue.status is IssueStatus.WANTED
+
+    @pytest.mark.asyncio
+    async def test_cancel_airdcpp_download_preserves_active_state_when_client_unavailable(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        issue_id = await _seed_issue(db_factory, status=IssueStatus.DOWNLOADING)
+        config_id = 79
+        await _seed_client_config(
+            db_factory,
+            config_id=config_id,
+            client_type=DownloadClientType.AIRDCPP,
+        )
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            state=DownloadState.DOWNLOADING,
+            client_type=DownloadClientType.AIRDCPP,
+            external_id=f"airdcpp:{config_id}:bundle:93",
+            download_client_config_id=config_id,
+            error_message=None,
+        )
+        async with db_factory() as session:
+            acquisition = AirDcppAcquisition(
+                download_history_id=download_id,
+                request_key="cancel-airdcpp-unavailable",
+                client_config_id=config_id,
+                client_identity=f"airdcpp:{config_id}",
+                tth="CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y",
+                size_bytes=100_000_000,
+                original_name="Batman 004 (2025).cbz",
+                bundle_id=93,
+                client_state="queued",
+            )
+            session.add(acquisition)
+            await session.flush()
+            acquisition_id = acquisition.id
+            await session.commit()
+
+        registry = SimpleNamespace(get=lambda _selected: None)
+        with patch(
+            "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+            return_value=registry,
+        ):
+            async with db_factory() as session:
+                with pytest.raises(HTTPException) as exc_info:
+                    await downloads_api.cancel_download(download_id, object(), session)  # type: ignore[arg-type]
+                await session.rollback()
+
+        assert exc_info.value.status_code == 503
+        async with db_factory() as session:
+            download = await session.get(DownloadHistory, download_id)
+            acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+            issue = await session.get(Issue, issue_id)
+            assert download is not None and acquisition is not None and issue is not None
+            assert download.state is DownloadState.DOWNLOADING
+            assert download.error_message is None
+            assert acquisition.client_state == "queued"
+            assert issue.status is IssueStatus.DOWNLOADING
+
+    @pytest.mark.asyncio
+    async def test_retry_airdcpp_download_schedules_bounded_exact_bundle_source_search(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        issue_id = await _seed_issue(db_factory, status=IssueStatus.WANTED)
+        config_id = 78
+        await _seed_client_config(
+            db_factory,
+            config_id=config_id,
+            client_type=DownloadClientType.AIRDCPP,
+        )
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            state=DownloadState.FAILED,
+            client_type=DownloadClientType.AIRDCPP,
+            external_id=f"airdcpp:{config_id}:bundle:92",
+            download_client_config_id=config_id,
+            error_message="AirDC++ reported a fatal download error.",
+        )
+        async with db_factory() as session:
+            acquisition = AirDcppAcquisition(
+                download_history_id=download_id,
+                request_key="retry-airdcpp",
+                client_config_id=config_id,
+                client_identity=f"airdcpp:{config_id}",
+                tth="CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y",
+                size_bytes=100_000_000,
+                original_name="Batman 004 (2025).cbz",
+                bundle_id=92,
+                client_state="download_error",
+            )
+            session.add(acquisition)
+            await session.flush()
+            acquisition_id = acquisition.id
+            await session.commit()
+
+        async with db_factory() as session:
+            response = await downloads_api.retry_download(download_id, object(), session)  # type: ignore[arg-type]
+            await session.commit()
+
+        assert response == {"status": "sent"}
+        async with db_factory() as session:
+            download = await session.get(DownloadHistory, download_id)
+            acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+            issue = await session.get(Issue, issue_id)
+            assert download is not None and acquisition is not None and issue is not None
+            assert download.state is DownloadState.RETRY_PENDING
+            assert acquisition.client_state == "source_search_pending"
+            assert acquisition.next_retry_at is not None
+            assert issue.status is IssueStatus.DOWNLOADING
+
+    @pytest.mark.asyncio
+    async def test_retry_missing_airdcpp_download_recreates_bundle_from_provenance(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        issue_id = await _seed_issue(db_factory, status=IssueStatus.WANTED)
+        config_id = 80
+        await _seed_client_config(
+            db_factory,
+            config_id=config_id,
+            client_type=DownloadClientType.AIRDCPP,
+        )
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            state=DownloadState.FAILED,
+            client_type=DownloadClientType.AIRDCPP,
+            external_id=f"airdcpp:{config_id}:bundle:94",
+            download_client_config_id=config_id,
+            error_message="The AirDC++ queue item was removed outside Pullbox.",
+        )
+        async with db_factory() as session:
+            acquisition = AirDcppAcquisition(
+                download_history_id=download_id,
+                request_key="retry-missing-airdcpp",
+                client_config_id=config_id,
+                client_identity=f"airdcpp:{config_id}",
+                tth="CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y",
+                size_bytes=100_000_000,
+                original_name="Batman 004 (2025).cbz",
+                bundle_id=94,
+                client_state="missing",
+                remote_target="/Downloads/Batman 004 (2025).cbz",
+                route_snapshot={"queue": {"downloaded_bytes": 10_000_000}},
+                reconciliation_error="external_bundle_missing",
+            )
+            session.add(acquisition)
+            await session.flush()
+            acquisition_id = acquisition.id
+            await session.commit()
+
+        api = AsyncMock()
+        api.create_file_bundle.return_value = SimpleNamespace(id=95, merged=False)
+        supervisor = SimpleNamespace(
+            state=AirDcppSupervisorState.READY,
+            api_client=api,
+        )
+        registry = SimpleNamespace(
+            get=lambda selected: supervisor if selected == config_id else None
+        )
+        with patch(
+            "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+            return_value=registry,
+        ):
+            async with db_factory() as session:
+                response = await downloads_api.retry_download(download_id, object(), session)  # type: ignore[arg-type]
+                await session.commit()
+
+        assert response == {"status": "sent"}
+        api.create_file_bundle.assert_awaited_once_with(
+            tth="CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y",
+            size=100_000_000,
+            target_name="Batman 004 (2025).cbz",
+            priority=None,
+        )
+        async with db_factory() as session:
+            download = await session.get(DownloadHistory, download_id)
+            acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+            issue = await session.get(Issue, issue_id)
+            assert download is not None and acquisition is not None and issue is not None
+            assert download.external_id == f"airdcpp:{config_id}:bundle:95"
+            assert download.state is DownloadState.RETRY_PENDING
+            assert acquisition.bundle_id == 95
+            assert acquisition.client_state == "source_search_pending"
+            assert acquisition.remote_target is None
+            assert "queue" not in acquisition.route_snapshot
+            assert acquisition.next_retry_at is not None
+            assert issue.status is IssueStatus.DOWNLOADING
 
     @pytest.mark.asyncio
     async def test_direct_download_sources_list_only_verified_equivalent_routes(

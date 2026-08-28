@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
@@ -39,6 +40,7 @@ from pullbox.services.direct_acquisition_planner_service import (
     DirectAcquisitionPlanningError,
     direct_route_identity,
     plan_direct_acquisition,
+    plan_direct_acquisition_with_provider_fallback,
     resolve_planned_artifact_source,
 )
 from pullbox.services.direct_resolver_service import ProviderResolverOption
@@ -47,6 +49,166 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 NOW = datetime(2026, 7, 28, 10, 0, tzinfo=UTC)
+
+
+async def test_hidden_provider_alternate_is_planned_after_primary_failure(
+    session: AsyncSession,
+) -> None:
+    alternate_provider = DirectProviderConfig(
+        id=2,
+        provider_id="community.libgen",
+        display_name="LibGen",
+        endpoint="http://libgen:8080",
+        enabled=True,
+        priority=20,
+        state=DirectProviderState.HEALTHY,
+    )
+    primary = DirectAcquisitionAttempt(
+        request_key="primary-fingerprint-result",
+        issue_id=1,
+        provider_config_id=1,
+        provider_identity="community.getcomics",
+        provider_candidate_id="primary-candidate",
+        state=DirectAcquisitionState.DISCOVERED,
+        requested_coverage={"issue_numbers": ["1"]},
+        candidate_snapshot={"display_title": "Planner Series 001", "visible": True},
+        plan_snapshot={},
+        progress_snapshot={},
+    )
+    alternate = DirectAcquisitionAttempt(
+        request_key="alternate-fingerprint-result",
+        issue_id=1,
+        provider_config_id=2,
+        provider_identity="community.libgen",
+        provider_candidate_id="alternate-candidate",
+        state=DirectAcquisitionState.DISCOVERED,
+        requested_coverage={"issue_numbers": ["1"]},
+        candidate_snapshot={"display_title": "Planner Series 001", "visible": False},
+        plan_snapshot={},
+        progress_snapshot={},
+    )
+    session.add_all([alternate_provider, primary, alternate])
+    await session.flush()
+    primary.candidate_snapshot = {
+        **primary.candidate_snapshot,
+        "alternate_attempt_ids": [alternate.id],
+    }
+    alternate.candidate_snapshot = {
+        **alternate.candidate_snapshot,
+        "primary_attempt_id": primary.id,
+    }
+    planned_artifact = SimpleNamespace(id=88)
+    calls: list[int] = []
+
+    async def planner(
+        _session: AsyncSession,
+        *,
+        acquisition_id: int,
+        **_kwargs: object,
+    ) -> object:
+        calls.append(acquisition_id)
+        if acquisition_id == primary.id:
+            primary.state = DirectAcquisitionState.FAILED
+            raise DirectAcquisitionPlanningError(
+                "provider_resolve_unavailable",
+                "The provider is unavailable.",
+                failure_class=DirectArtifactFailureClass.PROVIDER_UNAVAILABLE,
+            )
+        alternate.state = DirectAcquisitionState.PLANNED
+        return SimpleNamespace(
+            attempt=alternate,
+            selected_artifact=planned_artifact,
+            initial_source=object(),
+        )
+
+    result = await plan_direct_acquisition_with_provider_fallback(
+        session,
+        acquisition_id=primary.id,
+        planner=planner,
+    )
+
+    assert result.attempt is alternate
+    assert calls == [primary.id, alternate.id]
+    assert primary.progress_snapshot["fallback_attempt_id"] == alternate.id
+    assert primary.progress_snapshot["fallback_provider_identity"] == "community.libgen"
+    assert alternate.progress_snapshot["fallback_from_attempt_id"] == primary.id
+    assert alternate.progress_snapshot["fallback_from_provider_identity"] == "community.getcomics"
+
+
+async def test_transfer_recovery_skips_the_already_failed_primary_provider(
+    session: AsyncSession,
+) -> None:
+    alternate_provider = DirectProviderConfig(
+        id=2,
+        provider_id="community.libgen",
+        display_name="LibGen",
+        endpoint="http://libgen:8080",
+        enabled=True,
+        priority=20,
+        state=DirectProviderState.HEALTHY,
+    )
+    primary = DirectAcquisitionAttempt(
+        request_key="failed-primary-fingerprint-result",
+        issue_id=1,
+        provider_config_id=1,
+        provider_identity="community.getcomics",
+        provider_candidate_id="failed-primary-candidate",
+        state=DirectAcquisitionState.FAILED,
+        failure_class=DirectArtifactFailureClass.PROVIDER_UNAVAILABLE,
+        requested_coverage={"issue_numbers": ["1"]},
+        candidate_snapshot={"display_title": "Planner Series 001", "visible": True},
+        plan_snapshot={},
+        progress_snapshot={},
+    )
+    alternate = DirectAcquisitionAttempt(
+        request_key="recovery-alternate-fingerprint-result",
+        issue_id=1,
+        provider_config_id=2,
+        provider_identity="community.libgen",
+        provider_candidate_id="recovery-alternate-candidate",
+        state=DirectAcquisitionState.DISCOVERED,
+        requested_coverage={"issue_numbers": ["1"]},
+        candidate_snapshot={"display_title": "Planner Series 001", "visible": False},
+        plan_snapshot={},
+        progress_snapshot={},
+    )
+    session.add_all([alternate_provider, primary, alternate])
+    await session.flush()
+    primary.candidate_snapshot = {
+        **primary.candidate_snapshot,
+        "alternate_attempt_ids": [alternate.id],
+    }
+    alternate.candidate_snapshot = {
+        **alternate.candidate_snapshot,
+        "primary_attempt_id": primary.id,
+    }
+    calls: list[int] = []
+
+    async def planner(
+        _session: AsyncSession,
+        *,
+        acquisition_id: int,
+        **_kwargs: object,
+    ) -> object:
+        calls.append(acquisition_id)
+        if acquisition_id == primary.id:
+            raise AssertionError("recovery retried the failed primary provider")
+        alternate.state = DirectAcquisitionState.PLANNED
+        return SimpleNamespace(
+            attempt=alternate,
+            selected_artifact=SimpleNamespace(id=89),
+            initial_source=object(),
+        )
+
+    result = await plan_direct_acquisition_with_provider_fallback(
+        session,
+        acquisition_id=primary.id,
+        planner=planner,
+        skip_selected_attempt=True,
+    )
+
+    assert result.attempt is alternate
+    assert calls == [alternate.id]
 
 
 @pytest.fixture

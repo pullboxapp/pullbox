@@ -22,6 +22,7 @@
     importCancelUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/cancel')|tojson|forceescape }},
     importProgressUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/progress')|tojson|forceescape }},
     readerManifestUrl: {{ ('/api/v1/reader/issues/' ~ issue.id ~ '/manifest')|tojson|forceescape }},
+    openReaderOnLoad: {{ open_reader_on_load|default(false)|tojson }},
     toggleUrl: {{ ('/htmx/issues/' ~ issue.id ~ '/toggle')|tojson|forceescape }}
   })"
 >
@@ -40,6 +41,16 @@
       <span class="current">#{{ issue.issue_number|issue_num }}</span>
     </nav>
   </div>
+
+  {% if reader_deep_open_unavailable|default(false) %}
+  <div
+    data-testid="issue-reader-unavailable-message"
+    class="alert-banner alert-banner-warning text-sm text-pb-text-sec"
+    role="status"
+  >
+    A readable file is not available for this issue.
+  </div>
+  {% endif %}
 
   {% include "partials/issue_detail_hero.html" %}
   {% include "partials/issue_detail_description.html" %}

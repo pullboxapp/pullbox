@@ -147,9 +147,16 @@ async def run_import_comicinfo_enrichment(
             if prepared is None:
                 continue
 
-            apply_result = apply_comicinfo(prepared.artifact_path, prepared.payload)
-            if inspect.isawaitable(apply_result):
-                await apply_result
+            if inspect.iscoroutinefunction(apply_comicinfo):
+                await apply_comicinfo(prepared.artifact_path, prepared.payload)
+            else:
+                apply_result = await asyncio.to_thread(
+                    apply_comicinfo,
+                    prepared.artifact_path,
+                    prepared.payload,
+                )
+                if inspect.isawaitable(apply_result):
+                    await apply_result
 
             await _mark_pending_file_complete_with_retry(
                 session_factory,
@@ -345,8 +352,11 @@ async def _mark_pending_file_complete_with_retry(
                 library_file = await session.get(LibraryFile, prepared.library_file_id)
                 if library_file is None:
                     raise ValueError(f"Library file {prepared.library_file_id} no longer exists")
-                if prepared.artifact_path.exists():
-                    artifact_stat = prepared.artifact_path.stat()
+                try:
+                    artifact_stat = await asyncio.to_thread(prepared.artifact_path.stat)
+                except FileNotFoundError:
+                    artifact_stat = None
+                if artifact_stat is not None:
                     library_file.file_size = artifact_stat.st_size
                     library_file.file_modified_at = datetime.fromtimestamp(
                         artifact_stat.st_mtime,

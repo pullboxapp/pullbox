@@ -17,7 +17,7 @@ DEFAULT_SYSTEM_CONFIG: dict[str, tuple[str, str]] = {
     "usage_stats_consent": ("unknown", "string"),
     "usage_stats_instance_id": ("", "string"),
     # Search & Download
-    "source_priority": ('["usenet", "torrent", "direct"]', "string"),
+    "source_priority": ('["usenet", "torrent", "direct", "dc"]', "string"),
     "search_on_add_default": ("false", "bool"),
     "search_interval_hours": ("6", "int"),
     "auto_import_enabled": ("true", "bool"),

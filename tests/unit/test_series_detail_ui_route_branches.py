@@ -61,7 +61,7 @@ def _request(
 
 
 def _user() -> SimpleNamespace:
-    return SimpleNamespace(username="admin")
+    return SimpleNamespace(id=1, username="admin")
 
 
 @pytest.fixture
@@ -162,6 +162,7 @@ async def test_load_series_issues_context_counts_filters_and_sorts(
         series.id,
         IssueStatus.OWNED.value,
         page=99,
+        user_id=1,
         sort="title",
     )
 
@@ -177,6 +178,7 @@ async def test_load_series_issues_context_counts_filters_and_sorts(
         series.id,
         None,
         page=1,
+        user_id=1,
         sort="-release_date",
     )
     assert [issue.title for issue in all_issues["issues"]] == ["Skipped", "Wanted", "Owned"]

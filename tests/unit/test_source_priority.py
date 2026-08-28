@@ -9,6 +9,10 @@ Run:
 
 from __future__ import annotations
 
+import json
+
+from pullbox.core.acquisition import AcquisitionProtocol
+from pullbox.models.config import DEFAULT_SYSTEM_CONFIG
 from pullbox.providers.base import ReleaseResult
 from pullbox.services.search_scoring import normalize_source_priority
 from pullbox.services.search_service import _sort_by_source_priority
@@ -19,8 +23,16 @@ def _make_result(
     is_torrent: bool,
     *,
     is_direct: bool = False,
+    protocol: AcquisitionProtocol | None = None,
 ) -> ReleaseResult:
     """Create a minimal ReleaseResult for sorting tests."""
+    resolved_protocol = protocol or (
+        AcquisitionProtocol.DIRECT
+        if is_direct
+        else AcquisitionProtocol.TORRENT
+        if is_torrent
+        else AcquisitionProtocol.USENET
+    )
     return ReleaseResult(
         title=title,
         indexer_name="test",
@@ -32,7 +44,7 @@ def _make_result(
         seeders=10 if is_torrent else None,
         leechers=5 if is_torrent else None,
         grabs=50 if not is_torrent else None,
-        is_torrent=is_torrent,
+        protocol=resolved_protocol,
         category="comics",
         published_at=None,
     )
@@ -140,6 +152,21 @@ class TestSortBySourcePriority:
 
         assert [result.title for result in sorted_results] == ["d1", "n1", "t1"]
 
+    def test_dc_results_use_their_explicit_protocol_lane(self) -> None:
+        results = [
+            _make_result("n1", False),
+            _make_result("dc1", False, protocol=AcquisitionProtocol.DC),
+            _make_result("d1", False, is_direct=True),
+            _make_result("t1", True),
+        ]
+
+        sorted_results = _sort_by_source_priority(
+            results,
+            ["dc", "direct", "torrent", "usenet"],
+        )
+
+        assert [result.title for result in sorted_results] == ["dc1", "d1", "t1", "n1"]
+
     def test_same_protocol_is_noop(self) -> None:
         """All results same protocol → order unchanged."""
         results = [
@@ -157,7 +184,24 @@ def test_source_priority_adds_direct_to_existing_saved_order() -> None:
         "torrent",
         "usenet",
         "direct",
+        "dc",
     ]
+
+
+def test_source_priority_appends_dc_to_legacy_saved_order() -> None:
+    assert normalize_source_priority(["direct", "torrent", "usenet"]) == [
+        "direct",
+        "torrent",
+        "usenet",
+        "dc",
+    ]
+
+
+def test_source_priority_default_contains_all_protocol_lanes() -> None:
+    value, value_type = DEFAULT_SYSTEM_CONFIG["source_priority"]
+
+    assert json.loads(value) == ["usenet", "torrent", "direct", "dc"]
+    assert value_type == "string"
 
 
 def test_source_priority_migrates_legacy_ddl_key() -> None:
@@ -165,4 +209,5 @@ def test_source_priority_migrates_legacy_ddl_key() -> None:
         "direct",
         "usenet",
         "torrent",
+        "dc",
     ]

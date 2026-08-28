@@ -21,7 +21,10 @@ from pullbox.models.library import FileFormat
 if TYPE_CHECKING:
     from pathlib import Path
 
-_ARCHIVE_FORMATS = frozenset({FileFormat.CBZ, FileFormat.CBR, FileFormat.CB7, FileFormat.CBT})
+SUPPORTED_READER_FORMATS = frozenset(
+    {FileFormat.CBZ, FileFormat.CBR, FileFormat.CB7, FileFormat.CBT, FileFormat.PDF}
+)
+_ARCHIVE_FORMATS = SUPPORTED_READER_FORMATS - {FileFormat.PDF}
 
 
 def open_page_source(
@@ -49,6 +52,7 @@ def open_page_source(
 
 
 __all__ = [
+    "SUPPORTED_READER_FORMATS",
     "PageDescriptor",
     "PagePayload",
     "PageSource",

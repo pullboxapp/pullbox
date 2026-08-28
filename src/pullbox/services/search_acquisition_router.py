@@ -98,7 +98,7 @@ class SearchAcquisitionRoutingResult:
     queued: int
     action_status: str
     best_confidence: str | None
-    source_kind: Literal["indexer", "direct"] | None
+    source_kind: Literal["indexer", "direct", "dc"] | None
     notices: tuple[str, ...] = ()
     download_id: int | None = None
     acquisition_id: int | None = None
@@ -191,6 +191,21 @@ async def route_search_acquisition(
                 "pending_exists",
                 confidence,
                 "indexer",
+                tuple(notices),
+                release_title=selected.release.title,
+            )
+
+        if selected.source_kind == "dc":
+            if selected.dc_result is None:
+                raise RuntimeError("Selected DC result is unavailable.")
+            # R5 evaluates automatic DC participation and records the winner,
+            # while R6 owns durable provenance and queue mutation.
+            return SearchAcquisitionRoutingResult(
+                0,
+                0,
+                "dc_evaluation_only",
+                confidence,
+                "dc",
                 tuple(notices),
                 release_title=selected.release.title,
             )

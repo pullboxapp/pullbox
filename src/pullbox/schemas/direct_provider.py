@@ -46,6 +46,8 @@ class DirectConfigurationControlResponse(BaseModel):
     min_length: int | None
     max_length: int | None
     placeholder: str | None
+    suggestions: tuple[str, ...]
+    source_origin: bool
 
 
 class DirectProviderResponse(BaseModel):

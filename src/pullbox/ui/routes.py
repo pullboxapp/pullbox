@@ -20,6 +20,7 @@ from starlette.responses import Response
 
 import pullbox
 from pullbox.api.deps import load_sidebar_health_counts
+from pullbox.config import get_settings
 from pullbox.core.naming import (
     resolve_collection_non_standard_file_template,
     resolve_single_non_standard_file_template,
@@ -42,6 +43,7 @@ from pullbox.ui import (
     post_processing_routes,
     public_routes,
     pull_list_routes,
+    reading_routes,
     search_history_routes,
     security_routes,
     series_detail_routes,
@@ -230,6 +232,7 @@ def _ctx(request: Request, user: object | None = None, **kwargs: object) -> dict
         "user": user,
         "csrf_token": csrf_token,
         "display_config": display_config,
+        "reader_enabled": get_settings().reader_enabled,
         **sidebar_context,
         **kwargs,
     }
@@ -460,10 +463,11 @@ def _post_processing_recent_completion_ids_bridge() -> set[int]:
 
 
 async def _post_processing_live_status_map_bridge(
+    session: AsyncSession,
     active_items: Sequence[DownloadHistory],
 ) -> dict[int, dict[str, object]]:
     """Route live-status checks through the facade for compatibility tests."""
-    return await _load_post_processing_live_status_map(active_items)
+    return await _load_post_processing_live_status_map(session, active_items)
 
 
 post_processing_routes.configure_post_processing_routes(
@@ -749,6 +753,15 @@ pull_list_routes.configure_pull_list_routes(
 router.include_router(pull_list_routes.router)
 
 pull_list = pull_list_routes.pull_list
+
+
+reading_routes.configure_reading_routes(
+    get_templates=lambda: templates,
+    build_context=_ctx,
+)
+router.include_router(reading_routes.router)
+
+reading_workspace = reading_routes.reading_workspace
 
 
 router.include_router(series_routes.htmx_router)

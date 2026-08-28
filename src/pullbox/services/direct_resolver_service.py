@@ -26,6 +26,9 @@ from pullbox.providers.direct.resolver import (
     DirectResolverResult,
     ResolverCircuitBreaker,
 )
+from pullbox.services.direct_provider_source_origin import (
+    effective_direct_provider_source_domains,
+)
 from pullbox.services.direct_resolver_configuration import (
     DirectResolverConfigRead,
     load_resolver_auth_headers,
@@ -519,7 +522,8 @@ async def build_provider_resolver_profiles(
         manifest = DirectManifestResponse.model_validate(provider.manifest_snapshot)
     except ValueError:
         return ()
-    if not manifest.capabilities.browser_challenge or not manifest.source_domains:
+    source_domains = effective_direct_provider_source_domains(provider)
+    if not manifest.capabilities.browser_challenge or not source_domains:
         return ()
     resolvers = tuple(config for config in await _eligible_resolvers(session) if config.endpoint)
     return tuple(
@@ -536,7 +540,7 @@ async def build_provider_resolver_profiles(
                 ),
                 timeout_seconds=float(resolver.timeout_seconds),
                 max_concurrency=resolver.max_concurrency,
-                declared_domains=list(manifest.source_domains),
+                declared_domains=list(source_domains),
                 authentication_headers=load_resolver_auth_headers(resolver).headers,
             ),
         )

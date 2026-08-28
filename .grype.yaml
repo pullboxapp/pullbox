@@ -8,7 +8,7 @@
 # Python package vulnerabilities are not suppressed here; pip-audit covers
 # those separately in the security workflow.
 #
-# Reviewed against pullbox:validate on 2026-07-12 using the local Grype DB.
+# Reviewed against pullbox:validate on 2026-08-25 using the current Grype DB.
 # Re-audit after each DHI base-image refresh and remove entries when fixed
 # stable Python 3.14 or Debian 13 packages become available upstream.
 
@@ -19,17 +19,17 @@ ignore:
   - vulnerability: CVE-2026-14456
     package:
       name: libssl3t64
-      version: 3.5.6-1~deb13u2+dhi2
+      version: 3.5.7-1~deb13u2+dhi0
       type: deb
   - vulnerability: CVE-2026-14456
     package:
       name: openssl
-      version: 3.5.6-1~deb13u2+dhi2
+      version: 3.5.7-1~deb13u2+dhi0
       type: deb
   - vulnerability: CVE-2026-14456
     package:
       name: openssl-provider-legacy
-      version: 3.5.6-1~deb13u2+dhi2
+      version: 3.5.7-1~deb13u2+dhi0
       type: deb
 
   # CPython 3.14.6 binary findings. Grype reports either no fixed version or a

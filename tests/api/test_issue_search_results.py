@@ -31,6 +31,7 @@ from pullbox.models import Base
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
     DirectAcquisitionState,
+    DirectArtifactFailureClass,
     DirectProviderConfig,
     DirectProviderState,
     DirectProviderTrustLevel,
@@ -42,6 +43,7 @@ from pullbox.models.user import APIKey, User
 from pullbox.providers.base import ReleaseResult
 from pullbox.providers.direct.contract import DirectCandidate, DirectParsedCandidate
 from pullbox.services.auth_service import AuthService
+from pullbox.services.direct_acquisition_planner_service import DirectAcquisitionPlanningError
 from pullbox.services.direct_search_coordinator import (
     DirectSearchDiscovery,
     DirectSearchOutcome,
@@ -363,6 +365,53 @@ async def test_build_direct_interactive_results_uses_attempt_identity_not_url() 
     assert "getcomics.org" not in repr(matched[0])
 
 
+async def test_build_direct_interactive_results_hides_fingerprint_alternates() -> None:
+    from pullbox.api.v1.issues import build_direct_interactive_results
+
+    provider = DirectSearchProvider(
+        provider_config_id=9,
+        provider_identity="pullbox.libgen",
+        display_name="LibGen",
+        endpoint="http://libgen-provider:8780",
+        bearer_token="provider-token-with-enough-length",
+        allow_private_http=True,
+    )
+    candidate = DirectCandidate(
+        provider_candidate_id="libgen:batman-1",
+        source_reference="https://libgen.gl/book/1",
+        display_title="Batman 001 (2016) (Digital)",
+        raw_title="Batman 001 (2016) (Digital).cbz",
+        parsed=DirectParsedCandidate(
+            series_title="Batman",
+            issue_numbers=["1"],
+            year=2016,
+            format="cbz",
+        ),
+        provider_confidence=0.97,
+    )
+    release = _make_release("Batman 001 (2016) (Digital).cbz", indexer_name="LibGen")
+    validation = ReleaseValidator().validate_all_results(
+        [release],
+        wanted_series="Batman",
+        wanted_issue=1,
+        wanted_year=2016,
+    )[0][0]
+    hidden = DirectSearchDiscovery(
+        attempt_id=43,
+        result=DirectValidatedCandidate(provider, candidate, release, validation),
+        visible=False,
+    )
+
+    matched, rejected = build_direct_interactive_results(
+        (hidden,),
+        eval_kwargs={},
+        issue_type=IssueType.ISSUE,
+    )
+
+    assert matched == []
+    assert rejected == []
+
+
 def test_interactive_results_respect_direct_source_priority() -> None:
     from pullbox.api.v1.issues import (
         build_interactive_results,
@@ -393,7 +442,7 @@ def test_interactive_results_respect_direct_source_priority() -> None:
     assert [item.source_kind for item in ordered] == ["direct", "indexer"]
 
 
-def test_interactive_direct_results_prefer_configured_provider_before_quality() -> None:
+def test_interactive_direct_results_prefer_quality_before_provider_priority() -> None:
     from pullbox.api.v1.issues import (
         build_interactive_results,
         sort_interactive_results_by_source_priority,
@@ -424,19 +473,53 @@ def test_interactive_direct_results_prefer_configured_provider_before_quality() 
         rejected,
         {},
         source_priority=["direct", "usenet", "torrent"],
+        scoring_priority=25,
     )
     direct_items = [item.model_copy(update={"source_kind": "direct"}) for item in items]
 
-    # Anna's richer filename wins the generic quality score, but the user's
-    # explicit direct-provider preference must be authoritative after matching.
+    # Provider priority is a final tie-breaker, so the richer candidate keeps
+    # its lead after semantic and quality scoring.
     assert direct_items[0].indexer_name == "Anna's Archive"
     ordered = sort_interactive_results_by_source_priority(
         direct_items,
         ["direct", "usenet", "torrent"],
     )
 
-    assert [item.indexer_name for item in ordered] == ["GetComics", "Anna's Archive"]
+    assert [item.indexer_name for item in ordered] == ["Anna's Archive", "GetComics"]
     assert "ranking_priority" not in ordered[0].model_dump()
+
+
+def test_interactive_direct_results_use_provider_priority_for_quality_ties() -> None:
+    from pullbox.api.v1.issues import (
+        build_interactive_results,
+        sort_interactive_results_by_source_priority,
+    )
+
+    lower_priority = _make_release(
+        "Batman 001 (2016) (Digital).cbz",
+        "LibGen",
+        ranking_priority=20,
+    )
+    preferred = _make_release(
+        "Batman 001 (2016) (Digital).cbz",
+        "GetComics",
+        ranking_priority=10,
+    )
+    matched, rejected = ReleaseValidator().validate_all_results(
+        [lower_priority, preferred],
+        wanted_series="Batman",
+        wanted_issue=1,
+        wanted_year=2016,
+    )
+    items, _ = build_interactive_results(matched, rejected, {}, scoring_priority=25)
+    direct_items = [item.model_copy(update={"source_kind": "direct"}) for item in items]
+
+    ordered = sort_interactive_results_by_source_priority(
+        direct_items,
+        ["direct", "usenet", "torrent"],
+    )
+
+    assert [item.indexer_name for item in ordered] == ["GetComics", "LibGen"]
 
 
 @pytest.mark.asyncio
@@ -764,6 +847,107 @@ async def test_direct_grab_plans_commits_and_dispatches_ephemeral_source(
     runner.dispatch.assert_awaited_once_with(
         attempt_id,
         77,
+        initial_source=ephemeral_source,
+    )
+
+
+async def test_direct_grab_uses_hidden_provider_fallback_when_primary_cannot_plan(
+    client: AsyncClient,
+    _db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    issue_id = await _create_issue(_db_factory)
+    async with _db_factory() as session:
+        primary_config = DirectProviderConfig(
+            provider_id="pullbox.getcomics",
+            display_name="GetComics",
+            endpoint="http://getcomics-provider:8780",
+            enabled=True,
+            priority=10,
+            state=DirectProviderState.HEALTHY,
+            trust_level=DirectProviderTrustLevel.VERIFIED_PULLBOX,
+        )
+        alternate_config = DirectProviderConfig(
+            provider_id="pullbox.libgen",
+            display_name="LibGen",
+            endpoint="http://libgen-provider:8780",
+            enabled=True,
+            priority=20,
+            state=DirectProviderState.HEALTHY,
+            trust_level=DirectProviderTrustLevel.VERIFIED_PULLBOX,
+        )
+        session.add_all([primary_config, alternate_config])
+        await session.flush()
+        primary = DirectAcquisitionAttempt(
+            request_key="direct-grab-primary",
+            issue_id=issue_id,
+            provider_config_id=primary_config.id,
+            provider_identity=primary_config.provider_id,
+            provider_candidate_id="candidate-primary",
+            state=DirectAcquisitionState.DISCOVERED,
+            requested_coverage={"issue_numbers": ["1"]},
+            candidate_snapshot={"display_title": "Batman 001 (2016)", "visible": True},
+            plan_snapshot={},
+            progress_snapshot={},
+        )
+        alternate = DirectAcquisitionAttempt(
+            request_key="direct-grab-alternate",
+            issue_id=issue_id,
+            provider_config_id=alternate_config.id,
+            provider_identity=alternate_config.provider_id,
+            provider_candidate_id="candidate-alternate",
+            state=DirectAcquisitionState.DISCOVERED,
+            requested_coverage={"issue_numbers": ["1"]},
+            candidate_snapshot={"display_title": "Batman 001 (2016)", "visible": False},
+            plan_snapshot={},
+            progress_snapshot={},
+        )
+        session.add_all([primary, alternate])
+        await session.flush()
+        primary.candidate_snapshot = {
+            **primary.candidate_snapshot,
+            "alternate_attempt_ids": [alternate.id],
+        }
+        primary_id = primary.id
+        alternate_id = alternate.id
+        await session.commit()
+
+    ephemeral_source = object()
+
+    async def plan(session: AsyncSession, *, acquisition_id: int, **_kwargs: object):
+        planned_attempt = await session.get(DirectAcquisitionAttempt, acquisition_id)
+        assert planned_attempt is not None
+        if acquisition_id == primary_id:
+            planned_attempt.state = DirectAcquisitionState.FAILED
+            raise DirectAcquisitionPlanningError(
+                "provider_resolve_unavailable",
+                "The provider is unavailable.",
+                failure_class=DirectArtifactFailureClass.PROVIDER_UNAVAILABLE,
+            )
+        planned_attempt.state = DirectAcquisitionState.PLANNED
+        return SimpleNamespace(
+            attempt=planned_attempt,
+            selected_artifact=SimpleNamespace(id=99),
+            initial_source=ephemeral_source,
+        )
+
+    runner = SimpleNamespace(dispatch=AsyncMock(return_value=True))
+    with (
+        patch("pullbox.api.v1.issues.plan_direct_acquisition", side_effect=plan),
+        patch(
+            "pullbox.api.v1.issues.get_direct_acquisition_runner",
+            return_value=runner,
+        ),
+    ):
+        response = await client.post(
+            f"/api/v1/issues/{issue_id}/direct-grab",
+            json={"direct_attempt_id": primary_id},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["acquisition_id"] == alternate_id
+    runner.dispatch.assert_awaited_once_with(
+        alternate_id,
+        99,
         initial_source=ephemeral_source,
     )
 

@@ -1305,7 +1305,7 @@ class TestDashboardPendingCount:
         async with _db_factory() as session:
             resp = await dashboard(
                 request=req,
-                user=MagicMock(),
+                user=MagicMock(id=1),
                 session=session,
             )
 
@@ -1328,7 +1328,7 @@ class TestDashboardPendingCount:
         async with _db_factory() as session:
             resp = await dashboard(
                 request=req,
-                user=MagicMock(),
+                user=MagicMock(id=1),
                 session=session,
             )
 

@@ -336,14 +336,20 @@ async def _seed_series_library_data() -> None:
     from pullbox.models.matching_suggestion import MatchingSuggestion, SuggestionStatus
     from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
     from pullbox.models.publisher import Publisher
+    from pullbox.models.reader import IssueReaderState
     from pullbox.models.search_log import SearchLog, SearchType
     from pullbox.models.series import Series, SeriesStatus
+    from pullbox.models.user import User
 
     factory = get_session_factory()
     async with factory() as session:
         existing_series = await session.scalar(select(Series.id).limit(1))
         if existing_series is not None:
             return
+
+        reader_user = await session.scalar(select(User).where(User.username == "admin"))
+        if reader_user is None:
+            raise RuntimeError("E2E reader state requires the seeded admin user.")
 
         test_cover_url = (
             "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 180'%3E"
@@ -474,6 +480,17 @@ async def _seed_series_library_data() -> None:
                         file_format=FileFormat.CBZ,
                         file_modified_at=datetime(2024, 1, 1, tzinfo=UTC),
                         match_confidence=MatchConfidence.MANUAL,
+                    )
+                )
+                session.add(
+                    IssueReaderState(
+                        user_id=reader_user.id,
+                        issue_id=owned_issue.id,
+                        last_page_index=1,
+                        content_revision="e2e-reading-revision",
+                        page_count=3,
+                        progress_updated_at=datetime.now(tz=UTC),
+                        last_opened_at=datetime.now(tz=UTC),
                     )
                 )
                 session.add(
@@ -1068,6 +1085,48 @@ async def _seed_usage_stats_choice() -> None:
         await session.commit()
 
 
+async def _reset_seeded_reader_state() -> None:
+    """Restore the mutable Batman reader row shared by seeded E2E tests."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from pullbox.database import get_session_factory
+    from pullbox.models.issue import Issue
+    from pullbox.models.reader import IssueReaderState
+    from pullbox.models.series import Series
+    from pullbox.models.user import User
+
+    factory = get_session_factory()
+    async with factory() as session:
+        state = await session.scalar(
+            select(IssueReaderState)
+            .join(User, User.id == IssueReaderState.user_id)
+            .join(Issue, Issue.id == IssueReaderState.issue_id)
+            .join(Series, Series.id == Issue.series_id)
+            .where(
+                User.username == "admin",
+                Series.title == "Batman",
+                Issue.issue_number == 1.0,
+            )
+        )
+        if state is None:
+            raise RuntimeError("Seeded Batman reader state is missing.")
+
+        now = datetime.now(tz=UTC)
+        state.last_page_index = 1
+        state.content_revision = "e2e-reading-revision"
+        state.page_count = 3
+        state.progress_updated_at = now
+        state.last_opened_at = now
+        state.completed_at = None
+        state.completion_updated_at = None
+        state.want_to_read = False
+        state.want_to_read_updated_at = None
+        state.state_version = 1
+        await session.commit()
+
+
 # ── Server Fixtures ───────────────────────────────────────────────────
 
 
@@ -1102,6 +1161,13 @@ def _running_live_server() -> Generator[str, None, None]:
         "PULLBOX_TEMP_DIR": str(temp_dir),
         "PULLBOX_BACKUP_DIR": str(backup_dir),
         "PULLBOX_LIBRARY_ROOT": str(library_root),
+        # The session-scoped browser suite intentionally sends far more traffic
+        # than one real client would within a minute. Keep rate limiting active
+        # while preventing unrelated E2E modules from exhausting shared quotas.
+        "PULLBOX_RATE_LIMIT_ENABLED": "true",
+        "PULLBOX_RATE_LIMIT_TIER1": "10000",
+        "PULLBOX_RATE_LIMIT_TIER2": "10000",
+        "PULLBOX_RATE_LIMIT_TIER3": "10000",
     }
     original_env = {}
     for key, val in env_overrides.items():
@@ -1318,6 +1384,16 @@ def seeded_server(live_server: str) -> Generator[str, None, None]:
     _run_async_blocking(_seed_usage_stats_choice())
 
     yield live_server
+
+
+@pytest.fixture
+def seeded_reader_state_guard(seeded_server: str) -> Generator[None, None, None]:
+    """Prevent reader mutations from leaking through the session-scoped E2E seed."""
+    _run_async_blocking(_reset_seeded_reader_state())
+    try:
+        yield
+    finally:
+        _run_async_blocking(_reset_seeded_reader_state())
 
 
 @pytest.fixture(scope="session")

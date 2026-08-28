@@ -1,11 +1,25 @@
 """Download client configuration request/response schemas."""
 
-from datetime import datetime
+from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from datetime import datetime  # noqa: TC003 - Pydantic needs this at runtime
+from pathlib import PurePosixPath, PureWindowsPath
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pullbox.core.url_validation import normalize_peer_base_url
 from pullbox.models.download import DownloadClientType
+from pullbox.schemas.airdcpp import (
+    AirDcppSettingsInput,
+    AirDcppSettingsResponse,
+    AirDcppSettingsUpdate,
+)
+
+
+def is_absolute_client_path(value: str | None) -> bool:
+    if not value or "\x00" in value:
+        return False
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
 
 
 class ClientCreate(BaseModel):
@@ -46,12 +60,35 @@ class ClientCreate(BaseModel):
     deluge_label: str | None = Field(None, max_length=100)
     deluge_max_ratio: float | None = Field(None, ge=0)
     deluge_move_completed_path: str | None = Field(None, max_length=1000)
+    # AirDC++-specific extension
+    airdcpp: AirDcppSettingsInput | None = None
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, value: str) -> str:
         """Normalize and validate the configured download client URL."""
         return normalize_peer_base_url(value)
+
+    @model_validator(mode="after")
+    def validate_client_specific_fields(self) -> ClientCreate:
+        """Require AirDC++ connection roots and reject misplaced extension data."""
+        if self.client_type is not DownloadClientType.AIRDCPP:
+            if self.airdcpp is not None:
+                raise ValueError("airdcpp settings are only valid for an AirDC++ client")
+            return self
+
+        self.url = normalize_peer_base_url(self.url, reject_query_or_fragment=True)
+        if not self.username or not self.username.strip():
+            raise ValueError("username is required for an AirDC++ client")
+        if not is_absolute_client_path(self.remote_path):
+            raise ValueError("remote_path must be absolute for an AirDC++ client")
+        if not is_absolute_client_path(self.download_dir):
+            raise ValueError("download_dir must be absolute for an AirDC++ client")
+        if self.category:
+            raise ValueError("category is not used by an AirDC++ client")
+        if self.airdcpp is None:
+            self.airdcpp = AirDcppSettingsInput()
+        return self
 
 
 class ClientUpdate(BaseModel):
@@ -80,6 +117,7 @@ class ClientUpdate(BaseModel):
     deluge_label: str | None = Field(None, max_length=100)
     deluge_max_ratio: float | None = Field(None, ge=0)
     deluge_move_completed_path: str | None = Field(None, max_length=1000)
+    airdcpp: AirDcppSettingsUpdate | None = None
 
     @field_validator("url")
     @classmethod
@@ -123,6 +161,7 @@ class ClientResponse(BaseModel):
     deluge_label: str | None = None
     deluge_max_ratio: float | None = None
     deluge_move_completed_path: str | None = None
+    airdcpp: AirDcppSettingsResponse | None = None
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
     last_error: str | None = None

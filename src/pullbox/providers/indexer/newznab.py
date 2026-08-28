@@ -20,6 +20,7 @@ import structlog
 from defusedxml import ElementTree as DefusedElementTree
 from defusedxml.common import DefusedXmlException
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.providers.base import (
     IndexerCapabilities,
     ProviderHealthResult,
@@ -236,7 +237,7 @@ class NewznabIndexer:
             seeders=None,
             leechers=None,
             grabs=_safe_int(attrs.get("grabs")),
-            is_torrent=False,
+            protocol=AcquisitionProtocol.USENET,
             category=attrs.get("category"),
             published_at=published_at,
             info_url=info_url,

@@ -164,6 +164,41 @@ async def test_generic_https_explains_that_reachability_is_verified_per_url(
 
 
 @pytest.mark.asyncio
+async def test_generic_https_failure_records_operation_without_global_outage(
+    session: AsyncSession,
+) -> None:
+    config = DirectHostConfig(
+        host_kind=DirectArtifactHostKind.GENERIC_HTTPS,
+        enabled=True,
+        reachability_state=DirectHostReachabilityState.NOT_CHECKED,
+    )
+    session.add(config)
+    await session.commit()
+    error = ArtifactHostResolutionError(
+        code="artifact_host_unavailable",
+        message="This final-file URL is unavailable.",
+        failure_class=DirectArtifactFailureClass.TRANSIENT_HOST,
+        retryable=True,
+        intervention=False,
+    )
+
+    await record_direct_host_operational_result(
+        session,
+        host_config_id=config.id,
+        occurred_at=NOW,
+        succeeded=False,
+        error=error,
+    )
+    await session.flush()
+
+    assert config.last_operational_result is DirectHostOperationalResult.FAILED
+    assert config.last_operational_at == NOW
+    assert config.last_error_code == "artifact_host_unavailable"
+    assert config.reachability_state is DirectHostReachabilityState.NOT_CHECKED
+    assert config.last_reachable_at is None
+
+
+@pytest.mark.asyncio
 async def test_real_operations_are_recorded_for_anonymous_hosts(
     session: AsyncSession,
 ) -> None:

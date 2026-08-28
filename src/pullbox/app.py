@@ -70,6 +70,7 @@ STATIC_ASSET_CACHE_CONTROL = "public, max-age=86400"
 _startup_background_tasks: set[asyncio.Task[object]] = set()
 _update_check_service_ref: dict[str, object] = {}
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_ACTIVE_DOWNLOAD_POLL_MAX_SECONDS = 3
 
 
 class PullboxStaticFiles(StaticFiles):
@@ -469,6 +470,23 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             exc_info=True,
         )
 
+    # Start exact-client AirDC++ supervisors without waiting for remote I/O.
+    # The feature-off path creates no session, pool, socket, or background task.
+    from pullbox.composition.airdcpp import start_airdcpp_supervisor_registry
+
+    airdcpp_registry = None
+    try:
+        airdcpp_registry = await start_airdcpp_supervisor_registry(
+            get_session_factory(),
+            enabled=settings.airdcpp_enabled,
+        )
+    except Exception:
+        logger.warning(
+            "airdcpp_supervisor_startup_failed",
+            subsystem="airdcpp",
+            exc_info=True,
+        )
+
     # Resume deferred import metadata work from imports that completed before
     # the app stopped. This is background-only so startup stays fast.
     try:
@@ -540,9 +558,16 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     _search_hrs = get_int_setting(
         _db_intervals, "search_interval_hours", settings.search_interval_hours
     )
-    _dl_poll = get_int_setting(
+    configured_download_poll = get_int_setting(
         _db_intervals, "download_poll_interval_seconds", settings.download_poll_seconds
     )
+    _dl_poll = max(1, min(configured_download_poll, _ACTIVE_DOWNLOAD_POLL_MAX_SECONDS))
+    if configured_download_poll != _dl_poll:
+        logger.info(
+            "download_poll_interval_capped_for_live_progress",
+            configured_seconds=configured_download_poll,
+            effective_seconds=_dl_poll,
+        )
     _pc_secs = get_int_setting(
         _db_intervals,
         "process_completed_interval_seconds",
@@ -808,6 +833,17 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         await asyncio.gather(*remaining_startup_tasks, return_exceptions=True)
 
     scheduler.shutdown()
+    if airdcpp_registry is not None:
+        try:
+            from pullbox.composition.airdcpp import stop_airdcpp_supervisor_registry
+
+            await stop_airdcpp_supervisor_registry(airdcpp_registry)
+        except Exception:
+            logger.warning(
+                "airdcpp_supervisor_shutdown_failed",
+                subsystem="airdcpp",
+                exc_info=True,
+            )
     if direct_runner is not None:
         try:
             await direct_runner.aclose()
@@ -819,6 +855,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             )
         finally:
             set_direct_acquisition_runner(None)
+    from pullbox.services.operation_progress_dispatch import drain_operation_progress_updates
+
+    await drain_operation_progress_updates()
     await dispose_engine()
     logger.info("application_stopped")
 

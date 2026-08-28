@@ -71,6 +71,18 @@ def test_find_cover_file_returns_first_supported_existing_extension(tmp_path: Pa
     assert cover_cache_service.find_cover_file(tmp_path, "missing") is None
 
 
+def test_find_imported_series_cover_prefers_mylar_cover_then_thumbnail(tmp_path: Path) -> None:
+    thumbnail = tmp_path / "folder.jpg"
+    thumbnail.write_bytes(b"thumbnail")
+
+    assert cover_cache_service.find_imported_series_cover(tmp_path) == thumbnail
+
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"full-size")
+
+    assert cover_cache_service.find_imported_series_cover(tmp_path) == cover
+
+
 @pytest.mark.asyncio
 async def test_resolve_series_cover_file_prefers_series_folder_cover(tmp_path: Path) -> None:
     series_dir = tmp_path / "series"
@@ -161,6 +173,50 @@ async def test_resolve_series_cover_file_returns_none_when_no_cover(
     resolved = await cover_cache_service.resolve_series_cover_file(AsyncMock(), series)
 
     assert resolved is None
+
+
+@pytest.mark.asyncio
+async def test_cache_imported_series_cover_copies_source_without_modifying_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "mylar" / "cover.jpg"
+    source.parent.mkdir()
+    source.write_bytes(b"mylar-cover")
+    covers_base = tmp_path / "covers"
+    series = SimpleNamespace(id=42, cover_path=None)
+    monkeypatch.setattr(
+        cover_cache_service,
+        "resolve_covers_dir",
+        AsyncMock(return_value=covers_base),
+    )
+
+    resolved = await cover_cache_service.cache_imported_series_cover(
+        AsyncMock(),
+        series,
+        source,
+    )
+
+    assert resolved == covers_base / "42" / "series.jpg"
+    assert resolved.read_bytes() == b"mylar-cover"
+    assert source.read_bytes() == b"mylar-cover"
+    assert series.cover_path == "/api/v1/series/42/cover"
+
+
+@pytest.mark.asyncio
+async def test_cache_imported_series_cover_ignores_missing_source(
+    tmp_path: Path,
+) -> None:
+    series = SimpleNamespace(id=42, cover_path=None)
+
+    resolved = await cover_cache_service.cache_imported_series_cover(
+        AsyncMock(),
+        series,
+        tmp_path / "missing.jpg",
+    )
+
+    assert resolved is None
+    assert series.cover_path is None
 
 
 @pytest.mark.asyncio

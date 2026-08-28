@@ -10,7 +10,10 @@ from pullbox.services.import_file_match_candidates import (
     reset_file_match_state,
     select_file_match_candidate,
 )
-from pullbox.services.import_file_match_targets import FileMatchTargetIndex
+from pullbox.services.import_file_match_targets import (
+    PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
+    FileMatchTargetIndex,
+)
 from pullbox.services.import_source_metadata import source_metadata_for_import_file
 from pullbox.services.semantic_matching import ImportPolicy, SemanticMatchEngine
 
@@ -81,6 +84,50 @@ def test_select_file_match_candidate_falls_back_to_issue_number_confidence() -> 
     assert medium_candidate.has_library_file is True
     assert high_candidate is not None
     assert high_candidate.confidence == "high"
+
+
+def test_explicit_comicvine_issue_id_never_falls_back_to_another_issue_number() -> None:
+    regular_issue = Issue(
+        id=12,
+        issue_number=1.0,
+        comicvine_id=900001,
+        title="Regular issue",
+    )
+    target_index = FileMatchTargetIndex(
+        cv_id_map={900001: (12, 900001, False, regular_issue, "Regular issue")},
+        number_map={1.0: (12, 900001, False, regular_issue, "Regular issue")},
+    )
+    annual_file = ImportedFile(
+        comicvine_issue_id=950001,
+        parsed_issue_number=1.0,
+    )
+
+    candidate = select_file_match_candidate(
+        annual_file,
+        target_index,
+        series_high_confidence=True,
+    )
+
+    assert candidate is None
+
+
+def test_select_file_match_candidate_marks_provisional_mylar_target() -> None:
+    target_index = FileMatchTargetIndex(
+        number_map={4.0: (None, None, False, None, None)},
+        synthetic_issue_types={4.0: IssueType.SPECIAL},
+        provisional_issue_numbers={4.0},
+    )
+    imp_file = ImportedFile(parsed_issue_number=4.0)
+
+    candidate = select_file_match_candidate(
+        imp_file,
+        target_index,
+        series_high_confidence=True,
+    )
+
+    assert candidate is not None
+    assert candidate.method == PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD
+    assert candidate.synthetic_issue_type == IssueType.SPECIAL
 
 
 def test_select_file_match_candidate_recovers_volume_issue_number_from_filename() -> None:

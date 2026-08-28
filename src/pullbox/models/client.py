@@ -1,13 +1,19 @@
 """Download client configuration ORM model."""
 
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime  # noqa: TC003 - SQLAlchemy needs this at runtime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy import Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin, UTCDateTime
 from pullbox.models.download import DownloadClientType
+
+if TYPE_CHECKING:
+    from pullbox.models.airdcpp import AirDcppClientSettings
 
 
 class DownloadClientConfig(Base, IdentityMixin, TimestampMixin):
@@ -60,3 +66,10 @@ class DownloadClientConfig(Base, IdentityMixin, TimestampMixin):
     last_failure_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     last_test_message: Mapped[str | None] = mapped_column(Text)
+
+    airdcpp_settings: Mapped[AirDcppClientSettings | None] = relationship(
+        back_populates="client_config",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )

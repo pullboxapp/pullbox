@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 import pytest
+from playwright.sync_api import expect
 
 from tests.e2e.pages.series_detail import SeriesDetailPage
 from tests.e2e.pages.series_list import SeriesListPage
@@ -65,6 +66,73 @@ class TestSeriesDetailPage:
         assert series.footer.is_visible()
         assert authed_page.locator("[data-testid='series-detail-telemetry-strip']").count() == 0
         assert hero_box["y"] >= header_box["y"] + header_box["height"] + 12
+
+    def test_private_reading_state_is_distinct_from_acquisition_progress(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        series = SeriesDetailPage(authed_page, seeded_server)
+        series.goto(1)
+
+        summary = authed_page.locator("[data-testid='series-reading-summary']").first
+        reading = authed_page.locator("#issue-1 [data-testid='series-issue-reading']")
+        acquisition = authed_page.locator(".series-domain-issues-progress-label").first
+
+        expect(summary).to_have_text("Read 0 of 1 readable")
+        expect(reading).to_contain_text("Page 2/3")
+        expect(acquisition).to_have_text("33%")
+        assert (
+            authed_page.locator("#issue-1 [data-testid='series-issue-read']").get_attribute(
+                "aria-label"
+            )
+            == "Continue Batman #1"
+        )
+
+    def test_issue_polling_pauses_while_a_reading_menu_has_focus(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        series = SeriesDetailPage(authed_page, seeded_server)
+        series.goto(1)
+        menu = authed_page.locator("#issue-1 [data-testid='series-issue-reading-menu']")
+        trigger = menu.locator("button").first
+
+        trigger.click()
+        expect(trigger).to_be_focused()
+        assert authed_page.evaluate("window.pullboxSeriesIssuesCanPoll()") is False
+        authed_page.wait_for_timeout(3200)
+
+        expect(trigger).to_be_focused()
+        expect(menu.locator("[role='menu']")).to_be_visible()
+
+    def test_reading_menu_updates_the_row_and_series_summary_in_place(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+        seeded_reader_state_guard: None,
+    ) -> None:
+        series = SeriesDetailPage(authed_page, seeded_server)
+        series.goto(1)
+        row = authed_page.locator("#issue-1")
+        summary = authed_page.locator("[data-testid='series-reading-summary']").first
+
+        row.locator("[data-testid='series-issue-reading-menu'] > button").click()
+        row.get_by_role("menuitem", name="Mark read").click()
+
+        refreshed_row = authed_page.locator("#issue-1")
+        expect(refreshed_row.locator("[data-testid='series-issue-reading']")).to_have_text("Read")
+        expect(summary).to_have_text("Read 1 of 1 readable")
+
+        refreshed_row.locator("[data-testid='series-issue-reading-menu'] > button").click()
+        refreshed_row.get_by_role("menuitem", name="Mark unread").click()
+
+        restored_row = authed_page.locator("#issue-1")
+        expect(restored_row.locator("[data-testid='series-issue-reading']")).to_contain_text(
+            "Page 2/3"
+        )
+        expect(summary).to_have_text("Read 0 of 1 readable")
 
     def test_monitor_control_matches_action_button_height_and_shows_single_active_label(
         self,

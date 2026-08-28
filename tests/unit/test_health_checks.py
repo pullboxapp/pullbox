@@ -28,6 +28,10 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.models.health import HealthStatus
 from pullbox.models.library import LibraryRoot
+from pullbox.providers.airdcpp.supervisor import (
+    AirDcppSupervisorHealth,
+    AirDcppSupervisorState,
+)
 from pullbox.providers.base import ProviderHealthResult, ProviderRegistry
 from pullbox.services.health_service import CheckOutcome, HealthService
 
@@ -826,6 +830,48 @@ class TestDownloadClientsCheck:
         assert all(len(outcome.sub_checks) == 4 for outcome in outcomes[1:])
 
     @pytest.mark.asyncio
+    async def test_ready_airdcpp_supervisor_projects_safe_native_health(
+        self,
+        db_session: AsyncSession,
+        settings: MagicMock,
+    ) -> None:
+        await self._seed_client_config(
+            db_session,
+            config_id=12,
+            name="Dedicated Air",
+            client_type="airdcpp",
+            url="http://airdcpp-vpn:5600",
+        )
+        supervisor = MagicMock()
+        supervisor.state = AirDcppSupervisorState.READY
+        supervisor.health = AirDcppSupervisorHealth(
+            state=AirDcppSupervisorState.READY,
+            compatible=True,
+            api_version=1,
+            api_feature_level=10,
+            last_ready_at=datetime.now(UTC),
+            remote_min_search_interval_seconds=45,
+        )
+        air_registry = MagicMock()
+        air_registry.get.return_value = supervisor
+
+        with patch(
+            "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+            return_value=air_registry,
+        ):
+            outcomes = await _make_service(
+                settings,
+                registry=ProviderRegistry(),
+            ).run_check(db_session, "download_clients")
+
+        assert outcomes[0].status is HealthStatus.HEALTHY
+        assert outcomes[1].status is HealthStatus.HEALTHY
+        assert outcomes[1].message == "AirDC++ search and queue services are ready"
+        assert outcomes[1].details["minimum_search_interval_seconds"] == 45
+        assert "password" not in str(outcomes[1].details).lower()
+        assert "token" not in str(outcomes[1].details).lower()
+
+    @pytest.mark.asyncio
     async def test_all_unhealthy(self, db_session: AsyncSession, settings: MagicMock) -> None:
         reg = ProviderRegistry()
         await self._seed_client_config(
@@ -953,6 +999,41 @@ class TestDownloadClientsCheck:
             "GetComics",
             "Pixeldrain",
         }
+
+    @pytest.mark.asyncio
+    async def test_generic_https_transport_does_not_degrade_direct_acquisition_health(
+        self,
+        db_session: AsyncSession,
+        settings: MagicMock,
+    ) -> None:
+        generic_host = DirectHostConfig(
+            host_kind=DirectArtifactHostKind.GENERIC_HTTPS,
+            enabled=True,
+            reachability_state=DirectHostReachabilityState.UNAVAILABLE,
+        )
+        db_session.add_all(
+            [
+                DirectProviderConfig(
+                    provider_id="pullbox.getcomics",
+                    display_name="GetComics",
+                    endpoint="http://getcomics:8780",
+                    enabled=True,
+                    state=DirectProviderState.HEALTHY,
+                ),
+                generic_host,
+            ]
+        )
+        await db_session.flush()
+
+        outcomes = await _make_service(settings, registry=ProviderRegistry()).run_check(
+            db_session,
+            "download_clients",
+        )
+
+        assert outcomes[0].status is HealthStatus.HEALTHY
+        assert outcomes[0].message == "All acquisition routes available"
+        assert {outcome.subject_key for outcome in outcomes[1:]} == {"direct-provider:1"}
+        assert generic_host.reachability_state is DirectHostReachabilityState.NOT_CHECKED
 
     @pytest.mark.asyncio
     async def test_unreachable_artifact_host_degrades_direct_acquisition_health(

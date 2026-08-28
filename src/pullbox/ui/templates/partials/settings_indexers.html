@@ -370,6 +370,9 @@
                 <template x-if="item === 'direct'">
                   <div class="flex h-7 w-7 items-center justify-center rounded-md bg-pb-success-dim text-[10px] font-bold text-pb-success">DDL</div>
                 </template>
+                <template x-if="item === 'dc'">
+                  <div class="flex h-7 w-7 items-center justify-center rounded-md bg-pb-purple-dim text-[10px] font-bold text-pb-purple">ADC</div>
+                </template>
                 <div class="min-w-0">
                   <p class="text-sm font-medium text-pb-text" x-text="labels[item]"></p>
                 </div>
@@ -420,11 +423,11 @@
 
   <script>
   function sourcePriority() {
-    {%- set sp_default = '["usenet", "torrent", "direct"]' -%}
+    {%- set sp_default = '["usenet", "torrent", "direct", "dc"]' -%}
     const stored = {{ configs.get("source_priority", sp_default) | tojson }};
     let initial;
     try { initial = JSON.parse(stored); } catch { initial = []; }
-    const supported = ['usenet', 'torrent', 'direct'];
+    const supported = ['usenet', 'torrent', 'direct', 'dc'];
     const parsed = Array.isArray(initial) ? initial : [];
     const active = parsed
       .map(item => item === 'ddl' ? 'direct' : item)
@@ -436,11 +439,12 @@
       order: full,
       dirty: false,
       saved: false,
-      labels: { usenet: 'Usenet', torrent: 'Torrents', direct: 'Direct Downloads' },
+      labels: { usenet: 'Usenet', torrent: 'Torrents', direct: 'Direct Downloads', dc: 'Direct Connect' },
       descriptions: {
         usenet: 'SABnzbd, NZBGet \\u2022 Newznab indexers',
         torrent: 'qBittorrent, Transmission, Deluge \\u2022 Torznab indexers',
         direct: 'GetComics, Anna\'s Archive, direct file downloads',
+        dc: 'AirDC++ connected hubs',
       },
 
       moveUp(index) {

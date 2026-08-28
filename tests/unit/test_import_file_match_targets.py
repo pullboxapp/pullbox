@@ -331,6 +331,250 @@ async def test_load_file_match_target_index_uses_trusted_mylar_issue_targets_wit
     assert target_index.number_map == {1.0: (None, 500001, False, None, "I Am Gotham")}
 
 
+@pytest.mark.parametrize("metadata_signal", ["comicinfo", "sidecar"])
+async def test_trusted_folder_issue_identity_does_not_fetch_provider(
+    db_session: AsyncSession,
+    metadata_signal: str,
+) -> None:
+    job = await _create_job(db_session)
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Batman",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=97508,
+        cv_match_method="comicinfo_cv_id",
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    imp_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path="/tmp/Batman 045 (2016).cbz",
+        file_name="Batman 045 (2016).cbz",
+        file_size=1024,
+        file_format="cbz",
+        parsed_series="Batman",
+        parsed_issue_number=45.0,
+        comicvine_issue_id=987654,
+        status=ImportedFileStatus.PENDING,
+        diagnostics={
+            "comicvine_series_id": 97508,
+            "metadata_signals": {
+                "comicvine_issue_id": metadata_signal,
+                "comicvine_series_id": metadata_signal,
+            },
+            "source_metadata": {
+                "comicinfo": {"title": "The Gift"},
+            },
+        },
+    )
+
+    target_index = await load_file_match_target_index(
+        db_session,
+        imported_series,
+        duplicate_series=False,
+        metadata_provider=_ExplodingIssueSummaryProvider(),
+        files=[imp_file],
+    )
+
+    assert target_index.cv_id_map == {987654: (None, 987654, False, None, "The Gift")}
+    assert target_index.number_map == {45.0: (None, 987654, False, None, "The Gift")}
+    assert target_index.provisional_issue_numbers == set()
+
+
+async def test_trusted_folder_series_without_issue_id_uses_provisional_target(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Batman",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=97508,
+        cv_match_method="comicinfo_cv_id",
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    imp_file = ImportedFile(
+        file_name="Batman 046 (2016).cbz",
+        parsed_issue_number=46.0,
+        parsed_series="Batman",
+        diagnostics={
+            "comicvine_series_id": 97508,
+            "metadata_signals": {"comicvine_series_id": "comicinfo"},
+            "source_issue_type": IssueType.ISSUE.value,
+        },
+    )
+
+    target_index = await load_file_match_target_index(
+        db_session,
+        imported_series,
+        duplicate_series=False,
+        metadata_provider=_ExplodingIssueSummaryProvider(),
+        files=[imp_file],
+    )
+
+    assert target_index.number_map == {46.0: (None, None, False, None, None)}
+    assert target_index.provisional_issue_numbers == {46.0}
+
+
+async def test_conflicting_trusted_folder_identity_requires_review_without_provider(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Batman",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=97508,
+        cv_match_method="comicinfo_cv_id",
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    imp_file = ImportedFile(
+        file_name="Batman Annual 001 (2016).cbz",
+        parsed_issue_number=1.0,
+        comicvine_issue_id=900001,
+        diagnostics={
+            "comicvine_series_id": 11111,
+            "metadata_signals": {
+                "comicvine_series_id": "comicinfo",
+                "comicvine_issue_id": "comicinfo",
+            },
+        },
+    )
+
+    target_index = await load_file_match_target_index(
+        db_session,
+        imported_series,
+        duplicate_series=False,
+        metadata_provider=_ExplodingIssueSummaryProvider(),
+        files=[imp_file],
+    )
+
+    assert target_index.has_targets is False
+    assert imp_file.diagnostics["kind"] == "metadata_conflict"
+    assert imp_file.diagnostics["conflict_type"] == "trusted_source_series_id_mismatch"
+    assert imp_file.diagnostics["preserve_series_match"] is True
+
+
+async def test_trusted_mylar_targets_do_not_fetch_provider_for_mixed_annual_volume(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="X-Men",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=140553,
+        cv_match_method="mylar3_cv_id",
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    regular = ImportedFile(
+        comicvine_issue_id=900001,
+        parsed_issue_number=1.0,
+        diagnostics={
+            "comicvine_series_id": 140553,
+            "metadata_signals": {"comicvine_issue_id": "mylar3"},
+            "source_metadata": {"mylar3_issue": {"title": "Fearless"}},
+        },
+    )
+    annual = ImportedFile(
+        comicvine_issue_id=950001,
+        parsed_issue_number=1.0,
+        diagnostics={
+            "comicvine_series_id": 153726,
+            "metadata_signals": {"comicvine_issue_id": "mylar3"},
+            "source_metadata": {"mylar3_issue": {"title": "Contest of Chaos"}},
+        },
+    )
+
+    target_index = await load_file_match_target_index(
+        db_session,
+        imported_series,
+        duplicate_series=False,
+        metadata_provider=_ExplodingIssueSummaryProvider(),
+        files=[regular, annual],
+    )
+
+    assert target_index.cv_id_map == {900001: (None, 900001, False, None, "Fearless")}
+    assert target_index.number_map == {1.0: (None, 900001, False, None, "Fearless")}
+
+
+async def test_trusted_mylar_series_without_issue_row_does_not_fetch_provider(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="X-Men",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=140553,
+        cv_match_method="mylar3_cv_id",
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    unresolved_file = ImportedFile(
+        file_name="X-Men Special 004.cbz",
+        parsed_issue_number=4.0,
+        parsed_series="X-Men Special",
+        diagnostics={"source_issue_type": IssueType.SPECIAL.value},
+    )
+
+    target_index = await load_file_match_target_index(
+        db_session,
+        imported_series,
+        duplicate_series=False,
+        metadata_provider=_ExplodingIssueSummaryProvider(),
+        files=[unresolved_file],
+    )
+
+    assert target_index.number_map == {4.0: (None, None, False, None, None)}
+    assert target_index.synthetic_issue_types == {4.0: IssueType.SPECIAL}
+    assert target_index.provisional_issue_numbers == {4.0}
+
+
+async def test_trusted_mylar_issue_clears_same_number_provisional_marker(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="X-Men",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=140553,
+        cv_match_method="mylar3_cv_id",
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    unresolved = ImportedFile(
+        parsed_issue_number=1.0,
+        diagnostics={"source_issue_type": IssueType.SPECIAL.value},
+    )
+    trusted = ImportedFile(
+        comicvine_issue_id=900001,
+        parsed_issue_number=1.0,
+        diagnostics={
+            "comicvine_series_id": 140553,
+            "metadata_signals": {"comicvine_issue_id": "mylar3"},
+            "source_metadata": {"mylar3_issue": {"title": "Fearless"}},
+        },
+    )
+
+    target_index = await load_file_match_target_index(
+        db_session,
+        imported_series,
+        duplicate_series=False,
+        metadata_provider=_ExplodingIssueSummaryProvider(),
+        files=[unresolved, trusted],
+    )
+
+    assert target_index.number_map == {1.0: (None, 900001, False, None, "Fearless")}
+    assert target_index.synthetic_issue_types == {}
+    assert target_index.provisional_issue_numbers == set()
+
+
 async def test_load_file_match_target_index_full_fetches_single_issue_volume_subtitle(
     db_session: AsyncSession,
 ) -> None:

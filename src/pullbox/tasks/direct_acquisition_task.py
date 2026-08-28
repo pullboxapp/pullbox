@@ -21,8 +21,14 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.providers.artifact_hosts.contract import HostResolutionRequest
 from pullbox.services.blocklist_service import BlocklistService
-from pullbox.services.direct_acquisition_fallback import queue_next_artifact_route
+from pullbox.services.direct_acquisition_fallback import (
+    queue_next_artifact_route,
+    supports_route_fallback,
+)
 from pullbox.services.direct_acquisition_planner_service import (
+    DirectAcquisitionPlanningError,
+    DirectAcquisitionPlanningResult,
+    plan_direct_acquisition_with_provider_fallback,
     resolve_planned_artifact_source,
 )
 from pullbox.services.direct_acquisition_recovery import (
@@ -73,6 +79,7 @@ class DirectExecutor(Protocol):
 
 
 SourceResolver = Callable[..., Awaitable[HostResolutionRequest]]
+ProviderFallbackPlanner = Callable[..., Awaitable[DirectAcquisitionPlanningResult]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,10 +97,14 @@ class DirectAcquisitionRunner:
         *,
         executor: DirectExecutor,
         source_resolver: SourceResolver = resolve_planned_artifact_source,
+        provider_fallback_planner: ProviderFallbackPlanner = (
+            plan_direct_acquisition_with_provider_fallback
+        ),
     ) -> None:
         self._session_factory = session_factory
         self._executor = executor
         self._source_resolver = source_resolver
+        self._provider_fallback_planner = provider_fallback_planner
         self._active: dict[tuple[int, int], _ActiveRun] = {}
         self._lock = asyncio.Lock()
 
@@ -490,6 +501,22 @@ class DirectAcquisitionRunner:
                         .execution_options(populate_existing=True)
                     )
                 ).scalar_one()
+                if _supports_provider_fallback(attempt):
+                    try:
+                        planned = await self._provider_fallback_planner(
+                            session,
+                            acquisition_id=attempt.id,
+                            skip_selected_attempt=True,
+                        )
+                    except DirectAcquisitionPlanningError:
+                        return
+                    await session.commit()
+                    await self.dispatch(
+                        planned.attempt.id,
+                        planned.selected_artifact.id,
+                        initial_source=planned.initial_source,
+                    )
+                    return
                 if attempt.state is not DirectAcquisitionState.QUEUED:
                     return
                 selected = [
@@ -554,6 +581,23 @@ class DirectAcquisitionRunner:
                 artifact_id=key[1],
                 error_type=type(error).__name__,
             )
+
+
+def _supports_provider_fallback(attempt: DirectAcquisitionAttempt) -> bool:
+    """Return whether a failed attempt has a safe linked provider alternate."""
+    raw_alternates = attempt.candidate_snapshot.get("alternate_attempt_ids", [])
+    has_alternate = isinstance(raw_alternates, list) and any(
+        isinstance(value, int) and value > 0 for value in raw_alternates
+    )
+    failure_class = attempt.failure_class
+    if attempt.state is not DirectAcquisitionState.FAILED or not has_alternate:
+        return False
+    if failure_class is None:
+        return False
+    return supports_route_fallback(failure_class) or failure_class in {
+        DirectArtifactFailureClass.PROVIDER_UNAVAILABLE,
+        DirectArtifactFailureClass.CANDIDATE_INVALID,
+    }
 
 
 _runner: DirectAcquisitionRunner | None = None

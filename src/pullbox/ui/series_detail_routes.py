@@ -1,24 +1,42 @@
 """Series and issue detail UI routes."""
 
-from collections.abc import Callable, Mapping
+import asyncio
+import json
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import suppress
 from typing import Annotated
 from urllib.parse import unquote, urlsplit
 
 import structlog
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.composition.airdcpp import (
+    get_airdcpp_search_coordinator,
+    get_airdcpp_supervisor_registry,
+    load_airdcpp_search_clients,
+)
 from pullbox.config import get_settings
+from pullbox.core.page_sources import SUPPORTED_READER_FORMATS
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
+from pullbox.services.airdcpp_route_tokens import get_airdcpp_route_token_store
+from pullbox.services.airdcpp_search_types import AirDcppSearchProgress
+from pullbox.services.reader_state_service import load_reader_state
+from pullbox.services.reading_query_service import (
+    load_series_reading_aggregates,
+    load_visible_issue_states,
+)
+from pullbox.services.search_service import load_issue_search_target
 from pullbox.services.series_service import SeriesService
 from pullbox.ui.comicvine_series_search import wrap_comicvine_provider_for_ui_cache
+from pullbox.ui.reading_presenters import IssueReadingView, present_issue_reading
 
 logger = structlog.get_logger(__name__)
 
@@ -73,6 +91,8 @@ async def load_series_issues_context(
     series_id: int,
     issue_status: str | None,
     page: int,
+    *,
+    user_id: int,
     sort: str = "-issue_number",
 ) -> dict[str, object]:
     """Load issue stats and paginated issues for a series."""
@@ -116,9 +136,33 @@ async def load_series_issues_context(
     order_clause = sort_column.desc().nullslast() if sort_desc else sort_column.asc().nullslast()
 
     issues_result = await session.execute(
-        select(Issue).where(*issue_filters).order_by(order_clause).limit(per_page).offset(offset)
+        select(Issue)
+        .options(joinedload(Issue.library_file))
+        .where(*issue_filters)
+        .order_by(order_clause)
+        .limit(per_page)
+        .offset(offset)
     )
     issues = list(issues_result.scalars().all())
+    issue_ids = tuple(issue.id for issue in issues)
+    reading_states = await load_visible_issue_states(
+        session,
+        user_id=user_id,
+        issue_ids=issue_ids,
+    )
+    reader_enabled = get_settings().reader_enabled
+    issue_reading_views = {
+        issue.id: present_issue_reading(
+            reading_states.get(issue.id),
+            readable=_issue_is_readable(issue, reader_enabled=reader_enabled),
+        )
+        for issue in issues
+    }
+    reading_aggregates = await load_series_reading_aggregates(
+        session,
+        user_id=user_id,
+        series_ids=(series_id,),
+    )
 
     return {
         "issues": issues,
@@ -131,7 +175,45 @@ async def load_series_issues_context(
         "total_pages": total_pages,
         "issue_status": issue_status or "",
         "issue_sort": sort,
+        "issue_reading_views": issue_reading_views,
+        "series_reading_aggregate": reading_aggregates.get(series_id),
     }
+
+
+def _issue_is_readable(issue: Issue, *, reader_enabled: bool) -> bool:
+    return (
+        reader_enabled
+        and issue.status == IssueStatus.OWNED
+        and issue.library_file is not None
+        and issue.library_file.file_format in SUPPORTED_READER_FORMATS
+    )
+
+
+async def _load_issue_detail_record(session: DbSession, issue_id: int) -> Issue | None:
+    result = await session.execute(
+        select(Issue)
+        .options(
+            joinedload(Issue.series).joinedload(Series.publisher),
+            joinedload(Issue.library_file),
+            joinedload(Issue.creators),
+        )
+        .where(Issue.id == issue_id)
+    )
+    return result.unique().scalar_one_or_none()
+
+
+async def _issue_reading_view(
+    session: DbSession,
+    *,
+    user_id: int,
+    issue: Issue,
+    reader_enabled: bool,
+) -> IssueReadingView:
+    state = await load_reader_state(session, user_id=user_id, issue_id=issue.id)
+    return present_issue_reading(
+        state,
+        readable=_issue_is_readable(issue, reader_enabled=reader_enabled),
+    )
 
 
 @router.get("/series/{series_id}", response_class=HTMLResponse, include_in_schema=False)
@@ -161,7 +243,12 @@ async def series_detail(
         return RedirectResponse(url="/series", status_code=302)
 
     issues_ctx = await load_series_issues_context(
-        session, series_id, issue_status, page, sort=issue_sort
+        session,
+        series_id,
+        issue_status,
+        page,
+        user_id=user.id,
+        sort=issue_sort,
     )
 
     file_count: int = (
@@ -197,18 +284,10 @@ async def issue_detail(
     issue_id: int,
     user: AuthenticatedUser,
     session: DbSession,
+    read: str | None = Query(None),
 ) -> Response:
     """Render the issue detail page, fetching metadata on-demand if missing."""
-    result = await session.execute(
-        select(Issue)
-        .options(
-            joinedload(Issue.series).joinedload(Series.publisher),
-            joinedload(Issue.library_file),
-            joinedload(Issue.creators),
-        )
-        .where(Issue.id == issue_id)
-    )
-    issue = result.unique().scalar_one_or_none()
+    issue = await _load_issue_detail_record(session, issue_id)
     if issue is None:
         return RedirectResponse(url="/series", status_code=302)
 
@@ -246,6 +325,16 @@ async def issue_detail(
         except (ComicVineError, Exception):
             logger.exception("issue_metadata_enrich_failed", issue_id=issue.id)
 
+    reader_enabled = get_settings().reader_enabled
+    issue_reading = await _issue_reading_view(
+        session,
+        user_id=user.id,
+        issue=issue,
+        reader_enabled=reader_enabled,
+    )
+    deep_open_requested = read == "1"
+    open_reader_on_load = deep_open_requested and issue_reading.primary_label is not None
+
     return _templates().TemplateResponse(
         request,
         "pages/issue_detail.html",
@@ -253,9 +342,249 @@ async def issue_detail(
             request,
             user,
             issue=issue,
-            reader_enabled=get_settings().reader_enabled,
+            reader_enabled=reader_enabled,
+            issue_reading=issue_reading,
+            open_reader_on_load=open_reader_on_load,
+            reader_deep_open_unavailable=deep_open_requested and not open_reader_on_load,
         ),
     )
+
+
+@issue_router.get(
+    "/htmx/issues/{issue_id}/reading",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def htmx_issue_reading_hero(
+    request: Request,
+    issue_id: int,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Refresh only the issue hero after a private reading-state command."""
+    issue = await _load_issue_detail_record(session, issue_id)
+    if issue is None:
+        return Response(status_code=404)
+    reader_enabled = get_settings().reader_enabled
+    issue_reading = await _issue_reading_view(
+        session,
+        user_id=user.id,
+        issue=issue,
+        reader_enabled=reader_enabled,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/issue_detail_hero.html",
+        _ctx(
+            request,
+            user,
+            issue=issue,
+            reader_enabled=reader_enabled,
+            issue_reading=issue_reading,
+        ),
+    )
+
+
+@issue_router.get(
+    "/htmx/issues/{issue_id}/reading-row",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def htmx_issue_reading_row(
+    request: Request,
+    issue_id: int,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Refresh one series issue row and its reading aggregate after mutation."""
+    result = await session.execute(
+        select(Issue)
+        .options(joinedload(Issue.series), joinedload(Issue.library_file))
+        .where(Issue.id == issue_id)
+    )
+    issue = result.unique().scalar_one_or_none()
+    if issue is None:
+        return Response(status_code=404)
+    states = await load_visible_issue_states(
+        session,
+        user_id=user.id,
+        issue_ids=(issue.id,),
+    )
+    aggregates = await load_series_reading_aggregates(
+        session,
+        user_id=user.id,
+        series_ids=(issue.series_id,),
+    )
+    issue_reading_views = {
+        issue.id: present_issue_reading(
+            states.get(issue.id),
+            readable=_issue_is_readable(issue, reader_enabled=get_settings().reader_enabled),
+        )
+    }
+    return _templates().TemplateResponse(
+        request,
+        "partials/series_issue_reading_row_bundle.html",
+        _ctx(
+            request,
+            user,
+            issue=issue,
+            series=issue.series,
+            issue_reading_views=issue_reading_views,
+            series_reading_aggregate=aggregates.get(issue.series_id),
+        ),
+    )
+
+
+@issue_router.get(
+    "/htmx/issues/{issue_id}/dc-search-status",
+    response_class=JSONResponse,
+    include_in_schema=False,
+)
+async def htmx_issue_dc_search_status(
+    issue_id: int,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> JSONResponse:
+    """Return a secret-free cooldown projection without reserving a search."""
+    del user
+    if not get_settings().airdcpp_enabled or await session.get(Issue, issue_id) is None:
+        return JSONResponse({"available": False, "client_count": 0, "remaining_seconds": 0})
+    registry = get_airdcpp_supervisor_registry()
+    coordinator = get_airdcpp_search_coordinator()
+    if registry is None or coordinator is None:
+        return JSONResponse({"available": False, "client_count": 0, "remaining_seconds": 0})
+    clients = await load_airdcpp_search_clients(session, registry)
+    await session.commit()
+    waits = await coordinator.cooldown_status(tuple(client.config_id for client in clients))
+    return JSONResponse(
+        {
+            "available": bool(clients),
+            "client_count": len(clients),
+            "remaining_seconds": max(waits.values(), default=0),
+        }
+    )
+
+
+@issue_router.get(
+    "/htmx/issues/{issue_id}/dc-search-results",
+    response_class=StreamingResponse,
+    include_in_schema=False,
+)
+async def htmx_issue_dc_search_results(
+    request: Request,
+    issue_id: int,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Stream DC-only progress after existing source results have rendered."""
+    if not get_settings().airdcpp_enabled:
+        return Response(status_code=404)
+    target = await load_issue_search_target(session, issue_id)
+    if target is None:
+        return Response(status_code=404)
+    registry = get_airdcpp_supervisor_registry()
+    coordinator = get_airdcpp_search_coordinator()
+    if registry is None or coordinator is None:
+        return Response(status_code=404)
+    clients = await load_airdcpp_search_clients(session, registry)
+    await session.commit()
+    if not clients:
+        return Response(status_code=404)
+
+    template = _templates().get_template("partials/issue_dc_search_results.html")
+
+    async def stream() -> AsyncIterator[str]:
+        progress_queue: asyncio.Queue[AirDcppSearchProgress] = asyncio.Queue(maxsize=64)
+
+        async def on_progress(progress: AirDcppSearchProgress) -> None:
+            await progress_queue.put(progress)
+
+        search_task = asyncio.create_task(
+            coordinator.search(
+                clients,
+                target,
+                manual=True,
+                on_progress=on_progress,
+            )
+        )
+        try:
+            while not search_task.done() or not progress_queue.empty():
+                progress_task = asyncio.create_task(progress_queue.get())
+                done, _pending = await asyncio.wait(
+                    {progress_task, search_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if progress_task in done:
+                    progress = progress_task.result()
+                    yield _sse_frame(
+                        {
+                            "kind": "progress",
+                            "progress": {
+                                "config_id": progress.config_id,
+                                "state": progress.state.value,
+                                "remaining_seconds": progress.remaining_seconds,
+                            },
+                        }
+                    )
+                else:
+                    progress_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await progress_task
+
+            outcome = await search_task
+            route_store = get_airdcpp_route_token_store()
+            dc_rows = [
+                {
+                    "candidate": candidate,
+                    "route_token": route_store.issue(
+                        candidate,
+                        issue_id=target.issue_id,
+                        user_id=user.id,
+                        search_log_id=None,
+                    ),
+                }
+                for candidate in outcome.matched
+            ]
+            html = template.render(
+                _ctx(
+                    request,
+                    user,
+                    issue={
+                        "id": target.issue_id,
+                        "series_id": target.series_id,
+                        "issue_number": target.issue_number,
+                    },
+                    outcome=outcome,
+                    dc_rows=dc_rows,
+                )
+            )
+            result_count = len(outcome.matched) + len(outcome.rejected)
+            qualifier = " partial" if outcome.partial else ""
+            yield _sse_frame(
+                {
+                    "kind": "results",
+                    "html": html,
+                    "summary": f"{result_count} Direct Connect results{qualifier}.",
+                }
+            )
+        finally:
+            if not search_task.done():
+                search_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await search_task
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _sse_frame(payload: dict[str, object]) -> str:
+    return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
 
 @issue_router.post(
@@ -271,7 +600,9 @@ async def htmx_toggle_issue_status(
 ) -> Response:
     """Toggle issue status between wanted and skipped (HTMX partial)."""
     result = await session.execute(
-        select(Issue).options(joinedload(Issue.series)).where(Issue.id == issue_id)
+        select(Issue)
+        .options(joinedload(Issue.series), joinedload(Issue.library_file))
+        .where(Issue.id == issue_id)
     )
     issue = result.scalar_one_or_none()
     if issue is None:
@@ -286,10 +617,28 @@ async def htmx_toggle_issue_status(
 
     await session.commit()
 
+    states = await load_visible_issue_states(
+        session,
+        user_id=user.id,
+        issue_ids=(issue.id,),
+    )
+    issue_reading_views = {
+        issue.id: present_issue_reading(
+            states.get(issue.id),
+            readable=_issue_is_readable(issue, reader_enabled=get_settings().reader_enabled),
+        )
+    }
+
     return _templates().TemplateResponse(
         request,
         "partials/issue_row.html",
-        _ctx(request, user, issue=issue, series=issue.series),
+        _ctx(
+            request,
+            user,
+            issue=issue,
+            series=issue.series,
+            issue_reading_views=issue_reading_views,
+        ),
     )
 
 
@@ -475,7 +824,12 @@ async def htmx_series_issues(
         return Response(status_code=404)
 
     issues_ctx = await load_series_issues_context(
-        session, series_id, issue_status, page, sort=issue_sort
+        session,
+        series_id,
+        issue_status,
+        page,
+        user_id=user.id,
+        sort=issue_sort,
     )
 
     return _templates().TemplateResponse(

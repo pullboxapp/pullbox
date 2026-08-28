@@ -1,6 +1,6 @@
 """Unit tests for DownloadClientType enum expansion (DCE-M.1).
 
-Tests all 6 enum values, protocol classification helper properties,
+Tests all 7 enum values, protocol classification helper properties,
 StrEnum string comparison behavior, and SQLAlchemy round-trip persistence.
 
 Run:
@@ -17,6 +17,7 @@ from sqlalchemy import String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.models import Base
 from pullbox.models.download import DownloadClientType
 
@@ -24,6 +25,23 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-dce")
+
+
+def test_existing_client_types_expose_acquisition_protocol() -> None:
+    assert DownloadClientType.SABNZBD.acquisition_protocol is AcquisitionProtocol.USENET
+    assert DownloadClientType.NZBGET.acquisition_protocol is AcquisitionProtocol.USENET
+    assert DownloadClientType.QBITTORRENT.acquisition_protocol is AcquisitionProtocol.TORRENT
+    assert DownloadClientType.TRANSMISSION.acquisition_protocol is AcquisitionProtocol.TORRENT
+    assert DownloadClientType.DELUGE.acquisition_protocol is AcquisitionProtocol.TORRENT
+    assert DownloadClientType.DIRECT.acquisition_protocol is AcquisitionProtocol.DIRECT
+
+
+def test_airdcpp_client_type_maps_to_dc_protocol() -> None:
+    assert DownloadClientType.AIRDCPP.value == "airdcpp"
+    assert DownloadClientType.AIRDCPP.acquisition_protocol is AcquisitionProtocol.DC
+    assert DownloadClientType.AIRDCPP.is_usenet is False
+    assert DownloadClientType.AIRDCPP.is_torrent is False
+    assert DownloadClientType.AIRDCPP.is_direct is False
 
 
 # Minimal model for round-trip testing without pulling in full DownloadHistory
@@ -79,15 +97,20 @@ class TestDownloadClientTypeValues:
         assert DownloadClientType.DIRECT == "direct"
         assert DownloadClientType.DIRECT.value == "direct"
 
-    def test_all_six_members_exist(self) -> None:
+    def test_airdcpp_value(self) -> None:
+        assert DownloadClientType.AIRDCPP == "airdcpp"
+        assert DownloadClientType.AIRDCPP.value == "airdcpp"
+
+    def test_all_seven_members_exist(self) -> None:
         members = list(DownloadClientType)
-        assert len(members) == 6
+        assert len(members) == 7
 
     def test_construction_from_string(self) -> None:
         assert DownloadClientType("nzbget") is DownloadClientType.NZBGET
         assert DownloadClientType("transmission") is DownloadClientType.TRANSMISSION
         assert DownloadClientType("deluge") is DownloadClientType.DELUGE
         assert DownloadClientType("direct") is DownloadClientType.DIRECT
+        assert DownloadClientType("airdcpp") is DownloadClientType.AIRDCPP
 
     def test_invalid_value_raises(self) -> None:
         with pytest.raises(ValueError, match="rtorrent"):
@@ -135,12 +158,14 @@ class TestDownloadClientTypeValues:
         assert members[3] is DownloadClientType.TRANSMISSION
         assert members[4] is DownloadClientType.DELUGE
         assert members[5] is DownloadClientType.DIRECT
+        assert members[6] is DownloadClientType.AIRDCPP
 
     def test_membership_check_with_in(self) -> None:
         """The 'in' operator works with string values against the enum."""
         assert "nzbget" in [ct.value for ct in DownloadClientType]
         assert "transmission" in [ct.value for ct in DownloadClientType]
         assert "direct" in [ct.value for ct in DownloadClientType]
+        assert "airdcpp" in [ct.value for ct in DownloadClientType]
         assert "rtorrent" not in [ct.value for ct in DownloadClientType]
 
     def test_hashable_for_set_and_dict_use(self) -> None:
@@ -173,6 +198,9 @@ class TestIsUsenet:
     def test_direct_not_usenet(self) -> None:
         assert DownloadClientType.DIRECT.is_usenet is False
 
+    def test_airdcpp_not_usenet(self) -> None:
+        assert DownloadClientType.AIRDCPP.is_usenet is False
+
 
 class TestIsTorrent:
     """Tests for the is_torrent helper property."""
@@ -195,6 +223,9 @@ class TestIsTorrent:
     def test_direct_not_torrent(self) -> None:
         assert DownloadClientType.DIRECT.is_torrent is False
 
+    def test_airdcpp_not_torrent(self) -> None:
+        assert DownloadClientType.AIRDCPP.is_torrent is False
+
 
 class TestIsDirect:
     """Tests for the is_direct helper property."""
@@ -202,7 +233,10 @@ class TestIsDirect:
     def test_direct_is_direct(self) -> None:
         assert DownloadClientType.DIRECT.is_direct is True
 
-    @pytest.mark.parametrize("member", list(DownloadClientType)[:-1])
+    @pytest.mark.parametrize(
+        "member",
+        [member for member in DownloadClientType if member is not DownloadClientType.DIRECT],
+    )
     def test_client_backed_types_are_not_direct(self, member: DownloadClientType) -> None:
         assert member.is_direct is False
 
@@ -210,10 +244,11 @@ class TestIsDirect:
 class TestProtocolClassification:
     """Verify every client-history type has exactly one protocol classification."""
 
-    def test_every_member_is_exactly_one_type(self) -> None:
+    def test_legacy_boolean_flags_match_protocol(self) -> None:
         for member in DownloadClientType:
-            assert sum((member.is_usenet, member.is_torrent, member.is_direct)) == 1, (
-                f"{member.name} must have exactly one protocol classification"
+            expected_count = 0 if member.acquisition_protocol is AcquisitionProtocol.DC else 1
+            assert sum((member.is_usenet, member.is_torrent, member.is_direct)) == expected_count, (
+                f"{member.name} compatibility flags must agree with its protocol"
             )
 
     def test_no_member_is_both(self) -> None:
@@ -234,6 +269,14 @@ class TestProtocolClassification:
     def test_direct_count(self) -> None:
         direct = [m for m in DownloadClientType if m.is_direct]
         assert direct == [DownloadClientType.DIRECT]
+
+    def test_dc_count(self) -> None:
+        dc = [
+            member
+            for member in DownloadClientType
+            if member.acquisition_protocol is AcquisitionProtocol.DC
+        ]
+        assert dc == [DownloadClientType.AIRDCPP]
 
     def test_property_returns_bool_not_truthy(self) -> None:
         """Properties must return actual bool, not just truthy/falsy values."""
@@ -297,8 +340,17 @@ class TestSQLAlchemyRoundTrip:
         loaded = result.scalar_one()
         assert DownloadClientType(loaded.client_type) is DownloadClientType.QBITTORRENT
 
-    async def test_all_six_types_coexist_in_one_table(self, session: AsyncSession) -> None:
-        """All 6 client types can be stored and queried in the same table."""
+    async def test_airdcpp_round_trip(self, session: AsyncSession) -> None:
+        record = _ClientTypeRecord(id=6, client_type=DownloadClientType.AIRDCPP.value)
+        session.add(record)
+        await session.flush()
+
+        result = await session.execute(select(_ClientTypeRecord).where(_ClientTypeRecord.id == 6))
+        loaded = result.scalar_one()
+        assert DownloadClientType(loaded.client_type) is DownloadClientType.AIRDCPP
+
+    async def test_all_seven_types_coexist_in_one_table(self, session: AsyncSession) -> None:
+        """All 7 client types can be stored and queried in the same table."""
         for i, ct in enumerate(DownloadClientType, start=10):
             session.add(_ClientTypeRecord(id=i, client_type=ct.value))
         await session.flush()
@@ -313,6 +365,7 @@ class TestSQLAlchemyRoundTrip:
             "transmission",
             "deluge",
             "direct",
+            "airdcpp",
         }
 
     async def test_round_trip_preserves_helper_properties(self, session: AsyncSession) -> None:

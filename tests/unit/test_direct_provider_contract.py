@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from pullbox.providers.direct.contract import (
     DIRECT_PROVIDER_PROTOCOL_V1,
+    DirectCandidate,
     DirectManifestResponse,
     DirectMirror,
     DirectResolveResponse,
@@ -15,6 +16,19 @@ from pullbox.providers.direct.contract import (
     DirectSearchResponse,
     negotiate_direct_provider_protocol,
 )
+
+
+def _candidate(**overrides: object) -> DirectCandidate:
+    values: dict[str, object] = {
+        "provider_candidate_id": "provider:item-1",
+        "source_reference": "https://source.example/item/1",
+        "display_title": "Example #1",
+        "raw_title": "Example 001 (2026).cbz",
+        "parsed": {"series_title": "Example", "issue_numbers": ["1"]},
+        "provider_confidence": 0.95,
+    }
+    values.update(overrides)
+    return DirectCandidate.model_validate(values)
 
 
 def _manifest(**overrides: object) -> dict[str, object]:
@@ -96,6 +110,75 @@ def test_manifest_normalizes_allowlisted_uri_controls() -> None:
     )
 
 
+def test_manifest_normalizes_open_uri_suggestions_and_source_origin() -> None:
+    manifest = DirectManifestResponse.model_validate(
+        _manifest(
+            configuration_schema={
+                "type": "object",
+                "properties": {
+                    "source_url": {
+                        "type": "string",
+                        "format": "uri",
+                        "default": "https://custom.example",
+                        "x-pullbox-suggestions": [
+                            "https://source-one.example",
+                            "https://source-two.example",
+                        ],
+                        "x-pullbox-source-origin": True,
+                    }
+                },
+                "additionalProperties": False,
+            }
+        )
+    )
+
+    control = manifest.configuration_controls[0]
+    assert control.choices == ()
+    assert control.suggestions == (
+        "https://source-one.example",
+        "https://source-two.example",
+    )
+    assert control.source_origin is True
+
+
+def test_manifest_keeps_suggestions_and_source_origin_independent() -> None:
+    manifest = DirectManifestResponse.model_validate(
+        _manifest(
+            configuration_schema={
+                "type": "object",
+                "properties": {
+                    "suggested_url": {
+                        "type": "string",
+                        "format": "uri",
+                        "x-pullbox-suggestions": ["https://known.example"],
+                    },
+                    "custom_origin": {
+                        "type": "string",
+                        "format": "uri",
+                        "x-pullbox-source-origin": True,
+                    },
+                },
+                "additionalProperties": False,
+            }
+        )
+    )
+
+    suggested, custom = manifest.configuration_controls
+    assert suggested.suggestions == ("https://known.example",)
+    assert suggested.source_origin is False
+    assert custom.suggestions == ()
+    assert custom.source_origin is True
+
+
+def test_candidate_content_fingerprint_is_optional_and_validated() -> None:
+    assert _candidate().content_fingerprint is None
+    fingerprinted = _candidate(content_fingerprint="md5:0123456789abcdef0123456789abcdef")
+    assert fingerprinted.content_fingerprint == "md5:0123456789abcdef0123456789abcdef"
+    assert fingerprinted.content_fingerprint not in repr(fingerprinted)
+    with pytest.raises(ValidationError):
+        _candidate(content_fingerprint="md5:not-a-hash")
+
+
 def test_manifest_rejects_executable_or_nested_configuration_controls() -> None:
     with pytest.raises(ValidationError, match="configuration control is unsupported"):
         DirectManifestResponse.model_validate(
@@ -121,6 +204,46 @@ def test_manifest_rejects_executable_or_nested_configuration_controls() -> None:
         {"type": "string", "format": "html"},
         {"type": "boolean", "format": "uri"},
         {"type": "string", "format": "uri", "x-pullbox-secret": True},
+        {
+            "type": "string",
+            "format": "uri",
+            "x-pullbox-suggestions": ["https://127.0.0.1"],
+        },
+        {
+            "type": "string",
+            "format": "uri",
+            "x-pullbox-suggestions": ["https://localhost"],
+        },
+        {
+            "type": "string",
+            "format": "uri",
+            "x-pullbox-suggestions": ["https://2130706433"],
+        },
+        {
+            "type": "string",
+            "format": "uri",
+            "x-pullbox-suggestions": ["https://0x7f000001"],
+        },
+        {
+            "type": "string",
+            "format": "uri",
+            "x-pullbox-suggestions": ["https://source.local"],
+        },
+        {
+            "type": "string",
+            "format": "uri",
+            "x-pullbox-suggestions": ["https://source.onion"],
+        },
+        {
+            "type": "string",
+            "format": "uri",
+            "x-pullbox-suggestions": ["https://source.internal"],
+        },
+        {
+            "type": "string",
+            "format": "uri",
+            "x-pullbox-suggestions": ["https://source.home.arpa"],
+        },
     ],
 )
 def test_manifest_rejects_internally_inconsistent_configuration_controls(
@@ -132,6 +255,38 @@ def test_manifest_rejects_internally_inconsistent_configuration_controls(
                 configuration_schema={
                     "type": "object",
                     "properties": {"unsafe": field},
+                    "additionalProperties": False,
+                }
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "default",
+    [
+        "http://source.example",
+        "https://127.0.0.1",
+        "https://2130706433",
+        "https://source.local",
+        "https://source.onion",
+        "https://source.internal",
+        "https://source.home.arpa",
+    ],
+)
+def test_manifest_rejects_unsafe_source_origin_default(default: str) -> None:
+    with pytest.raises(ValidationError):
+        DirectManifestResponse.model_validate(
+            _manifest(
+                configuration_schema={
+                    "type": "object",
+                    "properties": {
+                        "source_url": {
+                            "type": "string",
+                            "format": "uri",
+                            "default": default,
+                            "x-pullbox-source-origin": True,
+                        }
+                    },
                     "additionalProperties": False,
                 }
             )

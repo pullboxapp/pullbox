@@ -256,6 +256,24 @@ async def evaluate_comicvine_match(
     normalized_query = NameMatcher.normalize(source_metadata.series_name or raw_name)
     semantic_engine = SemanticMatchEngine(policy=ImportPolicy())
 
+    identity_conflicts = source_metadata.diagnostics.get("identity_conflicts")
+    if isinstance(identity_conflicts, list) and identity_conflicts:
+        return ComicVineMatchEvaluation(
+            match=None,
+            diagnostics={
+                "kind": "series_conflict",
+                "reason": "trusted_source_identity_conflict",
+                "raw_name": raw_name,
+                "raw_year": raw_year,
+                "normalized_query": normalized_query,
+                "threshold": round(match_threshold, 4),
+                "identity_conflicts": [
+                    dict(conflict) for conflict in identity_conflicts if isinstance(conflict, dict)
+                ],
+                "top_candidates": [],
+            },
+        )
+
     known_cv_id = mylar3_cv_id or comicinfo_cv_id or source_metadata.comicvine_series_id
     if known_cv_id:
         match_method = "mylar3_cv_id" if mylar3_cv_id else "comicinfo_cv_id"

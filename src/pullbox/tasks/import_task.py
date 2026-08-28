@@ -27,6 +27,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_workflow_state import (
+    emit_progress,
     import_control_state_for_job,
     initialize_progress_snapshot,
     paused_message_for_mode,
@@ -271,9 +272,12 @@ async def _emit_terminal_event_for_job(
         payload[field_name] = snapshot.get(field_name)
 
     event = ImportProgressEvent.model_validate(payload)
-    job.progress_snapshot = event.model_dump(mode="json")
-    await session.commit()
-    await _publish_progress_event(event)
+    await emit_progress(
+        session,
+        job,
+        event,
+        progress_callback=_publish_progress_event,
+    )
     return job.status
 
 
@@ -329,7 +333,12 @@ async def _publish_current_snapshot_event_for_job(
             "control_state": import_control_state_for_job(job),
         }
     )
-    await _publish_progress_event(event)
+    await emit_progress(
+        session,
+        job,
+        event,
+        progress_callback=_publish_progress_event,
+    )
     return job.status
 
 

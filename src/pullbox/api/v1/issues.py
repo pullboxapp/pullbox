@@ -9,17 +9,21 @@ import structlog
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy import inspect, select
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry
+from pullbox.config import get_settings
 from pullbox.core.exceptions import ConfigurationError, NotFoundError, ValidationError
 from pullbox.core.file_ops import register_library_file
 from pullbox.core.file_safety import classify_resource_safety_exception
+from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
-from pullbox.models.download import DownloadState
+from pullbox.models.download import DownloadClientType, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryFile, MatchConfidence
 from pullbox.models.search_log import SearchLog, SearchType
+from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
 from pullbox.schemas.issue import (
     IssueFileDeleteResponse,
     IssueResponse,
@@ -29,6 +33,8 @@ from pullbox.schemas.issue import (
     ManualFileImportResponse,
 )
 from pullbox.schemas.search import (
+    DcGrabRequest,
+    DcGrabResponse,
     DirectGrabRequest,
     DirectGrabResponse,
     GrabReleaseRequest,
@@ -39,9 +45,12 @@ from pullbox.schemas.search import (
     RejectedResultItem,
     SearchResultItem,
 )
+from pullbox.services.airdcpp_acquisition import AirDcppQueueAcquisitionService
+from pullbox.services.airdcpp_route_tokens import get_airdcpp_route_token_store
 from pullbox.services.direct_acquisition_planner_service import (
     DirectAcquisitionPlanningError,
     plan_direct_acquisition,
+    plan_direct_acquisition_with_provider_fallback,
 )
 from pullbox.services.direct_search_coordinator import (
     DirectSearchDiscovery,
@@ -60,7 +69,11 @@ from pullbox.services.release_validator import (
     ValidationResult,
 )
 from pullbox.services.search_acquisition_router import route_search_acquisition
-from pullbox.services.search_scoring import match_confidence_rank, normalize_source_priority
+from pullbox.services.search_scoring import (
+    DIRECT_PROVIDER_NEUTRAL_PRIORITY,
+    match_confidence_rank,
+    normalize_source_priority,
+)
 from pullbox.services.search_service import (
     DEFAULT_TYPE_THRESHOLDS,
     IssueSearchOutcome,
@@ -75,6 +88,9 @@ from pullbox.services.search_service import (
 )
 from pullbox.services.search_source_selection import select_search_source
 from pullbox.services.search_types import SearchEvalKwargs
+from pullbox.services.secondary_operation_progress import (
+    project_issue_import_operation_progress,
+)
 from pullbox.tasks.direct_acquisition_task import get_direct_acquisition_runner
 from pullbox.tasks.issue_import_task import (
     cancel_issue_import_run,
@@ -172,6 +188,7 @@ def build_interactive_results(
     *,
     issue_type: IssueType = IssueType.ISSUE,
     type_thresholds: dict[str, str] | None = None,
+    scoring_priority: int | None = None,
 ) -> tuple[list[SearchResultItem], list[RejectedResultItem]]:
     """Build schema objects from validation results with quality scoring.
 
@@ -194,6 +211,7 @@ def build_interactive_results(
     for vr in matched_vr:
         quality = score_release(
             vr.release,
+            scoring_priority,
             min_size_mb=int(str(min_size_mb)) if min_size_mb else 50,
             max_size_mb=int(str(max_size_mb)) if max_size_mb else 2000,
             preferred_format=str(preferred_format) if preferred_format else None,
@@ -277,6 +295,8 @@ def build_direct_interactive_results(
     matched_items: list[SearchResultItem] = []
     rejected_items: list[RejectedResultItem] = []
     for discovery in discoveries:
+        if not discovery.visible:
+            continue
         result = discovery.result
         candidate = result.candidate
         common = {
@@ -296,6 +316,7 @@ def build_direct_interactive_results(
                 eval_kwargs,
                 issue_type=issue_type,
                 type_thresholds=type_thresholds,
+                scoring_priority=DIRECT_PROVIDER_NEUTRAL_PRIORITY,
             )
             matched_items.append(direct_matched[0].model_copy(update=common))
         else:
@@ -305,6 +326,7 @@ def build_direct_interactive_results(
                 eval_kwargs,
                 issue_type=issue_type,
                 type_thresholds=type_thresholds,
+                scoring_priority=DIRECT_PROVIDER_NEUTRAL_PRIORITY,
             )
             rejected_items.append(direct_rejected[0].model_copy(update=common))
     return matched_items, rejected_items
@@ -329,11 +351,11 @@ def sort_interactive_results_by_source_priority[
 
     def _rank(
         item: SearchResultItem | RejectedResultItem,
-    ) -> tuple[int, int, float, int, float]:
+    ) -> tuple[int, int, float, float, int]:
         score = getattr(item, "quality_score", None)
         source_rank = priority_map.get(_source(item), 0)
         if item.source_kind != "direct" or normalized is None:
-            return source_rank, 0, 0.0, 0, -float(score) if score is not None else 0.0
+            return source_rank, 0, 0.0, -float(score) if score is not None else 0.0, 0
         similarity = (
             item.match_details.series_similarity if isinstance(item, SearchResultItem) else 0.0
         )
@@ -341,8 +363,8 @@ def sort_interactive_results_by_source_priority[
             source_rank,
             match_confidence_rank(item.confidence),
             -similarity,
-            item.ranking_priority,
             -float(score) if score is not None else 0.0,
+            item.ranking_priority,
         )
 
     return sorted(items, key=_rank)
@@ -812,10 +834,11 @@ async def grab_direct_release(
     attempt.replace_existing_file = issue.library_file is not None
 
     try:
-        planned = await plan_direct_acquisition(
+        planned = await plan_direct_acquisition_with_provider_fallback(
             session,
             acquisition_id=attempt.id,
             pinned_route_identity=body.pinned_route_identity,
+            planner=plan_direct_acquisition,
         )
     except DirectAcquisitionPlanningError as exc:
         await session.commit()
@@ -824,30 +847,121 @@ async def grab_direct_release(
     await _increment_search_log_grabbed(
         session,
         issue_id=issue_id,
-        search_log_id=attempt.search_log_id,
+        search_log_id=planned.attempt.search_log_id,
     )
     await session.commit()
 
     runner = get_direct_acquisition_runner()
     await runner.dispatch(
-        attempt.id,
+        planned.attempt.id,
         planned.selected_artifact.id,
         initial_source=planned.initial_source,
     )
-    title = str(attempt.candidate_snapshot.get("display_title") or "Direct download")
+    title = str(planned.attempt.candidate_snapshot.get("display_title") or "Direct download")
     logger.info(
         "issue_manual_direct_grab",
         issue_id=issue_id,
-        acquisition_id=attempt.id,
+        acquisition_id=planned.attempt.id,
         artifact_id=planned.selected_artifact.id,
-        provider_id=attempt.provider_identity,
+        provider_id=planned.attempt.provider_identity,
     )
     return DirectGrabResponse(
         issue_id=issue_id,
-        acquisition_id=attempt.id,
+        acquisition_id=planned.attempt.id,
         artifact_id=planned.selected_artifact.id,
         title=title,
         status="queued",
+    )
+
+
+@router.post(
+    "/{issue_id}/dc-grab",
+    status_code=201,
+    response_model=DcGrabResponse,
+)
+async def grab_direct_connect_release(
+    issue_id: int,
+    body: DcGrabRequest,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> DcGrabResponse:
+    """Persist and queue one opaque, user-bound Direct Connect result."""
+    if not get_settings().airdcpp_enabled:
+        raise NotFoundError("Direct Connect route", issue_id)
+    try:
+        grant = get_airdcpp_route_token_store().resolve(
+            body.dc_route_token,
+            issue_id=issue_id,
+            user_id=user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    route = grant.candidate.route
+    client = (
+        await session.execute(
+            select(DownloadClientConfig)
+            .options(selectinload(DownloadClientConfig.airdcpp_settings))
+            .where(
+                DownloadClientConfig.id == route.client_config_id,
+                DownloadClientConfig.client_type == DownloadClientType.AIRDCPP,
+                DownloadClientConfig.enabled.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if (
+        client is None
+        or client.airdcpp_settings is None
+        or not client.airdcpp_settings.search_enabled
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The selected AirDC++ client is no longer enabled.",
+        )
+    registry = get_airdcpp_supervisor_registry()
+    supervisor = registry.get(client.id) if registry is not None else None
+    if supervisor is None or supervisor.state is not AirDcppSupervisorState.READY:
+        raise HTTPException(
+            status_code=409,
+            detail="The selected AirDC++ client is not ready.",
+        )
+    issue_result = await session.execute(
+        select(Issue).options(joinedload(Issue.library_file)).where(Issue.id == issue_id)
+    )
+    issue = issue_result.unique().scalar_one_or_none()
+    if issue is None:
+        raise NotFoundError("Issue", issue_id)
+    result = await AirDcppQueueAcquisitionService().acquire(
+        session,
+        candidate=grant.candidate,
+        issue_id=issue_id,
+        request_key=grant.request_key,
+        search_log_id=grant.search_log_id,
+        api_client=supervisor.api_client,
+        queue_priority=client.airdcpp_settings.queue_priority,
+        replace_existing_file=issue.library_file is not None,
+    )
+    await _increment_search_log_grabbed(
+        session,
+        issue_id=issue_id,
+        search_log_id=grant.search_log_id,
+    )
+    await session.commit()
+    logger.info(
+        "issue_manual_airdcpp_grab",
+        issue_id=issue_id,
+        acquisition_id=result.acquisition_id,
+        download_id=result.download_history_id,
+        bundle_id=result.bundle_id,
+        client_config_id=route.client_config_id,
+    )
+    return DcGrabResponse(
+        issue_id=issue_id,
+        acquisition_id=result.acquisition_id,
+        download_id=result.download_history_id,
+        bundle_id=result.bundle_id,
+        title=grant.candidate.release.title,
+        status=result.state.value,
     )
 
 
@@ -1088,9 +1202,13 @@ async def start_import_file_for_issue(
     issue_id: int,
     body: ManualFileImportRequest,
     _user: AuthenticatedUser,
+    session: DbSession,
 ) -> ManualFileImportProgressResponse:
     """Start a background manual import for the issue-detail UI."""
-    return await start_issue_import_run(issue_id, body)
+    progress = await start_issue_import_run(issue_id, body)
+    await project_issue_import_operation_progress(session, progress)
+    await session.commit()
+    return progress
 
 
 @router.post(
@@ -1100,9 +1218,13 @@ async def start_import_file_for_issue(
 async def cancel_import_file_for_issue(
     issue_id: int,
     _user: AuthenticatedUser,
+    session: DbSession,
 ) -> ManualFileImportProgressResponse:
     """Cancel a background manual import for the issue-detail UI."""
-    return await cancel_issue_import_run(issue_id)
+    progress = await cancel_issue_import_run(issue_id)
+    await project_issue_import_operation_progress(session, progress)
+    await session.commit()
+    return progress
 
 
 @router.get(
@@ -1112,10 +1234,13 @@ async def cancel_import_file_for_issue(
 async def get_import_file_for_issue_progress(
     issue_id: int,
     _user: AuthenticatedUser,
+    session: DbSession,
 ) -> ManualFileImportProgressResponse:
     """Return the latest live progress snapshot for one manual issue import."""
     progress = get_issue_import_progress_state(issue_id)
     if progress is not None:
+        await project_issue_import_operation_progress(session, progress)
+        await session.commit()
         return progress
     return ManualFileImportProgressResponse(
         issue_id=issue_id,

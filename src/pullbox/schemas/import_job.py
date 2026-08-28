@@ -368,6 +368,13 @@ class ImportJobRead(BaseModel):
     total_files_already_owned: int = 0
 
 
+class ImportActivityRead(BaseModel):
+    """Current background import activity for the persistent app shell."""
+
+    job: ImportJobRead | None = None
+    queued_count: int = 0
+
+
 class FileMatchUpdateRequest(BaseModel):
     """Request to manually set a file's issue match."""
 

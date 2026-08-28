@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.providers.base import ReleaseResult
 from pullbox.providers.indexer.torznab_transport import (
     ResolverAttemptCallback,
@@ -149,7 +150,7 @@ class TorznabIndexer(NewznabIndexer):
             seeders=_safe_int(attrs.get("seeders")),
             leechers=_safe_int(attrs.get("peers")),
             grabs=_safe_int(attrs.get("grabs")),
-            is_torrent=True,
+            protocol=AcquisitionProtocol.TORRENT,
             category=attrs.get("category"),
             published_at=published_at,
             info_url=info_url,

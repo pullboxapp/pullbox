@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
@@ -82,7 +83,9 @@ async def build_comicinfo_payload_for_issue(
 
     release_date = issue.release_date
     inspected_page_count = (
-        inspect_archive_page_count(source_path) if source_path is not None else None
+        await asyncio.to_thread(inspect_archive_page_count, source_path)
+        if source_path is not None
+        else None
     )
     notes: str | None = None
     if series.comicvine_id and issue.comicvine_id:
@@ -115,18 +118,19 @@ async def build_comicinfo_payload_for_issue(
     return payload
 
 
-def apply_comicinfo_to_imported_artifact(
+async def apply_comicinfo_to_imported_artifact(
     artifact_path: Path,
     comicinfo_payload: dict[str, Any],
     *,
     progress_callback: Callable[[str, int, int, str], Any] | None = None,
 ) -> None:
-    """Write authoritative ComicInfo to a final library artifact."""
+    """Write authoritative ComicInfo without blocking request handling."""
     if artifact_path.suffix.lower() != ".cbz":
         raise ConfigurationError(
             "Updating embedded ComicInfo.xml from matched issue requires a CBZ artifact."
         )
-    embed_comicinfo_in_cbz(
+    await asyncio.to_thread(
+        embed_comicinfo_in_cbz,
         artifact_path,
         comicinfo_payload,
         progress_callback=progress_callback,

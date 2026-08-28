@@ -185,6 +185,13 @@ async def record_direct_host_operational_result(
     )
     config.last_operational_at = occurred_at
     config.last_error_code = None if succeeded else getattr(error, "code", None)
+
+    # Generic HTTPS represents arbitrary final-file origins, not one host whose
+    # global reachability can be inferred from a single transfer.
+    if config.host_kind is DirectArtifactHostKind.GENERIC_HTTPS:
+        config.reachability_state = DirectHostReachabilityState.NOT_CHECKED
+        return
+
     has_credentials = bool(config.encrypted_credentials)
 
     if succeeded:

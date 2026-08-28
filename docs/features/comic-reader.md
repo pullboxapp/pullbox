@@ -29,6 +29,56 @@ Pullbox saves only the last page that remained visible after decoding for the se
 Progress is private to the signed-in user. Prefetching and opening directly on the final page do not
 mark completion; deliberately navigating to and viewing the final page does.
 
+## Reading state and workspace
+
+Reading state belongs to the signed-in user and the canonical Pullbox issue. It has three
+independent dimensions:
+
+- resume position records the last settled page for the current file revision and page count;
+- Read/Unread records deliberate completion intent; and
+- Want to Read maintains a private reading queue.
+
+**Want to Read is not the acquisition status Wanted.** The reading queue does not trigger a search
+or download, and acquisition state does not mark a comic read. Marking an issue Read removes it from
+Want to Read but preserves its last known page. Marking it Unread clears completion without erasing
+resume history.
+
+The **Reading** workspace at `/reading` presents bounded Continue, Want to Read, and Read tabs. The
+dashboard shows the eight most recently opened incomplete issues. Issue details expose the current
+reading state and explicit actions; series details show per-issue state and a read aggregate; the
+series registry reports readable/completed totals without opening comic archives. Unavailable
+queued or read issues remain visible but cannot be opened until a supported owned file is restored.
+
+## Moving between issues
+
+Previous issue and Next issue are separate from page navigation. They consider only owned issues in
+the same series with a registered CBZ, CBR, CB7, CBT, or PDF file. Pullbox waits for the active
+issue's progress write before requesting the next manifest. A failed save, target manifest, or first
+target page leaves the current issue open and reports an in-reader recovery message.
+
+Only one adjacent page in the active issue may be prefetched; another issue's pages are not fetched
+until the user explicitly switches. Reader fit, direction, and zoom preferences carry across the
+switch. Reaching the final page shows a completion panel with **Read next issue**, **Mark unread**,
+or a caught-up message as appropriate.
+
+## File identity and continuity
+
+Private state is keyed by `(user_id, issue_id)`, never a path or `LibraryFile` identifier. File
+operations therefore follow these rules:
+
+| Operation | Result |
+|---|---|
+| Rename or relocate | Position, completion, queue, clocks, and state version remain exact. |
+| Convert to CBZ with the same page count | The saved ordinal position and issue-level intent remain. |
+| Replace or re-import with the same page count | The saved ordinal position and issue-level intent remain. |
+| Replace or re-import with a different page count | The next open starts on page 1; completion and queue intent remain. |
+| Remove the registered file | Continue hides the issue; Want to Read/Read preserve it as unavailable. |
+| Re-import against the same Pullbox issue | Readability returns using the existing private state row. |
+| Delete the canonical Pullbox issue | Its private reading state is deleted by database cascade. |
+
+The manifest is side-effect free: page-count reconciliation controls the initial page returned to
+the client but does not rewrite saved state merely because a file was inspected.
+
 ## Errors and recovery
 
 The reader keeps failures inside the full-viewport shell and never exposes library paths, archive
@@ -60,9 +110,12 @@ environment and recreate/restart that service. This hides Read and makes the pri
 return not found while preserving source comics, generated cache files, and private resume state.
 Set the value back to `true` to restore the feature.
 
-The `issue_reader_states` migration is reversible, but downgrading it deletes private resume and
-completion records. Back up `/data` before any migration downgrade. Disabling the feature gate is
-the preferred rollback because it is non-destructive.
+Reader state is stored in the main Pullbox database, so a full `/data` backup includes it. Generated
+`reader-cache` files do not need to be backed up. Back up `/data` before any migration downgrade.
+Downgrading the independent-state migration deletes queue-only, completion-only, and explicit-unread
+rows that the old progress-only schema cannot represent; downgrading past the original reader-state
+migration deletes all reader state. Disabling the feature gate is the preferred rollback because it
+is non-destructive.
 
 ## Performance contract and acceptance snapshot
 
@@ -91,3 +144,17 @@ its cover in 129.5 ms, its next page in 4.0 ms, and a repeated page in 0.14 ms. 
 pages occupied 1.78 MiB on disk; retained process RSS grew by 52.4 MiB after decoding the large
 source artwork. Cancellation, single-flight generation, worker saturation, cache quota/clear, and
 source-preservation behavior have dedicated regression coverage.
+
+The 2026-08-25 reader-enhancement acceptance run on an Apple M5 Pro with 48 GB of memory seeded
+10,000 issues across 500 series and 5,000 overlapping state rows per user in SQLite. The warmed
+Continue query used exactly two SQL statements, returned eight rows, and improved from roughly
+2,154 ms to 3 ms after adding the measured `library_files.issue_id` join index. A 50-issue manifest
+run retained three bounded page sources, added no file descriptors or child processes, and retained
+about 1.2 MiB RSS. These are local development observations, not release SLAs.
+
+## Future OPDS and mobile clients
+
+`IssueReaderState` plus the adapter-neutral reader state and bounded query services are the source
+of truth for future OPDS and mobile integrations. Those adapters must call the same commands and
+projections rather than creating another state table or deriving state from file paths. Web URLs
+remain a web-adapter concern and are not stored in domain projections.

@@ -51,6 +51,7 @@ class PullboxSettings(BaseSettings):
     log_backup_count: int = 5  # Number of rotated log files to keep
     debug: bool = False
     startup_update_check_enabled: bool = True
+    airdcpp_enabled: bool = False
 
     # ── Database ───────────────────────────────────────────────────────
     db_url: str = "sqlite+aiosqlite:////data/pullbox.db"

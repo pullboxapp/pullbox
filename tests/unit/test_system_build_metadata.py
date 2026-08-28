@@ -156,6 +156,34 @@ def test_resolve_git_dir_supports_linked_worktrees(tmp_path: Path) -> None:
     assert build_metadata._resolve_git_dir(repo_root) == linked_git_dir
 
 
+def test_checkout_metadata_reads_shared_ref_for_linked_worktree(
+    monkeypatch,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    common_git_dir = tmp_path / "common.git"
+    linked_git_dir = common_git_dir / "worktrees" / "repo"
+    linked_git_dir.mkdir(parents=True)
+    repo_root.mkdir()
+
+    full_sha = "1234567890abcdef1234567890abcdef12345678"
+    (repo_root / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+    (linked_git_dir / "HEAD").write_text("ref: refs/heads/develop\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    shared_ref = common_git_dir / "refs" / "heads" / "develop"
+    shared_ref.parent.mkdir(parents=True)
+    shared_ref.write_text(f"{full_sha}\n", encoding="utf-8")
+    monkeypatch.setattr(build_metadata, "_repo_root", lambda: repo_root)
+
+    metadata = build_metadata._get_checkout_metadata()
+
+    assert metadata.branch == "develop"
+    assert metadata.commit == "1234567"
+
+
 def test_resolve_git_dir_returns_none_for_invalid_or_unreadable_git_file(
     monkeypatch,  # type: ignore[no-untyped-def]
     tmp_path: Path,

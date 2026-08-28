@@ -537,6 +537,12 @@ Pullbox also includes sidecar recovery logic for stale or corrupt `-wal` and
 - Database maintenance windows coordinate app traffic through the shared
   maintenance gate.
 - Gate-aware sessions pause before database-touching operations.
+- An exclusive nightly task runs SQLite `REINDEX` and
+  `PRAGMA optimize=0x10002` at 04:30, then verifies the database with
+  `PRAGMA quick_check`. The all-tables mask is intentional because the
+  maintenance connection has no prior query history.
+- Full SQLite `VACUUM` compaction remains an explicit operator action because
+  it rewrites the database and can require substantial temporary disk space.
 
 **Required standard**
 
@@ -551,6 +557,8 @@ Pullbox also includes sidecar recovery logic for stale or corrupt `-wal` and
 - For long-lived SQLite deployments, prefer `PRAGMA optimize` during maintenance
   or connection-lifecycle boundaries instead of broad manual `ANALYZE` routines
   on request paths.
+- PostgreSQL and in-memory SQLite deployments skip the SQLite file-maintenance
+  task.
 
 **Audit checks**
 
