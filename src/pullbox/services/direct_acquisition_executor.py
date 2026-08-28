@@ -78,9 +78,21 @@ from pullbox.services.direct_download_history_adapter import sync_direct_downloa
 from pullbox.services.direct_host_reachability import record_direct_host_operational_result
 from pullbox.services.direct_provider_capabilities import uses_internal_generic_https
 from pullbox.services.intervention_service import InterventionService
+from pullbox.services.post_processing_operation_progress import (
+    project_post_processing_operation_progress,
+)
+from pullbox.tasks.post_processing_progress import (
+    PostProcessingPhase,
+    _clear_post_processing,
+    _mark_post_processing_complete,
+    _set_post_processing_phase,
+    get_all_post_processing_progress,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from pullbox.models.download import DownloadHistory
 
 logger = structlog.get_logger(__name__)
 
@@ -576,12 +588,18 @@ class DirectAcquisitionExecutor:
     ) -> DirectExecutionResult:
         acquisition_id = attempt.id
         artifact_id = artifact.id
+        if progress.download_history_id is None:
+            await progress.write(stage="post_processing", force=True)
+        download_history_id = progress.download_history_id
+        if download_history_id is None:
+            raise RuntimeError("Direct post-processing requires a download history record.")
         try:
             pack_coverage = _selected_pack_coverage(attempt)
             if len(pack_coverage) > 1:
                 processed = await run_direct_artifact_pack_post_processing(
                     session,
                     acquisition_id=attempt.id,
+                    download_history_id=download_history_id,
                     issue_id=attempt.issue_id,
                     source_path=final_path,
                     expected_issue_numbers=pack_coverage,
@@ -592,6 +610,7 @@ class DirectAcquisitionExecutor:
                 processed = await self._post_processor(
                     session,
                     acquisition_id=attempt.id,
+                    download_history_id=download_history_id,
                     issue_id=attempt.issue_id,
                     source_path=final_path,
                     replace_existing_file=attempt.replace_existing_file,
@@ -819,6 +838,12 @@ class _ProgressWriter:
             (attempt.progress_snapshot or {}).get("source_slow") is True
         )
         self._slow_source_tracker = _SlowSourceTracker()
+        self._download_history_id: int | None = None
+
+    @property
+    def download_history_id(self) -> int | None:
+        """Return the durable UI identity established by the latest write."""
+        return self._download_history_id
 
     async def write_resolver_attempt(self, event: ArtifactResolutionProgress) -> None:
         await self.write(
@@ -883,17 +908,42 @@ class _ProgressWriter:
             revision=self._attempt.progress_revision + 1,
             snapshot=data,
         )
-        await sync_direct_download_history(
+        history = await sync_direct_download_history(
             self._session,
             self._attempt,
             self._artifact,
             at=self._now(),
             final_path=final_path,
         )
+        self._download_history_id = history.id
+        await self._project_post_processing_lifecycle(history, stage=stage)
         await self._session.commit()
         self._last_saved_at = now
         self._last_saved_bytes = current_bytes
         self._last_saved_source_slow = source_slow
+
+    async def _project_post_processing_lifecycle(
+        self,
+        history: DownloadHistory,
+        *,
+        stage: str,
+    ) -> None:
+        snapshot = None
+        if stage == "post_processing":
+            _set_post_processing_phase(history.id, PostProcessingPhase.RESOLVING_SOURCE)
+            snapshot = get_all_post_processing_progress().get(history.id)
+        elif stage == "completed":
+            _mark_post_processing_complete(history.id)
+            snapshot = get_all_post_processing_progress().get(history.id)
+        elif self._attempt.failure_class is DirectArtifactFailureClass.POST_PROCESS:
+            _clear_post_processing(history.id)
+        else:
+            return
+        await project_post_processing_operation_progress(
+            self._session,
+            history,
+            snapshot,
+        )
 
 
 async def _load_attempt(

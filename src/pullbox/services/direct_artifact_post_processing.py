@@ -81,6 +81,7 @@ async def run_direct_artifact_post_processing(
     session: AsyncSession,
     *,
     acquisition_id: int,
+    download_history_id: int,
     issue_id: int,
     source_path: Path,
     replace_existing_file: bool,
@@ -88,10 +89,10 @@ async def run_direct_artifact_post_processing(
     post_processor: _PostProcessor | None = None,
 ) -> DirectPostProcessingResult:
     """Process one quarantined comic without client path mapping or cleanup."""
-    if acquisition_id < 1 or issue_id < 1:
-        raise ValueError("Direct acquisition and issue IDs must be positive.")
+    if acquisition_id < 1 or download_history_id < 1 or issue_id < 1:
+        raise ValueError("Direct acquisition, download history, and issue IDs must be positive.")
     record = _DirectPostProcessingRecord(
-        id=-acquisition_id,
+        id=download_history_id,
         issue_id=issue_id,
         title=source_path.name,
         downloaded_path=str(source_path),
@@ -131,6 +132,7 @@ async def run_direct_artifact_pack_post_processing(
     session: AsyncSession,
     *,
     acquisition_id: int,
+    download_history_id: int,
     issue_id: int,
     source_path: Path,
     expected_issue_numbers: frozenset[str],
@@ -138,6 +140,8 @@ async def run_direct_artifact_pack_post_processing(
     allow_resource_safety_exception: bool = False,
 ) -> DirectPostProcessingResult:
     """Import separable same-series pack members through normal issue ingestion."""
+    if acquisition_id < 1 or download_history_id < 1 or issue_id < 1:
+        raise ValueError("Direct acquisition, download history, and issue IDs must be positive.")
     initiating_issue_result = await session.execute(
         select(Issue)
         .options(joinedload(Issue.series).joinedload(Series.publisher))

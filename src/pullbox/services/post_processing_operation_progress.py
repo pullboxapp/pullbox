@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -41,7 +42,21 @@ def _phase_label(snapshot: Any | None) -> str:
     return _phase_value(snapshot).replace("_", " ").capitalize()
 
 
-def _source_label(client_type: DownloadClientType) -> str:
+def _download_client_value(client: object) -> str:
+    if isinstance(client, DownloadClientType):
+        return client.value
+    value = getattr(client, "value", client)
+    if isinstance(value, str) and value:
+        return value
+    return "unknown"
+
+
+def _source_label(client: object) -> str:
+    client_value = _download_client_value(client)
+    try:
+        client_type = DownloadClientType(client_value)
+    except ValueError:
+        return client_value.replace("_", " ").title()
     labels = {
         DownloadClientType.AIRDCPP: "AirDC++",
         DownloadClientType.DIRECT: "Direct download",
@@ -57,9 +72,10 @@ def build_post_processing_operation_update(
     snapshot: Any | None = None,
 ) -> OperationProgressUpdate:
     """Build truthful post-processing progress without invented phase percentages."""
+    download_client_value = _download_client_value(download.download_client)
     phase = _phase_value(snapshot)
     is_failed = DownloadState(download.state) is DownloadState.FAILED
-    is_complete = phase == "import_complete" or download.imported_at is not None
+    is_complete = phase == "import_complete" or getattr(download, "imported_at", None) is not None
     if is_failed:
         state = OperationProgressState.FAILED
         tone = OperationProgressTone.DANGER
@@ -75,12 +91,14 @@ def build_post_processing_operation_update(
     total_bytes = int(total) if isinstance(total, int | float) and total > 0 else None
     current_bytes = int(current) if isinstance(current, int | float) and current >= 0 else None
     if is_complete:
-        total_bytes = total_bytes or download.file_size
+        file_size = getattr(download, "file_size", None)
+        if total_bytes is None and isinstance(file_size, int | float) and file_size > 0:
+            total_bytes = int(file_size)
         current_bytes = total_bytes or current_bytes
 
     rate = _snapshot_value(snapshot, "transfer_speed_bytes")
     eta = _snapshot_value(snapshot, "transfer_eta_seconds")
-    message = download.error_message if is_failed else _phase_label(snapshot)
+    message = getattr(download, "error_message", None) if is_failed else _phase_label(snapshot)
     return OperationProgressUpdate(
         operation_type=OperationProgressType.POST_PROCESSING,
         operation_key=str(download.id),
@@ -90,7 +108,7 @@ def build_post_processing_operation_update(
         phase="failed" if is_failed else phase,
         title=download.title,
         message=message or "Post-processing",
-        source_label=_source_label(DownloadClientType(download.download_client)),
+        source_label=_source_label(download.download_client),
         detail_url="/post-processing",
         visibility=OperationProgressVisibility.PROMINENT,
         tone=tone,
@@ -107,9 +125,11 @@ def build_post_processing_operation_update(
         detail_snapshot={
             "download_id": download.id,
             "issue_id": download.issue_id,
-            "client": download.download_client.value,
+            "client": download_client_value,
         },
-        started_at=download.post_processing_claimed_at or download.completed_at,
+        started_at=getattr(download, "post_processing_claimed_at", None)
+        or getattr(download, "completed_at", None),
+        event_at=datetime.now(UTC),
     )
 
 

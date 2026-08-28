@@ -96,6 +96,31 @@ async def test_publish_operation_progress_rejects_stale_and_equal_revisions(db_s
     assert equal.operation.revision == 3
 
 
+async def test_publish_operation_progress_rejects_late_delivery_of_an_older_event(
+    db_session,
+) -> None:
+    completed_at = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
+    completed = replace(
+        _update(
+            revision=1,
+            overall_percent=100,
+            state=OperationProgressState.COMPLETED,
+        ),
+        event_at=completed_at,
+    )
+    await publish_operation_progress(db_session, completed)
+
+    stale_running = replace(
+        _update(revision=2, overall_percent=70),
+        event_at=completed_at - timedelta(seconds=1),
+    )
+    result = await publish_operation_progress(db_session, stale_running)
+
+    assert result.accepted is False
+    assert result.operation.state is OperationProgressState.COMPLETED
+    assert result.operation.overall_percent == 100
+
+
 async def test_publish_operation_progress_keeps_overall_percentage_monotonic(db_session) -> None:
     await publish_operation_progress(db_session, _update(revision=1, overall_percent=60))
     result = await publish_operation_progress(

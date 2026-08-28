@@ -123,6 +123,12 @@ async def publish_operation_progress(
             .with_for_update()
         )
     ).scalar_one_or_none()
+    if (
+        existing is not None
+        and update.event_at is not None
+        and update.event_at < existing.last_event_at
+    ):
+        return OperationProgressPublishResult(operation=existing, accepted=False)
     revision = update.revision
     if revision is None:
         revision = (existing.revision if existing is not None else 0) + 1

@@ -91,3 +91,38 @@ def test_completed_post_processing_reports_terminal_completion() -> None:
 
     assert update.state is OperationProgressState.COMPLETED
     assert update.overall.percent == pytest.approx(100.0)
+
+
+def test_direct_download_compatibility_client_projects_progress() -> None:
+    download = SimpleNamespace(
+        id=-17,
+        issue_id=9,
+        title="Example Comic 001.cbz",
+        download_client=SimpleNamespace(
+            value="direct",
+            is_torrent=False,
+            is_usenet=False,
+        ),
+        state=DownloadState.COMPLETED,
+        imported_at=None,
+    )
+
+    update = build_post_processing_operation_update(download)  # type: ignore[arg-type]
+
+    assert update.source_label == "Direct download"
+    assert update.detail_snapshot["client"] == "direct"
+
+    completed = build_post_processing_operation_update(  # type: ignore[arg-type]
+        download,
+        SimpleNamespace(
+            phase=PostProcessingPhase.IMPORT_COMPLETE,
+            phase_label="Import complete",
+            transfer_done_bytes=None,
+            transfer_total_bytes=None,
+            transfer_speed_bytes=None,
+            transfer_eta_seconds=0,
+        ),
+    )
+
+    assert completed.state is OperationProgressState.COMPLETED
+    assert completed.overall.percent == pytest.approx(100.0)
