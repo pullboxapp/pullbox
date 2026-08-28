@@ -120,7 +120,7 @@
           x-cloak
           type="button"
           @click="cancelRun()"
-          :disabled="cancelling"
+          :disabled="cancelPrompting || cancelling"
           data-testid="import-progress-cancel-run"
           class="btn-ghost btn-sm inline-flex items-center justify-center"
         >

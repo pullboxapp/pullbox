@@ -3494,7 +3494,9 @@ function importProgressData(jobId, nextStep, sourceType) {
     pausing: false,
     optimisticPauseRequested: false,
     resuming: false,
+    cancelPrompting: false,
     cancelling: false,
+    cancelReturnStarted: false,
     continuing: false,
     controlState: {},
     stats: {
@@ -3728,6 +3730,12 @@ function importProgressData(jobId, nextStep, sourceType) {
     },
 
     showCancelAction: function () {
+      if (
+        (this.isScanMode() || this.isImportMode() || this.isRollbackMode()) &&
+        (this.cancelPrompting || this.cancelling)
+      ) {
+        return true;
+      }
       if (
         (this.isScanMode() || this.isImportMode() || this.isRollbackMode()) &&
         !this.completed &&
@@ -4870,6 +4878,24 @@ function importProgressData(jobId, nextStep, sourceType) {
       if (data.control_state && typeof data.control_state === "object") {
         this.controlState = data.control_state;
       }
+      var cancellationAction =
+        (data.control_state && typeof data.control_state.requested_action === "string"
+          ? data.control_state.requested_action
+          : typeof data.requested_action === "string"
+            ? data.requested_action
+            : ""
+        ).toLowerCase();
+      if (
+        this.jobStatus === "cancelling" ||
+        (this.jobStatus === "rolling_back" && cancellationAction === "cancel") ||
+        cancellationAction === "cancel"
+      ) {
+        this.cancelling = true;
+      } else if (
+        ["review", "completed", "failed", "cancelled", "rolled_back"].indexOf(this.jobStatus) !== -1
+      ) {
+        this.cancelling = false;
+      }
       if (this.optimisticPauseRequested) {
         var requestedAction =
           (data.control_state && typeof data.control_state.requested_action === "string"
@@ -4953,14 +4979,24 @@ function importProgressData(jobId, nextStep, sourceType) {
         return;
       }
 
-      if (data.status === "failed" || data.status === "cancelled") {
-      this.optimisticPauseRequested = false;
-      this.failed = true;
-      this.completed = false;
-      this.resetCurrentItemProgress();
-      this.emitFooterState();
-      this.stopPolling();
-      return;
+      if (data.status === "cancelled") {
+        this.optimisticPauseRequested = false;
+        this.failed = false;
+        this.completed = false;
+        this.resetCurrentItemProgress();
+        this.emitFooterState();
+        this.returnToImportStartAfterCancellation();
+        return;
+      }
+
+      if (data.status === "failed") {
+        this.optimisticPauseRequested = false;
+        this.failed = true;
+        this.completed = false;
+        this.resetCurrentItemProgress();
+        this.emitFooterState();
+        this.stopPolling();
+        return;
       }
 
       this.failed = false;
@@ -4975,6 +5011,19 @@ function importProgressData(jobId, nextStep, sourceType) {
         return;
       }
       this.applyJobState(snapshot, snapshot.recent_logs);
+    },
+
+    returnToImportStartAfterCancellation: function () {
+      if (this.cancelReturnStarted) {
+        return;
+      }
+      this.cancelReturnStarted = true;
+      this.cancelling = true;
+      this.stopPolling();
+      this.stopClock();
+      this.disconnectSSE("cancelled");
+      purgeImportClientState(this.jobId);
+      window.location.replace("/import?tab=collection");
     },
 
     startClock: function () {
@@ -5015,7 +5064,7 @@ function importProgressData(jobId, nextStep, sourceType) {
     init: function () {
       this.hydrateFromSnapshot();
       this.nowMs = Date.now();
-      if (this.completed || this.failed) {
+      if (this.completed || this.failed || this.cancelReturnStarted) {
         return;
       }
       this.startClock();
@@ -5071,6 +5120,10 @@ function importProgressData(jobId, nextStep, sourceType) {
         self.nowMs = Date.now();
         self.applyJobState(data, null);
 
+        if (self.cancelReturnStarted) {
+          return;
+        }
+
         if (self.nextStep === 5 && self.totalSelected === 0 && data.series_found) {
           self.totalSelected = data.series_found;
         }
@@ -5109,11 +5162,18 @@ function importProgressData(jobId, nextStep, sourceType) {
         var response = await fetch("/import/" + this.jobId + "/progress-state");
 
         if (!response.ok) {
+          if (response.status === 404 && this.cancelling) {
+            this.returnToImportStartAfterCancellation();
+          }
           return;
         }
 
         var job = await response.json();
         this.applyJobState(job, job.recent_logs || []);
+
+        if (this.cancelReturnStarted) {
+          return;
+        }
 
         if (this.isTerminalStatus(job.status, job.mode)) {
           this.stopPolling();
@@ -5274,7 +5334,12 @@ function importProgressData(jobId, nextStep, sourceType) {
     },
 
     cancelRun: async function () {
-      if (!this.jobId || this.cancelling || !this.showCancelAction()) {
+      if (
+        !this.jobId ||
+        this.cancelPrompting ||
+        this.cancelling ||
+        !this.showCancelAction()
+      ) {
         return;
       }
       var cancelTitle = this.isScanMode()
@@ -5287,12 +5352,18 @@ function importProgressData(jobId, nextStep, sourceType) {
         : this.isImportMode()
           ? "This will stop the current import, roll back any imported changes, and move the job to history."
           : "This will stop the current rollback run.";
-      var confirmed = await pbConfirm({
-        title: cancelTitle,
-        message: cancelMessage,
-        confirmText: this.cancelActionLabel(),
-        destructive: true,
-      });
+      this.cancelPrompting = true;
+      var confirmed = false;
+      try {
+        confirmed = await pbConfirm({
+          title: cancelTitle,
+          message: cancelMessage,
+          confirmText: this.cancelActionLabel(),
+          destructive: true,
+        });
+      } finally {
+        this.cancelPrompting = false;
+      }
       if (!confirmed) {
         return;
       }
@@ -5310,15 +5381,30 @@ function importProgressData(jobId, nextStep, sourceType) {
           });
           throw new Error(error.detail || "Failed to cancel " + this.runNoun() + ".");
         }
-        purgeImportClientState(this.jobId);
-        window.location.assign(this.isScanMode() ? "/import?tab=collection" : "/import?tab=history");
+        var job = await response.json().catch(function () {
+          return null;
+        });
+        if (!job) {
+          this.returnToImportStartAfterCancellation();
+          return;
+        }
+        var snapshot = this.jobReadToProgressState(job);
+        if (snapshot) {
+          this.applyJobState(snapshot, snapshot.recent_logs || []);
+        }
+        if (!this.cancelReturnStarted) {
+          this.startClock();
+          this.startPolling();
+          if (!this.evtSource) {
+            this.connectSSE();
+          }
+        }
       } catch (err) {
+        this.cancelling = false;
         showToast({
           message: (err && err.message) || "Failed to cancel " + this.runNoun() + ".",
           level: "error",
         });
-      } finally {
-        this.cancelling = false;
       }
     },
 
