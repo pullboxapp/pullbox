@@ -7,12 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-28
+
+Minor release adding native Direct Connect acquisition, LibGen direct-download
+search, expanded private reading workflows, substantially faster trusted
+imports, and unified background operation progress.
+
 ### Added
 
+- Added native AirDC++ client configuration, supervised API sessions, Direct
+  Connect search and ranking, live queue progress, completed-download import,
+  and durable queue reconciliation.
+- Added LibGen as a direct-download search and fallback source with bounded
+  provider deadlines, safe artifact routing, and resumable transfers.
 - Added a private Reading workspace with Continue, Want to Read, and Read views,
   plus dashboard, issue, series-detail, and series-registry reading state.
 - Added safe previous/next issue navigation inside the embedded reader with
   awaited progress saves, final-page actions, and failure-safe context retention.
+- Added durable operation progress and a global activity surface for imports,
+  downloads, post-processing, utilities, and other background work.
+- Added nightly SQLite optimization and reindex maintenance.
 
 ### Changed
 
@@ -20,16 +34,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dimensions keyed to the signed-in user and canonical issue.
 - Preserved reading state across rename, relocation, conversion, replacement,
   file removal, and re-import, with page-count-aware resume reconciliation.
+- Made trusted Mylar3 imports and sidecar-backed folder imports provider-free on
+  their critical matching path while preserving genuine exceptions for review.
+- Reused available Mylar series cover art and kept metadata enrichment
+  asynchronous so imported libraries become usable sooner.
+- Serialized direct-provider transfers to reduce artifact-host throttling and
+  improve transfer reliability while leaving Usenet, torrent, and Direct
+  Connect acquisition parallel.
+
+### Fixed
+
+- Normalized Windows drive-letter and UNC download paths safely, including
+  case-insensitive Windows matching, traversal rejection, and protection from
+  unintended filesystem-root scans.
+- Kept CPU-heavy import and ComicInfo work off the request event loop so
+  background processing no longer blocks normal application use.
+- Recovered the application shell when a cached stylesheet fails to load.
+- Treated generic HTTPS health per download instead of leaving the download
+  client registry permanently degraded.
+- Completed import cancellation, orphan recovery, and background progress
+  lifecycle handling without stale countdowns or stranded activity entries.
+- Improved direct-download and post-processing progress identity so active work
+  remains visible through acquisition and processing transitions.
+- Aligned AirDC++ client and queue priority controls with the shared settings
+  contract.
 
 ### Performance
 
 - Added the measured `library_files.issue_id` join index so bounded reading
   shelves remain fast on large libraries.
+- Removed unnecessary ComicVine requests from trusted Mylar3 and metadata-backed
+  folder imports, with benchmark tooling for large migration workloads.
+- Moved archive conversion, metadata writing, and other blocking file work off
+  the async request loop.
 
 ### Testing
 
 - Added file-continuity, 10,000-issue query-scale, 50-switch resource,
   cross-browser, keyboard, reduced-motion, and responsive reader regressions.
+- Added migration, Windows path, AirDC++, LibGen, import fast-path, cancellation,
+  progress lifecycle, scheduler, and large-library benchmark coverage.
+
+### CI / Build
+
+- Updated pinned CodeQL and Docker Buildx actions and refreshed reviewed Docker
+  Hardened Image vulnerability exceptions for current package revisions.
 
 ## [1.1.2] - 2026-08-26
 
