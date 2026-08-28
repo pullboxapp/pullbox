@@ -61,6 +61,8 @@ imports, and unified background operation progress.
 - Kept AirDC++ cancellations active until the exact remote bundle is confirmed
   removed, and recreated externally removed bundles from durable provenance on
   retry.
+- Recovered ambiguous AirDC++ queue mutations with bounded retries and prevented
+  repeated socket updates from hiding distinct search results at the result cap.
 
 ### Performance
 

@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 
 from pullbox.models.airdcpp import AirDcppAcquisition
 from pullbox.models.download import DownloadHistory, DownloadState
+from pullbox.providers.airdcpp.errors import AirDcppEntityNotFoundError, AirDcppError
 from pullbox.services.download_operation_progress import project_download_operation_progress
 
 if TYPE_CHECKING:
@@ -20,7 +21,11 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-    from pullbox.providers.airdcpp.contracts import AirDcppQueueBundle, AirDcppQueueFile
+    from pullbox.providers.airdcpp.contracts import (
+        AirDcppQueueBundle,
+        AirDcppQueueBundleAddInfo,
+        AirDcppQueueFile,
+    )
     from pullbox.services.airdcpp_search_cooldown import AirDcppCooldownReservation
 
 _PAGE_SIZE = 100
@@ -46,6 +51,24 @@ class AirDcppReconciliationApi(Protocol):
 
     async def get_queue_files_by_tth(self, tth: str) -> list[AirDcppQueueFile]: ...
 
+    async def download_search_result(
+        self,
+        instance_id: int,
+        result_id: str,
+        *,
+        target_name: str,
+        priority: int | None,
+    ) -> AirDcppQueueBundleAddInfo: ...
+
+    async def create_file_bundle(
+        self,
+        *,
+        tth: str,
+        size: int,
+        target_name: str,
+        priority: int | None,
+    ) -> AirDcppQueueBundleAddInfo: ...
+
     async def search_queue_bundle(self, bundle_id: int) -> None: ...
 
 
@@ -70,6 +93,19 @@ class _ActiveSnapshot:
     tth: str
     size_bytes: int
     target_name: str
+    search_instance_id: int | None
+    grouped_result_id: str | None
+    result_expires_at: datetime | None
+    retry_count: int
+    max_retries: int
+    next_retry_at: datetime | None
+    queue_priority: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveredMutation:
+    bundle_id: int
+    client_state: str
 
 
 class AirDcppReconciler:
@@ -141,6 +177,13 @@ class AirDcppReconciler:
                     row.tth,
                     row.size_bytes,
                     row.original_name,
+                    row.search_instance_id,
+                    row.grouped_result_id,
+                    row.result_expires_at,
+                    row.retry_count,
+                    row.max_retries,
+                    row.next_retry_at,
+                    _queue_priority(row.route_snapshot),
                 )
                 for row in rows
             )
@@ -149,9 +192,17 @@ class AirDcppReconciler:
             return AirDcppReconciliationResult(0, 0, 0, 0, False, 0)
 
         adopted: dict[int, AirDcppQueueFile] = {}
+        recovered: dict[int, _RecoveredMutation] = {}
+        retry_failures: dict[int, str] = {}
         pre_id = [snapshot for snapshot in snapshots if snapshot.bundle_id is None]
+        now = datetime.now(UTC)
         for snapshot in pre_id[:_MAX_PRE_ID_LOOKUPS]:
-            files = await api_client.get_queue_files_by_tth(snapshot.tth)
+            try:
+                files = await api_client.get_queue_files_by_tth(snapshot.tth)
+            except AirDcppError as exc:
+                if _pre_id_retry_due(snapshot, now=now):
+                    retry_failures[snapshot.acquisition_id] = exc.code
+                continue
             exact = [
                 item
                 for item in files
@@ -162,6 +213,17 @@ class AirDcppReconciler:
             bundle_ids = {item.bundle_id for item in exact}
             if len(bundle_ids) == 1:
                 adopted[snapshot.acquisition_id] = exact[0]
+                continue
+            if not _pre_id_retry_due(snapshot, now=now):
+                continue
+            try:
+                recovered[snapshot.acquisition_id] = await _retry_pre_id_mutation(
+                    api_client,
+                    snapshot,
+                    now=now,
+                )
+            except AirDcppError as exc:
+                retry_failures[snapshot.acquisition_id] = exc.code
 
         bundles: dict[int, AirDcppQueueBundle] = {}
         pages = 0
@@ -181,7 +243,6 @@ class AirDcppReconciler:
         changed = 0
         missing = 0
         completed = 0
-        now = datetime.now(UTC)
         async with self._session_factory() as session:
             result = await session.execute(
                 select(AirDcppAcquisition)
@@ -208,6 +269,22 @@ class AirDcppReconciler:
                         _apply_adopted_file(
                             acquisition,
                             adopted[snapshot.acquisition_id],
+                            at=now,
+                        )
+                    )
+                elif snapshot.acquisition_id in recovered:
+                    changed += int(
+                        _apply_recovered_mutation(
+                            acquisition,
+                            recovered[snapshot.acquisition_id],
+                            at=now,
+                        )
+                    )
+                elif snapshot.acquisition_id in retry_failures:
+                    changed += int(
+                        _apply_pre_id_retry_failure(
+                            acquisition,
+                            error_code=retry_failures[snapshot.acquisition_id],
                             at=now,
                         )
                     )
@@ -287,6 +364,111 @@ class AirDcppReconciler:
                 current.last_event_at = now
                 current.reconciliation_error = None
                 await session.commit()
+
+
+def _queue_priority(route_snapshot: dict[str, object] | None) -> int | None:
+    value = (route_snapshot or {}).get("queue_priority")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _pre_id_retry_due(snapshot: _ActiveSnapshot, *, now: datetime) -> bool:
+    return snapshot.next_retry_at is None or snapshot.next_retry_at <= now
+
+
+async def _retry_pre_id_mutation(
+    api_client: AirDcppReconciliationApi,
+    snapshot: _ActiveSnapshot,
+    *,
+    now: datetime,
+) -> _RecoveredMutation:
+    search_instance_id = snapshot.search_instance_id
+    grouped_result_id = snapshot.grouped_result_id
+    route_is_live = (
+        search_instance_id is not None
+        and grouped_result_id is not None
+        and snapshot.result_expires_at is not None
+        and snapshot.result_expires_at > now
+    )
+    if route_is_live:
+        assert search_instance_id is not None and grouped_result_id is not None
+        try:
+            added = await api_client.download_search_result(
+                search_instance_id,
+                grouped_result_id,
+                target_name=snapshot.target_name,
+                priority=snapshot.queue_priority,
+            )
+        except AirDcppEntityNotFoundError:
+            pass
+        else:
+            return _RecoveredMutation(added.id, "queued")
+
+    added = await api_client.create_file_bundle(
+        tth=snapshot.tth,
+        size=snapshot.size_bytes,
+        target_name=snapshot.target_name,
+        priority=snapshot.queue_priority,
+    )
+    return _RecoveredMutation(added.id, "source_search_pending")
+
+
+def _apply_recovered_mutation(
+    acquisition: AirDcppAcquisition,
+    recovered: _RecoveredMutation,
+    *,
+    at: datetime,
+) -> bool:
+    history = acquisition.download_history
+    acquisition.bundle_id = recovered.bundle_id
+    acquisition.client_state = recovered.client_state
+    acquisition.remote_target = None
+    acquisition.retry_count = 0
+    acquisition.next_retry_at = at if recovered.client_state == "source_search_pending" else None
+    acquisition.last_reconciled_at = at
+    acquisition.reconciliation_error = None
+    history.external_id = f"airdcpp:{acquisition.client_config_id}:bundle:{recovered.bundle_id}"
+    history.state = DownloadState.SENT
+    history.retry_count = 0
+    history.next_retry_at = None
+    history.error_message = None
+    history.completed_at = None
+    return True
+
+
+def _apply_pre_id_retry_failure(
+    acquisition: AirDcppAcquisition,
+    *,
+    error_code: str,
+    at: datetime,
+) -> bool:
+    history = acquisition.download_history
+    acquisition.retry_count = min(acquisition.retry_count + 1, acquisition.max_retries)
+    acquisition.last_reconciled_at = at
+    route_snapshot = dict(acquisition.route_snapshot or {})
+    route_snapshot["last_queue_mutation_error"] = error_code
+    acquisition.route_snapshot = route_snapshot
+    history.retry_count = acquisition.retry_count
+
+    if acquisition.retry_count >= acquisition.max_retries:
+        acquisition.client_state = "missing"
+        acquisition.next_retry_at = None
+        acquisition.reconciliation_error = "queue_mutation_failed"
+        history.state = DownloadState.FAILED
+        history.next_retry_at = None
+        history.completed_at = at
+        history.error_message = (
+            "AirDC++ could not create the queue item after bounded recovery attempts."
+        )
+        return True
+
+    next_retry_at = at + timedelta(seconds=30)
+    acquisition.client_state = "reconcile_pending"
+    acquisition.next_retry_at = next_retry_at
+    acquisition.reconciliation_error = error_code
+    history.state = DownloadState.RETRY_PENDING
+    history.next_retry_at = next_retry_at
+    history.error_message = "Waiting to retry the AirDC++ queue request."
+    return True
 
 
 def apply_airdcpp_bundle(

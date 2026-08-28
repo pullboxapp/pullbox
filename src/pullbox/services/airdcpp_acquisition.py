@@ -141,6 +141,7 @@ class AirDcppQueueAcquisitionService:
                 "free_slots": candidate.metrics.free_slots,
                 "total_slots": candidate.metrics.total_slots,
                 "result_kind": "file",
+                "queue_priority": queue_priority,
             },
             retry_count=0,
             max_retries=3,

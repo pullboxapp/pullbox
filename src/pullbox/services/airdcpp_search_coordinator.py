@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 _SEARCH_EXTENSIONS = ("cbz", "cbr", "pdf")
 _PAGE_SIZE = 100
+_MAX_SNAPSHOT_PAGES = 10
 _MAX_CLIENT_FANOUT = 4
 
 
@@ -311,7 +312,8 @@ class AirDcppSearchCoordinator:
         started = time.monotonic()
         instance: AirDcppSearchInstance | None = None
         listener_paths: list[str] = []
-        raw_results: list[AirDcppSearchResult] = []
+        raw_results: dict[str, AirDcppSearchResult] = {}
+        conflicting_results: list[AirDcppSearchResult] = []
         dropped = 0
         partial = False
         status = DcClientSearchStatus.FAILED
@@ -359,10 +361,13 @@ class AirDcppSearchCoordinator:
             except ValidationError:
                 dropped += 1
                 return
+            if event.result.id in raw_results:
+                raw_results[event.result.id] = event.result
+                return
             if len(raw_results) >= client.max_results:
                 dropped += 1
                 return
-            raw_results.append(event.result)
+            raw_results[event.result.id] = event.result
 
         try:
             if not await self._wait_for_reservation(client, progress, manual=manual):
@@ -418,13 +423,20 @@ class AirDcppSearchCoordinator:
                 )
                 await progress(AirDcppSearchProgressState.FINISHING)
                 try:
-                    raw_results.extend(
-                        await self._final_snapshot(
-                            client,
-                            instance.id,
-                            remaining=max(0, client.max_results - len(raw_results)),
-                        )
+                    snapshot_results = await self._final_snapshot(
+                        client,
+                        instance.id,
+                        remaining=max(0, client.max_results - len(raw_results)),
+                        seen_result_ids=frozenset(raw_results),
                     )
+                    for result in snapshot_results:
+                        existing = raw_results.get(result.id)
+                        if existing is not None and (
+                            existing.tth != result.tth or existing.size != result.size
+                        ):
+                            conflicting_results.append(result)
+                        else:
+                            raw_results[result.id] = result
                 except Exception:
                     partial = True
                 status = DcClientSearchStatus.PARTIAL if partial else DcClientSearchStatus.COMPLETED
@@ -455,7 +467,7 @@ class AirDcppSearchCoordinator:
 
         routes: list[_RawRoute] = []
         if instance is not None:
-            for result in raw_results:
+            for result in (*raw_results.values(), *conflicting_results):
                 normalized = _normalize_result(client, instance, result, now=self._now())
                 if normalized is None:
                     dropped += 1
@@ -468,7 +480,7 @@ class AirDcppSearchCoordinator:
             client_identity=client.client_identity,
             client_name=client.client_name,
             status=status,
-            raw_count=len(raw_results),
+            raw_count=len(raw_results) + len(conflicting_results),
             retained_count=len(per_client),
             dropped_count=dropped,
             elapsed_ms=int((time.monotonic() - started) * 1000),
@@ -498,21 +510,29 @@ class AirDcppSearchCoordinator:
         instance_id: int,
         *,
         remaining: int,
+        seen_result_ids: frozenset[str],
     ) -> list[AirDcppSearchResult]:
+        if remaining <= 0:
+            return []
         results: list[AirDcppSearchResult] = []
+        retained_ids = set(seen_result_ids)
         start = 0
-        while remaining > 0:
-            count = min(_PAGE_SIZE, remaining)
+        for _page_index in range(_MAX_SNAPSHOT_PAGES):
             page = await client.api_client.get_search_results(
                 instance_id,
                 start=start,
-                count=count,
+                count=_PAGE_SIZE,
             )
-            results.extend(page)
-            if len(page) < count:
+            for result in page:
+                results.append(result)
+                if result.id not in retained_ids:
+                    retained_ids.add(result.id)
+                    remaining -= 1
+                    if remaining == 0:
+                        break
+            if remaining == 0 or len(page) < _PAGE_SIZE:
                 break
             start += len(page)
-            remaining -= len(page)
         return results
 
 
