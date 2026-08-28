@@ -98,6 +98,9 @@ class DatabaseOptimizationService:
                     "SQLite could not checkpoint the write-ahead log because the database is busy."
                 )
             connection.execute("REINDEX")
+            # PRAGMA optimize may skip ANALYZE on a fresh connection depending
+            # on the bundled SQLite version, so refresh statistics explicitly.
+            connection.execute("ANALYZE")
             # This maintenance connection has no query history, so include the
             # all-tables mask recommended by SQLite for a fresh connection.
             connection.execute("PRAGMA optimize=0x10002")

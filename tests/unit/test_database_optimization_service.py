@@ -95,6 +95,7 @@ def test_maintain_reindexes_then_optimizes_and_verifies(tmp_path: Path) -> None:
     assert statements == [
         "PRAGMA wal_checkpoint(TRUNCATE)",
         "REINDEX",
+        "ANALYZE",
         "PRAGMA optimize=0x10002",
         "PRAGMA wal_checkpoint(TRUNCATE)",
         "PRAGMA quick_check",
