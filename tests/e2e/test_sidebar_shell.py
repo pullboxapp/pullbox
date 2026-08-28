@@ -135,12 +135,24 @@ class TestSidebarShell:
         assert operation.get_by_text("Batman 041", exact=True).is_visible()
         assert operation.get_by_text("PixelDrain", exact=True).is_visible()
         assert operation.get_by_text("Batman 041.cbz", exact=True).is_visible()
-        assert (
-            operation.locator(
-                "[data-testid='header-activity-overall-progress'] [role='progressbar']:visible"
-            ).get_attribute("aria-valuenow")
-            == "40"
+        overall_progress = operation.locator(
+            "[data-testid='header-activity-overall-progress'] [role='progressbar']:visible"
         )
+        assert overall_progress.get_attribute("aria-valuenow") == "40"
+        progress_track = overall_progress.bounding_box()
+        progress_fill_locator = overall_progress.locator(":scope > div")
+        progress_fill = progress_fill_locator.bounding_box()
+        assert progress_track is not None
+        assert progress_fill is not None
+        assert 0.38 <= progress_fill["width"] / progress_track["width"] <= 0.42
+        track_color = overall_progress.evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        fill_color = progress_fill_locator.evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        )
+        assert fill_color not in {"transparent", "rgba(0, 0, 0, 0)"}
+        assert fill_color != track_color
         assert (
             operation.locator(
                 "[data-testid='header-activity-item-progress'] [role='progressbar']:visible"

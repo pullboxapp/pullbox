@@ -10846,7 +10846,7 @@ function appShell() {
       if (operation && operation.tone === "success") {
         return "text-pb-success";
       }
-      return "text-pb-accent";
+      return "text-pb-interactive";
     },
 
     activityButtonClass: function () {
@@ -10854,7 +10854,7 @@ function appShell() {
         return "bg-pb-error/15 text-pb-error hover:bg-pb-error/25";
       }
       if (this.activitySpinnerCount > 0) {
-        return "bg-pb-accent/15 text-pb-accent hover:bg-pb-accent/25";
+        return "bg-pb-interactive/15 text-pb-interactive hover:bg-pb-interactive/25";
       }
       if (this.activityHasRecentSuccess()) {
         return "bg-pb-success/15 text-pb-success hover:bg-pb-success/25";

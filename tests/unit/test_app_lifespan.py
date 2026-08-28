@@ -317,6 +317,7 @@ async def test_lifespan_starts_background_services_and_shuts_down_cleanly(
         assert patched_lifespan.scheduler.loaded is True
         assert patched_lifespan.scheduler.running is True
         assert patched_lifespan.scheduler.overrides is not None
+        assert patched_lifespan.scheduler.overrides["monitor_downloads"] == {"seconds": 3}
         assert patched_lifespan.scheduler.overrides["process_completed"] == {"seconds": 300}
         assert _FakeImportRunner.instances
         assert _FakeDirectRunner.instances

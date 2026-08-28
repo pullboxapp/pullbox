@@ -70,6 +70,7 @@ STATIC_ASSET_CACHE_CONTROL = "public, max-age=86400"
 _startup_background_tasks: set[asyncio.Task[object]] = set()
 _update_check_service_ref: dict[str, object] = {}
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_ACTIVE_DOWNLOAD_POLL_MAX_SECONDS = 3
 
 
 class PullboxStaticFiles(StaticFiles):
@@ -557,9 +558,16 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     _search_hrs = get_int_setting(
         _db_intervals, "search_interval_hours", settings.search_interval_hours
     )
-    _dl_poll = get_int_setting(
+    configured_download_poll = get_int_setting(
         _db_intervals, "download_poll_interval_seconds", settings.download_poll_seconds
     )
+    _dl_poll = max(1, min(configured_download_poll, _ACTIVE_DOWNLOAD_POLL_MAX_SECONDS))
+    if configured_download_poll != _dl_poll:
+        logger.info(
+            "download_poll_interval_capped_for_live_progress",
+            configured_seconds=configured_download_poll,
+            effective_seconds=_dl_poll,
+        )
     _pc_secs = get_int_setting(
         _db_intervals,
         "process_completed_interval_seconds",

@@ -440,7 +440,7 @@
                     aria-valuemax="100"
                     :aria-label="operation.title + ' overall progress'"
                   >
-                    <div class="h-full rounded-full bg-pb-accent transition-all duration-300" :style="'width:' + activityOverallPercent(operation) + '%'" ></div>
+                    <div class="h-full rounded-full bg-pb-interactive transition-all duration-300" :style="'width:' + activityOverallPercent(operation) + '%'" ></div>
                   </div>
                   <div
                     x-show="activityOverallIndeterminate(operation)"
@@ -448,7 +448,7 @@
                     role="progressbar"
                     :aria-label="operation.title + ' overall progress, working'"
                   >
-                    <div class="h-full w-1/3 animate-pulse rounded-full bg-pb-accent"></div>
+                    <div class="h-full w-1/3 animate-pulse rounded-full bg-pb-interactive"></div>
                   </div>
                 </div>
 

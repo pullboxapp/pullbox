@@ -107,6 +107,31 @@ async def test_publish_operation_progress_keeps_overall_percentage_monotonic(db_
     assert result.operation.overall_percent == 60
 
 
+async def test_new_active_phase_resets_completed_overall_percentage(db_session) -> None:
+    await publish_operation_progress(
+        db_session,
+        _update(
+            revision=1,
+            overall_percent=100,
+            state=OperationProgressState.COMPLETED,
+        ),
+    )
+
+    result = await publish_operation_progress(
+        db_session,
+        _update(
+            revision=2,
+            overall_percent=12,
+            state=OperationProgressState.RUNNING,
+        ),
+    )
+
+    assert result.accepted is True
+    assert result.operation.state is OperationProgressState.RUNNING
+    assert result.operation.overall_percent == 12
+    assert result.operation.completed_at is None
+
+
 async def test_item_progress_only_resets_for_a_new_item_or_phase(db_session) -> None:
     await publish_operation_progress(
         db_session,

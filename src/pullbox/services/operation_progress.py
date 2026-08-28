@@ -153,11 +153,15 @@ async def publish_operation_progress(
         session.add(existing)
 
     previous_overall_percent = existing.overall_percent
+    restarts_after_terminal = bool(
+        previous_state is not None and previous_state.is_terminal and not update.state.is_terminal
+    )
     if (
         previous_overall_percent is not None
         and overall.percent is not None
         and overall.percent < previous_overall_percent
         and not update.state.is_terminal
+        and not restarts_after_terminal
     ):
         overall = _NormalizedMeasure(
             current=(
