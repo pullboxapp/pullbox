@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from datetime import UTC, datetime
@@ -1305,6 +1306,89 @@ class TestDownloadRouteFunctions:
             assert "queue" not in acquisition.route_snapshot
             assert acquisition.next_retry_at is not None
             assert issue.status is IssueStatus.DOWNLOADING
+
+    @pytest.mark.asyncio
+    async def test_retry_missing_airdcpp_download_claims_before_remote_mutation(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        issue_id = await _seed_issue(db_factory, status=IssueStatus.WANTED)
+        config_id = 81
+        await _seed_client_config(
+            db_factory,
+            config_id=config_id,
+            client_type=DownloadClientType.AIRDCPP,
+        )
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            state=DownloadState.FAILED,
+            client_type=DownloadClientType.AIRDCPP,
+            external_id=f"airdcpp:{config_id}:bundle:96",
+            download_client_config_id=config_id,
+            error_message="The AirDC++ queue item was removed outside Pullbox.",
+        )
+        async with db_factory() as session:
+            session.add(
+                AirDcppAcquisition(
+                    download_history_id=download_id,
+                    request_key="retry-missing-airdcpp-concurrent",
+                    client_config_id=config_id,
+                    client_identity=f"airdcpp:{config_id}",
+                    tth="CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y",
+                    size_bytes=100_000_000,
+                    original_name="Batman 004 (2025).cbz",
+                    bundle_id=96,
+                    client_state="missing",
+                    reconciliation_error="external_bundle_missing",
+                )
+            )
+            await session.commit()
+
+        mutation_started = asyncio.Event()
+        release_mutation = asyncio.Event()
+
+        async def _create_file_bundle(**_kwargs: object) -> SimpleNamespace:
+            mutation_started.set()
+            await release_mutation.wait()
+            return SimpleNamespace(id=97, merged=False)
+
+        api = AsyncMock()
+        api.create_file_bundle.side_effect = _create_file_bundle
+        supervisor = SimpleNamespace(
+            state=AirDcppSupervisorState.READY,
+            api_client=api,
+        )
+        registry = SimpleNamespace(
+            get=lambda selected: supervisor if selected == config_id else None
+        )
+
+        async def _retry() -> dict[str, str]:
+            async with db_factory() as session:
+                response = await downloads_api.retry_download(
+                    download_id,
+                    object(),  # type: ignore[arg-type]
+                    session,
+                )
+                await session.commit()
+                return response
+
+        with patch(
+            "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+            return_value=registry,
+        ):
+            first = asyncio.create_task(_retry())
+            await asyncio.wait_for(mutation_started.wait(), timeout=1)
+            second = asyncio.create_task(_retry())
+            await asyncio.sleep(0.05)
+            release_mutation.set()
+            results = await asyncio.gather(first, second, return_exceptions=True)
+
+        assert api.create_file_bundle.await_count == 1
+        assert {result["status"] for result in results if isinstance(result, dict)} == {"sent"}
+        conflicts = [result for result in results if isinstance(result, HTTPException)]
+        assert len(conflicts) == 1
+        assert conflicts[0].status_code == 409
 
     @pytest.mark.asyncio
     async def test_direct_download_sources_list_only_verified_equivalent_routes(

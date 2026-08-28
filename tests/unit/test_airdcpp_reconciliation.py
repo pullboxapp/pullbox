@@ -606,6 +606,35 @@ async def test_pre_id_reconciliation_does_not_race_an_initial_mutation(
 
 
 @pytest.mark.asyncio
+async def test_manual_retry_claim_is_not_missing_before_its_deadline(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.client_state = "retry_mutation_pending"
+        acquisition.next_retry_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+    api = _FakeApi([[]])
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert result.changed == 0
+    assert result.missing == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert history.state is DownloadState.RETRY_PENDING
+        assert acquisition.bundle_id == 91
+        assert acquisition.client_state == "retry_mutation_pending"
+
+
+@pytest.mark.asyncio
 async def test_pre_id_reconciliation_recreates_an_expired_route_by_exact_tth(
     db_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -776,3 +805,58 @@ async def test_pre_id_recovery_does_not_resurrect_a_cancelled_download(
         assert history.error_message == "Cancelled by user"
         assert acquisition.bundle_id is None
         assert acquisition.client_state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_pre_id_recovery_failure_does_not_resurrect_a_cancelled_download(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    class _CancelDuringFailedRetryApi(_FakeApi):
+        async def download_search_result(
+            self,
+            instance_id: int,
+            result_id: str,
+            *,
+            target_name: str,
+            priority: int | None,
+        ) -> AirDcppQueueBundleAddInfo:
+            self.retry_calls.append((instance_id, result_id, target_name, priority))
+            async with db_factory() as session:
+                history = await session.get(DownloadHistory, history_id)
+                acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+                assert history is not None and acquisition is not None
+                history.state = DownloadState.FAILED
+                history.error_message = "Cancelled by user"
+                acquisition.client_state = "cancelled"
+                acquisition.next_retry_at = None
+                await session.commit()
+            raise AirDcppUnavailableError()
+
+    api = _CancelDuringFailedRetryApi([[]])
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert api.retry_calls == [(44, "opaque-result", "Example Comic 001 (2026).cbz", None)]
+    assert result.changed == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert history.state is DownloadState.FAILED
+        assert history.error_message == "Cancelled by user"
+        assert acquisition.client_state == "cancelled"
+        assert acquisition.retry_count == 0

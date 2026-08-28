@@ -290,14 +290,19 @@ class AirDcppReconciler:
                     elif _stale_recovery_requires_cleanup(acquisition, recovered_mutation):
                         stale_recovered_bundle_ids.add(recovered_mutation.bundle_id)
                 elif snapshot.acquisition_id in retry_failures:
-                    changed += int(
-                        _apply_pre_id_retry_failure(
-                            acquisition,
-                            error_code=retry_failures[snapshot.acquisition_id],
-                            at=now,
+                    if _recovery_snapshot_is_current(acquisition, snapshot):
+                        changed += int(
+                            _apply_pre_id_retry_failure(
+                                acquisition,
+                                error_code=retry_failures[snapshot.acquisition_id],
+                                at=now,
+                            )
                         )
-                    )
-                elif snapshot.bundle_id is not None and complete_snapshot:
+                elif (
+                    snapshot.bundle_id is not None
+                    and complete_snapshot
+                    and _missing_bundle_state_is_actionable(snapshot, now=now)
+                ):
                     missing += 1
                     changed += int(_apply_missing_bundle(acquisition, at=now))
                 await project_download_operation_progress(
@@ -422,6 +427,16 @@ def _stale_recovery_requires_cleanup(
         DownloadState(history.state) in _TERMINAL_STATES
         or acquisition.bundle_id != recovered.bundle_id
     )
+
+
+def _missing_bundle_state_is_actionable(
+    snapshot: _ActiveSnapshot,
+    *,
+    now: datetime,
+) -> bool:
+    if snapshot.client_state != "retry_mutation_pending":
+        return True
+    return snapshot.next_retry_at is not None and snapshot.next_retry_at <= now
 
 
 async def _retry_pre_id_mutation(

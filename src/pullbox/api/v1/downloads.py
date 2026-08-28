@@ -2,7 +2,7 @@
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import joinedload, selectinload
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
@@ -566,7 +566,7 @@ async def retry_download(
     Re-sends the original download URL to the download client and resets
     the download state to SENT.
     """
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
 
     from pullbox.composition.providers import register_download_clients, register_indexers
     from pullbox.composition.services import build_download_service
@@ -664,6 +664,32 @@ async def retry_download(
                 )
             )
             queue_priority = settings.queue_priority if settings is not None else None
+            previous_client_state = acquisition.client_state
+            previous_reconciliation_error = acquisition.reconciliation_error
+            previous_error_message = download.error_message
+            claim_deadline = now + timedelta(minutes=5)
+            claim_result = await session.execute(
+                update(AirDcppAcquisition)
+                .where(
+                    AirDcppAcquisition.id == acquisition.id,
+                    AirDcppAcquisition.client_state == previous_client_state,
+                    AirDcppAcquisition.reconciliation_error == previous_reconciliation_error,
+                )
+                .values(
+                    client_state="retry_mutation_pending",
+                    next_retry_at=claim_deadline,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if claim_result.rowcount != 1:  # type: ignore[attr-defined]
+                await session.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="This AirDC++ download is already being retried.",
+                )
+            download.state = DownloadState.RETRY_PENDING
+            download.next_retry_at = claim_deadline
+            download.error_message = "Recreating the missing AirDC++ queue item."
             await session.commit()
             try:
                 added = await supervisor.api_client.create_file_bundle(
@@ -673,6 +699,19 @@ async def retry_download(
                     priority=queue_priority,
                 )
             except AirDcppError as exc:
+                await session.refresh(acquisition)
+                await session.refresh(download)
+                if (
+                    acquisition.client_state == "retry_mutation_pending"
+                    and download.state is DownloadState.RETRY_PENDING
+                ):
+                    acquisition.client_state = previous_client_state
+                    acquisition.next_retry_at = None
+                    acquisition.reconciliation_error = previous_reconciliation_error
+                    download.state = DownloadState.FAILED
+                    download.next_retry_at = None
+                    download.error_message = previous_error_message
+                    await session.commit()
                 raise HTTPException(
                     status_code=502,
                     detail="AirDC++ could not recreate the missing queue item.",
@@ -684,10 +723,43 @@ async def retry_download(
                     client_config_id=client_config_id,
                     exc_info=True,
                 )
+                await session.refresh(acquisition)
+                await session.refresh(download)
+                if (
+                    acquisition.client_state == "retry_mutation_pending"
+                    and download.state is DownloadState.RETRY_PENDING
+                ):
+                    acquisition.client_state = previous_client_state
+                    acquisition.next_retry_at = None
+                    acquisition.reconciliation_error = previous_reconciliation_error
+                    download.state = DownloadState.FAILED
+                    download.next_retry_at = None
+                    download.error_message = previous_error_message
+                    await session.commit()
                 raise HTTPException(
                     status_code=502,
                     detail="AirDC++ could not recreate the missing queue item.",
                 ) from exc
+            await session.refresh(acquisition)
+            await session.refresh(download)
+            if (
+                acquisition.client_state != "retry_mutation_pending"
+                or download.state is not DownloadState.RETRY_PENDING
+            ):
+                await session.commit()
+                try:
+                    await supervisor.api_client.remove_queue_bundle(added.id)
+                except AirDcppError as exc:
+                    logger.warning(
+                        "airdcpp_superseded_retry_cleanup_failed",
+                        download_id=download.id,
+                        bundle_id=added.id,
+                        error_code=exc.code,
+                    )
+                raise HTTPException(
+                    status_code=409,
+                    detail="The AirDC++ retry was superseded before it completed.",
+                )
             acquisition.bundle_id = added.id
             acquisition.remote_target = None
             acquisition.last_reconciled_at = None

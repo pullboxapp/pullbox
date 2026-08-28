@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutation retry budget or prematurely failing an active remote download.
 - Prevented AirDC++ reconciliation from racing an initial queue mutation or
   resurrecting a download cancelled while recovery was in flight.
+- Claimed missing AirDC++ bundle retries atomically so overlapping requests
+  cannot create duplicate remote bundles.
 
 ## [1.2.0] - 2026-08-28
 
