@@ -158,6 +158,9 @@ class TestSettingsRouteContracts:
         assert "body.airdcpp =" in enabled.text
         assert "minimum_search_interval_seconds" in enabled.text
         assert "actual transfer reachability is validated during a real download" in enabled.text
+        assert 'data-testid="settings-clients-airdcpp-client-priority"' in enabled.text
+        assert 'data-testid="settings-clients-airdcpp-queue-priority-select"' in enabled.text
+        assert '<select x-model="form.airdcpp_queue_priority"' not in enabled.text
         picker_start = enabled.text.index('data-testid="settings-clients-picker-airdcpp"')
         picker_end = enabled.text.index("</button>", picker_start)
         assert ":disabled=" not in enabled.text[picker_start:picker_end]
@@ -346,6 +349,8 @@ class TestSettingsRouteContracts:
         assert "dc: 'Direct Connect'" in response.text
         assert "Coming soon" not in response.text
         assert "item === 'direct'" in response.text
+        assert "item === 'dc'" in response.text
+        assert ">ADC</div>" in response.text
         assert "const supported = ['usenet', 'torrent', 'direct', 'dc'];" in response.text
         assert "JSON.stringify(this.order)" in response.text
 
@@ -739,6 +744,9 @@ class TestSettingsRouteContracts:
         assert 'data-testid="settings-direct-host-generic_https"' in response.text
         assert 'data-testid="settings-direct-host-pixeldrain"' in response.text
         assert 'data-testid="settings-direct-host-mega"' not in response.text
+        assert 'data-testid="settings-direct-host-validation-generic_https"' in response.text
+        assert ">Validated per download</span>" in response.text
+        assert "x-show=\"activeHost.host_kind !== 'generic_https'\"" in response.text
 
     async def test_direct_download_settings_hide_hosts_for_disabled_named_host_provider(
         self,

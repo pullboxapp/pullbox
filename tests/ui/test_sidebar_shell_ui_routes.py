@@ -53,6 +53,16 @@ class TestSidebarShellRouteContracts:
         assert "body[data-shell-pending] { visibility: hidden; }" in response.text
         assert "alpine:initialized" in response.text
         assert "document.documentElement.classList.add('boot-no-transitions')" in response.text
+        assert 'id="pullbox-app-stylesheet"' in response.text
+        assert 'onload="window.pullboxStylesheetLoaded(this)"' in response.text
+        assert 'onerror="window.pullboxStylesheetFailed(this)"' in response.text
+        assert "var appStylesReady = false" in response.text
+        assert "var stylesheetRetryLimit = 2" in response.text
+        assert "var stylesheetLoadTimeoutMs = 4000" in response.text
+        assert "window.pullboxArmStylesheetTimeout" in response.text
+        assert "--pb-surface-app" in response.text
+        assert "data-pullbox-stylesheet-ready" in response.text
+        assert "!appStylesReady" in response.text
         assert "document.fonts.ready" in response.text
         assert "window.Alpine.nextTick" in response.text
         assert "armBootTransitionRelease" in response.text

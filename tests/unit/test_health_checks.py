@@ -1001,6 +1001,41 @@ class TestDownloadClientsCheck:
         }
 
     @pytest.mark.asyncio
+    async def test_generic_https_transport_does_not_degrade_direct_acquisition_health(
+        self,
+        db_session: AsyncSession,
+        settings: MagicMock,
+    ) -> None:
+        generic_host = DirectHostConfig(
+            host_kind=DirectArtifactHostKind.GENERIC_HTTPS,
+            enabled=True,
+            reachability_state=DirectHostReachabilityState.UNAVAILABLE,
+        )
+        db_session.add_all(
+            [
+                DirectProviderConfig(
+                    provider_id="pullbox.getcomics",
+                    display_name="GetComics",
+                    endpoint="http://getcomics:8780",
+                    enabled=True,
+                    state=DirectProviderState.HEALTHY,
+                ),
+                generic_host,
+            ]
+        )
+        await db_session.flush()
+
+        outcomes = await _make_service(settings, registry=ProviderRegistry()).run_check(
+            db_session,
+            "download_clients",
+        )
+
+        assert outcomes[0].status is HealthStatus.HEALTHY
+        assert outcomes[0].message == "All acquisition routes available"
+        assert {outcome.subject_key for outcome in outcomes[1:]} == {"direct-provider:1"}
+        assert generic_host.reachability_state is DirectHostReachabilityState.NOT_CHECKED
+
+    @pytest.mark.asyncio
     async def test_unreachable_artifact_host_degrades_direct_acquisition_health(
         self,
         db_session: AsyncSession,

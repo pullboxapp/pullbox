@@ -17,6 +17,13 @@ pytest_plugins = ["conftest_security"]
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-issue-detail-ui-tests")
 
 
+def _issue_detail_content_html(html: str) -> str:
+    """Return page-specific content without shared shell recovery scripts."""
+    start = html.index('data-testid="issue-detail-page"')
+    end = html.index('data-testid="page-footer-dock"', start)
+    return html[start:end]
+
+
 @pytest.fixture
 async def seeded_issue_detail_ui_data(sec_db) -> dict[str, int]:  # type: ignore[no-untyped-def]
     """Seed a small issue-detail dataset with both owned and wanted states."""
@@ -198,7 +205,7 @@ class TestIssueDetailRouteContracts:
         assert "page-dock-inner page-dock-inner-status-only" in response.text
         assert 'data-testid="page-dock-pagination"' not in response.text
         assert "transition:true" not in response.text
-        assert "window.location.reload()" not in response.text
+        assert "window.location.reload()" not in _issue_detail_content_html(response.text)
 
     async def test_issue_detail_renders_private_progress_and_targeted_state_actions(
         self,

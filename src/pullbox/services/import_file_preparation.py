@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -87,7 +88,7 @@ async def prepare_import_file(
             **converter_kwargs,
         )
     except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
         raise
 
     return PreparedImportFile(
@@ -212,7 +213,8 @@ async def rewrite_import_file_comicinfo(
     """Repair an imported archive's ComicInfo.xml, normalizing to CBZ when needed."""
     source_path = Path(imp_file.file_path)
     if source_path.suffix.lower() == ".cbz":
-        embedder(
+        await asyncio.to_thread(
+            embedder,
             source_path,
             comicinfo_payload,
             progress_callback=progress_callback,
@@ -227,13 +229,14 @@ async def rewrite_import_file_comicinfo(
             temp_dir,
             progress_callback=progress_callback,
         )
-        embedder(
+        await asyncio.to_thread(
+            embedder,
             converted_path,
             comicinfo_payload,
             progress_callback=progress_callback,
         )
         repaired_target = repaired_cbz_output_path(source_path)
-        shutil.move(str(converted_path), str(repaired_target))
+        await asyncio.to_thread(shutil.move, str(converted_path), str(repaired_target))
         return repaired_target, "normalized_to_cbz", str(source_path)
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)

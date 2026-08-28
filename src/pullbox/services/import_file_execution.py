@@ -910,7 +910,8 @@ async def process_import_series_files(
                     live_only=True,
                 )
             if prepared.converted and transfer_method == "move":
-                original_trash_path = move_to_trash(
+                original_trash_path = await asyncio.to_thread(
+                    move_to_trash,
                     prepared.original_source,
                     trash_dir,
                     relative_path=Path("imports") / prepared.original_source.name,
@@ -1015,20 +1016,36 @@ async def process_import_series_files(
                 library_file_id=library_file.id,
                 issue_id=resolved_issue.id,
             )
-            cleanup_prepared_file(prepared)
-            if report_file_progress is not None:
-                await report_file_progress(
-                    imp_file=imp_file,
-                    file_index=file_index,
-                    total_files=total_importable_files,
-                    stage="finalizing",
-                    current=3,
-                    total=4,
-                    unit="steps",
-                    live_only=True,
-                )
+            # Make the imported file durable and release SQLite's writer slot
+            # before removing potentially large conversion workspaces.
             await session.commit()
             placeholder_progress_live_only = False
+            try:
+                await asyncio.to_thread(cleanup_prepared_file, prepared)
+            except Exception:
+                logger.exception(
+                    "import_file_post_commit_workspace_cleanup_failed",
+                    file_path=imp_file_path,
+                    destination_path=library_file.file_path,
+                )
+            if report_file_progress is not None:
+                try:
+                    await report_file_progress(
+                        imp_file=imp_file,
+                        file_index=file_index,
+                        total_files=total_importable_files,
+                        stage="finalizing",
+                        current=3,
+                        total=4,
+                        unit="steps",
+                        live_only=True,
+                    )
+                except Exception:
+                    logger.exception(
+                        "import_file_post_commit_progress_failed",
+                        file_path=imp_file_path,
+                        progress_current=3,
+                    )
             owned_issue_ids.add(resolved_issue.id)
             files_imported += 1
             if report_file_progress is not None:
@@ -1036,27 +1053,35 @@ async def process_import_series_files(
                 # import-row/library-file transaction commits. Persisting this
                 # event through the dedicated progress session while the main
                 # session still holds uncommitted writes can deadlock SQLite.
-                await report_file_progress(
-                    imp_file=imp_file,
-                    file_index=file_index,
-                    total_files=total_importable_files,
-                    stage="finalizing",
-                    current=4,
-                    total=4,
-                    unit="steps",
-                )
+                try:
+                    await report_file_progress(
+                        imp_file=imp_file,
+                        file_index=file_index,
+                        total_files=total_importable_files,
+                        stage="finalizing",
+                        current=4,
+                        total=4,
+                        unit="steps",
+                    )
+                except Exception:
+                    logger.exception(
+                        "import_file_post_commit_progress_failed",
+                        file_path=imp_file_path,
+                        progress_current=4,
+                    )
 
         except (JobPausedError, JobCancelledError):
             if prepared is not None:
-                cleanup_prepared_file(prepared)
+                await asyncio.to_thread(cleanup_prepared_file, prepared)
             raise
         except Exception as exc:
             if prepared is not None:
-                cleanup_prepared_file(prepared)
+                await asyncio.to_thread(cleanup_prepared_file, prepared)
             await session.rollback()
             placeholder_progress_live_only = False
             try:
-                _cleanup_failed_library_artifact(
+                await asyncio.to_thread(
+                    _cleanup_failed_library_artifact,
                     destination_path=placed_destination_path,
                     original_source=prepared.original_source if prepared is not None else None,
                     original_trash_path=original_trash_path,

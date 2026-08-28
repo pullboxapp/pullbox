@@ -19,8 +19,129 @@
       document.documentElement.classList.add('boot-no-transitions');
 
       var alpineReady = false;
+      var appStylesReady = false;
       var revealScheduled = false;
       var bootTransitionsReleased = false;
+      var stylesheetRetryCount = 0;
+      var stylesheetRetryLimit = 2;
+      var stylesheetLoadTimeoutMs = 4000;
+      var stylesheetReloadKey = 'pullbox-stylesheet-reload-attempted';
+
+      function armStylesheetTimeout(link) {
+        window.setTimeout(function() {
+          if (!appStylesReady && link && link.isConnected) {
+            retryStylesheet(link);
+          }
+        }, stylesheetLoadTimeoutMs);
+      }
+
+      function clearStylesheetReloadGuard() {
+        try {
+          sessionStorage.removeItem(stylesheetReloadKey);
+        } catch (_error) {}
+      }
+
+      function reloadForStylesheetRecovery() {
+        try {
+          if (sessionStorage.getItem(stylesheetReloadKey) !== 'true') {
+            sessionStorage.setItem(stylesheetReloadKey, 'true');
+            window.location.reload();
+            return true;
+          }
+        } catch (_error) {}
+        return false;
+      }
+
+      function showStylesheetRecovery() {
+        if (!document.body) {
+          window.addEventListener('DOMContentLoaded', showStylesheetRecovery, { once: true });
+          return;
+        }
+
+        document.body.removeAttribute('data-shell-pending');
+        document.body.replaceChildren();
+        document.body.style.cssText = 'min-height:100vh;margin:0;display:grid;place-items:center;background:#101824;color:#f7f1e8;font-family:sans-serif;padding:24px;';
+
+        var panel = document.createElement('main');
+        panel.style.cssText = 'width:min(100%,480px);border:1px solid #cbd5e133;border-radius:16px;background:#172231;padding:28px;box-shadow:0 18px 40px #070b1238;';
+
+        var heading = document.createElement('h1');
+        heading.textContent = 'Pullbox could not load its interface';
+        heading.style.cssText = 'margin:0;font-size:22px;line-height:1.25;';
+
+        var message = document.createElement('p');
+        message.textContent = 'The application is running, but its stylesheet did not load. Check the connection and try again.';
+        message.style.cssText = 'margin:12px 0 20px;color:#cbd5e1;font-size:15px;line-height:1.6;';
+
+        var retryButton = document.createElement('button');
+        retryButton.type = 'button';
+        retryButton.textContent = 'Retry loading Pullbox';
+        retryButton.style.cssText = 'cursor:pointer;border:0;border-radius:8px;background:#8fb9ee;color:#101824;padding:11px 16px;font:700 14px sans-serif;';
+        retryButton.addEventListener('click', function() {
+          clearStylesheetReloadGuard();
+          window.location.reload();
+        });
+
+        panel.append(heading, message, retryButton);
+        document.body.append(panel);
+      }
+
+      function retryStylesheet(link) {
+        if (!link || appStylesReady) {
+          return;
+        }
+
+        if (stylesheetRetryCount < stylesheetRetryLimit) {
+          stylesheetRetryCount += 1;
+          var retryNumber = stylesheetRetryCount;
+          window.setTimeout(function() {
+            if (!link.isConnected) {
+              return;
+            }
+
+            var retryLink = link.cloneNode(false);
+            var retryUrl = new URL(link.href, window.location.href);
+            retryUrl.searchParams.set('pullbox_retry', retryNumber + '-' + Date.now());
+            retryLink.href = retryUrl.toString();
+            retryLink.removeAttribute('onload');
+            retryLink.removeAttribute('onerror');
+            retryLink.addEventListener('load', function() {
+              verifyStylesheet(retryLink);
+            }, { once: true });
+            retryLink.addEventListener('error', function() {
+              retryStylesheet(retryLink);
+            }, { once: true });
+            link.replaceWith(retryLink);
+            armStylesheetTimeout(retryLink);
+          }, retryNumber * 200);
+          return;
+        }
+
+        if (!reloadForStylesheetRecovery()) {
+          showStylesheetRecovery();
+        }
+      }
+
+      function verifyStylesheet(link) {
+        requestAnimationFrame(function() {
+          var appSurface = window.getComputedStyle(document.documentElement)
+            .getPropertyValue('--pb-surface-app')
+            .trim();
+          if (!appSurface) {
+            retryStylesheet(link);
+            return;
+          }
+
+          appStylesReady = true;
+          clearStylesheetReloadGuard();
+          document.documentElement.setAttribute('data-pullbox-stylesheet-ready', 'true');
+          revealShell();
+        });
+      }
+
+      window.pullboxStylesheetLoaded = verifyStylesheet;
+      window.pullboxStylesheetFailed = retryStylesheet;
+      window.pullboxArmStylesheetTimeout = armStylesheetTimeout;
 
       function releaseBootTransitions() {
         if (bootTransitionsReleased) {
@@ -62,7 +183,7 @@
       }
 
       function revealShell() {
-        if (revealScheduled || !alpineReady) {
+        if (revealScheduled || !alpineReady || !appStylesReady) {
           return;
         }
 
@@ -98,7 +219,13 @@
   <link rel="preload" href="/static/fonts/syne-800.ttf" as="font" type="font/ttf" crossorigin>
   <link rel="preload" href="/static/fonts/jetbrains-mono-600.ttf" as="font" type="font/ttf" crossorigin>
   <link rel="preload" href="/static/fonts/jetbrains-mono-700.ttf" as="font" type="font/ttf" crossorigin>
-  <link rel="stylesheet" href="/static/css/tailwind.css?v={{ app_shell_asset_version|default('') }}">
+  <link id="pullbox-app-stylesheet" rel="stylesheet"
+        href="/static/css/tailwind.css?v={{ app_shell_asset_version|default('') }}"
+        onload="window.pullboxStylesheetLoaded(this)"
+        onerror="window.pullboxStylesheetFailed(this)">
+  <script>
+    window.pullboxArmStylesheetTimeout(document.getElementById('pullbox-app-stylesheet'));
+  </script>
   <link rel="icon" href="/static/img/logo.svg?v={{ app_shell_asset_version|default('') }}" type="image/svg+xml">
 
   {#- Alpine.js cloak — hide elements until Alpine initializes -#}
