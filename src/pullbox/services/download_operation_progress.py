@@ -100,6 +100,16 @@ def build_download_operation_update(
     source_slow = (
         bool(_progress_value(progress, "source_slow", False)) if progress is not None else False
     )
+    rate = _float_value(_progress_value(progress, "speed_bytes")) if progress is not None else None
+    eta_seconds = (
+        _int_value(_progress_value(progress, "eta_seconds")) if progress is not None else None
+    )
+    if shared_state is not OperationProgressState.RUNNING:
+        rate = None
+        eta_seconds = None
+    elif eta_seconds is not None and eta_seconds <= 0:
+        eta_seconds = None
+
     attention_required = shared_state is OperationProgressState.FAILED
     tone = OperationProgressTone.INFO
     if attention_required:
@@ -132,13 +142,9 @@ def build_download_operation_update(
             percent=percent,
             unit="bytes",
         ),
-        rate=(
-            _float_value(_progress_value(progress, "speed_bytes")) if progress is not None else None
-        ),
+        rate=rate,
         rate_unit="bytes_per_second",
-        eta_seconds=(
-            _int_value(_progress_value(progress, "eta_seconds")) if progress is not None else None
-        ),
+        eta_seconds=eta_seconds,
         detail_snapshot={
             "download_id": download.id,
             "issue_id": download.issue_id,

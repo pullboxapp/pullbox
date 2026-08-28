@@ -160,6 +160,62 @@ class TestSidebarShell:
             is None
         )
 
+    def test_global_activity_popover_does_not_invent_missing_eta(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        states = ("queued", "retrying", "failed")
+        authed_page.route(
+            "**/api/v1/activity",
+            lambda route: route.fulfill(
+                json={
+                    "active_count": 2,
+                    "spinner_count": 2,
+                    "attention_count": 1,
+                    "operations": [
+                        {
+                            "id": index,
+                            "operation_type": "download",
+                            "operation_key": f"download-{index}",
+                            "state": state,
+                            "phase": state,
+                            "title": f"Download {state}",
+                            "message": state.title(),
+                            "source_label": "Direct download",
+                            "detail_url": "/downloads",
+                            "tone": "danger" if state == "failed" else "warning",
+                            "attention_required": state == "failed",
+                            "acknowledged_at": None,
+                            "overall": {
+                                "current": None,
+                                "total": None,
+                                "percent": None,
+                                "unit": "bytes",
+                                "indeterminate": True,
+                            },
+                            "item": None,
+                            "rate": None,
+                            "rate_unit": "bytes_per_second",
+                            "eta_seconds": None,
+                        }
+                        for index, state in enumerate(states, start=51)
+                    ],
+                }
+            ),
+        )
+
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/series")
+        activity_button = authed_page.get_by_role("button", name="Background activity")
+        operations = authed_page.locator("[data-testid='header-activity-operation']")
+        expect(operations).to_have_count(3)
+        activity_button.click()
+
+        popover = authed_page.locator("[data-testid='header-activity-popover']")
+        expect(popover).to_be_visible()
+        expect(popover.get_by_text("1 sec remaining", exact=True)).to_have_count(0)
+
     def test_sidebar_collapse_toggle_keeps_shell_stable(
         self,
         authed_page,

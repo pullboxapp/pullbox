@@ -68,3 +68,29 @@ def test_unknown_download_size_stays_indeterminate() -> None:
     assert update.overall.current == 1024
     assert update.overall.total is None
     assert update.overall.percent is None
+
+
+def test_non_running_download_states_drop_stale_rate_and_eta() -> None:
+    for state in (
+        DownloadState.QUEUED,
+        DownloadState.RETRY_PENDING,
+        DownloadState.FAILED,
+    ):
+        update = build_download_operation_update(
+            _download(state),
+            SimpleNamespace(
+                progress=0.25,
+                speed_bytes=2048,
+                eta_seconds=30,
+                size_bytes=8192,
+                bytes_transferred=2048,
+                client_state=state.value,
+                source_label="Direct download",
+                is_indeterminate=False,
+                source_slow=False,
+            ),
+        )
+
+        assert update.state is not OperationProgressState.RUNNING
+        assert update.rate is None
+        assert update.eta_seconds is None

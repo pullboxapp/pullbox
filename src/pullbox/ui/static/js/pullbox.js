@@ -10934,8 +10934,11 @@ function appShell() {
     },
 
     activityEtaLabel: function (seconds) {
+      if (seconds == null || seconds === "") {
+        return "";
+      }
       var value = Number(seconds);
-      if (!Number.isFinite(value) || value < 0) {
+      if (!Number.isFinite(value) || value <= 0) {
         return "";
       }
       if (value < 60) {
