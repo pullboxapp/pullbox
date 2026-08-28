@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import structlog
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 from pullbox.config import get_settings
 from pullbox.core.scheduler import TaskExecutionResult, scheduled_task
@@ -17,12 +19,13 @@ logger = structlog.get_logger(__name__)
 
 def _sqlite_database_path(db_url: str) -> Path | None:
     """Return the file path for a file-backed SQLite URL."""
-    if not db_url.startswith(("sqlite:///", "sqlite+aiosqlite:///")):
+    try:
+        url = make_url(db_url)
+    except ArgumentError:
         return None
-    raw_path = db_url.split(":///", 1)[1]
-    if not raw_path or raw_path == ":memory:":
+    if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
         return None
-    return Path(raw_path)
+    return Path(url.database)
 
 
 @scheduled_task(

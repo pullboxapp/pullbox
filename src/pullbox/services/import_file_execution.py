@@ -1020,18 +1020,32 @@ async def process_import_series_files(
             # before removing potentially large conversion workspaces.
             await session.commit()
             placeholder_progress_live_only = False
-            await asyncio.to_thread(cleanup_prepared_file, prepared)
-            if report_file_progress is not None:
-                await report_file_progress(
-                    imp_file=imp_file,
-                    file_index=file_index,
-                    total_files=total_importable_files,
-                    stage="finalizing",
-                    current=3,
-                    total=4,
-                    unit="steps",
-                    live_only=True,
+            try:
+                await asyncio.to_thread(cleanup_prepared_file, prepared)
+            except Exception:
+                logger.exception(
+                    "import_file_post_commit_workspace_cleanup_failed",
+                    file_path=imp_file_path,
+                    destination_path=library_file.file_path,
                 )
+            if report_file_progress is not None:
+                try:
+                    await report_file_progress(
+                        imp_file=imp_file,
+                        file_index=file_index,
+                        total_files=total_importable_files,
+                        stage="finalizing",
+                        current=3,
+                        total=4,
+                        unit="steps",
+                        live_only=True,
+                    )
+                except Exception:
+                    logger.exception(
+                        "import_file_post_commit_progress_failed",
+                        file_path=imp_file_path,
+                        progress_current=3,
+                    )
             owned_issue_ids.add(resolved_issue.id)
             files_imported += 1
             if report_file_progress is not None:
@@ -1039,15 +1053,22 @@ async def process_import_series_files(
                 # import-row/library-file transaction commits. Persisting this
                 # event through the dedicated progress session while the main
                 # session still holds uncommitted writes can deadlock SQLite.
-                await report_file_progress(
-                    imp_file=imp_file,
-                    file_index=file_index,
-                    total_files=total_importable_files,
-                    stage="finalizing",
-                    current=4,
-                    total=4,
-                    unit="steps",
-                )
+                try:
+                    await report_file_progress(
+                        imp_file=imp_file,
+                        file_index=file_index,
+                        total_files=total_importable_files,
+                        stage="finalizing",
+                        current=4,
+                        total=4,
+                        unit="steps",
+                    )
+                except Exception:
+                    logger.exception(
+                        "import_file_post_commit_progress_failed",
+                        file_path=imp_file_path,
+                        progress_current=4,
+                    )
 
         except (JobPausedError, JobCancelledError):
             if prepared is not None:

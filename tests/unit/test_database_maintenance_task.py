@@ -25,6 +25,27 @@ def test_database_maintenance_task_is_nightly_and_exclusive() -> None:
     assert task.exclusive is True
 
 
+def test_sqlite_database_path_ignores_url_query_parameters(tmp_path: Path) -> None:
+    db_path = tmp_path / "pullbox.db"
+
+    resolved = database_maintenance_task._sqlite_database_path(
+        f"sqlite+aiosqlite:///{db_path}?timeout=30&mode=rwc"
+    )
+
+    assert resolved == db_path
+
+
+@pytest.mark.parametrize(
+    "db_url",
+    [
+        "sqlite:///:memory:?cache=shared",
+        "sqlite+aiosqlite:///:memory:?cache=shared",
+    ],
+)
+def test_sqlite_database_path_skips_parameterized_memory_urls(db_url: str) -> None:
+    assert database_maintenance_task._sqlite_database_path(db_url) is None
+
+
 @pytest.mark.asyncio
 async def test_database_maintenance_task_runs_for_sqlite(
     tmp_path: Path,
