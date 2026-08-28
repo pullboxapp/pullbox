@@ -241,6 +241,9 @@ async def main() -> None:
         metadata_service=cast("Any", SimpleNamespace(_provider=SimpleNamespace())),
         event_bus=cast("Any", SimpleNamespace()),
     )
+    # This profile measures deterministic transformation and registration work.
+    # Concurrent SQLite writers are covered by the contention test suite.
+    service._settings = service._settings.model_copy(update={"import_file_worker_count": 1})
 
     register_calls = 0
 

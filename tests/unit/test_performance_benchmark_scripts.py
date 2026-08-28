@@ -120,8 +120,9 @@ def test_import_execute_mixed_file_work_profile_uses_real_registration() -> None
     assert report["final_status"] == "completed"
     assert report["file_work_profile"] == "mixed-small"
     assert report["real_file_work"] is True
-    assert report["total_files_imported"] == 3
-    assert report["total_files_failed"] == 0
+    report_json = json.dumps(report, sort_keys=True)
+    assert report["total_files_imported"] == 3, report_json
+    assert report["total_files_failed"] == 0, report_json
     assert report["register_calls"] == 0
     assert report["library_file_count"] == 3
     assert report["operation_progress_count"] == 1
