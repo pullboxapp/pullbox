@@ -1023,6 +1023,17 @@ class TestDownloadsRouteContracts:
         assert (
             downloads_routes._direct_progress_label(
                 {
+                    "stage": "provider_queue",
+                    "provider_name": "Library Genesis",
+                    "host_kind": "generic_https",
+                }
+            )
+            == "Queued for Library Genesis"
+        )
+
+        assert (
+            downloads_routes._direct_progress_label(
+                {
                     "stage": "resolver",
                     "resolver_name": "FlareSolverr",
                     "resolver_kind": "flaresolverr",

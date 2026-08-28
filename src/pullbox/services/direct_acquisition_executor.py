@@ -33,7 +33,10 @@ from pullbox.providers.artifact_hosts.contract import (
     HostResolutionRequest,
     ResolvedTransfer,
 )
-from pullbox.providers.artifact_hosts.limiter import ArtifactTransferLimiter
+from pullbox.providers.artifact_hosts.limiter import (
+    ArtifactTransferLimiter,
+    DirectProviderTransferLimiter,
+)
 from pullbox.providers.artifact_hosts.mega import (
     MegaBridgeCancelledError,
     MegaBridgePausedError,
@@ -207,6 +210,7 @@ class DirectAcquisitionExecutor:
         mega_runner: Any,
         quarantine: DirectArtifactQuarantine,
         limiter: ArtifactTransferLimiter | None = None,
+        provider_limiter: DirectProviderTransferLimiter | None = None,
         validator: ArtifactValidator = validate_direct_artifact,
         post_processor: PostProcessor = run_direct_artifact_post_processing,
         now: Clock | None = None,
@@ -216,6 +220,9 @@ class DirectAcquisitionExecutor:
         self._mega_runner = mega_runner
         self._quarantine = quarantine
         self._limiter = limiter or ArtifactTransferLimiter(global_limit=3, per_host_limit=1)
+        self._provider_limiter = provider_limiter or DirectProviderTransferLimiter(
+            per_provider_limit=1
+        )
         self._validator = validator
         self._post_processor = post_processor
         self._now = now or (lambda: datetime.now(UTC))
@@ -290,22 +297,33 @@ class DirectAcquisitionExecutor:
                     progress,
                 )
 
-            await _enter_resolving(session, attempt, artifact, progress)
-            request = await _await_with_cancel(source_factory, cancel_event)
-            _validate_source_request(request, artifact)
-            credentials, host_config_id = await _load_host_credentials(
-                session,
-                artifact.host_kind,
-                internal_generic_https=(
-                    attempt.provider_config is not None
-                    and uses_internal_generic_https(attempt.provider_config.manifest_snapshot)
-                ),
+            await progress.write(
+                stage="provider_queue",
+                snapshot=_provider_queue_snapshot(artifact),
+                force=True,
+                details={"provider_name": _direct_provider_name(attempt)},
             )
-
-            async with self._limiter.slot(
-                artifact.host_kind,
-                cancel_event=cancel_event,
+            async with (
+                self._provider_limiter.slot(
+                    attempt.provider_identity,
+                    cancel_event=cancel_event,
+                ),
+                self._limiter.slot(
+                    artifact.host_kind,
+                    cancel_event=cancel_event,
+                ),
             ):
+                await _enter_resolving(session, attempt, artifact, progress)
+                request = await _await_with_cancel(source_factory, cancel_event)
+                _validate_source_request(request, artifact)
+                credentials, host_config_id = await _load_host_credentials(
+                    session,
+                    artifact.host_kind,
+                    internal_generic_https=(
+                        attempt.provider_config is not None
+                        and uses_internal_generic_https(attempt.provider_config.manifest_snapshot)
+                    ),
+                )
                 resolved = await _await_with_cancel(
                     lambda: self._resolve_host(
                         session,
@@ -1012,6 +1030,37 @@ async def _enter_resolving(
     artifact.failure_code = None
     artifact.error_message = None
     await progress.write(stage="resolving", force=True)
+
+
+def _provider_queue_snapshot(
+    artifact: DirectArtifactAttempt,
+) -> TransferProgressSnapshot:
+    total = artifact.expected_size
+    transferred = artifact.bytes_transferred
+    return TransferProgressSnapshot(
+        bytes_transferred=transferred,
+        total_bytes=total,
+        percent=(
+            min(100, int((transferred * 100) / total)) if total is not None and total > 0 else None
+        ),
+        bytes_per_second=None,
+        eta_seconds=None,
+    )
+
+
+def _direct_provider_name(attempt: DirectAcquisitionAttempt) -> str:
+    configured_name = getattr(attempt.provider_config, "display_name", None)
+    if isinstance(configured_name, str) and configured_name.strip():
+        return configured_name.strip()
+    labels = {
+        "pullbox.getcomics": "GetComics",
+        "pullbox.annas_archive": "Anna's Archive",
+        "pullbox.libgen": "Library Genesis",
+    }
+    return labels.get(
+        attempt.provider_identity,
+        attempt.provider_identity.removeprefix("pullbox.").replace("_", " ").title(),
+    )
 
 
 async def _enter_downloading(

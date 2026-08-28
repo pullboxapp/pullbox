@@ -170,6 +170,11 @@ def _shared_progress_snapshot(
 def _direct_progress_label(snapshot: dict[str, object], host_kind: str) -> str:
     stage = str(snapshot.get("stage") or "direct")
     host_label = _direct_host_label(host_kind)
+    if stage == "provider_queue":
+        provider_name = snapshot.get("provider_name")
+        if isinstance(provider_name, str) and provider_name.strip():
+            return f"Queued for {provider_name.strip()}"
+        return "Queued for direct provider"
     if stage == "resolver":
         resolver_name = str(snapshot.get("resolver_name") or "browser resolver").strip()
         resolver_kind = snapshot.get("resolver_kind")

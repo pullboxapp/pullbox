@@ -216,6 +216,43 @@ async def test_history_adapter_projects_direct_progress_to_shared_activity(
     assert operation.message == "Downloading from PixelDrain"
 
 
+@pytest.mark.asyncio
+async def test_history_adapter_projects_provider_queue_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        attempt = await session.get(DirectAcquisitionAttempt, 1)
+        artifact = await session.get(DirectArtifactAttempt, 1)
+        assert attempt is not None and artifact is not None
+        attempt.provider_identity = "pullbox.libgen"
+        attempt.state = DirectAcquisitionState.QUEUED
+        attempt.progress_snapshot = {
+            "stage": "provider_queue",
+            "provider_name": "Library Genesis",
+            "host_kind": "generic_https",
+        }
+        history = await sync_direct_download_history(
+            session,
+            attempt,
+            artifact,
+            at=datetime(2026, 8, 28, tzinfo=UTC),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        operation = (
+            await session.execute(
+                select(OperationProgress).where(
+                    OperationProgress.operation_type == OperationProgressType.DOWNLOAD,
+                    OperationProgress.operation_key == str(history.id),
+                )
+            )
+        ).scalar_one()
+
+    assert operation.message == "Queued for Library Genesis"
+    assert operation.source_label == "Library Genesis via HTTPS"
+
+
 @dataclass
 class _Executor:
     started: asyncio.Event = field(default_factory=asyncio.Event)

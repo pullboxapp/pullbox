@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import zipfile
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -308,6 +309,32 @@ class _InitialProgressTransport(_SuccessfulTransport):
         return await super().transfer(**kwargs)
 
 
+@dataclass
+class _ProviderSlotProbe:
+    active: bool = False
+    identities: list[str] = field(default_factory=list)
+
+    @asynccontextmanager
+    async def slot(self, provider_identity: str, **_kwargs: Any):  # type: ignore[no-untyped-def]
+        assert self.active is False
+        self.identities.append(provider_identity)
+        self.active = True
+        try:
+            yield
+        finally:
+            self.active = False
+
+
+class _ProviderAwareTransport(_SuccessfulTransport):
+    def __init__(self, probe: _ProviderSlotProbe) -> None:
+        super().__init__()
+        self._probe = probe
+
+    async def transfer(self, **kwargs: Any) -> ArtifactTransferResult:
+        assert self._probe.active is True
+        return await super().transfer(**kwargs)
+
+
 class _FailingTransport:
     def __init__(self, error: BaseException, *, write_partial: bool = False) -> None:
         self.error = error
@@ -573,6 +600,52 @@ async def test_executor_publishes_known_size_before_first_transfer_byte(
         "source_slow": False,
     }
     assert transport.initial_etag == '"stable"'
+
+
+@pytest.mark.asyncio
+async def test_executor_holds_provider_slot_through_transfer_only(
+    session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    attempt = _attempt()
+    attempt.provider_identity = "pullbox.libgen"
+    artifact = attempt.artifact_attempts[0]
+    session.add(attempt)
+    await session.commit()
+    probe = _ProviderSlotProbe()
+    resolved = ResolvedTransfer(
+        host_kind=DirectArtifactHostKind.GENERIC_HTTPS,
+        url="https://libgen.gl/get.php?md5=fixture",
+        allowed_domains=("libgen.gl",),
+        transport_protocol=ArtifactTransferProtocol.HTTPS,
+    )
+
+    async def source_factory() -> HostResolutionRequest:
+        assert probe.active is True
+        assert attempt.progress_snapshot["stage"] == "resolving"
+        return _source_request()
+
+    async def post_processor(*_args: Any, **_kwargs: Any) -> DirectPostProcessingResult:
+        assert probe.active is False
+        return await _successful_post_processor()
+
+    result = await DirectAcquisitionExecutor(
+        host_resolver=_FakeResolver(resolved),
+        http_transport=_ProviderAwareTransport(probe),
+        mega_runner=object(),
+        quarantine=DirectArtifactQuarantine(tmp_path / "quarantine"),
+        provider_limiter=probe,  # type: ignore[arg-type]
+        post_processor=post_processor,
+        now=lambda: NOW,
+    ).execute(
+        session,
+        acquisition_id=attempt.id,
+        artifact_id=artifact.id,
+        source_factory=source_factory,
+    )
+
+    assert result.state is DirectAcquisitionState.COMPLETED
+    assert probe.identities == ["pullbox.libgen"]
 
 
 @pytest.mark.asyncio

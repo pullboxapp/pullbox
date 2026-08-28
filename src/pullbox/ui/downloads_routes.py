@@ -689,6 +689,11 @@ def _direct_progress_label(snapshot: Mapping[str, object]) -> str:
     stage_value = str(stage) if isinstance(stage, str) and stage else "direct"
     host_label = _direct_host_label(host_kind)
 
+    if stage_value == "provider_queue":
+        provider_name = snapshot.get("provider_name")
+        if isinstance(provider_name, str) and provider_name.strip():
+            return f"Queued for {provider_name.strip()}"
+        return "Queued for direct provider"
     if stage_value == "resolver":
         resolver_name = snapshot.get("resolver_name")
         resolver_kind = snapshot.get("resolver_kind")
@@ -734,6 +739,7 @@ def _direct_source_label(provider_identity: str, host_kind: object) -> str:
     provider_labels = {
         "pullbox.getcomics": "GetComics",
         "pullbox.annas_archive": "Anna's Archive",
+        "pullbox.libgen": "Library Genesis",
     }
     provider_label = provider_labels.get(
         provider_identity,
