@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -26,6 +27,41 @@ async def test_resolve_and_validate_source_rejects_missing_client_path() -> None
             log=SimpleNamespace(debug=lambda *args, **kwargs: None),
             resolve_local_path=AsyncMock(return_value=None),
             probe_source=AsyncMock(),
+            build_integrity_exception=lambda comic_file, errors: RuntimeError(errors),
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_validate_source_refuses_filesystem_root_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed path mapping must never send the container root to file safety."""
+    from pullbox.tasks import download_post_processing_source_validation as source_validation
+
+    monkeypatch.setattr(
+        source_validation,
+        "get_allowed_extensions",
+        AsyncMock(return_value={".cbz"}),
+    )
+    probe = SimpleNamespace(
+        source_seen=True,
+        probe_root=Path("/"),
+        comic_file=Path("/unexpected.cbz"),
+        attempts=1,
+    )
+
+    with pytest.raises(RuntimeError, match="filesystem root"):
+        await source_validation.resolve_and_validate_source(
+            session=object(),
+            download=SimpleNamespace(id=7, downloaded_path="/downloads\\Release\\file.cbr"),
+            trace=SimpleNamespace(),
+            runtime=SimpleNamespace(enter_phase=lambda phase: None),
+            log=SimpleNamespace(
+                debug=lambda *args, **kwargs: None,
+                error=lambda *args, **kwargs: None,
+            ),
+            resolve_local_path=AsyncMock(return_value="/downloads\\Release\\file.cbr"),
+            probe_source=AsyncMock(return_value=probe),
             build_integrity_exception=lambda comic_file, errors: RuntimeError(errors),
         )
 

@@ -70,6 +70,17 @@ async def resolve_and_validate_source(
     trace.probe_root = str(probe_root)
     comic_file = source_probe.comic_file
 
+    if probe_root.expanduser().resolve(strict=False) == Path("/"):
+        log.error(
+            "post_processing_root_probe_rejected",
+            raw_client_path=getattr(download, "downloaded_path", None),
+            hint="Verify Remote Path and Download Directory before retrying post-processing.",
+        )
+        raise RuntimeError(
+            "Refusing to inspect the container filesystem root during post-processing. "
+            "Verify the download client's Remote Path and Download Directory."
+        )
+
     if comic_file is None:
         # Don't fail immediately; a prior failed attempt may have already moved
         # the file to the destination. The caller will check dest_path later.
