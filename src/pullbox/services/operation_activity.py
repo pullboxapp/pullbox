@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, case, or_, select
+from sqlalchemy import and_, case, func, or_, select
 
 from pullbox.models.operation_progress import (
     OperationProgress,
@@ -90,16 +90,23 @@ async def list_operation_activity(
         .limit(max(1, min(limit, 100)))
     )
     operations = list(result.scalars().all())
-    active_count = sum(1 for item in operations if item.state in _ACTIVE_STATES)
-    spinner_count = sum(
-        1
-        for item in operations
-        if item.state in _SPINNER_STATES
-        and item.visibility is OperationProgressVisibility.PROMINENT
-    )
-    attention_count = sum(
-        1 for item in operations if item.attention_required and item.acknowledged_at is None
-    )
+    count_row = (
+        await session.execute(
+            select(
+                func.count(OperationProgress.id).filter(active_clause),
+                func.count(OperationProgress.id).filter(
+                    OperationProgress.state.in_(_SPINNER_STATES),
+                    OperationProgress.visibility == OperationProgressVisibility.PROMINENT,
+                ),
+                func.count(OperationProgress.id).filter(
+                    unacknowledged_attention_clause,
+                ),
+            )
+        )
+    ).one()
+    active_count = int(count_row[0])
+    spinner_count = int(count_row[1])
+    attention_count = int(count_row[2])
     return OperationActivity(
         operations=operations,
         active_count=active_count,

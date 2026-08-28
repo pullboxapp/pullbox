@@ -96,6 +96,46 @@ async def test_publish_operation_progress_rejects_stale_and_equal_revisions(db_s
     assert equal.operation.revision == 3
 
 
+async def test_publish_operation_progress_recovers_when_first_create_loses_race(
+    db_session,
+) -> None:
+    class FirstCreateRaceSession:
+        def __init__(self, session) -> None:
+            self._session = session
+            self._injected = False
+
+        def __getattr__(self, name):
+            return getattr(self._session, name)
+
+        async def execute(self, statement, *args, **kwargs):
+            result = await self._session.execute(statement, *args, **kwargs)
+            if not self._injected:
+                self._injected = True
+                self._session.add(
+                    OperationProgress(
+                        operation_type=OperationProgressType.IMPORT,
+                        operation_key="42",
+                        state=OperationProgressState.RUNNING,
+                        phase="file_matching",
+                        title="Competing publisher",
+                        revision=1,
+                        last_event_at=datetime.now(UTC),
+                    )
+                )
+                await self._session.flush()
+            return result
+
+    result = await publish_operation_progress(
+        FirstCreateRaceSession(db_session),
+        _update(revision=2, overall_percent=40),
+    )
+
+    assert result.accepted is True
+    assert result.operation.revision == 2
+    assert result.operation.overall_percent == 40
+    assert result.operation.title == "Folder import"
+
+
 async def test_publish_operation_progress_rejects_late_delivery_of_an_older_event(
     db_session,
 ) -> None:
@@ -237,6 +277,36 @@ async def test_activity_list_promotes_user_work_and_hides_quiet_success(db_sessi
     assert [item.operation_key for item in activity.operations] == ["42"]
     assert activity.active_count == 1
     assert activity.spinner_count == 1
+
+
+async def test_activity_counters_include_matching_rows_beyond_display_limit(db_session) -> None:
+    now = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
+    for index in range(20):
+        await publish_operation_progress(
+            db_session,
+            replace(
+                _update(revision=1, state=OperationProgressState.FAILED),
+                operation_key=f"failure:{index}",
+                attention_required=True,
+                event_at=now - timedelta(minutes=1),
+            ),
+        )
+    await publish_operation_progress(
+        db_session,
+        replace(
+            _update(revision=1),
+            operation_key="active:1",
+            event_at=now,
+        ),
+    )
+
+    activity = await list_operation_activity(db_session, now=now, limit=20)
+
+    assert len(activity.operations) == 20
+    assert all(item.attention_required for item in activity.operations)
+    assert activity.active_count == 1
+    assert activity.spinner_count == 1
+    assert activity.attention_count == 20
 
 
 async def test_attention_failure_stays_visible_until_acknowledged(db_session) -> None:

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from pullbox.models.operation_progress import (
     OperationProgress,
@@ -108,57 +110,75 @@ def _normalize_measure(measure: OperationProgressMeasure) -> _NormalizedMeasure:
     )
 
 
+def _operation_progress_insert(session: AsyncSession) -> Any:
+    dialect_name = session.get_bind().dialect.name
+    if dialect_name == "sqlite":
+        return sqlite_insert(OperationProgress)
+    if dialect_name == "postgresql":
+        return postgresql_insert(OperationProgress)
+    raise RuntimeError(f"Unsupported operation-progress database dialect: {dialect_name}")
+
+
 async def publish_operation_progress(
     session: AsyncSession,
     update: OperationProgressUpdate,
 ) -> OperationProgressPublishResult:
     """Apply one newest-wins update to the durable progress projection."""
-    existing = (
-        await session.execute(
-            select(OperationProgress)
-            .where(
-                OperationProgress.operation_type == update.operation_type,
-                OperationProgress.operation_key == update.operation_key,
-            )
-            .with_for_update()
+    identity_statement = (
+        select(OperationProgress)
+        .where(
+            OperationProgress.operation_type == update.operation_type,
+            OperationProgress.operation_key == update.operation_key,
         )
-    ).scalar_one_or_none()
-    if (
-        existing is not None
-        and update.event_at is not None
-        and update.event_at < existing.last_event_at
-    ):
+        .with_for_update()
+    )
+    existing = (await session.execute(identity_statement)).scalar_one_or_none()
+    now = update.event_at or datetime.now(UTC)
+    created = False
+    if existing is None:
+        insert_statement = (
+            _operation_progress_insert(session)
+            .values(
+                operation_type=update.operation_type,
+                operation_key=update.operation_key,
+                state=update.state,
+                phase=update.phase,
+                title=update.title,
+                revision=0,
+                last_event_at=now,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    OperationProgress.operation_type,
+                    OperationProgress.operation_key,
+                ]
+            )
+            .returning(OperationProgress.id)
+        )
+        created = (await session.execute(insert_statement)).scalar_one_or_none() is not None
+        existing = (await session.execute(identity_statement)).scalar_one_or_none()
+        if existing is None:  # pragma: no cover - conflict implies a canonical row
+            raise RuntimeError("Operation progress insert returned no canonical row.")
+    if not created and update.event_at is not None and update.event_at < existing.last_event_at:
         return OperationProgressPublishResult(operation=existing, accepted=False)
     revision = update.revision
     if revision is None:
-        revision = (existing.revision if existing is not None else 0) + 1
+        revision = existing.revision + 1
     if revision < 0:
         raise ValueError("Operation progress revision cannot be negative.")
-    if existing is not None and revision <= existing.revision:
+    if not created and revision <= existing.revision:
         return OperationProgressPublishResult(operation=existing, accepted=False)
 
-    previous_attention_required = existing.attention_required if existing is not None else False
-    previous_state = existing.state if existing is not None else None
-    previous_phase = existing.phase if existing is not None else None
-    previous_message = existing.message if existing is not None else None
-    previous_detail_snapshot = existing.detail_snapshot if existing is not None else None
-    previous_acknowledged_at = existing.acknowledged_at if existing is not None else None
-    now = update.event_at or datetime.now(UTC)
+    previous_attention_required = existing.attention_required if not created else False
+    previous_state = existing.state if not created else None
+    previous_phase = existing.phase if not created else None
+    previous_message = existing.message if not created else None
+    previous_detail_snapshot = existing.detail_snapshot if not created else None
+    previous_acknowledged_at = existing.acknowledged_at if not created else None
     overall = _normalize_measure(update.overall)
     item = _normalize_measure(update.item.measure) if update.item is not None else None
-    if existing is None:
-        existing = OperationProgress(
-            operation_type=update.operation_type,
-            operation_key=update.operation_key,
-            state=update.state,
-            phase=update.phase,
-            title=update.title,
-            revision=revision,
-            last_event_at=now,
-        )
-        session.add(existing)
 
-    previous_overall_percent = existing.overall_percent
+    previous_overall_percent = existing.overall_percent if not created else None
     restarts_after_terminal = bool(
         previous_state is not None and previous_state.is_terminal and not update.state.is_terminal
     )

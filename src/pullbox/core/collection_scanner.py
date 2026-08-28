@@ -42,7 +42,8 @@ SCAN_PROGRESS_EMIT_INTERVAL_SECONDS = 0.25
 # Regex: folder name with a year token, optionally followed by release tags
 _FOLDER_YEAR_RE = re.compile(r"^(.+?)\s*[\[(](\d{4})[\])](?:\s*(?:\([^)]*\)|\[[^\]]*\]))*\s*$")
 _PULLBOX_FOLDER_CV_ID_RE = re.compile(
-    r"^(?P<name>.+?)\s+\((?P<year>(?:19|20)\d{2})\)\s+(?P<cv_id>\d{4,})\s*$"
+    r"^(?P<name>.+?)\s+\((?P<year>(?:19|20)\d{2})\)\s+"
+    r"(?:(?P<bare_cv_id>\d{4,})|\[cv-(?P<bracketed_cv_id>\d{4,})\])\s*$"
 )
 
 # Comic file extensions (lowercase, with dot)
@@ -870,10 +871,12 @@ class CollectionScanner:
         if match is None:
             name, year = self._extract_from_folder_name(folder_name)
             return name, year, None
+        comicvine_id = match.group("bare_cv_id") or match.group("bracketed_cv_id")
+        assert comicvine_id is not None
         return (
             re.sub(r"\s{2,}", " ", match.group("name")).strip(),
             int(match.group("year")),
-            int(match.group("cv_id")),
+            int(comicvine_id),
         )
 
     def _infer_publisher_from_hierarchy(self, series_dir: Path, root: Path) -> str | None:
