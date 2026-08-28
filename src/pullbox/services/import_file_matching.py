@@ -35,6 +35,9 @@ from pullbox.services.import_file_match_provider_errors import (
     defer_file_matching_for_provider_error,
 )
 from pullbox.services.import_file_match_results import apply_file_match_series_summary
+from pullbox.services.import_file_match_targets import (
+    trusted_source_issue_identity_matches_target,
+)
 from pullbox.services.import_file_matching_progress import (
     build_file_matching_progress_emitter,
     load_file_match_target_index_with_progress,
@@ -674,6 +677,12 @@ def _evaluate_file_match_candidate(
     metadata_conflict: dict[str, Any] | None = None
 
     if match_candidate is not None:
+        if trusted_source_issue_identity_matches_target(
+            imp_series,
+            imp_file,
+            match_candidate.matched_issue_cv_id,
+        ):
+            return match_candidate, None
         target_context = build_file_match_target_context(
             imp_series,
             imp_file,

@@ -906,6 +906,96 @@ class TestMylar3Import:
         assert by_name[regular_path.name].matched_issue_cv_id == 900001
         assert by_name[annual_path.name].matched_issue_cv_id == 950001
 
+    @pytest.mark.parametrize(
+        ("series_name", "series_year", "file_name", "issue_number", "series_cv_id", "issue_cv_id"),
+        [
+            (
+                "A-Men",
+                "2021",
+                "a-men 030 (0000).cbz",
+                "30",
+                160001,
+                1100001,
+            ),
+            (
+                "A B C Special",
+                "2024",
+                "a b c special 001 (2024).cbz",
+                "1",
+                160002,
+                1100002,
+            ),
+        ],
+    )
+    async def test_trusted_mylar_issue_id_overrides_filename_semantic_noise(
+        self,
+        db_session,
+        tmp_path,
+        series_name: str,
+        series_year: str,
+        file_name: str,
+        issue_number: str,
+        series_cv_id: int,
+        issue_cv_id: int,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "fixture-series"
+        issue_path = series_dir / file_name
+        create_minimal_cbz(issue_path)
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": str(series_cv_id),
+                    "ComicName": series_name,
+                    "ComicYear": series_year,
+                    "ComicPublisher": "Fixture Comics",
+                    "ComicLocation": str(series_dir),
+                    "Total": 1,
+                }
+            ],
+            issues=[
+                {
+                    "IssueID": str(issue_cv_id),
+                    "ComicID": str(series_cv_id),
+                    "ComicName": series_name,
+                    "IssueName": "Trusted issue",
+                    "Issue_Number": issue_number,
+                    "Location": issue_path.name,
+                    "IssueDate": f"{series_year}-01-01",
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+
+        imported_file = await db_session.scalar(
+            sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+        )
+        assert imported_file is not None
+        assert imported_file.status == ImportedFileStatus.MATCHED
+        assert imported_file.matched_issue_cv_id == issue_cv_id
+
     async def test_incomplete_trusted_mylar_row_reaches_review_without_provider_calls(
         self,
         db_session,

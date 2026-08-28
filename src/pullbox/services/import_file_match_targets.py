@@ -290,6 +290,31 @@ def _trusted_source_identity_conflicts(imp_file: ImportedFile) -> list[dict[str,
     return [dict(conflict) for conflict in conflicts if isinstance(conflict, dict)]
 
 
+def trusted_source_issue_identity_matches_target(
+    imp_series: ImportedSeries,
+    imp_file: ImportedFile,
+    target_issue_cv_id: int | None,
+) -> bool:
+    """Return whether trusted local IDs authoritatively identify the target issue."""
+    if (
+        target_issue_cv_id is None
+        or imp_file.comicvine_issue_id != target_issue_cv_id
+        or imp_series.cv_id is None
+        or not _has_trusted_issue_identity(imp_file)
+    ):
+        return False
+    diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
+    signals = diagnostics.get("metadata_signals")
+    if (
+        not isinstance(signals, dict)
+        or signals.get("comicvine_series_id") not in _TRUSTED_IDENTITY_SIGNALS
+    ):
+        return False
+    if _trusted_issue_series_id(imp_file) != int(imp_series.cv_id):
+        return False
+    return not _trusted_source_identity_conflicts(imp_file)
+
+
 def _mark_trusted_source_identity_conflict(
     imp_file: ImportedFile,
     imp_series: ImportedSeries,
