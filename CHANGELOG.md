@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-28
+
+Patch release hardening AirDC++ acquisition recovery so retries, cancellation,
+and merged queue bundles remain race-safe.
+
+### Fixed
+
+- Kept transient AirDC++ queue lookup failures from consuming the bounded queue
+  mutation retry budget or prematurely failing an active remote download.
+- Prevented AirDC++ acquisition and reconciliation from racing cancellation,
+  including pre-bundle requests and remote mutations already in flight.
+- Claimed missing AirDC++ bundle retries atomically, bound completion to the
+  exact claim, preserved remote bundles merged with existing queue work, and
+  prevented duplicate intents from taking ownership of the same bundle.
+- Rechecked AirDC++ bundle ownership immediately before stale recovery cleanup
+  so cancellation cannot delete a bundle adopted by another Pullbox download.
+
 ## [1.2.0] - 2026-08-28
 
 Minor release adding native Direct Connect acquisition, LibGen direct-download

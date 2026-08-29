@@ -151,12 +151,14 @@ class _FakeApi:
         pages: list[list[AirDcppQueueBundle]],
         *,
         files: list[AirDcppQueueFile] | None = None,
+        lookup_failure: Exception | None = None,
         retry_result: AirDcppQueueBundleAddInfo | None = None,
         retry_failure: Exception | None = None,
         create_result: AirDcppQueueBundleAddInfo | None = None,
     ) -> None:
         self.pages = pages
         self.files = files or []
+        self.lookup_failure = lookup_failure
         self.retry_result = retry_result or AirDcppQueueBundleAddInfo(id=92, merged=False)
         self.retry_failure = retry_failure
         self.create_result = create_result or AirDcppQueueBundleAddInfo(id=93, merged=False)
@@ -165,6 +167,7 @@ class _FakeApi:
         self.alternate_calls: list[int] = []
         self.retry_calls: list[tuple[int, str, str, int | None]] = []
         self.create_calls: list[tuple[str, int, str, int | None]] = []
+        self.removed_bundles: list[int] = []
 
     async def get_queue_bundles(self, *, start: int, count: int):
         self.calls.append((start, count))
@@ -173,6 +176,8 @@ class _FakeApi:
 
     async def get_queue_files_by_tth(self, tth: str):
         self.tth_calls.append(tth)
+        if self.lookup_failure is not None:
+            raise self.lookup_failure
         return self.files
 
     async def search_queue_bundle(self, bundle_id: int) -> None:
@@ -201,6 +206,9 @@ class _FakeApi:
     ) -> AirDcppQueueBundleAddInfo:
         self.create_calls.append((tth, size, target_name, priority))
         return self.create_result
+
+    async def remove_queue_bundle(self, bundle_id: int) -> None:
+        self.removed_bundles.append(bundle_id)
 
 
 class _FakeCooldown:
@@ -562,6 +570,192 @@ async def test_pre_id_reconciliation_retries_a_due_live_route_mutation(
 
 
 @pytest.mark.asyncio
+async def test_pre_id_recovery_does_not_claim_a_merged_bundle_owned_by_pullbox(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        history = await session.get(DownloadHistory, history_id)
+        assert acquisition is not None and history is not None
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        owner_history = DownloadHistory(
+            issue_id=history.issue_id,
+            download_client_config_id=client_id,
+            title=history.title,
+            download_url="airdcpp://intent/existing-owner",
+            download_client=DownloadClientType.AIRDCPP,
+            protocol=AcquisitionProtocol.DC,
+            external_id=f"airdcpp:{client_id}:bundle:92",
+            state=DownloadState.SENT,
+            file_size=100_000_000,
+            sent_at=datetime.now(UTC),
+        )
+        session.add(owner_history)
+        await session.flush()
+        owner = AirDcppAcquisition(
+            download_history_id=owner_history.id,
+            request_key="existing-owner",
+            client_config_id=client_id,
+            client_identity=f"airdcpp:{client_id}",
+            tth=_TTH,
+            size_bytes=100_000_000,
+            original_name=history.title,
+            bundle_id=92,
+            client_state="queued",
+        )
+        session.add(owner)
+        await session.flush()
+        owner_id = owner.id
+        await session.commit()
+    api = _FakeApi(
+        [[_bundle(bundle_id=92)]],
+        retry_result=AirDcppQueueBundleAddInfo(id=92, merged=True),
+    )
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert result.processed == 2
+    assert api.removed_bundles == []
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        owner = await session.get(AirDcppAcquisition, owner_id)
+        assert history is not None and acquisition is not None and owner is not None
+        assert acquisition.bundle_id is None
+        assert acquisition.client_state == "duplicate"
+        assert acquisition.reconciliation_error == "queue_bundle_already_owned"
+        assert acquisition.route_snapshot["existing_bundle_owner_acquisition_id"] == owner_id
+        assert history.external_id is None
+        assert history.state is DownloadState.FAILED
+        assert history.error_message == (
+            "AirDC++ merged this request into an existing Pullbox download."
+        )
+        assert owner.bundle_id == 92
+
+
+@pytest.mark.asyncio
+async def test_pre_id_reconciliation_does_not_race_an_initial_mutation(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.QUEUED,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.client_state = "mutation_pending"
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.next_retry_at = None
+        await session.commit()
+    api = _FakeApi([[]])
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert api.tth_calls == [_TTH]
+    assert api.retry_calls == []
+    assert api.create_calls == []
+    assert result.changed == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert acquisition.bundle_id is None
+        assert acquisition.client_state == "mutation_pending"
+        assert acquisition.retry_count == 0
+        assert history.state is DownloadState.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_manual_retry_claim_is_not_missing_before_its_deadline(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.client_state = "retry_mutation_pending"
+        acquisition.next_retry_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+    api = _FakeApi([[]])
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert result.changed == 0
+    assert result.missing == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert history.state is DownloadState.RETRY_PENDING
+        assert acquisition.bundle_id == 91
+        assert acquisition.client_state == "retry_mutation_pending"
+
+
+@pytest.mark.asyncio
+async def test_expired_manual_retry_claim_does_not_hide_a_committed_replacement(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.client_state = "retry_mutation_pending"
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    class _CommitReplacementDuringSnapshotApi(_FakeApi):
+        async def get_queue_bundles(
+            self,
+            *,
+            start: int,
+            count: int,
+        ) -> list[AirDcppQueueBundle]:
+            async with db_factory() as session:
+                history = await session.get(DownloadHistory, history_id)
+                acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+                assert history is not None and acquisition is not None
+                acquisition.bundle_id = 95
+                acquisition.client_state = "source_search_pending"
+                acquisition.next_retry_at = datetime.now(UTC)
+                history.external_id = f"airdcpp:{client_id}:bundle:95"
+                await session.commit()
+            return await super().get_queue_bundles(start=start, count=count)
+
+    api = _CommitReplacementDuringSnapshotApi([[]])
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert result.changed == 0
+    assert result.missing == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert history.state is DownloadState.RETRY_PENDING
+        assert history.external_id == f"airdcpp:{client_id}:bundle:95"
+        assert acquisition.bundle_id == 95
+        assert acquisition.client_state == "source_search_pending"
+
+
+@pytest.mark.asyncio
 async def test_pre_id_reconciliation_recreates_an_expired_route_by_exact_tth(
     db_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -633,3 +827,257 @@ async def test_pre_id_reconciliation_exhaustion_becomes_manually_retryable_failu
         assert acquisition.reconciliation_error == "queue_mutation_failed"
         assert history.state is DownloadState.FAILED
         assert history.next_retry_at is None
+
+
+@pytest.mark.asyncio
+async def test_pre_id_lookup_failure_does_not_consume_mutation_retry_budget(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.retry_count = 2
+        acquisition.max_retries = 3
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+    api = _FakeApi([[]], lookup_failure=AirDcppUnavailableError())
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert api.tth_calls == [_TTH]
+    assert api.retry_calls == []
+    assert api.create_calls == []
+    assert result.changed == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert acquisition.bundle_id is None
+        assert acquisition.client_state == "reconcile_pending"
+        assert acquisition.retry_count == 2
+        assert acquisition.reconciliation_error is None
+        assert history.state is DownloadState.RETRY_PENDING
+
+
+@pytest.mark.parametrize(
+    ("merged", "expected_removed_bundles"),
+    [(False, [92]), (True, [])],
+)
+@pytest.mark.asyncio
+async def test_pre_id_recovery_does_not_resurrect_a_cancelled_download(
+    db_factory: async_sessionmaker[AsyncSession],
+    merged: bool,
+    expected_removed_bundles: list[int],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    class _CancelDuringRetryApi(_FakeApi):
+        async def download_search_result(
+            self,
+            instance_id: int,
+            result_id: str,
+            *,
+            target_name: str,
+            priority: int | None,
+        ) -> AirDcppQueueBundleAddInfo:
+            added = await super().download_search_result(
+                instance_id,
+                result_id,
+                target_name=target_name,
+                priority=priority,
+            )
+            async with db_factory() as session:
+                history = await session.get(DownloadHistory, history_id)
+                acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+                assert history is not None and acquisition is not None
+                history.state = DownloadState.FAILED
+                history.error_message = "Cancelled by user"
+                acquisition.client_state = "cancelled"
+                acquisition.next_retry_at = None
+                await session.commit()
+            return added
+
+    api = _CancelDuringRetryApi(
+        [[]],
+        retry_result=AirDcppQueueBundleAddInfo(id=92, merged=merged),
+    )
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert api.retry_calls == [(44, "opaque-result", "Example Comic 001 (2026).cbz", None)]
+    assert api.removed_bundles == expected_removed_bundles
+    assert result.changed == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert history.state is DownloadState.FAILED
+        assert history.error_message == "Cancelled by user"
+        assert acquisition.bundle_id is None
+        assert acquisition.client_state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stale_recovery_does_not_delete_a_bundle_adopted_by_another_acquisition(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    class _AdoptDuringCancelledRetryApi(_FakeApi):
+        async def download_search_result(
+            self,
+            instance_id: int,
+            result_id: str,
+            *,
+            target_name: str,
+            priority: int | None,
+        ) -> AirDcppQueueBundleAddInfo:
+            added = await super().download_search_result(
+                instance_id,
+                result_id,
+                target_name=target_name,
+                priority=priority,
+            )
+            async with db_factory() as session:
+                history = await session.get(DownloadHistory, history_id)
+                acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+                assert history is not None and acquisition is not None
+                history.state = DownloadState.FAILED
+                history.error_message = "Cancelled by user"
+                acquisition.client_state = "cancelled"
+                acquisition.next_retry_at = None
+                owner_history = DownloadHistory(
+                    issue_id=history.issue_id,
+                    download_client_config_id=client_id,
+                    title=history.title,
+                    download_url="airdcpp://intent/adopted-owner",
+                    download_client=DownloadClientType.AIRDCPP,
+                    protocol=AcquisitionProtocol.DC,
+                    external_id=f"airdcpp:{client_id}:bundle:{added.id}",
+                    state=DownloadState.SENT,
+                    file_size=100_000_000,
+                    sent_at=datetime.now(UTC),
+                )
+                session.add(owner_history)
+                await session.flush()
+                session.add(
+                    AirDcppAcquisition(
+                        download_history_id=owner_history.id,
+                        request_key="adopted-owner",
+                        client_config_id=client_id,
+                        client_identity=f"airdcpp:{client_id}",
+                        tth=_TTH,
+                        size_bytes=100_000_000,
+                        original_name=history.title,
+                        bundle_id=added.id,
+                        client_state="queued",
+                    )
+                )
+                await session.commit()
+            return added
+
+    api = _AdoptDuringCancelledRetryApi(
+        [[]],
+        retry_result=AirDcppQueueBundleAddInfo(id=92, merged=False),
+    )
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert result.changed == 0
+    assert api.removed_bundles == []
+    async with db_factory() as session:
+        owner = await session.scalar(
+            select(AirDcppAcquisition).where(
+                AirDcppAcquisition.client_identity == f"airdcpp:{client_id}",
+                AirDcppAcquisition.bundle_id == 92,
+            )
+        )
+        assert owner is not None
+        assert owner.id != acquisition_id
+
+
+@pytest.mark.asyncio
+async def test_pre_id_recovery_failure_does_not_resurrect_a_cancelled_download(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert acquisition is not None
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    class _CancelDuringFailedRetryApi(_FakeApi):
+        async def download_search_result(
+            self,
+            instance_id: int,
+            result_id: str,
+            *,
+            target_name: str,
+            priority: int | None,
+        ) -> AirDcppQueueBundleAddInfo:
+            self.retry_calls.append((instance_id, result_id, target_name, priority))
+            async with db_factory() as session:
+                history = await session.get(DownloadHistory, history_id)
+                acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+                assert history is not None and acquisition is not None
+                history.state = DownloadState.FAILED
+                history.error_message = "Cancelled by user"
+                acquisition.client_state = "cancelled"
+                acquisition.next_retry_at = None
+                await session.commit()
+            raise AirDcppUnavailableError()
+
+    api = _CancelDuringFailedRetryApi([[]])
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert api.retry_calls == [(44, "opaque-result", "Example Comic 001 (2026).cbz", None)]
+    assert result.changed == 0
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        assert history is not None and acquisition is not None
+        assert history.state is DownloadState.FAILED
+        assert history.error_message == "Cancelled by user"
+        assert acquisition.client_state == "cancelled"
+        assert acquisition.retry_count == 0
