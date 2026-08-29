@@ -124,21 +124,34 @@ class _FakeApi:
         failure: Exception | None = None,
         file_bundle_failure: Exception | None = None,
         adopted: list[AirDcppQueueFile] | None = None,
+        merged: bool = False,
     ) -> None:
         self.session = session
         self.failure = failure
         self.file_bundle_failure = file_bundle_failure
         self.adopted = adopted or []
+        self.merged = merged
         self.mutations = 0
         self.lookups = 0
         self.file_bundle_mutations = 0
+        self.removed_bundles: list[int] = []
+        self.observed_mutation_state: str | None = None
+        self.observed_next_retry_at: datetime | None = None
 
     async def download_search_result(self, *_args: object, **_kwargs: object):
         assert self.session.in_transaction() is False
+        pending = (
+            await self.session.execute(
+                select(AirDcppAcquisition).where(AirDcppAcquisition.bundle_id.is_(None))
+            )
+        ).scalar_one()
+        self.observed_mutation_state = pending.client_state
+        self.observed_next_retry_at = pending.next_retry_at
+        await self.session.commit()
         self.mutations += 1
         if self.failure is not None:
             raise self.failure
-        return AirDcppQueueBundleAddInfo(id=91, merged=False)
+        return AirDcppQueueBundleAddInfo(id=91, merged=self.merged)
 
     async def get_queue_files_by_tth(self, _tth: str) -> list[AirDcppQueueFile]:
         assert self.session.in_transaction() is False
@@ -151,6 +164,10 @@ class _FakeApi:
         if self.file_bundle_failure is not None:
             raise self.file_bundle_failure
         return AirDcppQueueBundleAddInfo(id=92, merged=False)
+
+    async def remove_queue_bundle(self, bundle_id: int) -> None:
+        assert self.session.in_transaction() is False
+        self.removed_bundles.append(bundle_id)
 
 
 def _queue_file(*, size: int = 100_000_000, target: str | None = None) -> AirDcppQueueFile:
@@ -212,6 +229,9 @@ async def test_acquisition_persists_before_mutation_and_replays_idempotently(
         )
 
         assert api.mutations == 1
+        assert api.observed_mutation_state == "mutation_pending"
+        assert api.observed_next_retry_at is not None
+        assert api.observed_next_retry_at > datetime.now(UTC)
         assert second.acquisition_id == first.acquisition_id
         acquisition = await session.get(AirDcppAcquisition, first.acquisition_id)
         history = await session.get(DownloadHistory, first.download_history_id)
@@ -223,6 +243,68 @@ async def test_acquisition_persists_before_mutation_and_replays_idempotently(
         assert history.protocol is AcquisitionProtocol.DC
         assert history.state is DownloadState.SENT
         assert issue.status is IssueStatus.DOWNLOADING
+
+
+@pytest.mark.parametrize(
+    ("merged", "removed_bundles"),
+    [(False, [91]), (True, [])],
+)
+@pytest.mark.asyncio
+async def test_initial_mutation_does_not_resurrect_a_cancelled_download(
+    db_factory: async_sessionmaker[AsyncSession],
+    merged: bool,
+    removed_bundles: list[int],
+) -> None:
+    client_id, issue_id = await _seed(db_factory)
+
+    class _CancelDuringMutationApi(_FakeApi):
+        async def download_search_result(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> AirDcppQueueBundleAddInfo:
+            added = await super().download_search_result(*_args, **_kwargs)
+            async with db_factory() as cancel_session:
+                acquisition = (
+                    await cancel_session.execute(select(AirDcppAcquisition))
+                ).scalar_one()
+                history = await cancel_session.get(
+                    DownloadHistory,
+                    acquisition.download_history_id,
+                )
+                assert history is not None
+                acquisition.client_state = "cancelled"
+                acquisition.next_retry_at = None
+                history.state = DownloadState.FAILED
+                history.error_message = "Cancelled by user"
+                await cancel_session.commit()
+            return added
+
+    async with db_factory() as session:
+        api = _CancelDuringMutationApi(session, merged=merged)
+
+        result = await AirDcppQueueAcquisitionService().acquire(
+            session,
+            candidate=_candidate(client_id),
+            issue_id=issue_id,
+            request_key="manual-intent-cancelled",
+            search_log_id=None,
+            api_client=api,
+            queue_priority=3,
+            replace_existing_file=False,
+        )
+
+    assert result.bundle_id is None
+    assert result.state is DownloadState.FAILED
+    assert api.removed_bundles == removed_bundles
+    async with db_factory() as session:
+        acquisition = (await session.execute(select(AirDcppAcquisition))).scalar_one()
+        history = await session.get(DownloadHistory, acquisition.download_history_id)
+        assert history is not None
+        assert acquisition.bundle_id is None
+        assert acquisition.client_state == "cancelled"
+        assert history.state is DownloadState.FAILED
+        assert history.error_message == "Cancelled by user"
 
 
 @pytest.mark.asyncio

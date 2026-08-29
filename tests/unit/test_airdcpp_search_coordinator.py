@@ -22,6 +22,7 @@ from pullbox.services.airdcpp_search_types import (
 from pullbox.services.search_targets import IssueSearchOutcome, IssueSearchTarget
 
 _TTH = "CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y"
+_SECOND_TTH = "B" * 39
 
 
 def test_issue_search_outcome_has_typed_direct_connect_lane() -> None:
@@ -58,6 +59,7 @@ def _result(
     *,
     free: int = 1,
     result_id: str = _TTH,
+    tth: str = _TTH,
     size: int = 100_000_000,
 ) -> AirDcppSearchResult:
     return AirDcppSearchResult.model_validate(
@@ -69,7 +71,7 @@ def _result(
             "users": {"count": 2},
             "type": {"id": "file"},
             "path": "/private/peer/path",
-            "tth": _TTH,
+            "tth": tth,
             "time": 0,
             "slots": {"free": free, "total": 2, "str": f"{free}/2"},
             "connection": 1_000_000,
@@ -109,11 +111,13 @@ class _FakeSocket:
         *,
         sent: int = 1,
         emit_result: bool = True,
+        emit_update: bool = False,
         block_send: bool = False,
         fail_after_sent: bool = False,
     ) -> None:
         self.sent = sent
         self.emit_result = emit_result
+        self.emit_update = emit_update
         self.block_send = block_send
         self.fail_after_sent = fail_after_sent
         self.handlers: dict[str, Any] = {}
@@ -152,9 +156,14 @@ class _FakeSocket:
             }
         )
         if self.emit_result:
+            result = _result(free=0).model_dump()
             await self.handlers["/search/44/listeners/search_result_added"](
-                {"result": _result(free=0).model_dump(), "search_id": "active-search-id"}
+                {"result": result, "search_id": "active-search-id"}
             )
+            if self.emit_update:
+                await self.handlers["/search/44/listeners/search_result_updated"](
+                    {"result": result, "search_id": "active-search-id"}
+                )
         if self.fail_after_sent:
             raise ConnectionError("socket disconnected")
         return {"queued_count": 0}
@@ -189,6 +198,7 @@ def _client(
     *,
     config_id: int = 7,
     client_priority: int = 20,
+    max_results: int = 200,
 ) -> AirDcppSearchClient:
     return AirDcppSearchClient(
         config_id=config_id,
@@ -199,7 +209,7 @@ def _client(
         socket_client=socket,
         manual_collection_seconds=1,
         automatic_collection_seconds=2,
-        max_results=200,
+        max_results=max_results,
         max_retained_routes=400,
         search_dispatch_deadline_seconds=5,
         hub_allowlist=(),
@@ -233,7 +243,7 @@ async def test_search_subscribes_before_send_extends_from_event_and_deduplicates
     }
     assert cooldown.extended == 1
     assert sleeps == [1]
-    assert outcome.raw_count == 2
+    assert outcome.raw_count == 1
     assert outcome.deduplicated_count == 1
     assert len(outcome.matched) == 1
     assert outcome.matched[0].route.tth == _TTH
@@ -241,6 +251,30 @@ async def test_search_subscribes_before_send_extends_from_event_and_deduplicates
     assert outcome.client_summaries[0].status is DcClientSearchStatus.COMPLETED
     assert api.deleted == []
     assert len(socket.unsubscribed) == 4
+
+
+@pytest.mark.asyncio
+async def test_socket_updates_do_not_consume_capacity_for_distinct_snapshot_results() -> None:
+    snapshot_result = _result(
+        result_id="second-result",
+        tth=_SECOND_TTH,
+        size=200_000_000,
+    )
+    api = _FakeApi([snapshot_result])
+    socket = _FakeSocket(emit_update=True)
+    coordinator = AirDcppSearchCoordinator(
+        cooldown=_FakeCooldown(),
+        sleep=lambda _s: asyncio.sleep(0),
+    )
+
+    outcome = await coordinator.search(
+        (_client(api, socket, max_results=2),),
+        _target(),
+        manual=True,
+    )
+
+    assert {candidate.route.tth for candidate in outcome.matched} == {_TTH, _SECOND_TTH}
+    assert outcome.raw_count == 2
 
 
 @pytest.mark.asyncio
