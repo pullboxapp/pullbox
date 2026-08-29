@@ -21,6 +21,8 @@ and merged queue bundles remain race-safe.
 - Claimed missing AirDC++ bundle retries atomically, bound completion to the
   exact claim, preserved remote bundles merged with existing queue work, and
   prevented duplicate intents from taking ownership of the same bundle.
+- Rechecked AirDC++ bundle ownership immediately before stale recovery cleanup
+  so cancellation cannot delete a bundle adopted by another Pullbox download.
 
 ## [1.2.0] - 2026-08-28
 

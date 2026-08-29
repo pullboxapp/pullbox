@@ -203,7 +203,7 @@ class AirDcppReconciler:
         adopted: dict[int, AirDcppQueueFile] = {}
         recovered: dict[int, _RecoveredMutation] = {}
         retry_failures: dict[int, str] = {}
-        stale_recovered_bundle_ids: set[int] = set()
+        stale_recovered_bundles: set[tuple[str, int]] = set()
         pre_id = [snapshot for snapshot in snapshots if snapshot.bundle_id is None]
         now = datetime.now(UTC)
         for snapshot in pre_id[:_MAX_PRE_ID_LOOKUPS]:
@@ -351,7 +351,9 @@ class AirDcppReconciler:
                                 )
                             )
                     elif _stale_recovery_requires_cleanup(acquisition, recovered_mutation):
-                        stale_recovered_bundle_ids.add(recovered_mutation.bundle_id)
+                        stale_recovered_bundles.add(
+                            (snapshot.client_identity, recovered_mutation.bundle_id)
+                        )
                 elif snapshot.acquisition_id in retry_failures:
                     if _active_snapshot_is_current(acquisition, snapshot):
                         changed += int(
@@ -376,7 +378,23 @@ class AirDcppReconciler:
                 )
             await session.commit()
 
-        for bundle_id in stale_recovered_bundle_ids:
+        for client_identity, bundle_id in stale_recovered_bundles:
+            async with self._session_factory() as session:
+                owner_id = await session.scalar(
+                    select(AirDcppAcquisition.id)
+                    .where(
+                        AirDcppAcquisition.client_identity == client_identity,
+                        AirDcppAcquisition.bundle_id == bundle_id,
+                    )
+                    .limit(1)
+                )
+            if owner_id is not None:
+                logger.info(
+                    "airdcpp_stale_recovery_cleanup_skipped_owned_bundle",
+                    bundle_id=bundle_id,
+                    owner_acquisition_id=owner_id,
+                )
+                continue
             try:
                 await api_client.remove_queue_bundle(bundle_id)
             except AirDcppEntityNotFoundError:
