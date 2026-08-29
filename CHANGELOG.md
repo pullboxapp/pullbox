@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-28
+
+Patch release hardening AirDC++ acquisition recovery so retries, cancellation,
+and merged queue bundles remain race-safe.
+
 ### Fixed
 
 - Kept transient AirDC++ queue lookup failures from consuming the bounded queue
