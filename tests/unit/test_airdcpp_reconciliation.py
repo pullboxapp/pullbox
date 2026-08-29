@@ -570,6 +570,78 @@ async def test_pre_id_reconciliation_retries_a_due_live_route_mutation(
 
 
 @pytest.mark.asyncio
+async def test_pre_id_recovery_does_not_claim_a_merged_bundle_owned_by_pullbox(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory,
+        state=DownloadState.RETRY_PENDING,
+        bundle_id=None,
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        history = await session.get(DownloadHistory, history_id)
+        assert acquisition is not None and history is not None
+        acquisition.search_instance_id = 44
+        acquisition.grouped_result_id = "opaque-result"
+        acquisition.result_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        owner_history = DownloadHistory(
+            issue_id=history.issue_id,
+            download_client_config_id=client_id,
+            title=history.title,
+            download_url="airdcpp://intent/existing-owner",
+            download_client=DownloadClientType.AIRDCPP,
+            protocol=AcquisitionProtocol.DC,
+            external_id=f"airdcpp:{client_id}:bundle:92",
+            state=DownloadState.SENT,
+            file_size=100_000_000,
+            sent_at=datetime.now(UTC),
+        )
+        session.add(owner_history)
+        await session.flush()
+        owner = AirDcppAcquisition(
+            download_history_id=owner_history.id,
+            request_key="existing-owner",
+            client_config_id=client_id,
+            client_identity=f"airdcpp:{client_id}",
+            tth=_TTH,
+            size_bytes=100_000_000,
+            original_name=history.title,
+            bundle_id=92,
+            client_state="queued",
+        )
+        session.add(owner)
+        await session.flush()
+        owner_id = owner.id
+        await session.commit()
+    api = _FakeApi(
+        [[_bundle(bundle_id=92)]],
+        retry_result=AirDcppQueueBundleAddInfo(id=92, merged=True),
+    )
+
+    result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
+
+    assert result.processed == 2
+    assert api.removed_bundles == []
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        owner = await session.get(AirDcppAcquisition, owner_id)
+        assert history is not None and acquisition is not None and owner is not None
+        assert acquisition.bundle_id is None
+        assert acquisition.client_state == "duplicate"
+        assert acquisition.reconciliation_error == "queue_bundle_already_owned"
+        assert acquisition.route_snapshot["existing_bundle_owner_acquisition_id"] == owner_id
+        assert history.external_id is None
+        assert history.state is DownloadState.FAILED
+        assert history.error_message == (
+            "AirDC++ merged this request into an existing Pullbox download."
+        )
+        assert owner.bundle_id == 92
+
+
+@pytest.mark.asyncio
 async def test_pre_id_reconciliation_does_not_race_an_initial_mutation(
     db_factory: async_sessionmaker[AsyncSession],
 ) -> None:

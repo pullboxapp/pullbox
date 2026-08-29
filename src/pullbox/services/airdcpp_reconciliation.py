@@ -93,6 +93,7 @@ class AirDcppReconciliationResult:
 @dataclass(frozen=True, slots=True)
 class _ActiveSnapshot:
     acquisition_id: int
+    client_identity: str
     bundle_id: int | None
     client_state: str | None
     tth: str
@@ -179,6 +180,7 @@ class AirDcppReconciler:
             snapshots = tuple(
                 _ActiveSnapshot(
                     row.id,
+                    row.client_identity,
                     row.bundle_id,
                     row.client_state,
                     row.tth,
@@ -256,6 +258,40 @@ class AirDcppReconciler:
                 .where(AirDcppAcquisition.id.in_(snapshot.acquisition_id for snapshot in snapshots))
             )
             acquisitions = {item.id: item for item in result.unique().scalars()}
+            ownership_candidates = {
+                (snapshot.client_identity, adopted[snapshot.acquisition_id].bundle_id)
+                for snapshot in snapshots
+                if snapshot.acquisition_id in adopted
+            }
+            ownership_candidates.update(
+                (snapshot.client_identity, recovered[snapshot.acquisition_id].bundle_id)
+                for snapshot in snapshots
+                if snapshot.acquisition_id in recovered
+                and not recovered[snapshot.acquisition_id].created_bundle
+            )
+            existing_bundle_owners: dict[tuple[str, int], int] = {}
+            if ownership_candidates:
+                owner_identities = tuple(
+                    {identity for identity, _bundle_id in ownership_candidates}
+                )
+                owner_bundle_ids = tuple(
+                    {bundle_id for _identity, bundle_id in ownership_candidates}
+                )
+                owner_rows = await session.execute(
+                    select(
+                        AirDcppAcquisition.client_identity,
+                        AirDcppAcquisition.bundle_id,
+                        AirDcppAcquisition.id,
+                    ).where(
+                        AirDcppAcquisition.client_identity.in_(owner_identities),
+                        AirDcppAcquisition.bundle_id.in_(owner_bundle_ids),
+                    )
+                )
+                existing_bundle_owners = {
+                    (identity, bundle_id): owner_id
+                    for identity, bundle_id, owner_id in owner_rows
+                    if bundle_id is not None
+                }
             for snapshot in snapshots:
                 acquisition = acquisitions.get(snapshot.acquisition_id)
                 if acquisition is None:
@@ -271,23 +307,49 @@ class AirDcppReconciler:
                         and acquisition.download_history.state is DownloadState.COMPLETED
                     )
                 elif snapshot.acquisition_id in adopted:
-                    changed += int(
-                        _apply_adopted_file(
-                            acquisition,
-                            adopted[snapshot.acquisition_id],
-                            at=now,
+                    adopted_file = adopted[snapshot.acquisition_id]
+                    if _active_snapshot_is_current(acquisition, snapshot):
+                        owner_id = existing_bundle_owners.get(
+                            (snapshot.client_identity, adopted_file.bundle_id)
                         )
-                    )
+                        if owner_id is not None and owner_id != acquisition.id:
+                            changed += int(
+                                _apply_existing_bundle_owner(
+                                    acquisition,
+                                    owner_acquisition_id=owner_id,
+                                    at=now,
+                                )
+                            )
+                        else:
+                            changed += int(
+                                _apply_adopted_file(
+                                    acquisition,
+                                    adopted_file,
+                                    at=now,
+                                )
+                            )
                 elif snapshot.acquisition_id in recovered:
                     recovered_mutation = recovered[snapshot.acquisition_id]
                     if _active_snapshot_is_current(acquisition, snapshot):
-                        changed += int(
-                            _apply_recovered_mutation(
-                                acquisition,
-                                recovered_mutation,
-                                at=now,
-                            )
+                        owner_id = existing_bundle_owners.get(
+                            (snapshot.client_identity, recovered_mutation.bundle_id)
                         )
+                        if owner_id is not None and owner_id != acquisition.id:
+                            changed += int(
+                                _apply_existing_bundle_owner(
+                                    acquisition,
+                                    owner_acquisition_id=owner_id,
+                                    at=now,
+                                )
+                            )
+                        else:
+                            changed += int(
+                                _apply_recovered_mutation(
+                                    acquisition,
+                                    recovered_mutation,
+                                    at=now,
+                                )
+                            )
                     elif _stale_recovery_requires_cleanup(acquisition, recovered_mutation):
                         stale_recovered_bundle_ids.add(recovered_mutation.bundle_id)
                 elif snapshot.acquisition_id in retry_failures:
@@ -506,6 +568,27 @@ def _apply_recovered_mutation(
     history.next_retry_at = None
     history.error_message = None
     history.completed_at = None
+    return True
+
+
+def _apply_existing_bundle_owner(
+    acquisition: AirDcppAcquisition,
+    *,
+    owner_acquisition_id: int,
+    at: datetime,
+) -> bool:
+    history = acquisition.download_history
+    route_snapshot = dict(acquisition.route_snapshot or {})
+    route_snapshot["existing_bundle_owner_acquisition_id"] = owner_acquisition_id
+    acquisition.route_snapshot = route_snapshot
+    acquisition.client_state = "duplicate"
+    acquisition.next_retry_at = None
+    acquisition.last_reconciled_at = at
+    acquisition.reconciliation_error = "queue_bundle_already_owned"
+    history.state = DownloadState.FAILED
+    history.next_retry_at = None
+    history.completed_at = at
+    history.error_message = "AirDC++ merged this request into an existing Pullbox download."
     return True
 
 
