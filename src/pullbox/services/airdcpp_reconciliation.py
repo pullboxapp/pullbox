@@ -111,6 +111,7 @@ class _ActiveSnapshot:
 class _RecoveredMutation:
     bundle_id: int
     client_state: str
+    created_bundle: bool
 
 
 class AirDcppReconciler:
@@ -424,7 +425,7 @@ def _stale_recovery_requires_cleanup(
     recovered: _RecoveredMutation,
 ) -> bool:
     history = acquisition.download_history
-    return (
+    return recovered.created_bundle and (
         DownloadState(history.state) in _TERMINAL_STATES
         or acquisition.bundle_id != recovered.bundle_id
     )
@@ -466,7 +467,11 @@ async def _retry_pre_id_mutation(
         except AirDcppEntityNotFoundError:
             pass
         else:
-            return _RecoveredMutation(added.id, "queued")
+            return _RecoveredMutation(
+                bundle_id=added.id,
+                client_state="queued",
+                created_bundle=not added.merged,
+            )
 
     added = await api_client.create_file_bundle(
         tth=snapshot.tth,
@@ -474,7 +479,11 @@ async def _retry_pre_id_mutation(
         target_name=snapshot.target_name,
         priority=snapshot.queue_priority,
     )
-    return _RecoveredMutation(added.id, "source_search_pending")
+    return _RecoveredMutation(
+        bundle_id=added.id,
+        client_state="source_search_pending",
+        created_bundle=not added.merged,
+    )
 
 
 def _apply_recovered_mutation(

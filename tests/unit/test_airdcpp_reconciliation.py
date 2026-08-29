@@ -795,9 +795,15 @@ async def test_pre_id_lookup_failure_does_not_consume_mutation_retry_budget(
         assert history.state is DownloadState.RETRY_PENDING
 
 
+@pytest.mark.parametrize(
+    ("merged", "expected_removed_bundles"),
+    [(False, [92]), (True, [])],
+)
 @pytest.mark.asyncio
 async def test_pre_id_recovery_does_not_resurrect_a_cancelled_download(
     db_factory: async_sessionmaker[AsyncSession],
+    merged: bool,
+    expected_removed_bundles: list[int],
 ) -> None:
     client_id, history_id, acquisition_id = await _seed(
         db_factory,
@@ -839,12 +845,15 @@ async def test_pre_id_recovery_does_not_resurrect_a_cancelled_download(
                 await session.commit()
             return added
 
-    api = _CancelDuringRetryApi([[]])
+    api = _CancelDuringRetryApi(
+        [[]],
+        retry_result=AirDcppQueueBundleAddInfo(id=92, merged=merged),
+    )
 
     result = await AirDcppReconciler(db_factory).reconcile_client(client_id, api)
 
     assert api.retry_calls == [(44, "opaque-result", "Example Comic 001 (2026).cbz", None)]
-    assert api.removed_bundles == [92]
+    assert api.removed_bundles == expected_removed_bundles
     assert result.changed == 0
     async with db_factory() as session:
         history = await session.get(DownloadHistory, history_id)
