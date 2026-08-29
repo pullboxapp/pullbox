@@ -731,6 +731,8 @@ async def retry_download(
                 if (
                     acquisition.client_state == "retry_mutation_pending"
                     and download.state is DownloadState.RETRY_PENDING
+                    and acquisition.next_retry_at == claim_deadline
+                    and download.next_retry_at == claim_deadline
                 ):
                     acquisition.client_state = previous_client_state
                     acquisition.next_retry_at = None
@@ -755,6 +757,8 @@ async def retry_download(
                 if (
                     acquisition.client_state == "retry_mutation_pending"
                     and download.state is DownloadState.RETRY_PENDING
+                    and acquisition.next_retry_at == claim_deadline
+                    and download.next_retry_at == claim_deadline
                 ):
                     acquisition.client_state = previous_client_state
                     acquisition.next_retry_at = None
@@ -772,17 +776,20 @@ async def retry_download(
             if (
                 acquisition.client_state != "retry_mutation_pending"
                 or download.state is not DownloadState.RETRY_PENDING
+                or acquisition.next_retry_at != claim_deadline
+                or download.next_retry_at != claim_deadline
             ):
                 await session.commit()
-                try:
-                    await supervisor.api_client.remove_queue_bundle(added.id)
-                except AirDcppError as exc:
-                    logger.warning(
-                        "airdcpp_superseded_retry_cleanup_failed",
-                        download_id=download.id,
-                        bundle_id=added.id,
-                        error_code=exc.code,
-                    )
+                if not added.merged:
+                    try:
+                        await supervisor.api_client.remove_queue_bundle(added.id)
+                    except AirDcppError as exc:
+                        logger.warning(
+                            "airdcpp_superseded_retry_cleanup_failed",
+                            download_id=download.id,
+                            bundle_id=added.id,
+                            error_code=exc.code,
+                        )
                 raise HTTPException(
                     status_code=409,
                     detail="The AirDC++ retry was superseded before it completed.",

@@ -109,7 +109,7 @@ class AirDcppQueueAcquisitionService:
             ):
                 adopted = await self._find_adoptable(api_client, existing, history.title)
                 if adopted is not None:
-                    recorded = await self._record_bundle_if_current(
+                    await self._record_bundle_if_current(
                         session,
                         existing,
                         history,
@@ -119,12 +119,6 @@ class AirDcppQueueAcquisitionService:
                         expected_retry_count=expected_retry_count,
                         remote_target=adopted.target.get_secret_value(),
                     )
-                    if not recorded:
-                        await self._remove_superseded_bundle(
-                            api_client,
-                            existing,
-                            adopted.bundle_id,
-                        )
             return _result(existing, history, merged=None)
 
         issue = await session.get(Issue, issue_id)
@@ -184,6 +178,7 @@ class AirDcppQueueAcquisitionService:
         bundle_id: int | None = None
         remote_target: str | None = None
         mutation_error: str | None = None
+        bundle_created = False
         source_search_pending = False
         try:
             added = await api_client.download_search_result(
@@ -194,6 +189,7 @@ class AirDcppQueueAcquisitionService:
             )
             bundle_id = added.id
             merged = added.merged
+            bundle_created = not added.merged
         except AirDcppUnavailableError:
             adopted, recovery_error = await self._try_find_adoptable(
                 api_client,
@@ -218,6 +214,7 @@ class AirDcppQueueAcquisitionService:
             else:
                 bundle_id = added.id
                 merged = added.merged
+                bundle_created = not added.merged
                 source_search_pending = True
         except AirDcppError as exc:
             mutation_error = exc.code
@@ -235,7 +232,7 @@ class AirDcppQueueAcquisitionService:
                 client_state=("source_search_pending" if source_search_pending else "queued"),
                 next_retry_at=(now if source_search_pending else None),
             )
-            if not recorded:
+            if not recorded and bundle_created:
                 await self._remove_superseded_bundle(api_client, acquisition, bundle_id)
         else:
             await self._record_retry_if_current(

@@ -124,11 +124,13 @@ class _FakeApi:
         failure: Exception | None = None,
         file_bundle_failure: Exception | None = None,
         adopted: list[AirDcppQueueFile] | None = None,
+        merged: bool = False,
     ) -> None:
         self.session = session
         self.failure = failure
         self.file_bundle_failure = file_bundle_failure
         self.adopted = adopted or []
+        self.merged = merged
         self.mutations = 0
         self.lookups = 0
         self.file_bundle_mutations = 0
@@ -149,7 +151,7 @@ class _FakeApi:
         self.mutations += 1
         if self.failure is not None:
             raise self.failure
-        return AirDcppQueueBundleAddInfo(id=91, merged=False)
+        return AirDcppQueueBundleAddInfo(id=91, merged=self.merged)
 
     async def get_queue_files_by_tth(self, _tth: str) -> list[AirDcppQueueFile]:
         assert self.session.in_transaction() is False
@@ -243,9 +245,15 @@ async def test_acquisition_persists_before_mutation_and_replays_idempotently(
         assert issue.status is IssueStatus.DOWNLOADING
 
 
+@pytest.mark.parametrize(
+    ("merged", "removed_bundles"),
+    [(False, [91]), (True, [])],
+)
 @pytest.mark.asyncio
 async def test_initial_mutation_does_not_resurrect_a_cancelled_download(
     db_factory: async_sessionmaker[AsyncSession],
+    merged: bool,
+    removed_bundles: list[int],
 ) -> None:
     client_id, issue_id = await _seed(db_factory)
 
@@ -273,7 +281,7 @@ async def test_initial_mutation_does_not_resurrect_a_cancelled_download(
             return added
 
     async with db_factory() as session:
-        api = _CancelDuringMutationApi(session)
+        api = _CancelDuringMutationApi(session, merged=merged)
 
         result = await AirDcppQueueAcquisitionService().acquire(
             session,
@@ -288,7 +296,7 @@ async def test_initial_mutation_does_not_resurrect_a_cancelled_download(
 
     assert result.bundle_id is None
     assert result.state is DownloadState.FAILED
-    assert api.removed_bundles == [91]
+    assert api.removed_bundles == removed_bundles
     async with db_factory() as session:
         acquisition = (await session.execute(select(AirDcppAcquisition))).scalar_one()
         history = await session.get(DownloadHistory, acquisition.download_history_id)

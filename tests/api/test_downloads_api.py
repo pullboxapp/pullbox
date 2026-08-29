@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -33,6 +33,7 @@ from pullbox.models.indexer import IndexerConfig, IndexerSource, IndexerType
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
 from pullbox.models.user import APIKey, User
+from pullbox.providers.airdcpp.errors import AirDcppUnavailableError
 from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
 from pullbox.providers.download.qbittorrent import QBittorrentError
 from pullbox.providers.indexer.newznab import NewznabError
@@ -1444,6 +1445,103 @@ class TestDownloadRouteFunctions:
         conflicts = [result for result in results if isinstance(result, HTTPException)]
         assert len(conflicts) == 1
         assert conflicts[0].status_code == 409
+
+    @pytest.mark.parametrize("mutation_fails", [False, True])
+    @pytest.mark.asyncio
+    async def test_retry_missing_airdcpp_download_preserves_newer_claim(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+        mutation_fails: bool,
+    ) -> None:
+        issue_id = await _seed_issue(db_factory, status=IssueStatus.WANTED)
+        config_id = 82
+        await _seed_client_config(
+            db_factory,
+            config_id=config_id,
+            client_type=DownloadClientType.AIRDCPP,
+        )
+        download_id = await _seed_download(
+            db_factory,
+            issue_id,
+            state=DownloadState.FAILED,
+            client_type=DownloadClientType.AIRDCPP,
+            external_id=f"airdcpp:{config_id}:bundle:96",
+            download_client_config_id=config_id,
+            error_message="The AirDC++ queue item was removed outside Pullbox.",
+        )
+        async with db_factory() as session:
+            acquisition = AirDcppAcquisition(
+                download_history_id=download_id,
+                request_key=f"retry-missing-airdcpp-newer-{mutation_fails}",
+                client_config_id=config_id,
+                client_identity=f"airdcpp:{config_id}",
+                tth="CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y",
+                size_bytes=100_000_000,
+                original_name="Batman 004 (2025).cbz",
+                bundle_id=96,
+                client_state="missing",
+                reconciliation_error="external_bundle_missing",
+            )
+            session.add(acquisition)
+            await session.flush()
+            acquisition_id = acquisition.id
+            await session.commit()
+
+        newer_deadline = datetime.now(UTC) + timedelta(minutes=10)
+
+        async def _create_file_bundle(**_kwargs: object) -> SimpleNamespace:
+            async with db_factory() as newer_session:
+                current_acquisition = await newer_session.get(
+                    AirDcppAcquisition,
+                    acquisition_id,
+                )
+                current_download = await newer_session.get(DownloadHistory, download_id)
+                assert current_acquisition is not None and current_download is not None
+                current_acquisition.client_state = "retry_mutation_pending"
+                current_acquisition.next_retry_at = newer_deadline
+                current_download.state = DownloadState.RETRY_PENDING
+                current_download.next_retry_at = newer_deadline
+                current_download.error_message = "A newer retry owns this claim."
+                await newer_session.commit()
+            if mutation_fails:
+                raise AirDcppUnavailableError()
+            return SimpleNamespace(id=98, merged=False)
+
+        api = AsyncMock()
+        api.create_file_bundle.side_effect = _create_file_bundle
+        supervisor = SimpleNamespace(
+            state=AirDcppSupervisorState.READY,
+            api_client=api,
+        )
+        registry = SimpleNamespace(
+            get=lambda selected: supervisor if selected == config_id else None
+        )
+
+        with (
+            patch(
+                "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+                return_value=registry,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            async with db_factory() as session:
+                await downloads_api.retry_download(download_id, object(), session)  # type: ignore[arg-type]
+
+        assert exc_info.value.status_code == (502 if mutation_fails else 409)
+        if mutation_fails:
+            api.remove_queue_bundle.assert_not_awaited()
+        else:
+            api.remove_queue_bundle.assert_awaited_once_with(98)
+        async with db_factory() as session:
+            acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+            download = await session.get(DownloadHistory, download_id)
+            assert acquisition is not None and download is not None
+            assert acquisition.bundle_id == 96
+            assert acquisition.client_state == "retry_mutation_pending"
+            assert acquisition.next_retry_at == newer_deadline
+            assert download.state is DownloadState.RETRY_PENDING
+            assert download.next_retry_at == newer_deadline
+            assert download.error_message == "A newer retry owns this claim."
 
     @pytest.mark.asyncio
     async def test_direct_download_sources_list_only_verified_equivalent_routes(
