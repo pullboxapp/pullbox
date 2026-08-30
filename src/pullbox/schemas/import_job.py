@@ -1,19 +1,36 @@
 """Import job request/response schemas."""
 
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime  # noqa: TC003 - Pydantic needs this at runtime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pullbox.models.import_job import (
     ImportControlRequest,
     ImportedFileStatus,
+    ImportFileHandlingMode,
     ImportJobStatus,
     ImportSeriesStatus,
     ImportSourceType,
 )
+from pullbox.schemas.import_layout import SourceLayoutSpecPayload
 
 # ── Request Schemas ──────────────────────────────────────────────────────
+
+
+class FutureRootPolicyPayload(BaseModel):
+    """Complete proposed naming policy for a later per-root implementation."""
+
+    schema_version: Literal[1] = 1
+    series_path_template: str = Field(..., min_length=1, max_length=1024)
+    comic_file_template: str = Field(..., min_length=1, max_length=1024)
+    annual_file_template: str = Field(..., min_length=1, max_length=1024)
+    non_standard_file_template: str = Field(..., min_length=1, max_length=1024)
+    single_non_standard_file_template: str = Field(..., min_length=1, max_length=1024)
+    replace_illegal_characters: bool
+    colon_replacement: Literal["dash", "space", "empty", "smart"]
 
 
 class ImportJobCreate(BaseModel):
@@ -49,6 +66,31 @@ class ImportJobCreate(BaseModel):
     file_formats: str | None = Field(
         None, description="Comma-separated file extensions to scan (e.g. 'cbz, cbr, pdf')"
     )
+    source_layout: SourceLayoutSpecPayload = Field(
+        default_factory=SourceLayoutSpecPayload,
+        description="Versioned interpretation of source folders and filenames",
+    )
+    file_handling_mode: ImportFileHandlingMode = Field(
+        ImportFileHandlingMode.MANAGED_COPY,
+        description="Whether Pullbox creates a managed artifact or references the source",
+    )
+    future_layout_requested: bool = Field(
+        False,
+        description="Whether the proposed layout should become the target root's future policy",
+    )
+    future_root_policy: FutureRootPolicyPayload | None = Field(
+        None,
+        description="Complete proposed future policy when future_layout_requested is true",
+    )
+
+    @model_validator(mode="after")
+    def validate_future_policy_pair(self) -> ImportJobCreate:
+        """Require the future-policy request flag and payload to agree."""
+        if self.future_layout_requested and self.future_root_policy is None:
+            raise ValueError("future_root_policy is required when future_layout_requested is true")
+        if not self.future_layout_requested and self.future_root_policy is not None:
+            raise ValueError("future_root_policy requires future_layout_requested to be true")
+        return self
 
     @field_validator("file_formats")
     @classmethod
@@ -357,6 +399,11 @@ class ImportJobRead(BaseModel):
     transfer_method: str = "move"
     convert_to_preferred_format: bool = False
     update_embedded_comicinfo_from_match: bool = False
+    file_handling_mode: ImportFileHandlingMode = ImportFileHandlingMode.MANAGED_COPY
+    source_layout_snapshot: SourceLayoutSpecPayload = Field(default_factory=SourceLayoutSpecPayload)
+    future_layout_requested: bool = False
+    future_root_policy_snapshot: FutureRootPolicyPayload | None = None
+    future_root_policy_applied_at: datetime | None = None
     cv_match_threshold: float
     min_files_per_series: int
     file_formats: str | None

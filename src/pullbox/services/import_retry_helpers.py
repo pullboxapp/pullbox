@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from pullbox.models.import_job import ImportFileHandlingMode
 from pullbox.schemas.import_job import ImportJobCreate
+from pullbox.schemas.import_layout import SourceLayoutSpecPayload
 
 _RETRY_RUNTIME_FIELDS = (
     "move_to_library",
@@ -21,6 +23,8 @@ _RETRY_RUNTIME_FIELDS = (
 
 def build_retry_import_request(original: Any) -> ImportJobCreate:
     """Build the creation request for a fresh retry job."""
+    source_layout_snapshot = getattr(original, "source_layout_snapshot", None) or {}
+    future_root_policy_snapshot = getattr(original, "future_root_policy_snapshot", None)
     return ImportJobCreate(
         source_path=original.source_path,
         file_paths=list(original.selected_file_paths or []) or None,
@@ -31,6 +35,14 @@ def build_retry_import_request(original: Any) -> ImportJobCreate:
         cv_match_threshold=original.cv_match_threshold,
         min_files_per_series=original.min_files_per_series,
         file_formats=original.file_formats,
+        file_handling_mode=getattr(
+            original,
+            "file_handling_mode",
+            ImportFileHandlingMode.MANAGED_COPY,
+        ),
+        source_layout=SourceLayoutSpecPayload.model_validate(source_layout_snapshot),
+        future_layout_requested=bool(getattr(original, "future_layout_requested", False)),
+        future_root_policy=future_root_policy_snapshot,
     )
 
 
@@ -39,3 +51,15 @@ def copy_retry_import_settings(original: Any, retry: Any) -> None:
     for field_name in _RETRY_RUNTIME_FIELDS:
         setattr(retry, field_name, getattr(original, field_name))
     retry.ingest_policy_snapshot = dict(original.ingest_policy_snapshot or {})
+    retry.file_handling_mode = getattr(
+        original,
+        "file_handling_mode",
+        ImportFileHandlingMode.MANAGED_COPY,
+    )
+    retry.source_layout_snapshot = dict(getattr(original, "source_layout_snapshot", None) or {})
+    retry.future_layout_requested = bool(getattr(original, "future_layout_requested", False))
+    future_root_policy_snapshot = getattr(original, "future_root_policy_snapshot", None)
+    retry.future_root_policy_snapshot = (
+        dict(future_root_policy_snapshot) if future_root_policy_snapshot is not None else None
+    )
+    retry.future_root_policy_applied_at = None

@@ -641,6 +641,19 @@ class TestCreateImportJob:
         data = resp.json()
         assert data["status"] == "pending"
         assert data["source_type"] == "filesystem"
+        assert data["file_handling_mode"] == "managed_copy"
+        assert data["source_layout_snapshot"] == {
+            "schema_version": 1,
+            "mode": "auto",
+            "preset": None,
+            "series_path_template": None,
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        }
+        assert data["future_layout_requested"] is False
+        assert data["future_root_policy_snapshot"] is None
+        assert data["future_root_policy_applied_at"] is None
         mock_trigger.assert_called_once_with(data["id"])
 
     @pytest.mark.asyncio
@@ -673,6 +686,56 @@ class TestCreateImportJob:
             },
         )
         assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"file_handling_mode": "in_place"}, "In-place import is not available yet"),
+            (
+                {"source_layout": {"mode": "preset", "preset": "publisher_series"}},
+                "Selected source layouts are not available yet",
+            ),
+            (
+                {
+                    "future_layout_requested": True,
+                    "future_root_policy": {
+                        "schema_version": 1,
+                        "series_path_template": "{Publisher}/{Series} ({Year})",
+                        "comic_file_template": "{Series} {IssueTitle} Issue {Issue:03d}",
+                        "annual_file_template": "{Series} Annual Issue {Issue:03d}",
+                        "non_standard_file_template": (
+                            "{Series} {Type} {Volume:02d} - {IssueTitle}"
+                        ),
+                        "single_non_standard_file_template": ("{Series} {Type} - {IssueTitle}"),
+                        "replace_illegal_characters": True,
+                        "colon_replacement": "dash",
+                    },
+                },
+                "Future library layout is not available yet",
+            ),
+        ],
+    )
+    async def test_create_job_rejects_not_yet_safe_execution_modes(
+        self,
+        client: AsyncClient,
+        tmp_path: object,
+        overrides: dict[str, object],
+        message: str,
+    ) -> None:
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            resp = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                    **overrides,
+                },
+            )
+
+        assert resp.status_code == 409
+        assert message in resp.json()["detail"]
+        mock_trigger.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_job_rejects_existing_active_import(

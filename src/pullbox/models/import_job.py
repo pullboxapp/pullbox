@@ -39,6 +39,13 @@ class ImportSourceType(enum.StrEnum):
     MYLAR3 = "mylar3"
 
 
+class ImportFileHandlingMode(enum.StrEnum):
+    """How files selected by an import become Pullbox library files."""
+
+    MANAGED_COPY = "managed_copy"
+    IN_PLACE = "in_place"
+
+
 class ImportJobStatus(enum.StrEnum):
     """Lifecycle status of an import job."""
 
@@ -204,6 +211,42 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     ingest_policy_snapshot: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}"
     )
+    file_handling_mode: Mapped[ImportFileHandlingMode] = mapped_column(
+        SQLAlchemyEnum(
+            ImportFileHandlingMode,
+            values_callable=_enum_values,
+            native_enum=False,
+            create_constraint=True,
+        ),
+        default=ImportFileHandlingMode.MANAGED_COPY,
+        server_default=ImportFileHandlingMode.MANAGED_COPY.value,
+        nullable=False,
+    )
+    source_layout_snapshot: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
+        JSON,
+        default=lambda: {
+            "schema_version": 1,
+            "mode": "auto",
+            "preset": None,
+            "series_path_template": None,
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        },
+        server_default=(
+            '{"schema_version":1,"mode":"auto","preset":null,'
+            '"series_path_template":null,"issue_filename_template":null,'
+            '"selected_cluster_id":null,"fallback_to_auto":true}'
+        ),
+        nullable=False,
+    )
+    future_layout_requested: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
+    future_root_policy_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # type: ignore[type-arg]
+    future_root_policy_applied_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     # Per-job configuration
     cv_match_threshold: Mapped[float] = mapped_column(Float, default=0.70)

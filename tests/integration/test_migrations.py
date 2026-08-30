@@ -626,6 +626,88 @@ class TestMigrationChain:
         assert "source_preserved" in columns
         assert "ingest_policy_snapshot" in columns
 
+    def test_import_jobs_has_durable_layout_snapshot_fields(self, alembic_cfg) -> None:
+        """Import job choices survive background execution, restarts, and retries."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            columns = {column["name"]: column for column in inspector.get_columns("import_jobs")}
+        finally:
+            engine.dispose()
+
+        assert {
+            "file_handling_mode",
+            "source_layout_snapshot",
+            "future_layout_requested",
+            "future_root_policy_snapshot",
+            "future_root_policy_applied_at",
+        }.issubset(columns)
+        assert columns["file_handling_mode"]["nullable"] is False
+        assert columns["source_layout_snapshot"]["nullable"] is False
+        assert columns["future_layout_requested"]["nullable"] is False
+        assert columns["future_root_policy_snapshot"]["nullable"] is True
+        assert columns["future_root_policy_applied_at"]["nullable"] is True
+
+    def test_import_job_layout_snapshot_migration_backfills_existing_rows(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Pre-v1.3 import history receives the compatible managed/auto defaults."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "v7w8x9y0z123")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO import_jobs ("
+                        "source_path, source_type, status, scan_total_files, scan_total_dirs, "
+                        "series_found, series_duplicate, series_matched, series_no_match, "
+                        "series_new, series_imported, series_failed, search_on_add, "
+                        "cv_match_threshold, auto_accept_high_confidence, skip_no_match"
+                        ") VALUES ("
+                        "'/imports/history', 'FILESYSTEM', 'COMPLETED', 4, 2, "
+                        "1, 0, 1, 0, 1, 1, 0, 0, 0.7, 1, 0"
+                        ")"
+                    )
+                )
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT file_handling_mode, source_layout_snapshot, "
+                        "future_layout_requested, future_root_policy_snapshot, "
+                        "future_root_policy_applied_at FROM import_jobs "
+                        "WHERE source_path = '/imports/history'"
+                    )
+                ).one()
+        finally:
+            engine.dispose()
+
+        assert row.file_handling_mode == "managed_copy"
+        assert json.loads(row.source_layout_snapshot) == {
+            "schema_version": 1,
+            "mode": "auto",
+            "preset": None,
+            "series_path_template": None,
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        }
+        assert row.future_layout_requested == 0
+        assert row.future_root_policy_snapshot is None
+        assert row.future_root_policy_applied_at is None
+
     def test_library_files_has_naming_snapshot(self, alembic_cfg) -> None:
         """Library files keep the naming inputs used at placement time."""
         cfg, sync_url = alembic_cfg

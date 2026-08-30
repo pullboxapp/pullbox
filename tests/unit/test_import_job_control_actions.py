@@ -17,6 +17,7 @@ from pullbox.api.v1.import_job_control_actions import (
 )
 from pullbox.models.import_job import (
     ImportControlRequest,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSourceType,
@@ -49,6 +50,19 @@ def _import_job(status: ImportJobStatus = ImportJobStatus.REVIEW) -> ImportJob:
         transfer_method="move",
         convert_to_preferred_format=False,
         update_embedded_comicinfo_from_match=False,
+        file_handling_mode=ImportFileHandlingMode.MANAGED_COPY,
+        source_layout_snapshot={
+            "schema_version": 1,
+            "mode": "auto",
+            "preset": None,
+            "series_path_template": None,
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        },
+        future_layout_requested=False,
+        future_root_policy_snapshot=None,
+        future_root_policy_applied_at=None,
         cv_match_threshold=0.70,
         min_files_per_series=1,
         progress_snapshot={},
