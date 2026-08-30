@@ -160,6 +160,55 @@ async def test_rollback_action_removes_copied_library_file_and_journal_row(
     assert action.rolled_back_at is not None
 
 
+async def test_rollback_action_detaches_referenced_file_without_touching_source(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    source_path = tmp_path / "library" / "Existing Series" / "Issue 001.cbz"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("user-owned comic", encoding="utf-8")
+    stale_original_path = tmp_path / "incoming" / source_path.name
+    root = LibraryRoot(name="Library", path=str(tmp_path / "library"))
+    db_session.add(root)
+    await db_session.flush()
+    library_file = LibraryFile(
+        file_path=str(source_path),
+        file_name=source_path.name,
+        file_size=source_path.stat().st_size,
+        file_format=FileFormat.CBZ,
+        file_modified_at=datetime.now(tz=UTC),
+        match_confidence=MatchConfidence.HIGH,
+        library_root_id=root.id,
+    )
+    db_session.add(library_file)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="library_file_registered",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "library_file_id": library_file.id,
+            "destination_path": str(source_path),
+            "original_source_path": str(stale_original_path),
+            "transfer_method": "leave_in_place",
+            "storage_mode": "referenced",
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert await db_session.get(LibraryFile, library_file.id) is None
+    assert source_path.read_text(encoding="utf-8") == "user-owned comic"
+    assert not stale_original_path.exists()
+    assert action.status == ImportJobActionStatus.ROLLED_BACK
+
+
 async def test_rollback_action_deletes_created_series_without_files(
     db_session: AsyncSession,
 ) -> None:

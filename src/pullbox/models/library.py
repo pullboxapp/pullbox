@@ -44,6 +44,13 @@ class MatchConfidence(enum.StrEnum):
     MANUAL = "manual"
 
 
+class LibraryFileStorageMode(enum.StrEnum):
+    """Whether Pullbox owns an artifact or references a user-owned file."""
+
+    MANAGED = "managed"
+    REFERENCED = "referenced"
+
+
 class LibraryFile(Base, IdentityMixin, TimestampMixin):
     __tablename__ = "library_files"
     __table_args__ = (
@@ -74,6 +81,20 @@ class LibraryFile(Base, IdentityMixin, TimestampMixin):
 
     # Naming audit snapshot captured when the file was placed.
     naming_snapshot: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    storage_mode: Mapped[LibraryFileStorageMode] = mapped_column(
+        SQLAlchemyEnum(
+            LibraryFileStorageMode,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+            create_constraint=True,
+        ),
+        default=LibraryFileStorageMode.MANAGED,
+        server_default=LibraryFileStorageMode.MANAGED.value,
+        nullable=False,
+    )
+    source_signature: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}", nullable=False
     )
 

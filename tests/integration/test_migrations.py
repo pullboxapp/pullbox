@@ -717,6 +717,112 @@ class TestMigrationChain:
 
         assert "naming_snapshot" in columns
 
+    def test_library_file_ownership_migration_backfills_managed_and_signatures(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Existing library/import file rows receive conservative ownership defaults."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "w8x9y0z1a234")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO library_roots "
+                        "(name, path, enabled, created_at, updated_at) "
+                        "VALUES ('Comics', '/library', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    )
+                )
+                root_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+                conn.execute(
+                    text(
+                        "INSERT INTO library_files "
+                        "(file_path, file_name, file_size, file_format, file_modified_at, "
+                        "match_confidence, library_root_id, has_comicinfo, naming_snapshot, "
+                        "created_at, updated_at) "
+                        "VALUES ('/library/Batman/Batman 001.cbz', 'Batman 001.cbz', 100, "
+                        "'CBZ', CURRENT_TIMESTAMP, 'HIGH', :root_id, 0, '{}', "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {"root_id": root_id},
+                )
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            library_columns = {
+                column["name"]: column for column in inspector.get_columns("library_files")
+            }
+            import_columns = {
+                column["name"]: column for column in inspector.get_columns("import_files")
+            }
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT storage_mode, source_signature FROM library_files "
+                        "WHERE file_path = '/library/Batman/Batman 001.cbz'"
+                    )
+                ).one()
+        finally:
+            engine.dispose()
+
+        assert library_columns["storage_mode"]["nullable"] is False
+        assert library_columns["source_signature"]["nullable"] is False
+        assert import_columns["source_signature"]["nullable"] is False
+        assert row.storage_mode == "managed"
+        assert json.loads(row.source_signature) == {}
+
+        command.downgrade(cfg, "w8x9y0z1a234")
+        assert "storage_mode" not in _get_columns(sync_url, "library_files")
+        assert "source_signature" not in _get_columns(sync_url, "library_files")
+        assert "source_signature" not in _get_columns(sync_url, "import_files")
+        command.upgrade(cfg, "head")
+
+    def test_library_file_ownership_downgrade_blocks_referenced_rows(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """A downgrade cannot erase ownership while user-owned references remain."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO library_roots "
+                        "(name, path, enabled, created_at, updated_at) "
+                        "VALUES ('Comics', '/library', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    )
+                )
+                root_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+                conn.execute(
+                    text(
+                        "INSERT INTO library_files "
+                        "(file_path, file_name, file_size, file_format, file_modified_at, "
+                        "match_confidence, library_root_id, has_comicinfo, naming_snapshot, "
+                        "storage_mode, source_signature, created_at, updated_at) "
+                        "VALUES ('/library/Batman/Batman 001.cbz', 'Batman 001.cbz', 100, "
+                        "'CBZ', CURRENT_TIMESTAMP, 'HIGH', :root_id, 0, '{}', "
+                        "'referenced', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {"root_id": root_id},
+                )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="referenced files remain"):
+            command.downgrade(cfg, "w8x9y0z1a234")
+
+        assert "storage_mode" in _get_columns(sync_url, "library_files")
+
     def test_naming_snapshot_migration_backfills_series_path(self, alembic_cfg) -> None:
         """Existing library files materialize missing series folder paths."""
         cfg, sync_url = alembic_cfg

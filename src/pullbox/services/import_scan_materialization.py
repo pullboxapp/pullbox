@@ -137,6 +137,7 @@ async def materialize_discovered_scan_results(
                 has_comicinfo=df.has_comicinfo,
                 comicvine_issue_id=df.comicvine_issue_id,
                 issue_number_raw=df.issue_number_raw,
+                source_signature=dict(df.source_signature),
                 status=file_status,
                 include_in_import=False,
                 error_message=error_message,

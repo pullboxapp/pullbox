@@ -83,10 +83,14 @@ def _cleanup_failed_library_artifact(
     original_source: Path | None,
     original_trash_path: Path | None,
     transfer_method: str | None,
+    storage_mode: str | None,
     created_series_folder: bool,
     created_series_folder_path: Path | None,
 ) -> None:
     """Best-effort cleanup when import fails after the library artifact was placed."""
+    if storage_mode == "referenced" or transfer_method == "leave_in_place":
+        return
+
     if (
         original_trash_path is not None
         and original_source is not None
@@ -672,6 +676,7 @@ async def process_import_series_files(
         placed_destination_path: Path | None = None
         placed_series_folder_created = False
         placed_series_folder_path: Path | None = None
+        placed_storage_mode = "referenced" if not move_to_library else "managed"
         original_trash_path: Path | None = None
         imp_file = await _load_imported_file_for_processing(session, imp_file_id)
         if imp_file is None:
@@ -876,6 +881,7 @@ async def process_import_series_files(
                 )
             library_file, registration = _registration_outcome(registration_result)
             placed_destination_path = Path(library_file.file_path)
+            placed_storage_mode = library_file.storage_mode.value
             placed_series_folder_created = (
                 bool(registration.series_folder_created) if registration is not None else False
             )
@@ -980,6 +986,7 @@ async def process_import_series_files(
                     "destination_path": library_file.file_path,
                     "original_source_path": str(prepared.original_source),
                     "transfer_method": (transfer_method if move_to_library else "leave_in_place"),
+                    "storage_mode": placed_storage_mode,
                     "original_trash_path": (
                         str(original_trash_path) if original_trash_path is not None else ""
                     ),
@@ -1086,6 +1093,7 @@ async def process_import_series_files(
                     original_source=prepared.original_source if prepared is not None else None,
                     original_trash_path=original_trash_path,
                     transfer_method=transfer_method,
+                    storage_mode=placed_storage_mode,
                     created_series_folder=placed_series_folder_created,
                     created_series_folder_path=placed_series_folder_path,
                 )

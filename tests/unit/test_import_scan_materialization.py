@@ -56,6 +56,14 @@ def _discovered_file(
         issue_count_hint=24,
         metadata_signals={"series": "comicinfo", "issue": "filename"},
         metadata_diagnostics={"title": "Absolute Wonder Woman"},
+        source_signature={
+            "schema_version": 1,
+            "resolved_path": f"/tmp/comics/Absolute Wonder Woman/{name}",
+            "size": 12345,
+            "mtime_ns": 123456789,
+            "device": 1,
+            "inode": 2,
+        },
     )
 
 
@@ -123,6 +131,14 @@ async def test_materialize_discovered_scan_results_persists_series_and_files(
     assert file_row.comicvine_issue_id == 123456
     assert file_row.issue_number_raw == "019"
     assert file_row.status == ImportedFileStatus.PENDING
+    assert file_row.source_signature == {
+        "schema_version": 1,
+        "resolved_path": ("/tmp/comics/Absolute Wonder Woman/Absolute Wonder Woman 019.cbz"),
+        "size": 12345,
+        "mtime_ns": 123456789,
+        "device": 1,
+        "inode": 2,
+    }
     assert file_row.diagnostics == {
         "source_issue_type": "issue",
         "comicvine_series_id": 98765,

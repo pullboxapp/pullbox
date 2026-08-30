@@ -31,7 +31,9 @@ from pullbox.core.collection_scan_grouping import (
     _strip_year_volume_tokens,
     _type_qualified_issue_like_label,
 )
+from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.library_layout import (
     ImportLayoutMode,
     SourceLayoutMatch,
@@ -114,6 +116,7 @@ class DiscoveredFile:
     issue_count_hint: int | None = None
     metadata_signals: dict[str, str] = field(default_factory=dict)
     metadata_diagnostics: dict[str, object] = field(default_factory=dict)
+    source_signature: dict[str, int | str] = field(default_factory=dict)
 
 
 @dataclass
@@ -459,10 +462,12 @@ class CollectionScanner:
             file_name = fpath.name
             file_format = fpath.suffix.lstrip(".").lower()
 
-            # Get file size (sync but fast — just a stat call)
+            # Capture the identity used to detect scan-to-execution changes.
             try:
-                file_size = fpath.stat().st_size
-            except OSError:
+                source_signature = build_file_identity_signature(fpath)
+                file_size = int(source_signature["size"])
+            except (OSError, ConfigurationError):
+                source_signature = {}
                 file_size = 0
 
             initial_metadata = extractor.from_path(
@@ -625,6 +630,7 @@ class CollectionScanner:
                     for key, value in metadata_signals.items()
                 },
                 metadata_diagnostics=metadata_diagnostics,
+                source_signature=source_signature,
             )
 
         sorted_files = sorted(comic_files)

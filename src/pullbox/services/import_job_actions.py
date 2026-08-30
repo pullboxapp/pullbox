@@ -85,6 +85,8 @@ async def rollback_action(
         destination_path = Path(str(payload.get("destination_path") or ""))
         original_source_path = Path(str(payload.get("original_source_path") or ""))
         transfer_method = str(payload.get("transfer_method") or "move")
+        storage_mode = str(payload.get("storage_mode") or "")
+        referenced_file = storage_mode == "referenced" or transfer_method == "leave_in_place"
         original_trash_path = str(payload.get("original_trash_path") or "")
         created_series_folder = bool(payload.get("created_series_folder"))
         created_series_folder_path_raw = str(payload.get("created_series_folder_path") or "")
@@ -94,39 +96,40 @@ async def rollback_action(
         if library_file is not None:
             await session.delete(library_file)
 
-        if transfer_method in {"move", "leave_in_place"}:
-            if original_trash_path:
-                restore_file_from_utility_trash(Path(original_trash_path), original_source_path)
-                if destination_path.exists():
-                    destination_path.unlink(missing_ok=True)
+        if not referenced_file:
+            if transfer_method == "move":
+                if original_trash_path:
+                    restore_file_from_utility_trash(Path(original_trash_path), original_source_path)
+                    if destination_path.exists():
+                        destination_path.unlink(missing_ok=True)
+                elif destination_path.exists():
+                    original_source_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(destination_path), str(original_source_path))
             elif destination_path.exists():
-                original_source_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(destination_path), str(original_source_path))
-        elif destination_path.exists():
-            destination_path.unlink(missing_ok=True)
+                destination_path.unlink(missing_ok=True)
 
-        for entry in permission_restores:
-            restore_path = Path(str(entry.get("path") or ""))
-            restore_mode = entry.get("mode")
-            if not restore_path or restore_mode is None or not restore_path.exists():
-                continue
-            try:
-                restore_path.chmod(int(restore_mode))
-            except OSError:
-                continue
+            for entry in permission_restores:
+                restore_path = Path(str(entry.get("path") or ""))
+                restore_mode = entry.get("mode")
+                if not restore_path or restore_mode is None or not restore_path.exists():
+                    continue
+                try:
+                    restore_path.chmod(int(restore_mode))
+                except OSError:
+                    continue
 
-        if created_series_folder and created_series_folder_path_raw:
-            created_series_folder_path = Path(created_series_folder_path_raw)
-        else:
-            created_series_folder_path = None
+            if created_series_folder and created_series_folder_path_raw:
+                created_series_folder_path = Path(created_series_folder_path_raw)
+            else:
+                created_series_folder_path = None
 
-        if created_series_folder_path is not None and created_series_folder_path.exists():
-            try:
-                next(created_series_folder_path.iterdir())
-            except StopIteration:
-                created_series_folder_path.rmdir()
-            except OSError:
-                pass
+            if created_series_folder_path is not None and created_series_folder_path.exists():
+                try:
+                    next(created_series_folder_path.iterdir())
+                except StopIteration:
+                    created_series_folder_path.rmdir()
+                except OSError:
+                    pass
 
     elif action_type == "library_file_placement_started":
         destination_path_raw = str(payload.get("destination_path") or "")

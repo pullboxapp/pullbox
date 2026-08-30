@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.library_leave_in_place import handle_leave_in_place
 from pullbox.core.library_policy import LibraryIngestPolicy
 from pullbox.models.issue import Issue, IssueType
@@ -50,17 +51,17 @@ async def test_handle_leave_in_place_does_not_rename_outside_library_root(
     db_session.add_all([root, series, issue])
     await db_session.flush()
 
-    result = await handle_leave_in_place(
-        db_session,
-        source_path,
-        issue,
-        series,
-        root,
-        _policy(),
-        rename=True,
-    )
+    with pytest.raises(ConfigurationError, match="inside an enabled library root"):
+        await handle_leave_in_place(
+            db_session,
+            source_path,
+            issue,
+            series,
+            root,
+            _policy(),
+            rename=True,
+        )
 
-    assert result == source_path
     assert source_path.exists()
 
 
@@ -86,7 +87,7 @@ async def test_handle_leave_in_place_noops_when_computed_name_is_unchanged(
         series,
         root,
         _policy(),
-        rename=True,
+        rename=False,
     )
 
     assert result == source_path
@@ -94,7 +95,7 @@ async def test_handle_leave_in_place_noops_when_computed_name_is_unchanged(
 
 
 @pytest.mark.asyncio
-async def test_handle_leave_in_place_renames_source_inside_library_root(
+async def test_handle_leave_in_place_rejects_rename_inside_library_root(
     db_session,
     tmp_path: Path,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -108,16 +109,16 @@ async def test_handle_leave_in_place_renames_source_inside_library_root(
     db_session.add_all([root, series, issue])
     await db_session.flush()
 
-    result = await handle_leave_in_place(
-        db_session,
-        source_path,
-        issue,
-        series,
-        root,
-        _policy(),
-        rename=True,
-    )
+    with pytest.raises(ConfigurationError, match="cannot rename"):
+        await handle_leave_in_place(
+            db_session,
+            source_path,
+            issue,
+            series,
+            root,
+            _policy(),
+            rename=True,
+        )
 
-    assert result == root_path / "Batman (2026) #002.cbz"
-    assert not source_path.exists()
-    assert result.read_bytes() == b"comic"
+    assert source_path.exists()
+    assert source_path.read_bytes() == b"comic"

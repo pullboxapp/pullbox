@@ -33,7 +33,12 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.models.issue import Issue, IssueStatus, IssueType
-from pullbox.models.library import LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series, SeriesStatus
 from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
@@ -1110,7 +1115,7 @@ class TestImportLeaveInPlace:
         )
 
         for i, issue in enumerate(issues):
-            src = tmp_path / "source" / f"Batman #{i + 1:03d}.cbz"
+            src = comics_dir / "Existing Batman Layout" / f"Batman #{i + 1:03d}.cbz"
             src.parent.mkdir(parents=True, exist_ok=True)
             _write_comic_file(src, size=200)
 
@@ -1125,7 +1130,7 @@ class TestImportLeaveInPlace:
             # File stays at source
             assert src.exists()
             assert lf.file_path == str(src)
-            assert str(comics_dir) not in lf.file_path
+            assert lf.storage_mode == LibraryFileStorageMode.REFERENCED
 
         # Issues marked OWNED
         await db_session.refresh(issues[0])
@@ -1447,7 +1452,7 @@ class TestManualIssueImport:
         )
         issue = issues[0]
 
-        src = tmp_path / "downloads" / "Batman 017 (2016).cbz"
+        src = comics_dir / "Existing Batman Layout" / "Batman 017 (2016).cbz"
         src.parent.mkdir(parents=True)
         _write_comic_file(src, size=200)
 
@@ -1568,7 +1573,7 @@ class TestManualIssueImport:
             [(1.0, 100001)],
         )
 
-        src = tmp_path / "downloads" / "Batman 001.cbz"
+        src = comics_dir / "Existing Batman Layout" / "Batman 001.cbz"
         src.parent.mkdir(parents=True)
         _write_comic_file(src)
 
@@ -1616,7 +1621,8 @@ class TestManualIssueImport:
                 strict=True,
             )
         ):
-            src = tmp_path / f"file_{i}.cbz"
+            src = comics_dir / "Existing Batman Layout" / f"file_{i}.cbz"
+            src.parent.mkdir(parents=True, exist_ok=True)
             _write_comic_file(src)
 
             lf = await register_library_file(

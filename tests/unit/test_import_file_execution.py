@@ -2033,6 +2033,26 @@ class TestImportExecutionAutoflushDiscipline:
         failed_artifact_cleanup.assert_not_called()
 
 
+def test_failed_referenced_registration_cleanup_never_unlinks_source(tmp_path: Path) -> None:
+    from pullbox.services.import_file_execution import _cleanup_failed_library_artifact
+
+    source_path = tmp_path / "library" / "Existing Series" / "Issue 001.cbz"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("user-owned comic", encoding="utf-8")
+
+    _cleanup_failed_library_artifact(
+        destination_path=source_path,
+        original_source=source_path,
+        original_trash_path=None,
+        transfer_method="leave_in_place",
+        storage_mode="referenced",
+        created_series_folder=False,
+        created_series_folder_path=None,
+    )
+
+    assert source_path.read_text(encoding="utf-8") == "user-owned comic"
+
+
 class TestOneFileFailsOthersContinue:
     """One file fails but others in the series still get processed."""
 

@@ -467,6 +467,9 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     is_preferred: Mapped[bool] = mapped_column(default=False)
     include_in_import: Mapped[bool] = mapped_column(default=False, server_default="0")
     content_hash: Mapped[str | None] = mapped_column(String(64))
+    source_signature: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
+        JSON, default=dict, server_default="{}", nullable=False
+    )
 
     # Import outcome
     library_file_id: Mapped[int | None] = mapped_column(
