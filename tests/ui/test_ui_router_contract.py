@@ -119,6 +119,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_review_partial",
         ),
         (
+            "/import/{job_id}/safety/categories/{category}/preview",
+            ("GET",),
+            "import_review_preview_safety_category",
+            "import_review_preview_safety_category",
+        ),
+        (
+            "/import/{job_id}/safety/categories/{category}/allow-once",
+            ("POST",),
+            "import_review_allow_safety_category_once",
+            "import_review_allow_safety_category_once",
+        ),
+        (
             "/import/{job_id}/files/{file_id}/safety/allow-once",
             ("POST",),
             "import_review_allow_safety_file_once",
@@ -309,6 +321,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             ("POST",),
             "story_arc_resolve_membership",
             "story_arc_resolve_membership",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/memberships/{membership_id}/local-issues",
+            ("GET",),
+            "story_arc_local_issue_search",
+            "story_arc_local_issue_search",
         ),
         (
             "/story-arcs/{story_arc_id}/memberships/{membership_id}/remove",

@@ -52,7 +52,7 @@ async def test_later_acquisition_registers_once_and_populates_active_arc(
 ) -> None:
     comics = tmp_path / "comics"
     comics.mkdir()
-    arcs = tmp_path / "arcs"
+    arcs = comics / "arcs"
     arcs.mkdir()
     incoming = tmp_path / "incoming" / "Batman 001.cbz"
     incoming.parent.mkdir()
@@ -155,4 +155,7 @@ async def test_later_acquisition_registers_once_and_populates_active_arc(
     assert work.state is StoryArcSyncWorkState.COMPLETED
     assert placement.library_file_id == work.library_file_id
     assert canonical_path != placement.placement_path
-    assert Path(canonical_path).read_bytes() == Path(placement.placement_path).read_bytes()
+    assert Path(placement.placement_path).is_relative_to(arcs)
+    assert not Path(canonical_path).is_relative_to(arcs)
+    assert Path(canonical_path).read_bytes() == incoming.read_bytes()
+    assert Path(placement.placement_path).read_bytes() == incoming.read_bytes()

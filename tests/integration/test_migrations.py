@@ -7,15 +7,16 @@ and verifies that Phase 2 columns and config keys exist.
 from __future__ import annotations
 
 import json
-import os
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import sqlalchemy.ext.asyncio as sqlalchemy_asyncio
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import MetaData, Table, create_engine, func, inspect, select, text
+from sqlalchemy import MetaData, Table, create_engine, event, func, inspect, select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
@@ -38,7 +39,7 @@ _EXACT_ISSUE_IDENTITY_REVISION = "e6f7a8b9c012"
 
 
 @pytest.fixture
-def alembic_cfg(tmp_path):
+def alembic_cfg(tmp_path, monkeypatch):
     """Create an Alembic config pointing at a temp SQLite database.
 
     Uses the async driver for Alembic (which uses async_engine_from_config)
@@ -52,10 +53,33 @@ def alembic_cfg(tmp_path):
     cfg.set_main_option("script_location", str(_ALEMBIC_DIR))
     cfg.set_main_option("sqlalchemy.url", async_url)
 
-    # Set the env var that env.py reads
-    os.environ["PULLBOX_DB_URL"] = async_url
+    original_engine_factory = sqlalchemy_asyncio.async_engine_from_config
+
+    def migration_engine_from_config(*args, **kwargs):
+        engine = original_engine_factory(*args, **kwargs)
+        if engine.dialect.name == "sqlite" and engine.url.database == str(db_path):
+            # Runtime imports install a process-global FK-ON listener. The real
+            # app/dev migration entrypoints use fresh Alembic subprocesses, where
+            # that listener is absent and SQLite batch rebuilds run with FK OFF.
+            # Match that connection policy only for this fixture's migration
+            # engine; normal inspection/runtime connections retain enforcement.
+            def use_cli_connection_pragmas(dbapi_connection, _connection_record):
+                cursor = dbapi_connection.cursor()
+                try:
+                    cursor.execute("PRAGMA foreign_keys=OFF")
+                finally:
+                    cursor.close()
+
+            event.listen(engine.sync_engine, "connect", use_cli_connection_pragmas)
+        return engine
+
+    monkeypatch.setattr(
+        sqlalchemy_asyncio,
+        "async_engine_from_config",
+        migration_engine_from_config,
+    )
+    monkeypatch.setenv("PULLBOX_DB_URL", async_url)
     yield cfg, sync_url
-    os.environ.pop("PULLBOX_DB_URL", None)
 
 
 def _get_columns(sync_url: str, table: str) -> set[str]:
@@ -262,6 +286,46 @@ def _insert_story_arc_sync_work(
 
 class TestMigrationChain:
     """Verify the full Alembic migration chain applies cleanly."""
+
+    def test_migration_engine_isolated_from_runtime_connection_pragmas(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """App imports cannot change the subprocess-equivalent migration connection."""
+        from pullbox import database
+
+        assert event.contains(Engine, "connect", database._set_sqlite_pragma)
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, _STORY_ARC_IMPORT_INTENT_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+                _insert_download_history_issue(conn)
+                conn.execute(
+                    text(
+                        "INSERT INTO download_history "
+                        "(issue_id, title, download_url, download_client, protocol, state) "
+                        "VALUES (1, 'Import-order preservation', "
+                        "'https://example.test/import-order', 'SABNZBD', 'usenet', 'QUEUED')"
+                    )
+                )
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+        command.downgrade(cfg, _STORY_ARC_IMPORT_INTENT_REVISION)
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+                assert conn.execute(text("SELECT COUNT(*) FROM download_history")).scalar_one() == 1
+                assert conn.execute(text("PRAGMA foreign_key_check")).fetchall() == []
+        finally:
+            engine.dispose()
 
     def test_upgrade_to_head(self, alembic_cfg) -> None:
         """All migrations apply without error."""
