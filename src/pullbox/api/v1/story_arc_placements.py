@@ -18,6 +18,11 @@ from pullbox.schemas.story_arc_placement import (
     StoryArcPlacementResponse,
     StoryArcPlacementSyncRequest,
     StoryArcPlacementSyncResponse,
+    StoryArcPolicyMigrationConfirmationRequest,
+    StoryArcPolicyMigrationConfirmationResponse,
+    StoryArcPolicyMigrationPreviewItemResponse,
+    StoryArcPolicyMigrationPreviewRequest,
+    StoryArcPolicyMigrationPreviewResponse,
 )
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementIntegrationError,
@@ -27,10 +32,14 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementSyncResult,
     StoryArcPlacementSyncService,
 )
+from pullbox.services.story_arc_policy_migration import (
+    StoryArcPolicyMigrationService,
+)
 
 router = APIRouter(prefix="/story-arcs", tags=["story-arc-placements"])
 
 _service = StoryArcPlacementSyncService()
+_migration_service = StoryArcPolicyMigrationService()
 
 
 def _proposal(body: StoryArcPlacementPolicyPayload) -> StoryArcPlacementPolicyInput:
@@ -151,6 +160,104 @@ async def preview_story_arc_placement_policy(
         limit=page.limit,
         offset=page.offset,
         has_more=page.has_more,
+    )
+
+
+@router.post(
+    "/{story_arc_id}/placement-policy/migration-preview",
+    response_model=StoryArcPolicyMigrationPreviewResponse,
+)
+async def preview_story_arc_policy_migration(
+    story_arc_id: int,
+    body: StoryArcPolicyMigrationPreviewRequest,
+    user: AuthenticatedUser,
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    after_placement_id: Annotated[int, Query(ge=0)] = 0,
+) -> StoryArcPolicyMigrationPreviewResponse:
+    """Preview every policy consequence while returning one bounded path page."""
+    try:
+        actor_id = int(user.id)
+        # Authentication may update API-key audit/upgrade fields. Persist that
+        # short transaction before the preview service begins rollback-only scans.
+        await session.commit()
+        preview = await _migration_service.preview_policy_change(
+            session,
+            story_arc_id,
+            actor_id=actor_id,
+            expected_revision=body.expected_revision,
+            proposal=_proposal(body),
+            limit=limit,
+            after_placement_id=after_placement_id,
+        )
+    except StoryArcPlacementIntegrationError as exc:
+        _raise_integration_error(exc)
+    return StoryArcPolicyMigrationPreviewResponse(
+        story_arc_id=preview.story_arc_id,
+        expected_revision=preview.expected_revision,
+        current_policy=_policy_response(preview.current_policy),
+        proposed_policy=_policy_response(preview.proposed_policy),
+        scope_digest=preview.scope_digest,
+        preview_token=preview.preview_token,
+        required_confirmation=preview.required_confirmation,
+        total_placement_count=preview.total_placement_count,
+        managed_migrate_count=preview.managed_migrate_count,
+        managed_remove_count=preview.managed_remove_count,
+        managed_unchanged_count=preview.managed_unchanged_count,
+        referenced_preserved_count=preview.referenced_preserved_count,
+        collision_count=preview.collision_count,
+        blocked_count=preview.blocked_count,
+        required_bytes=preview.required_bytes,
+        available_bytes=preview.available_bytes,
+        global_block_codes=list(preview.global_block_codes),
+        items=[
+            StoryArcPolicyMigrationPreviewItemResponse.model_validate(item)
+            for item in preview.items
+        ],
+        limit=preview.limit,
+        after_placement_id=preview.after_placement_id,
+        next_cursor=preview.next_cursor,
+        has_more=preview.has_more,
+        requires_confirmation=preview.requires_confirmation,
+        execution_supported=preview.execution_supported,
+        filesystem_mutated=preview.filesystem_mutated,
+    )
+
+
+@router.post(
+    "/{story_arc_id}/placement-policy/migration-confirmation",
+    response_model=StoryArcPolicyMigrationConfirmationResponse,
+)
+async def prepare_story_arc_policy_migration_confirmation(
+    story_arc_id: int,
+    body: StoryArcPolicyMigrationConfirmationRequest,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> StoryArcPolicyMigrationConfirmationResponse:
+    """Validate signed, exact actor intent without mutating policy or files."""
+    try:
+        actor_id = int(user.id)
+        await session.commit()
+        confirmation = await _migration_service.prepare_confirmation(
+            session,
+            story_arc_id,
+            actor_id=actor_id,
+            expected_revision=body.expected_revision,
+            proposal=_proposal(body),
+            preview_token=body.preview_token,
+            confirmation=body.confirmation,
+        )
+    except StoryArcPlacementIntegrationError as exc:
+        _raise_integration_error(exc)
+    return StoryArcPolicyMigrationConfirmationResponse(
+        story_arc_id=confirmation.story_arc_id,
+        expected_revision=confirmation.expected_revision,
+        scope_digest=confirmation.scope_digest,
+        confirmed=confirmation.confirmed,
+        ready_for_execution=confirmation.ready_for_execution,
+        execution_supported=confirmation.execution_supported,
+        mutation_performed=confirmation.mutation_performed,
+        policy_update_block_code=confirmation.policy_update_block_code,
     )
 
 

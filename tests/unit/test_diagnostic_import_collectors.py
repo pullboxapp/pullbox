@@ -51,6 +51,7 @@ async def test_collect_import_story_arc_diagnostics_is_aggregate_only_and_saniti
         ImportSeriesStatus,
         ImportSourceType,
     )
+    from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
     from pullbox.models.story_arc import (
         ImportedStoryArcStatus,
         IssueStoryArc,
@@ -241,6 +242,22 @@ async def test_collect_import_story_arc_diagnostics_is_aggregate_only_and_saniti
     )
     db_session.add(membership)
     await db_session.flush()
+    library_root = LibraryRoot(
+        name="Diagnostic Comics",
+        path="/private/library",
+        enabled=True,
+    )
+    diagnostic_library_file = LibraryFile(
+        file_path="/private/library/never-emit.cbz",
+        file_name="never-emit.cbz",
+        file_size=123,
+        file_format=FileFormat.CBZ,
+        file_modified_at=started_at,
+        match_confidence=MatchConfidence.UNMATCHED,
+        library_root=library_root,
+    )
+    db_session.add(diagnostic_library_file)
+    await db_session.flush()
     db_session.add(
         StoryArcPlacement(
             issue_story_arc_id=membership.id,
@@ -255,7 +272,7 @@ async def test_collect_import_story_arc_diagnostics_is_aggregate_only_and_saniti
     db_session.add(
         StoryArcSyncWork(
             issue_story_arc_id=membership.id,
-            library_file_id=999,
+            library_file_id=diagnostic_library_file.id,
             origin_import_job_id=cancelled.id,
             desired_generation="generation",
             source_signature_hash="hash",

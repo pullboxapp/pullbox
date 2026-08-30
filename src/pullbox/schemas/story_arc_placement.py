@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 - Pydantic resolves this at runtime
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pullbox.models.story_arc import (  # noqa: TC001 - used by Pydantic at runtime
     StoryArcPlacementMode,
@@ -15,6 +15,9 @@ from pullbox.models.story_arc import (  # noqa: TC001 - used by Pydantic at runt
 )
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicyMode,
+)
+from pullbox.services.story_arc_policy_migration import (
+    STORY_ARC_POLICY_MIGRATION_CONFIRMATION,
 )
 
 
@@ -145,3 +148,91 @@ class StoryArcPlacementRemovalResponse(BaseModel):
     canonical_preserved: bool
     referenced_artifact_preserved: bool
     automatic_sync_disabled: bool
+
+
+class StoryArcPolicyMigrationPreviewRequest(StoryArcPlacementPolicyUpdate):
+    """Complete proposed policy and the exact arc revision being previewed."""
+
+
+class StoryArcPolicyMigrationConfirmationRequest(StoryArcPlacementPolicyUpdate):
+    """Actor-bound signed preview plus an exact destructive-change phrase."""
+
+    preview_token: str = Field(..., min_length=1, max_length=16_384)
+    confirmation: str = Field(
+        ...,
+        min_length=len(STORY_ARC_POLICY_MIGRATION_CONFIRMATION),
+        max_length=len(STORY_ARC_POLICY_MIGRATION_CONFIRMATION),
+        json_schema_extra={"const": STORY_ARC_POLICY_MIGRATION_CONFIRMATION},
+    )
+
+    @field_validator("confirmation")
+    @classmethod
+    def validate_exact_confirmation(cls, value: str) -> str:
+        """Expose and enforce one fixed, non-ambiguous confirmation phrase."""
+        if value != STORY_ARC_POLICY_MIGRATION_CONFIRMATION:
+            raise ValueError(
+                f'Type exactly "{STORY_ARC_POLICY_MIGRATION_CONFIRMATION}" to continue'
+            )
+        return value
+
+
+class StoryArcPolicyMigrationPreviewItemResponse(BaseModel):
+    """One intended old/new path disclosure in an authenticated preview page."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    placement_id: int
+    membership_id: int
+    ownership: str
+    action: str
+    old_mode: str
+    new_mode: str
+    old_path: str
+    new_path: str | None
+    collision: str
+    blocked: bool
+    reason: str | None
+    required_bytes: int
+
+
+class StoryArcPolicyMigrationPreviewResponse(BaseModel):
+    """Complete migration counts/digest plus one bounded keyset item page."""
+
+    story_arc_id: int
+    expected_revision: int
+    current_policy: StoryArcPlacementPolicyResponse
+    proposed_policy: StoryArcPlacementPolicyResponse
+    scope_digest: str
+    preview_token: str
+    required_confirmation: str
+    total_placement_count: int
+    managed_migrate_count: int
+    managed_remove_count: int
+    managed_unchanged_count: int
+    referenced_preserved_count: int
+    collision_count: int
+    blocked_count: int
+    required_bytes: int
+    available_bytes: int | None
+    global_block_codes: list[str]
+    items: list[StoryArcPolicyMigrationPreviewItemResponse]
+    limit: int
+    after_placement_id: int
+    next_cursor: int | None
+    has_more: bool
+    requires_confirmation: bool
+    execution_supported: bool
+    filesystem_mutated: bool
+
+
+class StoryArcPolicyMigrationConfirmationResponse(BaseModel):
+    """Validated preparation truth without claiming filesystem execution."""
+
+    story_arc_id: int
+    expected_revision: int
+    scope_digest: str
+    confirmed: bool
+    ready_for_execution: bool
+    execution_supported: bool
+    mutation_performed: bool
+    policy_update_block_code: str
