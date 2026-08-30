@@ -11,6 +11,8 @@ PULLBOX_IMAGE ?= ghcr.io/pullboxapp/pullbox:latest
 DEV_DOCKER_PORT ?= 8585
 DEV_DOCKER_COMPOSE := PULLBOX_DEV_PORT=$(DEV_DOCKER_PORT) docker compose -f docker/docker-compose.dev.yml
 DEV_DOCKER_URL ?= http://127.0.0.1:$(DEV_DOCKER_PORT)
+# Opt in to stopping without logs or cleanup so a failed smoke container can be reviewed.
+DOCKER_SMOKE_KEEP_ON_FAILURE ?= 0
 PERFORMANCE_BASELINE_URL ?= $(DEV_DOCKER_URL)
 PERFORMANCE_BASELINE_ARGS ?=
 TOOLS_DIR := .cache/tools
@@ -288,6 +290,10 @@ docker-smoke: docker-build-check ## Run Docker smoke tests against the locally b
 		fi; \
 		if [ $$i -eq 30 ]; then \
 			echo "\033[31m  ❌ Container failed to become healthy\033[0m"; \
+			if [ "$(DOCKER_SMOKE_KEEP_ON_FAILURE)" = "1" ]; then \
+				echo "Container pullbox-smoke preserved; stopped before logs or cleanup."; \
+				exit 1; \
+			fi; \
 			docker logs pullbox-smoke; \
 			docker rm -f pullbox-smoke; \
 			exit 1; \
@@ -296,7 +302,10 @@ docker-smoke: docker-build-check ## Run Docker smoke tests against the locally b
 	done
 	@echo "\033[36m──── Smoke Tests ────\033[0m"
 	PYTHONPATH=src PULLBOX_SMOKE_URL=http://localhost:18585 $(SECRET) $(VENV)/bin/pytest tests/e2e/test_smoke.py -v || \
-		(docker logs pullbox-smoke; docker rm -f pullbox-smoke; exit 1)
+		(if [ "$(DOCKER_SMOKE_KEEP_ON_FAILURE)" = "1" ]; then \
+			echo "Container pullbox-smoke preserved; stopped before logs or cleanup."; \
+			exit 1; \
+		fi; docker logs pullbox-smoke; docker rm -f pullbox-smoke; exit 1)
 	@echo "\033[36m──── Teardown ────\033[0m"
 	@docker rm -f pullbox-smoke
 	@echo ""

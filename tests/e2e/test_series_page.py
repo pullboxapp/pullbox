@@ -1126,15 +1126,42 @@ class TestSeriesPage:
     ) -> None:
         series = SeriesListPage(authed_page, seeded_server)
         series.goto("sort=title&per_page=25", preferred_view=view)
+        series.open_select_mode()
+        checkboxes = authed_page.locator("[data-testid='series-row-checkbox']:visible")
+        # Other browser tests add/remove series in the session-scoped seed.
+        # Range selection must include every visible item, not a fixed title list.
+        visible_ids = checkboxes.evaluate_all("items => items.map(item => item.value)")
+        ids = {
+            title: authed_page.get_by_role(
+                "checkbox", name=f"Select {title}", exact=True
+            ).input_value()
+            for title in ("Batman", "Planetary", "Saga")
+        }
+
+        def inclusive_range(first: str, last: str) -> set[str]:
+            start, end = sorted((visible_ids.index(ids[first]), visible_ids.index(ids[last])))
+            return set(visible_ids[start : end + 1])
+
+        def assert_selected(expected: set[str]) -> None:
+            assert series.selected_count_text() == f"{len(expected)} selected"
+            assert (
+                set(
+                    checkboxes.evaluate_all(
+                        "items => items.filter(item => item.checked).map(item => item.value)"
+                    )
+                )
+                == expected
+            )
 
         series.toggle_row_selection("Batman")
         series.toggle_row_selection("Planetary", modifiers=[additive_modifier])
-        assert series.selected_count_text() == "2 selected"
+        assert_selected({ids["Batman"], ids["Planetary"]})
         assert series.row_is_selected("Batman")
         assert series.row_is_selected("Planetary")
 
         series.toggle_row_selection("Saga", modifiers=["Shift"])
-        assert series.selected_count_text() == "2 selected"
+        shifted_ids = inclusive_range("Planetary", "Saga")
+        assert_selected(shifted_ids)
         assert not series.row_is_selected("Batman")
         assert series.row_is_selected("Planetary")
         assert series.row_is_selected("Saga")
@@ -1143,15 +1170,10 @@ class TestSeriesPage:
             "Batman",
             modifiers=[additive_modifier, "Shift"],
         )
-        expected_titles = ["Batman", "Planetary", "Saga"]
-        if series.row_count("Batman Beyond"):
-            expected_titles.append("Batman Beyond")
-        assert series.selected_count_text() == f"{len(expected_titles)} selected"
-        for title in expected_titles:
-            assert series.row_is_selected(title)
+        assert_selected(shifted_ids | inclusive_range("Batman", "Planetary"))
 
         series.toggle_row_selection("Planetary")
-        assert series.selected_count_text() == "0 selected"
+        assert_selected(set())
         assert not series.row_is_selected("Planetary")
         assert not series.row_is_selected("Batman")
         assert not series.row_is_selected("Saga")
