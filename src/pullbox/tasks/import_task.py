@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _COMPAT_QUEUE_MAXSIZE = 200
+_BULK_SAFETY_REMATCH_PAGE_SIZE = 25
 
 _import_progress_queues: dict[int, asyncio.Queue[ImportProgressEvent]] = {}
 _latest_import_progress_events: dict[int, ImportProgressEvent] = {}
@@ -930,6 +931,53 @@ async def run_import_series_rematch_task(job_id: int, imported_series_id: int) -
         await _run_import_series_rematch_task(job_id, imported_series_id)
 
 
+async def run_import_safety_bulk_rematch_task(job_id: int) -> None:
+    """Rematch safety-approved series from one job in bounded keyset pages."""
+    lock = _review_rematch_locks.setdefault(job_id, asyncio.Lock())
+    async with lock:
+        session_factory = get_session_factory()
+        cursor = 0
+        while True:
+            async with session_factory() as session:
+                job = await session.get(ImportJob, job_id)
+                if (
+                    job is None
+                    or job.status != ImportJobStatus.REVIEW
+                    or job.control_request != ImportControlRequest.NONE
+                ):
+                    return
+                series_ids = list(
+                    (
+                        await session.execute(
+                            sa_select(ImportedSeries.id)
+                            .join(
+                                ImportedFile,
+                                ImportedFile.import_series_id == ImportedSeries.id,
+                            )
+                            .where(
+                                ImportedSeries.import_job_id == job_id,
+                                ImportedSeries.id > cursor,
+                                ImportedSeries.diagnostics["rematch_pending"]
+                                .as_boolean()
+                                .is_(True),
+                                ImportedFile.import_job_id == job_id,
+                                ImportedFile.status == ImportedFileStatus.SAFETY_APPROVED,
+                            )
+                            .distinct()
+                            .order_by(ImportedSeries.id)
+                            .limit(_BULK_SAFETY_REMATCH_PAGE_SIZE)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            if not series_ids:
+                return
+            for imported_series_id in series_ids:
+                await _run_import_series_rematch_task(job_id, imported_series_id)
+                cursor = imported_series_id
+
+
 async def _run_import_series_rematch_task(job_id: int, imported_series_id: int) -> None:
     """Perform one rematch after the job-level review rematch lock is held."""
     session_factory = get_session_factory()
@@ -1013,6 +1061,12 @@ def trigger_import_series_rematch(job_id: int, imported_series_id: int) -> None:
         job_id=job_id,
         imported_series_id=imported_series_id,
     )
+
+
+def trigger_import_safety_bulk_rematch(job_id: int) -> None:
+    """Schedule one bounded worker for all pending safety rematches in a job."""
+    _fire_and_forget(run_import_safety_bulk_rematch_task(job_id))
+    logger.info("import_safety_bulk_rematch_triggered", job_id=job_id)
 
 
 async def recover_stuck_import_jobs(

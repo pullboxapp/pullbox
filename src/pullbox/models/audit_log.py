@@ -25,6 +25,7 @@ class AuditEventType(StrEnum):
     API_RATE_LIMITED = "api_rate_limited"
     SECURITY_CONFIG_CHANGED = "security_config_changed"
     LOCAL_BYPASS_TOGGLED = "local_bypass_toggled"
+    IMPORT_SAFETY_BULK_OVERRIDE = "import_safety_bulk_override"
 
 
 class AuditLog(Base, IdentityMixin):

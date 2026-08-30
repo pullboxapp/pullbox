@@ -163,6 +163,86 @@ async def test_review_series_rematches_are_serialized_per_import_job() -> None:
     _review_rematch_locks.pop(71, None)
 
 
+@pytest.mark.asyncio
+async def test_bulk_safety_rematch_worker_queries_only_pending_series_for_one_job(
+    async_engine: object,
+    db_session: AsyncSession,
+) -> None:
+    """One bounded worker must not retain or dispatch another job's safety rows."""
+    from pullbox.models.import_job import (
+        ImportedFile,
+        ImportedFileStatus,
+        ImportedSeries,
+        ImportSeriesStatus,
+    )
+    from pullbox.tasks.import_task import run_import_safety_bulk_rematch_task
+
+    job = await _create_job(db_session, status=ImportJobStatus.REVIEW)
+    other_job = await _create_job(db_session, status=ImportJobStatus.REVIEW)
+    expected_ids: list[int] = []
+    for index in range(30):
+        series = ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name=f"Pending {index}",
+            status=ImportSeriesStatus.MATCHED,
+            diagnostics={"rematch_pending": True},
+        )
+        db_session.add(series)
+        await db_session.flush()
+        expected_ids.append(series.id)
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                file_path=f"/source/{index}.cbz",
+                file_name=f"{index}.cbz",
+                file_size=1,
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_APPROVED,
+            )
+        )
+
+    unrelated_series = ImportedSeries(
+        import_job_id=other_job.id,
+        raw_series_name="Other source",
+        status=ImportSeriesStatus.MATCHED,
+        diagnostics={"rematch_pending": True},
+    )
+    db_session.add(unrelated_series)
+    await db_session.flush()
+    db_session.add(
+        ImportedFile(
+            import_job_id=other_job.id,
+            import_series_id=unrelated_series.id,
+            file_path="/other/private.cbz",
+            file_name="private.cbz",
+            file_size=1,
+            file_format="cbz",
+            status=ImportedFileStatus.SAFETY_APPROVED,
+        )
+    )
+    await db_session.commit()
+
+    calls: list[tuple[int, int]] = []
+
+    async def fake_rematch(job_id: int, imported_series_id: int) -> None:
+        calls.append((job_id, imported_series_id))
+
+    factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    _review_rematch_locks.pop(job.id, None)
+    with (
+        patch("pullbox.tasks.import_task.get_session_factory", return_value=factory),
+        patch(
+            "pullbox.tasks.import_task._run_import_series_rematch_task",
+            side_effect=fake_rematch,
+        ),
+    ):
+        await run_import_safety_bulk_rematch_task(job.id)
+
+    assert calls == [(job.id, series_id) for series_id in expected_ids]
+    _review_rematch_locks.pop(job.id, None)
+
+
 # ── Test: Progress Queues ────────────────────────────────────────────────
 
 

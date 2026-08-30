@@ -26,6 +26,33 @@ RecomputeFileCounters = Callable[[AsyncSession, ImportJob, list[int]], Awaitable
 RecomputeSeriesCounters = Callable[[AsyncSession, ImportJob], Awaitable[None]]
 
 
+def apply_safety_allow_once_to_file(
+    imp_file: ImportedFile,
+    *,
+    retry_import: bool = False,
+    allowed_at: datetime | None = None,
+) -> None:
+    """Apply the canonical one-job safety exception payload to one staged file."""
+    diagnostics = dict(imp_file.diagnostics or {})
+    previous_block = diagnostics.pop("safety_block", None)
+    if not isinstance(previous_block, Mapping):
+        raise ValidationError("This safety block cannot be overridden.")
+    normalized_previous_block = normalize_import_safety_diagnostics(previous_block)
+    if normalized_previous_block["overrideable"] is not True:
+        raise ValidationError("This safety block cannot be overridden.")
+    diagnostics["safety_exception"] = {
+        "allowed_once": True,
+        "allowed_at": (allowed_at or datetime.now(UTC)).isoformat(),
+        "previous_block": normalized_previous_block,
+    }
+    imp_file.status = (
+        ImportedFileStatus.CONFIRMED if retry_import else ImportedFileStatus.SAFETY_APPROVED
+    )
+    imp_file.include_in_import = bool(retry_import)
+    imp_file.error_message = None
+    imp_file.diagnostics = diagnostics
+
+
 async def resolve_conflict(
     session: AsyncSession,
     job_id: int,
@@ -305,24 +332,7 @@ async def allow_safety_blocked_file_once(
         allow_terminal_job=retry_import,
     )
 
-    diagnostics = dict(imp_file.diagnostics or {})
-    previous_block = diagnostics.pop("safety_block", None)
-    if not isinstance(previous_block, Mapping):
-        raise ValidationError("This safety block cannot be overridden.")
-    normalized_previous_block = normalize_import_safety_diagnostics(previous_block)
-    if normalized_previous_block["overrideable"] is not True:
-        raise ValidationError("This safety block cannot be overridden.")
-    diagnostics["safety_exception"] = {
-        "allowed_once": True,
-        "allowed_at": datetime.now(UTC).isoformat(),
-        "previous_block": normalized_previous_block,
-    }
-    imp_file.status = (
-        ImportedFileStatus.CONFIRMED if retry_import else ImportedFileStatus.SAFETY_APPROVED
-    )
-    imp_file.include_in_import = bool(retry_import)
-    imp_file.error_message = None
-    imp_file.diagnostics = diagnostics
+    apply_safety_allow_once_to_file(imp_file, retry_import=retry_import)
     imported_series.selected_for_import = bool(retry_import)
     if retry_import and imported_series.status in {
         ImportSeriesStatus.IMPORTED,

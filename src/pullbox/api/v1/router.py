@@ -16,6 +16,7 @@ from pullbox.api.v1.downloads import router as downloads_router
 from pullbox.api.v1.filesystem import router as filesystem_router
 from pullbox.api.v1.health import router as health_router
 from pullbox.api.v1.import_jobs import router as import_jobs_router
+from pullbox.api.v1.import_safety_bulk import router as import_safety_bulk_router
 from pullbox.api.v1.indexers import router as indexers_router
 from pullbox.api.v1.intervention import router as intervention_router
 from pullbox.api.v1.issues import router as issues_router
@@ -54,6 +55,7 @@ v1_router.include_router(covers_router)
 v1_router.include_router(filesystem_router)
 v1_router.include_router(health_router)
 v1_router.include_router(import_jobs_router)
+v1_router.include_router(import_safety_bulk_router)
 v1_router.include_router(intervention_router)
 v1_router.include_router(suggestions_router)
 v1_router.include_router(system_router)
