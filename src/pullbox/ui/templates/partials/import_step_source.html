@@ -1,4 +1,8 @@
-<div x-data="importSourceData()" data-testid="import-collection-source" class="space-y-4">
+<div
+  x-data="importSourceData({ libraryRoots: {{ library_root_options|default([])|tojson|forceescape }} })"
+  data-testid="import-collection-source"
+  class="space-y-4"
+>
   <section class="downloads-table-wrap" data-testid="import-collection-source-shell">
     <div class="space-y-5 px-5 py-5 sm:px-6">
       <div>
@@ -382,6 +386,146 @@
                 </div>
               </article>
             </template>
+          </div>
+        </div>
+      </section>
+
+      <section
+        x-show="sourceType === 'filesystem'"
+        x-cloak
+        class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
+        data-testid="import-future-layout-section"
+      >
+        <div>
+          <p class="downloads-section-label">How should Pullbox organize new files?</p>
+          <p class="mt-2 text-xs leading-5 text-pb-text-sec">
+            This is independent from keeping existing files in place. It changes future managed
+            imports and downloads for one library only.
+          </p>
+        </div>
+
+        <label class="flex items-start gap-3" :class="!canRequestFutureLayout() && 'opacity-60'">
+          <input
+            type="checkbox"
+            x-model="futureLayoutRequested"
+            @change="toggleFutureLayout()"
+            :disabled="!canRequestFutureLayout() || futurePolicyLoading"
+            class="checkbox-pb mt-0.5 shrink-0"
+            data-testid="import-future-layout-toggle"
+          >
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold text-pb-text">Use this layout for future files</span>
+            <span class="mt-1 block text-xs leading-5 text-pb-text-sec">
+              Existing files won't be renamed. Pullbox activates this policy only after at least
+              one file is registered successfully in Step 4.
+            </span>
+          </span>
+        </label>
+
+        <div x-show="libraryRoots.length" x-cloak class="space-y-2">
+          <label for="import-future-library-root" class="block text-xs font-medium text-pb-text-sec">
+            Target library
+          </label>
+          <select
+            id="import-future-library-root"
+            x-model.number="targetLibraryRootId"
+            @change="futureLayoutRootChanged()"
+            :disabled="futurePolicyLoading"
+            class="input-pb max-w-2xl"
+            data-testid="import-future-layout-root"
+          >
+            <template x-for="root in libraryRoots" :key="root.id">
+              <option :value="root.id" x-text="root.name + ' — ' + root.path"></option>
+            </template>
+          </select>
+        </div>
+
+        <div x-show="!libraryRoots.length" class="inline-alert inline-alert-warning">
+          Configure an enabled library root before saving a future layout.
+        </div>
+        <div
+          x-show="libraryRoots.length && (!layoutPreview || !layoutPreview.can_apply_future_policy)"
+          class="inline-alert inline-alert-info"
+        >
+          Analyze a single, unambiguous folder pattern before enabling future organization.
+        </div>
+        <div
+          x-show="layoutPreview && layoutPreview.can_apply_future_policy && !futureLayoutRequested"
+          class="inline-alert inline-alert-success"
+          data-testid="import-future-layout-ready"
+        >
+          This sample has one safe layout. You can preview and save it for future files.
+        </div>
+
+        <div x-show="futureLayoutRequested" x-cloak class="space-y-4">
+          <div class="grid gap-4 md:grid-cols-2">
+            <div>
+              <label for="import-future-series-template" class="block text-xs font-medium text-pb-text-sec">
+                Future series path
+              </label>
+              <input
+                id="import-future-series-template"
+                type="text"
+                x-model="futureRootPolicy.series_path_template"
+                @input.debounce.350ms="previewFuturePolicy()"
+                class="input-pb mt-2 w-full font-mono"
+                data-testid="import-future-series-template"
+              >
+              <p class="mt-1 text-[11px] leading-5 text-pb-text-dim">
+                Forward slashes create publisher or other nested folders under this library.
+              </p>
+            </div>
+            <div>
+              <label for="import-future-file-template" class="block text-xs font-medium text-pb-text-sec">
+                Future standard issue filename
+              </label>
+              <input
+                id="import-future-file-template"
+                type="text"
+                x-model="futureRootPolicy.comic_file_template"
+                @input.debounce.350ms="previewFuturePolicy()"
+                class="input-pb mt-2 w-full font-mono"
+                data-testid="import-future-file-template"
+              >
+              <p class="mt-1 text-[11px] leading-5 text-pb-text-dim">
+                Annual and non-standard templates retain the selected library's current values.
+              </p>
+            </div>
+          </div>
+
+          <div x-show="futurePolicyError" class="inline-alert inline-alert-danger" role="alert">
+            <span x-text="futurePolicyError"></span>
+          </div>
+
+          <div
+            x-show="futurePolicyLoading || futurePolicyComparison"
+            class="grid gap-3 lg:grid-cols-2"
+            data-testid="import-future-layout-preview"
+            aria-live="polite"
+          >
+            <div class="rounded-lg border border-pb-border bg-pb-bg/50 p-3">
+              <p class="text-xs font-semibold uppercase tracking-wide text-pb-text-dim">Current library policy</p>
+              <div class="mt-2 space-y-1 font-mono text-[11px] text-pb-text-sec">
+                <template x-for="path in ((futurePolicyComparison && futurePolicyComparison.current_series_paths) || [])" :key="'current-path-' + path">
+                  <p x-text="path"></p>
+                </template>
+                <template x-for="name in ((futurePolicyComparison && futurePolicyComparison.current_file_names) || [])" :key="'current-file-' + name">
+                  <p class="text-pb-text-dim" x-text="name"></p>
+                </template>
+              </div>
+            </div>
+            <div class="rounded-lg border border-pb-border bg-pb-bg/50 p-3">
+              <p class="text-xs font-semibold uppercase tracking-wide text-pb-text-dim">Proposed for new files</p>
+              <p x-show="futurePolicyLoading" class="mt-2 text-xs italic text-pb-text-dim">Loading preview…</p>
+              <div class="mt-2 space-y-1 font-mono text-[11px]">
+                <template x-for="path in ((futurePolicyComparison && futurePolicyComparison.proposed_series_paths) || [])" :key="'proposed-path-' + path">
+                  <p class="text-pb-success" x-text="path"></p>
+                </template>
+                <template x-for="name in ((futurePolicyComparison && futurePolicyComparison.proposed_file_names) || [])" :key="'proposed-file-' + name">
+                  <p class="text-pb-text-sec" x-text="name"></p>
+                </template>
+              </div>
+            </div>
           </div>
         </div>
       </section>

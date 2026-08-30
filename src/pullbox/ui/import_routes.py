@@ -236,6 +236,11 @@ async def _load_import_collection_context(session: AsyncSession) -> dict[str, ob
 
     return {
         "library_roots": library_roots,
+        "library_root_options": [
+            {"id": root.id, "name": root.name, "path": root.path}
+            for root in library_roots
+            if root.enabled
+        ],
         "recent_jobs": recent_jobs,
         "resume_step": None,
         "resume_job_id": None,

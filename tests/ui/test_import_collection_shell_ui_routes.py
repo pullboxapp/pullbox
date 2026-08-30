@@ -806,6 +806,12 @@ class TestImportShellRouteContracts:
         assert "How is this library organized?" in response.text
         assert "Use automatic detection for files that do not fit" in response.text
         assert "Files that do not fit will wait for review" in response.text
+        assert 'data-testid="import-future-layout-section"' in response.text
+        assert 'data-testid="import-future-layout-toggle"' in response.text
+        assert "Use this layout for future files" in response.text
+        assert "Existing files won't be renamed" in response.text
+        assert "Current library policy" in response.text
+        assert "Proposed for new files" in response.text
         assert 'data-testid="file-browser-modal"' in response.text
         assert 'data-testid="import-collection-modal-host"' in response.text
 
@@ -826,6 +832,12 @@ class TestImportShellRouteContracts:
         assert "file_handling_mode: this.fileHandlingMode" in source_controller
         assert 'this.fileHandlingMode === "in_place"' in source_controller
         assert "this.layoutPreview.can_keep_in_place" in source_controller
+        assert "futureLayoutRequested: false" in source_controller
+        assert "this.layoutPreview.can_apply_future_policy" in source_controller
+        assert "future_layout_requested: this.futureLayoutRequested" in source_controller
+        assert "future_root_policy: this.futureLayoutRequested" in source_controller
+        assert "target_library_root_id: this.futureLayoutRequested" in source_controller
+        assert '"/api/v1/config/library-roots/"' in source_controller
 
     async def test_import_collection_exposes_stable_step_mounts(
         self,

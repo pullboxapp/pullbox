@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.pages.import_page import ImportPage
 
 pytestmark = pytest.mark.e2e
@@ -2556,3 +2557,170 @@ class TestImportCollectionTab:
         assert created_requests
         assert created_requests[-1]["file_handling_mode"] == "in_place"
         assert created_requests[-1]["source_path"] == "/comics/Existing Layout"
+
+    def test_import_collection_submits_confirmed_future_root_policy(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        policy_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_layout_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "preset",
+                            "preset": "publisher_series",
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "normal_library",
+                        "clusters": [
+                            {
+                                "cluster_id": "publisher-series",
+                                "classification": "normal_library",
+                                "file_count": 2,
+                                "directory_count": 2,
+                                "confidence": "high",
+                                "proposed_series_path_template": "{Publisher}/{Series}",
+                                "proposed_issue_filename_template": (
+                                    "{Series} {IssueTitle} Issue {Issue:03d}"
+                                ),
+                                "examples": [
+                                    {
+                                        "relative_path": (
+                                            "DC Comics/Batman/Issue 017 - The Brave and the Bold.cbz"
+                                        ),
+                                        "publisher": "DC Comics",
+                                        "series": "Batman",
+                                        "year": 2024,
+                                        "issue_number": "17",
+                                        "issue_title": "The Brave and the Bold",
+                                        "evidence": ["selected_layout_match"],
+                                        "warnings": [],
+                                    }
+                                ],
+                            }
+                        ],
+                        "directories_considered": 2,
+                        "files_considered": 2,
+                        "files_fitting": 2,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": False,
+                        "can_apply_future_policy": True,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_policy_requests(route) -> None:  # type: ignore[no-untyped-def]
+            if route.request.url.endswith("/preview"):
+                policy_preview_requests.append(route.request.post_data_json)
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "current_scope": "global_default",
+                            "current_series_paths": ["Batman (2024)"],
+                            "proposed_series_paths": ["DC Comics/Batman"],
+                            "current_file_names": ["Batman (2024) #017.cbz"],
+                            "proposed_file_names": ["Batman The Brave and the Bold Issue 017.cbz"],
+                        }
+                    ),
+                )
+                return
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "library_root_id": 1,
+                        "library_root_name": "E2E Library",
+                        "scope": "global_default",
+                        "policy_id": None,
+                        "revision": 0,
+                        "effective_policy": {
+                            "schema_version": 1,
+                            "series_path_template": "{Series} ({Year})",
+                            "series_folder_template": "{Series} ({Year})",
+                            "comic_file_template": "{Series} ({Year}) #{Issue:03d}",
+                            "annual_file_template": "{Series} ({Year}) Annual #{Issue:03d}",
+                            "non_standard_file_template": (
+                                "{Series} ({Year}) {Type} {Volume:02d} - {Title}"
+                            ),
+                            "single_non_standard_file_template": (
+                                "{Series} ({Year}) {Type} - {Title}"
+                            ),
+                            "replace_illegal_characters": True,
+                            "colon_replacement": "dash",
+                            "source": "global_default",
+                            "source_import_job_id": None,
+                        },
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 654, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_layout_preview)
+        authed_page.route("**/api/v1/config/library-roots/**", fulfill_policy_requests)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/imports")
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+        assert import_page.future_layout_toggle.is_enabled()
+
+        import_page.future_layout_toggle.check()
+        import_page.future_layout_preview.wait_for(state="visible", timeout=5000)
+        assert "Batman (2024)" in (import_page.future_layout_preview.text_content() or "")
+        assert "DC Comics/Batman" in (import_page.future_layout_preview.text_content() or "")
+        assert policy_preview_requests
+        assert policy_preview_requests[-1]["examples"][0] == {  # type: ignore[index]
+            "publisher": "DC Comics",
+            "series": "Batman",
+            "year": 2024,
+            "issue_number": 17,
+            "issue_title": "The Brave and the Bold",
+        }
+        assert_no_axe_violations(
+            authed_page,
+            name="import future layout controls",
+            include=["[data-testid='import-future-layout-section']"],
+        )
+
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        payload = created_requests[-1]
+        assert payload["future_layout_requested"] is True
+        assert isinstance(payload["target_library_root_id"], int)
+        assert payload["future_root_policy"]["series_path_template"] == (  # type: ignore[index]
+            "{Publisher}/{Series}"
+        )
+        assert payload["future_root_policy"]["comic_file_template"] == (  # type: ignore[index]
+            "{Series} {IssueTitle} Issue {Issue:03d}"
+        )

@@ -116,6 +116,14 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-layout-preview']").first
 
     @property
+    def future_layout_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-future-layout-toggle']").first
+
+    @property
+    def future_layout_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-future-layout-preview']").first
+
+    @property
     def file_browser_modal(self) -> Locator:
         return self.page.locator("[data-testid='file-browser-modal']").first
 

@@ -217,15 +217,26 @@ class TestLibraryRootPolicyConfig:
 
         response = await client.post(
             f"/api/v1/config/library-roots/{root_id}/naming-policy/preview",
-            json={"policy": _root_policy_payload(expected_revision=0)["policy"]},
+            json={
+                "policy": _root_policy_payload(expected_revision=0)["policy"],
+                "examples": [
+                    {
+                        "publisher": "Marvel",
+                        "series": "Daredevil",
+                        "year": 2019,
+                        "issue_number": 25,
+                        "issue_title": "Truth/Dare",
+                    }
+                ],
+            },
             headers=_csrf_header_for(client),
         )
 
         assert response.status_code == 200
         data = response.json()
         assert data["current_scope"] == "global_default"
-        assert "DC Comics/Batman (2024)" in data["proposed_series_paths"]
-        assert any("The Brave and the Bold" in name for name in data["proposed_file_names"])
+        assert "Marvel/Daredevil (2019)" in data["proposed_series_paths"]
+        assert any("Truth - Dare" in name for name in data["proposed_file_names"])
         async with _db_factory() as session:
             assert await session.scalar(select(func.count()).select_from(LibraryRootPolicy)) == 0
 

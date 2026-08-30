@@ -59,10 +59,21 @@ class LibraryRootPolicyClear(BaseModel):
     expected_revision: int = Field(..., ge=0)
 
 
+class LibraryRootPolicyPreviewExample(BaseModel):
+    """One bounded real-source example used for old/new policy comparison."""
+
+    publisher: str | None = Field(None, max_length=255)
+    series: str = Field(..., min_length=1, max_length=500)
+    year: int | None = Field(None, ge=1, le=9999)
+    issue_number: float
+    issue_title: str | None = Field(None, max_length=500)
+
+
 class LibraryRootPolicyPreviewRequest(BaseModel):
     """Unsaved root-policy proposal to render against representative metadata."""
 
     policy: FutureRootPolicyPayload
+    examples: list[LibraryRootPolicyPreviewExample] = Field(default_factory=list, max_length=5)
 
 
 class EffectiveLibraryRootPolicy(BaseModel):

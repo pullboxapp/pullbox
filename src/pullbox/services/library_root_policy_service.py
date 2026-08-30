@@ -21,7 +21,7 @@ from pullbox.services.import_root_policy_activation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -109,19 +109,21 @@ async def preview_library_root_policy(
     library_root_id: int,
     *,
     definition: Mapping[str, object],
+    examples: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """Render current and proposed outputs without persisting the proposal."""
     root = await _load_root(session, library_root_id)
     current = await load_effective_library_ingest_policy(session, root)
     proposal = normalize_root_policy_definition(definition)
     proposed = apply_future_root_policy_to_ingest_policy(current, proposal)
+    subjects = _preview_subjects(examples)
 
     return {
         "current_scope": _scope(current),
-        "current_series_paths": _series_path_examples(current),
-        "proposed_series_paths": _series_path_examples(proposed),
-        "current_file_names": _file_name_examples(current),
-        "proposed_file_names": _file_name_examples(proposed),
+        "current_series_paths": _series_path_examples(current, subjects),
+        "proposed_series_paths": _series_path_examples(proposed, subjects),
+        "current_file_names": _file_name_examples(current, subjects),
+        "proposed_file_names": _file_name_examples(proposed, subjects),
     }
 
 
@@ -217,28 +219,85 @@ def _sample_series() -> Series:
     )
 
 
-def _series_path_examples(policy: LibraryIngestPolicy) -> list[str]:
-    return [build_series_relative_path(_sample_series(), policy).as_posix()]
+def _preview_subjects(
+    examples: Sequence[Mapping[str, object]],
+) -> list[tuple[Series, Issue]]:
+    if examples:
+        subjects: list[tuple[Series, Issue]] = []
+        for example in examples:
+            publisher_value = example.get("publisher")
+            publisher = (
+                Publisher(name=publisher_value)
+                if isinstance(publisher_value, str) and publisher_value
+                else None
+            )
+            series_value = example.get("series")
+            year_value = example.get("year")
+            issue_number_value = example.get("issue_number")
+            issue_title_value = example.get("issue_title")
+            if not isinstance(series_value, str) or not series_value:
+                continue
+            if isinstance(issue_number_value, bool) or not isinstance(
+                issue_number_value, int | float
+            ):
+                continue
+            series = Series(
+                title=series_value,
+                sort_title=series_value.casefold(),
+                year_start=year_value if isinstance(year_value, int) else None,
+                publisher=publisher,
+            )
+            issue = Issue(
+                series=series,
+                issue_number=float(issue_number_value),
+                title=issue_title_value if isinstance(issue_title_value, str) else None,
+                issue_type=IssueType.ISSUE,
+            )
+            subjects.append((series, issue))
+        if subjects:
+            return subjects
 
-
-def _file_name_examples(policy: LibraryIngestPolicy) -> list[str]:
     series = _sample_series()
-    examples = (
-        (17.0, "The Brave and the Bold", IssueType.ISSUE),
-        (1.0, "Annual Adventure", IssueType.ANNUAL),
-        (1.0, "The Long Halloween", IssueType.ONE_SHOT),
-    )
     return [
-        compute_target_filename(
+        (
+            series,
             Issue(
                 series=series,
                 issue_number=number,
                 title=title,
                 issue_type=issue_type,
             ),
+        )
+        for number, title, issue_type in (
+            (17.0, "The Brave and the Bold", IssueType.ISSUE),
+            (1.0, "Annual Adventure", IssueType.ANNUAL),
+            (1.0, "The Long Halloween", IssueType.ONE_SHOT),
+        )
+    ]
+
+
+def _series_path_examples(
+    policy: LibraryIngestPolicy,
+    subjects: Sequence[tuple[Series, Issue]],
+) -> list[str]:
+    paths: list[str] = []
+    for series, _issue in subjects:
+        path = build_series_relative_path(series, policy).as_posix()
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _file_name_examples(
+    policy: LibraryIngestPolicy,
+    subjects: Sequence[tuple[Series, Issue]],
+) -> list[str]:
+    return [
+        compute_target_filename(
+            issue,
             series,
             Path("sample.cbz"),
             policy,
         )
-        for number, title, issue_type in examples
+        for series, issue in subjects
     ]

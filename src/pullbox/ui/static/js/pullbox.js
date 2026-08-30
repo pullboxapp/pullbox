@@ -2917,6 +2917,8 @@ function importCollectionFooterData(config) {
 
 function importSourceData(config) {
   var cfg = config || {};
+  var libraryRoots = Array.isArray(cfg.libraryRoots) ? cfg.libraryRoots : [];
+  var initialTargetRootId = libraryRoots.length ? Number(libraryRoots[0].id) : null;
 
   return Object.assign(fileBrowserMixin(cfg), {
     sourceType: "",
@@ -2938,12 +2940,30 @@ function importSourceData(config) {
     layoutPreviewTimer: null,
     layoutPreviewController: null,
     layoutPreviewRequestId: 0,
+    libraryRoots: libraryRoots,
+    targetLibraryRootId: initialTargetRootId,
+    futureLayoutRequested: false,
+    futureRootPolicy: {
+      schema_version: 1,
+      series_path_template: "",
+      comic_file_template: "",
+      annual_file_template: "",
+      non_standard_file_template: "",
+      single_non_standard_file_template: "",
+      replace_illegal_characters: true,
+      colon_replacement: "dash",
+    },
+    futurePolicyComparison: null,
+    futurePolicyLoading: false,
+    futurePolicyError: "",
+    futurePolicyRequestId: 0,
 
     selectSourceType: function (sourceType) {
       this.sourceType = sourceType;
       if (sourceType !== "filesystem") {
         this.fileHandlingMode = "managed_copy";
       }
+      this.clearFuturePolicy();
       this.clearLayoutPreview();
       if (sourceType === "filesystem") {
         this.scheduleLayoutPreview();
@@ -2961,6 +2981,205 @@ function importSourceData(config) {
     setLayoutChoice: function (choice) {
       this.layoutChoice = choice;
       this.scheduleLayoutPreview();
+    },
+
+    clearFuturePolicy: function () {
+      this.futurePolicyRequestId += 1;
+      this.futureLayoutRequested = false;
+      this.futurePolicyComparison = null;
+      this.futurePolicyLoading = false;
+      this.futurePolicyError = "";
+    },
+
+    canRequestFutureLayout: function () {
+      return !!(
+        this.sourceType === "filesystem" &&
+        this.targetLibraryRootId &&
+        this.layoutPreview &&
+        this.layoutPreview.can_apply_future_policy &&
+        Array.isArray(this.layoutPreview.clusters) &&
+        this.layoutPreview.clusters.length === 1 &&
+        this.layoutPreview.clusters[0].proposed_series_path_template
+      );
+    },
+
+    toggleFutureLayout: function () {
+      if (!this.futureLayoutRequested) {
+        this.futurePolicyRequestId += 1;
+        this.futurePolicyComparison = null;
+        this.futurePolicyLoading = false;
+        this.futurePolicyError = "";
+        return;
+      }
+      if (!this.canRequestFutureLayout()) {
+        this.clearFuturePolicy();
+        return;
+      }
+      this.prepareFuturePolicy();
+    },
+
+    futureLayoutRootChanged: function () {
+      this.futurePolicyRequestId += 1;
+      this.futurePolicyComparison = null;
+      this.futurePolicyError = "";
+      if (this.futureLayoutRequested) {
+        this.prepareFuturePolicy();
+      }
+    },
+
+    futurePolicyRequest: async function (path, options) {
+      var response = await fetch(
+        path,
+        Object.assign({}, options || {}, {
+          headers: Object.assign(
+            {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": this.csrfToken(),
+            },
+            (options && options.headers) || {},
+          ),
+        }),
+      );
+      var payload = await response.json().catch(function () {
+        return {};
+      });
+      if (!response.ok) {
+        var detail = payload.detail;
+        if (Array.isArray(detail)) {
+          detail = detail
+            .map(function (item) {
+              return item && item.msg ? item.msg : "";
+            })
+            .filter(Boolean)
+            .join(" ");
+        }
+        throw new Error(
+          (payload.error && payload.error.message) ||
+            detail ||
+            "Pullbox could not prepare this future library policy.",
+        );
+      }
+      return payload;
+    },
+
+    prepareFuturePolicy: async function () {
+      if (!this.canRequestFutureLayout()) {
+        this.clearFuturePolicy();
+        return;
+      }
+      var requestId = ++this.futurePolicyRequestId;
+      var rootId = Number(this.targetLibraryRootId);
+      this.futurePolicyLoading = true;
+      this.futurePolicyError = "";
+      this.futurePolicyComparison = null;
+      try {
+        var current = await this.futurePolicyRequest(
+          "/api/v1/config/library-roots/" + rootId + "/naming-policy",
+        );
+        if (requestId !== this.futurePolicyRequestId || rootId !== this.targetLibraryRootId) {
+          return;
+        }
+        var currentPolicy = current.effective_policy;
+        var cluster = this.layoutPreview.clusters[0];
+        this.futureRootPolicy = {
+          schema_version: 1,
+          series_path_template: cluster.proposed_series_path_template,
+          comic_file_template:
+            cluster.proposed_issue_filename_template || currentPolicy.comic_file_template,
+          annual_file_template: currentPolicy.annual_file_template,
+          non_standard_file_template: currentPolicy.non_standard_file_template,
+          single_non_standard_file_template: currentPolicy.single_non_standard_file_template,
+          replace_illegal_characters: currentPolicy.replace_illegal_characters,
+          colon_replacement: currentPolicy.colon_replacement,
+        };
+        await this.previewFuturePolicy(requestId);
+      } catch (err) {
+        if (requestId === this.futurePolicyRequestId) {
+          this.futurePolicyError =
+            err && err.message
+              ? err.message
+              : "Pullbox could not prepare this future library policy.";
+        }
+      } finally {
+        if (requestId === this.futurePolicyRequestId) {
+          this.futurePolicyLoading = false;
+        }
+      }
+    },
+
+    futurePolicyExamples: function () {
+      if (
+        !this.layoutPreview ||
+        !Array.isArray(this.layoutPreview.clusters) ||
+        this.layoutPreview.clusters.length !== 1 ||
+        !Array.isArray(this.layoutPreview.clusters[0].examples)
+      ) {
+        return [];
+      }
+      return this.layoutPreview.clusters[0].examples
+        .filter(function (example) {
+          return (
+            example &&
+            typeof example.series === "string" &&
+            example.series.trim() &&
+            example.issue_number !== null &&
+            example.issue_number !== "" &&
+            Number.isFinite(Number(example.issue_number))
+          );
+        })
+        .slice(0, 5)
+        .map(function (example) {
+          return {
+            publisher: example.publisher || null,
+            series: example.series,
+            year:
+              example.year !== null &&
+              example.year !== "" &&
+              Number.isFinite(Number(example.year)) &&
+              Number(example.year) > 0 &&
+              Number(example.year) <= 9999
+                ? Number(example.year)
+                : null,
+            issue_number: Number(example.issue_number),
+            issue_title: example.issue_title || null,
+          };
+        });
+    },
+
+    previewFuturePolicy: async function (existingRequestId) {
+      if (!this.futureLayoutRequested || !this.targetLibraryRootId) {
+        return;
+      }
+      var requestId = existingRequestId || ++this.futurePolicyRequestId;
+      this.futurePolicyLoading = true;
+      this.futurePolicyError = "";
+      try {
+        var comparison = await this.futurePolicyRequest(
+          "/api/v1/config/library-roots/" +
+            Number(this.targetLibraryRootId) +
+            "/naming-policy/preview",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              policy: this.futureRootPolicy,
+              examples: this.futurePolicyExamples(),
+            }),
+          },
+        );
+        if (requestId === this.futurePolicyRequestId) {
+          this.futurePolicyComparison = comparison;
+        }
+      } catch (err) {
+        if (requestId === this.futurePolicyRequestId) {
+          this.futurePolicyComparison = null;
+          this.futurePolicyError =
+            err && err.message ? err.message : "Pullbox could not preview this future policy.";
+        }
+      } finally {
+        if (requestId === this.futurePolicyRequestId) {
+          this.futurePolicyLoading = false;
+        }
+      }
     },
 
     sourceLayoutPayload: function () {
@@ -3015,6 +3234,15 @@ function importSourceData(config) {
       ) {
         return false;
       }
+      if (
+        this.futureLayoutRequested &&
+        (!this.canRequestFutureLayout() ||
+          this.futurePolicyLoading ||
+          this.futurePolicyError ||
+          !this.futurePolicyComparison)
+      ) {
+        return false;
+      }
       return this.layoutChoice !== "custom" || !!this.customSeriesPathTemplate.trim();
     },
 
@@ -3031,6 +3259,7 @@ function importSourceData(config) {
       this.layoutPreview = null;
       this.layoutPreviewLoading = false;
       this.layoutPreviewError = "";
+      this.clearFuturePolicy();
     },
 
     scheduleLayoutPreview: function () {
@@ -3046,6 +3275,7 @@ function importSourceData(config) {
       this.layoutPreview = null;
       this.layoutPreviewLoading = false;
       this.layoutPreviewError = "";
+      this.clearFuturePolicy();
       if (!this.canAnalyzeLayout()) {
         return;
       }
@@ -3067,6 +3297,7 @@ function importSourceData(config) {
       if (this.layoutPreviewController) {
         this.layoutPreviewController.abort();
       }
+      this.clearFuturePolicy();
 
       var requestId = ++this.layoutPreviewRequestId;
       var controller = new AbortController();
@@ -3170,6 +3401,11 @@ function importSourceData(config) {
             file_formats: this.fileFormats.trim() || null,
             file_handling_mode: this.fileHandlingMode,
             source_layout: this.sourceLayoutPayload(),
+            target_library_root_id: this.futureLayoutRequested
+              ? Number(this.targetLibraryRootId)
+              : null,
+            future_layout_requested: this.futureLayoutRequested,
+            future_root_policy: this.futureLayoutRequested ? this.futureRootPolicy : null,
           }),
         });
 

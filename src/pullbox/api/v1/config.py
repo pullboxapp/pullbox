@@ -774,6 +774,7 @@ async def preview_root_naming_policy(
         session,
         library_root_id,
         definition=body.policy.model_dump(),
+        examples=[example.model_dump() for example in body.examples],
     )
     return LibraryRootPolicyPreviewResponse.model_validate(preview)
 
