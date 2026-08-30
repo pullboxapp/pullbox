@@ -87,6 +87,10 @@ from pullbox.services.import_progress_runtime import (
     import_group_progress_plan,
     weighted_import_progress_pct,
 )
+from pullbox.services.import_root_policy_activation import (
+    RootPolicyActivationConflictError,
+    activate_future_root_policy,
+)
 from pullbox.services.import_workflow_state import (
     emit_live_progress,
 )
@@ -477,6 +481,34 @@ async def execute_import_job(
 
                 total_files_imported += files_ok
                 total_files_failed += files_err
+                policy_was_pending = job.future_root_policy_applied_at is None
+                try:
+                    policy_action = await activate_future_root_policy(
+                        session,
+                        job,
+                        successful_registration_count=total_files_imported,
+                    )
+                except RootPolicyActivationConflictError as exc:
+                    job.error_message = exc.message
+                    await log_event(
+                        session,
+                        job_id,
+                        "ERROR",
+                        "library_root_policy_activation_conflict",
+                        message=exc.message,
+                        target_library_root_id=job.target_library_root_id,
+                    )
+                else:
+                    if policy_action is not None and policy_was_pending:
+                        await log_event(
+                            session,
+                            job_id,
+                            "INFO",
+                            "library_root_policy_applied",
+                            message="Future library layout activated for the selected root.",
+                            target_library_root_id=job.target_library_root_id,
+                            policy_revision=policy_action.payload.get("applied_revision"),
+                        )
                 await session.commit()
 
             except JobPausedError:

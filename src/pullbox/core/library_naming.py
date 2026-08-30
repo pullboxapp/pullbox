@@ -227,21 +227,7 @@ def build_series_relative_path(
         "series_path_template",
         policy_value(naming_policy, "series_folder_template", "{Series} ({Year})"),
     ) or policy_value(naming_policy, "series_folder_template", "{Series} ({Year})")
-    if not template or len(template.encode("utf-8")) > _MAX_SERIES_PATH_TEMPLATE_BYTES:
-        raise ValueError("Series path template is empty or too long.")
-    if template.startswith(("/", "\\")) or "\\" in template:
-        raise ValueError("Series path template must be root-relative.")
-
-    raw_segments = template.split("/")
-    if any(segment in {"", ".", ".."} for segment in raw_segments):
-        raise ValueError("Series path template contains an unsafe segment.")
-
-    for matched in _SERIES_PATH_TOKEN_RE.finditer(template):
-        if matched.group("name") not in _SERIES_PATH_TOKENS:
-            raise ValueError(f"Unsupported series path token: {matched.group('name')}")
-    without_tokens = _SERIES_PATH_TOKEN_RE.sub("", template)
-    if "{" in without_tokens or "}" in without_tokens:
-        raise ValueError("Series path template contains an invalid token.")
+    raw_segments = validate_series_path_template(template)
 
     rendered_segments = tuple(
         build_series_folder_name(
@@ -265,6 +251,26 @@ def build_series_relative_path(
     if any(segment in {"", ".", ".."} for segment in rendered_segments):
         raise ValueError("Series path template rendered an unsafe segment.")
     return Path(*rendered_segments)
+
+
+def validate_series_path_template(template: str) -> tuple[str, ...]:
+    """Validate a root-relative output template and return its raw segments."""
+    if not template or len(template.encode("utf-8")) > _MAX_SERIES_PATH_TEMPLATE_BYTES:
+        raise ValueError("Series path template is empty or too long.")
+    if template.startswith(("/", "\\")) or "\\" in template:
+        raise ValueError("Series path template must be root-relative.")
+
+    raw_segments = template.split("/")
+    if any(segment in {"", ".", ".."} for segment in raw_segments):
+        raise ValueError("Series path template contains an unsafe segment.")
+
+    for matched in _SERIES_PATH_TOKEN_RE.finditer(template):
+        if matched.group("name") not in _SERIES_PATH_TOKENS:
+            raise ValueError(f"Unsupported series path token: {matched.group('name')}")
+    without_tokens = _SERIES_PATH_TOKEN_RE.sub("", template)
+    if "{" in without_tokens or "}" in without_tokens:
+        raise ValueError("Series path template contains an invalid token.")
+    return tuple(raw_segments)
 
 
 def compute_target_filename(

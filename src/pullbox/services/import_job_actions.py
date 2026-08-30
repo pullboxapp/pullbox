@@ -227,6 +227,20 @@ async def rollback_action(
                     int(old_library_root_id_raw) if old_library_root_id_raw is not None else None
                 )
 
+    elif action_type == "library_root_policy_applied":
+        from pullbox.services.import_root_policy_activation import (
+            rollback_future_root_policy,
+        )
+
+        action = await session.get(ImportJobAction, action_id)
+        if action is None:
+            return
+        job = await session.get(ImportJob, action.import_job_id)
+        if job is None:
+            raise NotFoundError("ImportJob", action.import_job_id)
+        await rollback_future_root_policy(session, job=job, action=action)
+        return
+
     action = await session.get(ImportJobAction, action_id)
     if action is None:
         return

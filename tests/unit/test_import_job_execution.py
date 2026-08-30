@@ -1143,6 +1143,7 @@ async def test_execute_import_job_defers_catalog_hydration_until_after_file_grou
     processed_groups: list[str] = []
     hydration_counts_at_file_start: list[int] = []
     created_series_ids: list[int] = []
+    activate_policy = AsyncMock(return_value=None)
 
     def fake_schedule_catalog_hydration(
         _session,
@@ -1192,6 +1193,11 @@ async def test_execute_import_job_defers_catalog_hydration_until_after_file_grou
         "_schedule_catalog_hydration",
         fake_schedule_catalog_hydration,
     )
+    monkeypatch.setattr(
+        import_job_execution,
+        "activate_future_root_policy",
+        activate_policy,
+    )
 
     await execute_import_job(
         db_session,
@@ -1210,6 +1216,9 @@ async def test_execute_import_job_defers_catalog_hydration_until_after_file_grou
     assert processed_groups == ["First Series", "Second Series"]
     assert hydration_counts_at_file_start == [0, 0]
     assert scheduled_hydrations == [(series_id, True) for series_id in created_series_ids]
+    assert [
+        call.kwargs["successful_registration_count"] for call in activate_policy.await_args_list
+    ] == [1, 2]
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,10 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
+from pullbox.services.import_root_policy_activation import (
+    apply_future_root_policy_to_ingest_policy,
+    build_future_root_policy_snapshot,
+)
 from pullbox.services.import_workflow_state import (
     ACTIVE_IMPORT_JOB_STATUSES,
     initialize_progress_snapshot,
@@ -78,8 +82,8 @@ async def create_job(
         and request.source_layout.mode != ImportLayoutMode.AUTO
     ):
         raise ValidationError("Selected source layouts currently require a filesystem import.")
-    if request.future_layout_requested:
-        raise ValidationError("Future library layout is not available yet.")
+    if request.future_layout_requested and resolved_target_library_root_id is None:
+        raise ValidationError("Future library layout requires a target library root.")
 
     active_job_id = await session.scalar(
         sa_select(ImportJob.id)
@@ -98,13 +102,29 @@ async def create_job(
         raise ValidationError("Search on add is now controlled by the global import policy.")
 
     monitored = request.monitored or search_on_add
-    ingest_policy = (
+    baseline_ingest_policy = (
         await load_effective_library_ingest_policy(
             session,
             resolved_target_library_root_id,
         )
         if resolved_target_library_root_id is not None
         else await load_library_ingest_policy(session)
+    )
+    future_root_policy_snapshot = (
+        build_future_root_policy_snapshot(
+            request.future_root_policy.model_dump(mode="json"),
+            baseline_ingest_policy,
+        )
+        if request.future_root_policy is not None
+        else None
+    )
+    ingest_policy = (
+        apply_future_root_policy_to_ingest_policy(
+            baseline_ingest_policy,
+            future_root_policy_snapshot,
+        )
+        if future_root_policy_snapshot is not None
+        else baseline_ingest_policy
     )
     source_layout_snapshot = resolve_source_layout_spec(request.source_layout.to_core()).to_dict()
 
@@ -126,16 +146,21 @@ async def create_job(
         file_handling_mode=request.file_handling_mode,
         source_layout_snapshot=source_layout_snapshot,
         future_layout_requested=request.future_layout_requested,
-        future_root_policy_snapshot=(
-            request.future_root_policy.model_dump(mode="json")
-            if request.future_root_policy is not None
-            else None
-        ),
+        future_root_policy_snapshot=future_root_policy_snapshot,
         future_root_policy_applied_at=None,
     )
     apply_ingest_policy_to_import_job(job, ingest_policy)
     session.add(job)
     await session.flush()
+    if future_root_policy_snapshot is not None:
+        apply_ingest_policy_to_import_job(
+            job,
+            apply_future_root_policy_to_ingest_policy(
+                baseline_ingest_policy,
+                future_root_policy_snapshot,
+                source_import_job_id=job.id,
+            ),
+        )
     job.progress_snapshot = initialize_progress_snapshot(
         job,
         mode="scan",

@@ -195,7 +195,7 @@ async def test_create_job_rejects_existing_active_import(
                     colon_replacement="dash",
                 ),
             },
-            "Future library layout is not available yet",
+            "Future library layout requires a target library root",
         ),
     ],
 )
@@ -246,6 +246,48 @@ async def test_create_job_accepts_in_place_source_inside_enabled_root(
     assert job.source_preserved is True
     assert job.convert_to_preferred_format is False
     assert job.update_embedded_comicinfo_from_match is False
+
+
+async def test_create_job_freezes_future_policy_baseline_and_job_placement_policy(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "future-library"
+    root_path.mkdir()
+    root = LibraryRoot(name="Future layout", path=str(root_path), enabled=True)
+    db_session.add(root)
+    await db_session.flush()
+    proposal = FutureRootPolicyPayload(
+        series_path_template="{Publisher}/{Series} ({Year})",
+        comic_file_template="{Series} {IssueTitle} Issue {Issue:03d}",
+        annual_file_template="{Series} Annual Issue {Issue:03d}",
+        non_standard_file_template="{Series} {Type} {Volume:02d} - {IssueTitle}",
+        single_non_standard_file_template="{Series} {Type} - {IssueTitle}",
+        replace_illegal_characters=True,
+        colon_replacement="dash",
+    )
+
+    job = await create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(tmp_path),
+            source_type=ImportSourceType.FILESYSTEM,
+            target_library_root_id=root.id,
+            future_layout_requested=True,
+            future_root_policy=proposal,
+        ),
+        log_event=_log_event,
+    )
+
+    assert job.future_layout_requested is True
+    assert job.future_root_policy_snapshot is not None
+    assert job.future_root_policy_snapshot["expected_root_policy_id"] is None
+    assert job.future_root_policy_snapshot["expected_root_policy_revision"] == 0
+    assert job.future_root_policy_snapshot["prior_policy"] is None
+    assert job.ingest_policy_snapshot["series_path_template"] == ("{Publisher}/{Series} ({Year})")
+    assert job.ingest_policy_snapshot["policy_source"] == "import_adoption"
+    assert job.ingest_policy_snapshot["policy_revision"] == 1
+    assert job.ingest_policy_snapshot["source_import_job_id"] == job.id
 
 
 async def test_create_job_rejects_in_place_source_outside_enabled_root(
