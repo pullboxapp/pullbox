@@ -12,7 +12,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -32,6 +32,16 @@ from pullbox.core.collection_scan_grouping import (
     _type_qualified_issue_like_label,
 )
 from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.library_layout import (
+    ImportLayoutMode,
+    LayoutTemplateError,
+    SourceLayoutMatch,
+    SourceLayoutSpec,
+    compile_source_layout,
+    resolve_source_layout_spec,
+)
+from pullbox.core.naming_type_detection import detect_issue_type
+from pullbox.core.release_parser import normalize_issue_number
 from pullbox.core.source_metadata import MetadataSignal, SourceMetadata, SourceMetadataExtractor
 from pullbox.models.issue import IssueType
 
@@ -40,6 +50,15 @@ logger = structlog.get_logger(__name__)
 SERIES_SCAN_WORKERS = 4
 ARCHIVE_READ_CONCURRENCY = 8
 SCAN_PROGRESS_EMIT_INTERVAL_SECONDS = 0.25
+
+_EXACT_METADATA_SIGNALS = frozenset(
+    {
+        MetadataSignal.COMICINFO,
+        MetadataSignal.MYLAR3,
+        MetadataSignal.PULLBOX_FOLDER,
+        MetadataSignal.SIDECAR,
+    }
+)
 
 # Regex: folder name with a year token, optionally followed by release tags
 _FOLDER_YEAR_RE = re.compile(r"^(.+?)\s*[\[(](\d{4})[\])](?:\s*(?:\([^)]*\)|\[[^\]]*\]))*\s*$")
@@ -150,6 +169,7 @@ class CollectionScanner:
         file_progress_callback: Callable[[int], Awaitable[None]] | None = None,
         inventory_progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
         extensions: frozenset[str] | None = None,
+        source_layout: SourceLayoutSpec | None = None,
     ) -> None:
         self._min_file_count = min_file_count
         self._max_sample_paths = max_sample_paths
@@ -157,6 +177,20 @@ class CollectionScanner:
         self._file_progress_callback = file_progress_callback
         self._inventory_progress_callback = inventory_progress_callback
         self._extensions = extensions or COMIC_EXTENSIONS
+        self._source_layout = resolve_source_layout_spec(source_layout or SourceLayoutSpec())
+        if (
+            self._source_layout.mode != ImportLayoutMode.AUTO
+            and not self._source_layout.fallback_to_auto
+        ):
+            raise LayoutTemplateError(
+                "Selected source layouts require automatic fallback until "
+                "non-fitting review support is available"
+            )
+        self._compiled_source_layout = (
+            None
+            if self._source_layout.mode == ImportLayoutMode.AUTO
+            else compile_source_layout(self._source_layout)
+        )
 
     async def inventory(self, root_path: str | Path) -> ScanInventory:
         """Count candidate directories and comic files before the main scan."""
@@ -278,6 +312,7 @@ class CollectionScanner:
                 discovered_files = await self._build_discovered_files(
                     comic_files,
                     comicinfo_sem,
+                    root=root,
                     folder_publisher=folder_publisher,
                     allow_weak_file_identity=allow_weak_file_identity,
                 )
@@ -353,7 +388,12 @@ class CollectionScanner:
             loose_series=loose_series_count,
         )
 
-    async def scan_files(self, file_paths: list[str]) -> list[DiscoveredSeries]:
+    async def scan_files(
+        self,
+        file_paths: list[str],
+        *,
+        root_path: str | Path | None = None,
+    ) -> list[DiscoveredSeries]:
         """Build DiscoveredSeries from explicit file paths (no directory walk).
 
         Groups files by parent directory, treating each directory as a
@@ -373,12 +413,14 @@ class CollectionScanner:
 
         comicinfo_sem = asyncio.Semaphore(ARCHIVE_READ_CONCURRENCY)
         discovered_list: list[DiscoveredSeries] = []
+        root = Path(root_path).resolve() if root_path is not None else None
 
         for series_dir, comic_files in sorted(dir_files.items()):
             name, year, folder_cv_id = self._extract_folder_identity(series_dir.name)
             discovered_files = await self._build_discovered_files(
                 comic_files,
                 comicinfo_sem,
+                root=root,
                 allow_weak_file_identity=True,
             )
             if not discovered_files:
@@ -410,6 +452,7 @@ class CollectionScanner:
         comic_files: list[Path],
         sem: asyncio.Semaphore,
         *,
+        root: Path | None = None,
         folder_publisher: str | None = None,
         allow_weak_file_identity: bool = False,
     ) -> list[DiscoveredFile]:
@@ -465,34 +508,125 @@ class CollectionScanner:
             else:
                 metadata = initial_metadata
 
+            parsed_series = metadata.series_name
+            parsed_issue_number = metadata.issue_number
+            parsed_year = metadata.year
+            parsed_publisher = metadata.publisher
+            issue_type = metadata.issue_type
+            metadata_signals = dict(metadata.signals)
+            metadata_diagnostics = dict(metadata.diagnostics)
+
+            layout_match, relative_path = self._match_selected_layout(fpath, root=root)
+            if self._compiled_source_layout is not None and relative_path is not None:
+                layout_diagnostics: dict[str, object] = {
+                    "fit": layout_match is not None,
+                    "fallback_used": layout_match is None and self._source_layout.fallback_to_auto,
+                    "relative_path": relative_path,
+                }
+                if layout_match is not None and layout_match.issue_title is not None:
+                    layout_diagnostics["issue_title"] = layout_match.issue_title
+                metadata_diagnostics["source_layout"] = layout_diagnostics
+
+            conflicts: dict[str, dict[str, object]] = {}
+
+            def apply_layout_value(
+                field_name: str,
+                current: object,
+                selected: object | None,
+            ) -> object:
+                if selected is None:
+                    return current
+                current_signal = metadata_signals.get(field_name)
+                if current is not None and current_signal in _EXACT_METADATA_SIGNALS:
+                    if str(current).casefold() != str(selected).casefold():
+                        conflicts[field_name] = {
+                            "selected": selected,
+                            "preserved_signal": current_signal.value,
+                        }
+                    return current
+                metadata_signals[field_name] = MetadataSignal.SOURCE_LAYOUT
+                return selected
+
+            layout_issue_number_raw: str | None = None
+            if layout_match is not None:
+                parsed_series = cast(
+                    "str | None",
+                    apply_layout_value(
+                        "series_name",
+                        parsed_series,
+                        layout_match.series,
+                    ),
+                )
+                parsed_year = cast(
+                    "int | None",
+                    apply_layout_value("year", parsed_year, layout_match.year),
+                )
+                parsed_publisher = cast(
+                    "str | None",
+                    apply_layout_value(
+                        "publisher",
+                        parsed_publisher,
+                        layout_match.publisher,
+                    ),
+                )
+                if layout_match.issue_number is not None:
+                    selected_issue_number = normalize_issue_number(layout_match.issue_number)
+                    parsed_issue_number = cast(
+                        "float | None",
+                        apply_layout_value(
+                            "issue_number",
+                            parsed_issue_number,
+                            selected_issue_number,
+                        ),
+                    )
+                    if metadata_signals.get("issue_number") == MetadataSignal.SOURCE_LAYOUT:
+                        layout_issue_number_raw = layout_match.issue_number
+                if layout_match.issue_type is not None:
+                    selected_issue_type = IssueType(detect_issue_type(layout_match.issue_type))
+                    issue_type = cast(
+                        "IssueType",
+                        apply_layout_value(
+                            "issue_type",
+                            issue_type,
+                            selected_issue_type,
+                        ),
+                    )
+
+            if conflicts:
+                metadata_diagnostics["source_layout_conflicts"] = conflicts
+
             parsed = metadata.parsed_release
             issue_number_raw: str | None = None
-            if parsed is not None and parsed.issue_number is not None:
+            if layout_issue_number_raw is not None:
+                issue_number_raw = layout_issue_number_raw
+            elif parsed is not None and parsed.issue_number is not None:
                 issue_number_raw = format_issue_number(parsed.issue_number)
-            elif metadata.issue_number is not None:
-                issue_number_raw = format_issue_number(metadata.issue_number)
+            elif parsed_issue_number is not None:
+                issue_number_raw = format_issue_number(parsed_issue_number)
 
             return DiscoveredFile(
                 file_path=str(fpath),
                 file_name=file_name,
                 file_size=file_size,
                 file_format=file_format,
-                parsed_series=metadata.series_name,
-                parsed_issue_number=metadata.issue_number,
-                parsed_year=metadata.year,
-                parsed_publisher=metadata.publisher,
+                parsed_series=str(parsed_series) if parsed_series is not None else None,
+                parsed_issue_number=(
+                    float(parsed_issue_number) if parsed_issue_number is not None else None
+                ),
+                parsed_year=int(parsed_year) if parsed_year is not None else None,
+                parsed_publisher=(str(parsed_publisher) if parsed_publisher is not None else None),
                 has_comicinfo=bool(metadata.diagnostics.get("has_comicinfo")),
                 comicvine_issue_id=metadata.comicvine_issue_id,
                 issue_number_raw=issue_number_raw,
-                issue_type=metadata.issue_type,
+                issue_type=IssueType(issue_type),
                 comicvine_series_id=metadata.comicvine_series_id,
                 series_status=metadata.series_status,
                 issue_count_hint=metadata.issue_count_hint,
                 metadata_signals={
                     key: value.value if isinstance(value, MetadataSignal) else str(value)
-                    for key, value in metadata.signals.items()
+                    for key, value in metadata_signals.items()
                 },
-                metadata_diagnostics=dict(metadata.diagnostics),
+                metadata_diagnostics=metadata_diagnostics,
             )
 
         sorted_files = sorted(comic_files)
@@ -505,6 +639,22 @@ class CollectionScanner:
             if self._file_progress_callback is not None:
                 await self._file_progress_callback(1)
         return sorted(results, key=lambda df: df.file_name)
+
+    def _match_selected_layout(
+        self,
+        path: Path,
+        *,
+        root: Path | None,
+    ) -> tuple[SourceLayoutMatch | None, str | None]:
+        """Match one root-relative path against the frozen selected layout."""
+        compiled = self._compiled_source_layout
+        if compiled is None or root is None:
+            return None, None
+        try:
+            relative_path = path.relative_to(root).as_posix()
+        except ValueError:
+            return None, None
+        return compiled.match(relative_path), relative_path
 
     def _should_load_archive_metadata(
         self,

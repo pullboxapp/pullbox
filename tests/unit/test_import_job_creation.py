@@ -142,9 +142,10 @@ async def test_create_job_rejects_existing_active_import(
                 "source_layout": SourceLayoutSpecPayload(
                     mode="preset",
                     preset="publisher_series",
+                    fallback_to_auto=False,
                 )
             },
-            "Selected source layouts are not available yet",
+            "without automatic fallback",
         ),
         (
             {
@@ -176,4 +177,47 @@ async def test_create_job_rejects_not_yet_safe_execution_modes(
     )
 
     with pytest.raises(ValidationError, match=message):
+        await create_job(db_session, request, log_event=_log_event)
+
+
+async def test_create_job_freezes_normalized_selected_layout(
+    db_session: AsyncSession,
+    tmp_path: object,
+) -> None:
+    request = ImportJobCreate(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.FILESYSTEM,
+        source_layout=SourceLayoutSpecPayload(
+            mode="preset",
+            preset="publisher_series",
+        ),
+    )
+
+    job = await create_job(db_session, request, log_event=_log_event)
+
+    assert job.source_layout_snapshot == {
+        "schema_version": 1,
+        "mode": "preset",
+        "preset": "publisher_series",
+        "series_path_template": "{Publisher}/{Series}",
+        "issue_filename_template": None,
+        "selected_cluster_id": None,
+        "fallback_to_auto": True,
+    }
+
+
+async def test_create_job_rejects_selected_layout_for_mylar_source(
+    db_session: AsyncSession,
+    tmp_path: object,
+) -> None:
+    request = ImportJobCreate(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.MYLAR3,
+        source_layout=SourceLayoutSpecPayload(
+            mode="preset",
+            preset="publisher_series",
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="filesystem import"):
         await create_job(db_session, request, log_event=_log_event)

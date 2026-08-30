@@ -282,6 +282,7 @@ class MetadataSignal(enum.StrEnum):
     FOLDER_HINT = "folder_hint"
     PULLBOX_FOLDER = "pullbox_folder"
     MYLAR3 = "mylar3"
+    SOURCE_LAYOUT = "source_layout"
 
 
 @dataclass(frozen=True, slots=True)

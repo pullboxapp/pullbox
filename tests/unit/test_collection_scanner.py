@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 
 from pullbox.core.collection_scanner import CollectionScanner, DiscoveredSeries
-from pullbox.core.source_metadata import SourceMetadataExtractor
+from pullbox.core.library_layout import ImportLayoutMode, LayoutTemplateError, SourceLayoutSpec
+from pullbox.core.source_metadata import MetadataSignal, SourceMetadata, SourceMetadataExtractor
 from pullbox.models.issue import IssueType
 
 
@@ -152,6 +153,133 @@ class TestThreeLevelWithPublisher:
         by_name = {r.raw_series_name: r for r in results}
         assert by_name["Batman"].raw_publisher == "DC Comics"
         assert by_name["Saga"].raw_publisher == "Image Comics"
+
+
+class TestSelectedSourceLayout:
+    """Explicit source layouts should drive grouping without hiding fallback files."""
+
+    def test_scanner_rejects_selected_layout_without_review_fallback_support(self) -> None:
+        with pytest.raises(LayoutTemplateError, match="automatic fallback"):
+            CollectionScanner(
+                source_layout=SourceLayoutSpec(
+                    mode=ImportLayoutMode.CUSTOM,
+                    series_path_template="{Publisher}/{Series}",
+                    fallback_to_auto=False,
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_custom_layout_uses_higher_series_segment_and_exact_issue_text(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _touch(
+            tmp_path
+            / "DC Comics"
+            / "Absolute Batman (2024)"
+            / "Issues"
+            / "Issue 1000000 - The Zoo.cbz"
+        )
+        scanner = CollectionScanner(
+            source_layout=SourceLayoutSpec(
+                mode=ImportLayoutMode.CUSTOM,
+                series_path_template="{Publisher}/{Series} ({Year})/{Type}",
+                issue_filename_template="Issue {Issue} - {IssueTitle}",
+                fallback_to_auto=True,
+            )
+        )
+
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        candidate = results[0]
+        assert candidate.raw_series_name == "Absolute Batman"
+        assert candidate.raw_year == 2024
+        assert candidate.raw_publisher == "DC Comics"
+        discovered_file = candidate.files[0]
+        assert discovered_file.parsed_series == "Absolute Batman"
+        assert discovered_file.issue_number_raw == "1000000"
+        assert discovered_file.metadata_signals["series_name"] == "source_layout"
+        assert discovered_file.metadata_signals["issue_number"] == "source_layout"
+        assert discovered_file.metadata_diagnostics["source_layout"] == {
+            "fit": True,
+            "fallback_used": False,
+            "relative_path": (
+                "DC Comics/Absolute Batman (2024)/Issues/Issue 1000000 - The Zoo.cbz"
+            ),
+            "issue_title": "The Zoo",
+        }
+
+    @pytest.mark.asyncio
+    async def test_non_fitting_file_uses_auto_only_when_fallback_is_enabled(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _touch(tmp_path / "Batman (2011)" / "Batman 001.cbz")
+        scanner = CollectionScanner(
+            source_layout=SourceLayoutSpec(
+                mode=ImportLayoutMode.CUSTOM,
+                series_path_template="{Publisher}/{Series}",
+                fallback_to_auto=True,
+            )
+        )
+
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Batman"
+        assert results[0].files[0].metadata_diagnostics["source_layout"] == {
+            "fit": False,
+            "fallback_used": True,
+            "relative_path": "Batman (2011)/Batman 001.cbz",
+        }
+
+    @pytest.mark.asyncio
+    async def test_exact_embedded_identity_wins_over_conflicting_selected_layout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        comic_path = tmp_path / "DC Comics" / "Layout Batman" / "Batman 001.cbz"
+        _touch(comic_path)
+
+        def exact_metadata(*_args, **_kwargs) -> SourceMetadata:
+            return SourceMetadata(
+                original_title=comic_path.name,
+                source_path=str(comic_path),
+                series_name="Canonical Batman",
+                issue_number=1.0,
+                year=2011,
+                publisher="DC Comics",
+                signals={
+                    "series_name": MetadataSignal.COMICINFO,
+                    "issue_number": MetadataSignal.COMICINFO,
+                    "year": MetadataSignal.COMICINFO,
+                    "publisher": MetadataSignal.COMICINFO,
+                },
+                diagnostics={"has_comicinfo": True},
+            )
+
+        monkeypatch.setattr(SourceMetadataExtractor, "from_path", exact_metadata)
+        scanner = CollectionScanner(
+            source_layout=SourceLayoutSpec(
+                mode=ImportLayoutMode.PRESET,
+                preset="publisher_series",
+            )
+        )
+
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Canonical Batman"
+        discovered_file = results[0].files[0]
+        assert discovered_file.metadata_signals["series_name"] == "comicinfo"
+        assert discovered_file.metadata_diagnostics["source_layout_conflicts"] == {
+            "series_name": {
+                "selected": "Layout Batman",
+                "preserved_signal": "comicinfo",
+            }
+        }
 
 
 class TestDeepNesting:

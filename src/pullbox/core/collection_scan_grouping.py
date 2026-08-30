@@ -58,7 +58,7 @@ _GENERIC_SERIES_CONTAINER_IDENTITIES: frozenset[str] = frozenset(
 )
 
 _EXACT_SERIES_METADATA_SIGNALS: frozenset[str] = frozenset(
-    {"comicinfo", "mylar3", "pullbox_folder", "sidecar"}
+    {"comicinfo", "mylar3", "pullbox_folder", "sidecar", "source_layout"}
 )
 
 _LEADING_ISSUE_TITLE_RE = re.compile(
@@ -170,6 +170,7 @@ def _has_strong_file_identity(discovered_file: DiscoveredFileLike) -> bool:
             discovered_file.comicvine_issue_id is not None,
             discovered_file.comicvine_series_id is not None,
             discovered_file.has_comicinfo,
+            discovered_file.metadata_signals.get("series_name") == "source_layout",
         )
     )
 

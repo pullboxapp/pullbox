@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy.exc import OperationalError
 
 from pullbox.core.collection_scanner import COMIC_EXTENSIONS, CollectionScanner, DiscoveredSeries
+from pullbox.core.library_layout import ImportLayoutMode, SourceLayoutSpec
 from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 from pullbox.services.import_scan_pipeline import (
     _scan_collection_discovered_series,
@@ -147,6 +148,53 @@ async def test_scan_collection_discovered_series_skips_inventory_prepass(
     assert len(discovered) == 1
     assert job.scan_total_files == 3
     assert job.scan_total_dirs == 1
+
+
+async def test_scan_collection_discovered_series_passes_frozen_layout_to_scanner(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    expected_layout = SourceLayoutSpec(
+        mode=ImportLayoutMode.PRESET,
+        preset="publisher_series",
+        series_path_template="{Publisher}/{Series}",
+    )
+    job = ImportJob(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.SCANNING,
+        min_files_per_series=1,
+        source_layout_snapshot=expected_layout.to_dict(),
+    )
+    db_session.add(job)
+    await db_session.flush()
+    captured_layouts: list[SourceLayoutSpec] = []
+
+    async def resolve_import_file_extensions(_session, _formats):
+        return COMIC_EXTENSIONS
+
+    async def emit_scan_progress(**_kwargs) -> None:
+        return None
+
+    class ScannerDouble:
+        def __init__(self, *args, source_layout=None, **kwargs) -> None:
+            captured_layouts.append(source_layout)
+
+        async def scan(self, _root):
+            if False:
+                yield None
+
+    discovered = await _scan_collection_discovered_series(
+        db_session,
+        job,
+        scanner_cls=ScannerDouble,
+        resolve_import_file_extensions=resolve_import_file_extensions,
+        emit_scan_progress=emit_scan_progress,
+        phase_progress=phase_progress,
+    )
+
+    assert discovered == []
+    assert captured_layouts == [expected_layout]
 
 
 def test_scan_failure_message_names_sqlite_lock_contention() -> None:

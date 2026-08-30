@@ -14,6 +14,7 @@ from pullbox.models.import_job import (
     ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
+    ImportSourceType,
 )
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
 from pullbox.services.import_workflow_state import (
@@ -52,8 +53,18 @@ async def create_job(
     """Create an import job record without starting scan execution."""
     if request.file_handling_mode == ImportFileHandlingMode.IN_PLACE:
         raise ValidationError("In-place import is not available yet.")
-    if request.source_layout.mode != ImportLayoutMode.AUTO:
-        raise ValidationError("Selected source layouts are not available yet.")
+    if (
+        request.source_layout.mode != ImportLayoutMode.AUTO
+        and not request.source_layout.fallback_to_auto
+    ):
+        raise ValidationError(
+            "Selected source layouts without automatic fallback are not available yet."
+        )
+    if (
+        request.source_type != ImportSourceType.FILESYSTEM
+        and request.source_layout.mode != ImportLayoutMode.AUTO
+    ):
+        raise ValidationError("Selected source layouts currently require a filesystem import.")
     if request.future_layout_requested:
         raise ValidationError("Future library layout is not available yet.")
 

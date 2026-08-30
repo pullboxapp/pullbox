@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError, NotFoundError
+from pullbox.core.library_layout import SourceLayoutSpec
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
 from pullbox.models.import_job import (
     ImportJob,
@@ -713,13 +714,17 @@ async def _scan_collection_discovered_series(
         file_progress_callback=capture_materialized_file,
         inventory_progress_callback=capture_inventory_progress,
         extensions=custom_exts,
+        source_layout=SourceLayoutSpec.from_dict(dict(job.source_layout_snapshot or {})),
     )
     discovered_list: list[DiscoveredSeries] = []
 
     file_paths_mode = list(job.selected_file_paths or [])
 
     if file_paths_mode:
-        discovered_list = await scanner.scan_files(file_paths_mode)
+        discovered_list = await scanner.scan_files(
+            file_paths_mode,
+            root_path=job.source_path,
+        )
         job.scan_total_files = sum(series.file_count for series in discovered_list)
         job.scan_total_dirs = len({series.source_folder for series in discovered_list})
         job.series_found = len(discovered_list)

@@ -26,7 +26,15 @@ def test_build_retry_import_request_copies_creation_fields(tmp_path) -> None:
         min_files_per_series=3,
         file_formats="CBZ, PDF",
         file_handling_mode=ImportFileHandlingMode.MANAGED_COPY,
-        source_layout_snapshot=SourceLayoutSpecPayload().model_dump(mode="json"),
+        source_layout_snapshot={
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "series_path_template": "{Publisher}/{Series}",
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        },
         future_layout_requested=False,
         future_root_policy_snapshot=None,
     )
@@ -43,7 +51,11 @@ def test_build_retry_import_request_copies_creation_fields(tmp_path) -> None:
     assert request.min_files_per_series == 3
     assert request.file_formats == "cbz, pdf"
     assert request.file_handling_mode == ImportFileHandlingMode.MANAGED_COPY
-    assert request.source_layout == SourceLayoutSpecPayload()
+    assert request.source_layout == SourceLayoutSpecPayload(
+        mode="preset",
+        preset="publisher_series",
+        series_path_template="{Publisher}/{Series}",
+    )
     assert request.future_layout_requested is False
     assert request.future_root_policy is None
 

@@ -672,6 +672,38 @@ class TestCreateImportJob:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
+    async def test_create_job_accepts_selected_layout_with_automatic_fallback(
+        self,
+        client: AsyncClient,
+        tmp_path: object,
+    ) -> None:
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            resp = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                    "source_layout": {
+                        "mode": "preset",
+                        "preset": "publisher_series",
+                        "fallback_to_auto": True,
+                    },
+                },
+            )
+
+        assert resp.status_code == 201
+        assert resp.json()["source_layout_snapshot"] == {
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "series_path_template": "{Publisher}/{Series}",
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        }
+        mock_trigger.assert_called_once_with(resp.json()["id"])
+
+    @pytest.mark.asyncio
     async def test_create_job_invalid_source_type(
         self,
         client: AsyncClient,
@@ -692,10 +724,6 @@ class TestCreateImportJob:
         ("overrides", "message"),
         [
             ({"file_handling_mode": "in_place"}, "In-place import is not available yet"),
-            (
-                {"source_layout": {"mode": "preset", "preset": "publisher_series"}},
-                "Selected source layouts are not available yet",
-            ),
             (
                 {
                     "future_layout_requested": True,
