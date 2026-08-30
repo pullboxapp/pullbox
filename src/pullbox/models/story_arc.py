@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from pullbox.models.issue import Issue
     from pullbox.models.library import LibraryFile, LibraryRoot
     from pullbox.models.story_arc_import import ImportedStoryArc
+    from pullbox.models.story_arc_placement_operation import StoryArcPlacementOperation
 
 
 class StoryArcSourceKind(enum.StrEnum):
@@ -107,6 +108,15 @@ class StoryArcPlacementState(enum.StrEnum):
     FAILED = "failed"
 
 
+class StoryArcPlacementOperationKind(enum.StrEnum):
+    """Arc-wide placement workflows that share the Story Arc fence."""
+
+    POLICY_MIGRATION = "policy_migration"
+    REORDER = "reorder"
+    ARC_DELETE = "arc_delete"
+    REPAIR = "repair"
+
+
 def story_arc_enum_values(enum_cls: type[enum.Enum]) -> list[str]:
     """Persist lowercase enum values instead of Python member names."""
     return [str(member.value) for member in enum_cls]
@@ -128,6 +138,23 @@ class StoryArc(Base, IdentityMixin, TimestampMixin):
 
     __tablename__ = "story_arcs"
     __table_args__ = (
+        CheckConstraint(
+            "((active_placement_operation_token IS NULL "
+            "AND active_placement_operation_kind IS NULL) OR "
+            "(active_placement_operation_token IS NOT NULL "
+            "AND active_placement_operation_kind IS NOT NULL))",
+            name="ck_story_arcs_active_placement_operation_pair",
+        ),
+        CheckConstraint(
+            "active_placement_operation_token IS NULL OR "
+            "length(active_placement_operation_token) = 32",
+            name="ck_story_arcs_active_placement_operation_token_length",
+        ),
+        Index(
+            "ux_story_arcs_active_placement_operation_token",
+            "active_placement_operation_token",
+            unique=True,
+        ),
         Index("ix_story_arcs_normalized_id", "normalized_name", "id"),
         Index(
             "ix_story_arcs_lifecycle_monitored_id",
@@ -180,6 +207,10 @@ class StoryArc(Base, IdentityMixin, TimestampMixin):
     diagnostics: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}", nullable=False
     )
+    active_placement_operation_token: Mapped[str | None] = mapped_column(String(32))
+    active_placement_operation_kind: Mapped[StoryArcPlacementOperationKind | None] = mapped_column(
+        story_arc_enum(StoryArcPlacementOperationKind)
+    )
 
     memberships: Mapped[list[IssueStoryArc]] = relationship(
         back_populates="story_arc",
@@ -209,6 +240,10 @@ class StoryArc(Base, IdentityMixin, TimestampMixin):
     materialized_imports: Mapped[list[ImportedStoryArc]] = relationship(
         back_populates="materialized_story_arc",
         foreign_keys="ImportedStoryArc.materialized_story_arc_id",
+    )
+    placement_operations: Mapped[list[StoryArcPlacementOperation]] = relationship(
+        back_populates="story_arc",
+        passive_deletes=True,
     )
 
     @validates("name")

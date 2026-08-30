@@ -88,6 +88,7 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcPlacement,
     StoryArcPlacementMode,
+    StoryArcPlacementOperationKind,
     StoryArcPlacementOwnership,
     StoryArcPlacementState,
     StoryArcResolutionState,
@@ -95,6 +96,14 @@ from pullbox.models.story_arc import (
     StoryArcSymlinkStyle,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.models.story_arc_placement_operation import (
+    StoryArcPlacementOperation,
+    StoryArcPlacementOperationAction,
+    StoryArcPlacementOperationActionKind,
+    StoryArcPlacementOperationActionState,
+    StoryArcPlacementOperationRecoveryMode,
+    StoryArcPlacementOperationState,
+)
 from pullbox.models.story_arc_sync import (
     StoryArcSyncReason,
     StoryArcSyncWork,
@@ -204,6 +213,13 @@ __all__ = [
     "StoryArcLifecycle",
     "StoryArcPlacement",
     "StoryArcPlacementMode",
+    "StoryArcPlacementOperation",
+    "StoryArcPlacementOperationAction",
+    "StoryArcPlacementOperationActionKind",
+    "StoryArcPlacementOperationActionState",
+    "StoryArcPlacementOperationKind",
+    "StoryArcPlacementOperationRecoveryMode",
+    "StoryArcPlacementOperationState",
     "StoryArcPlacementOwnership",
     "StoryArcPlacementState",
     "StoryArcResolutionState",
