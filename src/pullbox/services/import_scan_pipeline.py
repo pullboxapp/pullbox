@@ -666,13 +666,10 @@ async def _load_mylar3_discovered_series(
     read_import_metadata = getattr(reader, "read_import_metadata", None)
     iter_story_arc_pages = getattr(reader, "iter_import_story_arc_pages", None)
     iter_series_pages = getattr(reader, "iter_import_series_pages", None)
-    paged_reader = all(
-        callable(method)
-        for method in (
-            read_import_metadata,
-            iter_story_arc_pages,
-            iter_series_pages,
-        )
+    paged_reader = (
+        inspect.iscoroutinefunction(read_import_metadata)
+        and inspect.isasyncgenfunction(iter_story_arc_pages)
+        and inspect.isasyncgenfunction(iter_series_pages)
     )
     legacy_snapshot: Mylar3CollectionSnapshot | None = None
     if paged_reader:

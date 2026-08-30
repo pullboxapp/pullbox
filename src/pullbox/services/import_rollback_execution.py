@@ -250,12 +250,15 @@ async def _rollback_import_job_while_enrichment_fenced(
             sequence_no=action.sequence_no,
         )
         idx += 1
-        page_checkpoint = idx % ROLLBACK_ACTION_PAGE_SIZE == 0 or idx == total
+        small_rollback = total <= ROLLBACK_ACTION_PAGE_SIZE
+        page_checkpoint = small_rollback or idx % ROLLBACK_ACTION_PAGE_SIZE == 0 or idx == total
         if not page_checkpoint:
             continue
         now = monotonic()
         should_emit_progress = progress_callback is not None and (
-            idx == total or now - last_progress_emit_at >= ROLLBACK_PROGRESS_MIN_INTERVAL_SECONDS
+            small_rollback
+            or idx == total
+            or now - last_progress_emit_at >= ROLLBACK_PROGRESS_MIN_INTERVAL_SECONDS
         )
         if should_emit_progress:
             assert progress_callback is not None

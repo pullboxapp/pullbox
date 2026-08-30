@@ -10,6 +10,7 @@ from inspect import isawaitable, iscoroutine
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy import func as sa_func
 from sqlalchemy import select as sa_select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -39,11 +40,13 @@ from pullbox.services.import_known_cv_match import (
 )
 from pullbox.services.import_progress_runtime import (
     ScanReviewFileMatchProfile,
+    ScanReviewProgressPlan,
     ScanReviewSeriesMatchProfile,
     current_item_payload,
-    scan_review_completed_weight,
+    scan_review_analysis_weight,
+    scan_review_file_match_weight,
     scan_review_progress_pct,
-    scan_review_progress_plan,
+    scan_review_series_match_weight,
 )
 from pullbox.services.import_series_match_state import clear_auto_cv_match_fields
 from pullbox.services.import_workflow_state import emit_live_progress
@@ -148,8 +151,19 @@ class _VolumeSubtitleRebucketMatch:
     diagnostics: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class _ScanReviewProfile:
+    """Minimal persisted facts needed to aggregate matching progress."""
+
+    id: int
+    file_count: int
+    direct_match: bool
+    has_files: bool
+    issue_count: int | None
+
+
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
     from datetime import datetime
     from typing import Protocol
 
@@ -259,43 +273,196 @@ async def _log_detail_event_best_effort(
         )
 
 
-async def run_import_series_matching(
-    session: AsyncSession,
-    job: ImportJob,
-    *,
-    metadata_provider: Any,
-    source_metadata_for_series: SourceMetadataForSeriesFunc,
-    load_deferred_source_metadata_for_series: DeferredSourceMetadataForSeriesFunc | None = None,
-    evaluate_match: EvaluateMatchFunc,
-    raise_if_cancelled: RaiseIfCancelledFunc,
-    reclassify_duplicates: ReclassifyDuplicatesFunc,
-    recompute_series_counters: RecomputeCountersFunc,
-    log_event: LogEventFunc,
-    emit_progress: EmitProgressFunc,
-    phase_progress: PhaseProgressFunc,
-    estimate_remaining_seconds: EstimateRemainingFunc,
-    job_stats: JobStatsFunc,
-    maybe_slow_item_delay: SlowItemDelayFunc,
-    provider_free_filesystem: bool = False,
-    estimate_remaining_work_seconds: EstimateRemainingWorkFunc | None = None,
-    progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None = None,
-) -> None:
-    """Run ComicVine matching for all pending imported series in a job."""
-    started_at = time.monotonic()
-    persist_batch_size = 25
-    last_checkpoint_at = time.monotonic()
-
-    async def _mark_pending_files_no_match(item: ImportedSeries) -> None:
-        pending_files_result = await session.execute(
-            sa_select(ImportedFile).where(
-                ImportedFile.import_series_id == item.id,
-                ImportedFile.status == ImportedFileStatus.PENDING,
-            )
+async def _count_pending_import_series(session: AsyncSession, *, job_id: int) -> int:
+    count = await session.scalar(
+        sa_select(sa_func.count(ImportedSeries.id)).where(
+            ImportedSeries.import_job_id == job_id,
+            ImportedSeries.status == ImportSeriesStatus.PENDING,
         )
-        pending_files = list(pending_files_result.scalars().all())
-        if not pending_files:
-            return
+    )
+    return int(count or 0)
 
+
+async def _load_pending_import_series_page(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    after_id: int,
+    page_size: int,
+) -> list[ImportedSeries]:
+    result = await session.execute(
+        sa_select(ImportedSeries)
+        .where(
+            ImportedSeries.import_job_id == job_id,
+            ImportedSeries.status == ImportSeriesStatus.PENDING,
+            ImportedSeries.id > after_id,
+        )
+        .order_by(ImportedSeries.id)
+        .limit(page_size)
+    )
+    return list(result.scalars())
+
+
+async def _iter_pending_import_series(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    page_size: int,
+    raise_if_cancelled: RaiseIfCancelledFunc,
+) -> AsyncIterator[tuple[int, ImportedSeries, bool]]:
+    after_id = 0
+    item_index = 0
+    while True:
+        await raise_if_cancelled(session, job_id)
+        items = await _load_pending_import_series_page(
+            session,
+            job_id=job_id,
+            after_id=after_id,
+            page_size=page_size,
+        )
+        if not items:
+            break
+        for page_index, item in enumerate(items):
+            yield item_index, item, page_index == len(items) - 1
+            item_index += 1
+        after_id = items[-1].id
+
+
+async def _load_pending_import_file_page(
+    session: AsyncSession,
+    *,
+    import_series_id: int,
+    after_id: int,
+    page_size: int,
+) -> list[ImportedFile]:
+    result = await session.execute(
+        sa_select(ImportedFile)
+        .where(
+            ImportedFile.import_series_id == import_series_id,
+            ImportedFile.status == ImportedFileStatus.PENDING,
+            ImportedFile.id > after_id,
+        )
+        .order_by(ImportedFile.id)
+        .limit(page_size)
+    )
+    return list(result.scalars())
+
+
+async def _load_scan_review_profile_page(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    after_id: int,
+    page_size: int,
+) -> list[_ScanReviewProfile]:
+    result = await session.execute(
+        sa_select(
+            ImportedSeries.id,
+            ImportedSeries.files_total,
+            ImportedSeries.file_count,
+            ImportedSeries.cv_id,
+            ImportedSeries.has_files,
+            ImportedSeries.cv_issue_count,
+        )
+        .where(
+            ImportedSeries.import_job_id == job_id,
+            ImportedSeries.status == ImportSeriesStatus.PENDING,
+            ImportedSeries.id > after_id,
+        )
+        .order_by(ImportedSeries.id)
+        .limit(page_size)
+    )
+    return [
+        _ScanReviewProfile(
+            id=int(row.id),
+            file_count=max(int(row.files_total or row.file_count or 0), 0),
+            direct_match=bool(row.cv_id),
+            has_files=bool(row.has_files),
+            issue_count=row.cv_issue_count,
+        )
+        for row in result
+    ]
+
+
+async def _build_scan_review_progress_plan(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    analysis_series_count: int,
+    page_size: int,
+    raise_if_cancelled: RaiseIfCancelledFunc,
+) -> ScanReviewProgressPlan:
+    series_match_weight = 0.0
+    file_match_weight = 0.0
+    after_id = 0
+    while True:
+        await raise_if_cancelled(session, job_id)
+        profiles = await _load_scan_review_profile_page(
+            session,
+            job_id=job_id,
+            after_id=after_id,
+            page_size=page_size,
+        )
+        if not profiles:
+            break
+        for profile in profiles:
+            series_match_weight += scan_review_series_match_weight(
+                ScanReviewSeriesMatchProfile(
+                    file_count=profile.file_count,
+                    direct_match=profile.direct_match,
+                )
+            )
+            if profile.has_files:
+                file_match_weight += scan_review_file_match_weight(
+                    ScanReviewFileMatchProfile(
+                        file_count=profile.file_count,
+                        issue_count=profile.issue_count,
+                    )
+                )
+        after_id = profiles[-1].id
+
+    analysis_weight = scan_review_analysis_weight(analysis_series_count)
+    return ScanReviewProgressPlan(
+        analysis_weights=(analysis_weight,) if analysis_weight else (),
+        series_match_weights=(series_match_weight,) if series_match_weight else (),
+        file_match_weights=(file_match_weight,) if file_match_weight else (),
+    )
+
+
+def _aggregate_matching_completed_weight(
+    plan: ScanReviewProgressPlan,
+    *,
+    completed_items: int,
+    total_items: int,
+    current_item_progress_pct: int | None = None,
+) -> float:
+    current_fraction = max(min(int(current_item_progress_pct or 0), 100), 0) / 100
+    completed_fraction = min(
+        max((completed_items + current_fraction) / max(total_items, 1), 0.0),
+        1.0,
+    )
+    return plan.analysis_weight + plan.series_match_weight * completed_fraction
+
+
+async def _mark_pending_files_no_match(
+    session: AsyncSession,
+    item: ImportedSeries,
+    *,
+    job_id: int,
+    page_size: int,
+    raise_if_cancelled: RaiseIfCancelledFunc,
+) -> None:
+    after_id = 0
+    while True:
+        await raise_if_cancelled(session, job_id)
+        pending_files = await _load_pending_import_file_page(
+            session,
+            import_series_id=item.id,
+            after_id=after_id,
+            page_size=page_size,
+        )
+        if not pending_files:
+            break
         for imp_file in pending_files:
             diagnostics = dict(imp_file.diagnostics or {})
             diagnostics.setdefault("kind", "series_no_match_file")
@@ -322,14 +489,41 @@ async def run_import_series_matching(
             imp_file.is_preferred = False
             imp_file.error_message = None
             imp_file.diagnostics = diagnostics
+        after_id = pending_files[-1].id
+        await session.flush()
 
-    items_result = await session.execute(
-        sa_select(ImportedSeries).where(
-            ImportedSeries.import_job_id == job.id,
-            ImportedSeries.status == ImportSeriesStatus.PENDING,
-        )
-    )
-    items = list(items_result.scalars().all())
+
+async def run_import_series_matching(
+    session: AsyncSession,
+    job: ImportJob,
+    *,
+    metadata_provider: Any,
+    source_metadata_for_series: SourceMetadataForSeriesFunc,
+    load_deferred_source_metadata_for_series: DeferredSourceMetadataForSeriesFunc | None = None,
+    evaluate_match: EvaluateMatchFunc,
+    raise_if_cancelled: RaiseIfCancelledFunc,
+    reclassify_duplicates: ReclassifyDuplicatesFunc,
+    recompute_series_counters: RecomputeCountersFunc,
+    log_event: LogEventFunc,
+    emit_progress: EmitProgressFunc,
+    phase_progress: PhaseProgressFunc,
+    estimate_remaining_seconds: EstimateRemainingFunc,
+    job_stats: JobStatsFunc,
+    maybe_slow_item_delay: SlowItemDelayFunc,
+    provider_free_filesystem: bool = False,
+    estimate_remaining_work_seconds: EstimateRemainingWorkFunc | None = None,
+    progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None = None,
+    item_page_size: int = 100,
+    file_page_size: int = 250,
+    profile_page_size: int = 500,
+) -> None:
+    """Run ComicVine matching for all pending imported series in a job."""
+    started_at = time.monotonic()
+    persist_batch_size = 25
+    last_checkpoint_at = time.monotonic()
+    item_page_size = max(item_page_size, 1)
+    file_page_size = max(file_page_size, 1)
+    profile_page_size = max(profile_page_size, 1)
 
     matched_count = 0
     no_match_count = 0
@@ -342,25 +536,19 @@ async def run_import_series_matching(
     rebucket_duration_ms = 0.0
     rebucket_evaluated_files = 0
     deferred_metadata_loads = 0
-    total_items = len(items)
+    total_items = await _count_pending_import_series(session, job_id=job.id)
+    processed_items = 0
     runtime_revision_state: dict[str, int] = {"value": int(job.progress_revision or 0)}
-    progress_plan = scan_review_progress_plan(
-        analysis_series_count=max(job.series_found or total_items, total_items),
-        series_match_profiles=[
-            ScanReviewSeriesMatchProfile(
-                file_count=int(item.files_total or item.file_count or 0),
-                direct_match=bool(item.cv_id),
-            )
-            for item in items
-        ],
-        file_match_profiles=[
-            ScanReviewFileMatchProfile(
-                file_count=int(item.files_total or item.file_count or 0),
-                issue_count=item.cv_issue_count,
-            )
-            for item in items
-            if item.has_files
-        ],
+    progress_plan = (
+        await _build_scan_review_progress_plan(
+            session,
+            job_id=job.id,
+            analysis_series_count=max(job.series_found or total_items, total_items),
+            page_size=profile_page_size,
+            raise_if_cancelled=raise_if_cancelled,
+        )
+        if progress_callback is not None
+        else None
     )
 
     async def emit_matching_progress(
@@ -374,11 +562,12 @@ async def run_import_series_matching(
     ) -> None:
         if progress_callback is None:
             return
+        assert progress_plan is not None
 
-        completed_weight = scan_review_completed_weight(
+        completed_weight = _aggregate_matching_completed_weight(
             progress_plan,
-            phase="matching",
             completed_items=idx,
+            total_items=total_items,
             current_item_progress_pct=current_item_progress_pct,
         )
         progress = scan_review_progress_pct(
@@ -551,7 +740,12 @@ async def run_import_series_matching(
             await asyncio.gather(task, return_exceptions=True)
             raise
 
-    for idx, item in enumerate(items):
+    async for idx, item, is_page_last in _iter_pending_import_series(
+        session,
+        job_id=job.id,
+        page_size=item_page_size,
+        raise_if_cancelled=raise_if_cancelled,
+    ):
         await raise_if_cancelled(session, job.id)
         try:
             source_metadata_started_at = time.monotonic()
@@ -613,7 +807,8 @@ async def run_import_series_matching(
                 cv_result = evaluation.match
         except ImportProviderDegradedError as exc:
             deferred_count += 1
-            deferred_titles.append(item.raw_series_name)
+            if len(deferred_titles) < 10:
+                deferred_titles.append(item.raw_series_name)
             clear_auto_cv_match_fields(item)
             item.status = ImportSeriesStatus.PENDING
             item.diagnostics = {
@@ -655,6 +850,7 @@ async def run_import_series_matching(
             item.status = ImportSeriesStatus.MATCHED
             item.diagnostics = evaluation.diagnostics if evaluation is not None else {}
             matched_count += 1
+            rebucket_result = VolumeSubtitleRebucketResult()
             if not provider_free_filesystem:
                 rebucket_started_at = time.monotonic()
                 rebucket_result = await _rebucket_collection_volume_subtitle_series_with_progress(
@@ -667,27 +863,33 @@ async def run_import_series_matching(
                     matched_count += rebucket_result.created_series_count
                     if rebucket_result.removed_source_series:
                         matched_count -= 1
-                        continue
 
-            pending_detail_logs.append(
-                {
-                    "level": "DEBUG",
-                    "event": "import_series_match_detail",
-                    "message": f"Matched '{item.raw_series_name}' -> CV {cv_result['cv_id']}",
-                    "details": {
-                        "raw_series_name": item.raw_series_name,
-                        "cv_id": cv_result["cv_id"],
-                        "cv_title": cv_result["cv_title"],
-                        "score": cv_result["cv_match_score"],
-                        "method": cv_result["cv_match_method"],
-                    },
-                }
-            )
+            if not rebucket_result.removed_source_series:
+                pending_detail_logs.append(
+                    {
+                        "level": "DEBUG",
+                        "event": "import_series_match_detail",
+                        "message": f"Matched '{item.raw_series_name}' -> CV {cv_result['cv_id']}",
+                        "details": {
+                            "raw_series_name": item.raw_series_name,
+                            "cv_id": cv_result["cv_id"],
+                            "cv_title": cv_result["cv_title"],
+                            "score": cv_result["cv_match_score"],
+                            "method": cv_result["cv_match_method"],
+                        },
+                    }
+                )
         elif evaluation is not None:
             item.status = ImportSeriesStatus.NO_MATCH
             item.diagnostics = evaluation.diagnostics
             clear_auto_cv_match_fields(item)
-            await _mark_pending_files_no_match(item)
+            await _mark_pending_files_no_match(
+                session,
+                item,
+                job_id=job.id,
+                page_size=file_page_size,
+                raise_if_cancelled=raise_if_cancelled,
+            )
             no_match_count += 1
 
             diagnostics = dict(item.diagnostics or {})
@@ -717,7 +919,8 @@ async def run_import_series_matching(
         should_checkpoint = (
             idx == 0
             or (idx + 1) % persist_batch_size == 0
-            or idx == len(items) - 1
+            or idx == total_items - 1
+            or is_page_last
             or (time.monotonic() - last_checkpoint_at) >= 0.5
         )
         if should_checkpoint:
@@ -737,11 +940,11 @@ async def run_import_series_matching(
                 )
 
         if progress_callback and should_checkpoint:
-            total_items = len(items)
-            completed_weight = scan_review_completed_weight(
+            assert progress_plan is not None
+            completed_weight = _aggregate_matching_completed_weight(
                 progress_plan,
-                phase="matching",
                 completed_items=idx + 1,
+                total_items=total_items,
             )
             progress = scan_review_progress_pct(
                 progress_plan,
@@ -784,6 +987,7 @@ async def run_import_series_matching(
                 progress_callback,
             )
             await maybe_slow_item_delay()
+        processed_items = idx + 1
 
     if deferred_count:
         job.series_matched = matched_count
@@ -799,9 +1003,9 @@ async def run_import_series_matching(
             "import_matching_provider_degraded",
             message=job.error_message,
             deferred_count=deferred_count,
-            deferred_titles=deferred_titles[:10],
+            deferred_titles=deferred_titles,
             duration_ms=round((time.monotonic() - started_at) * 1000),
-            items_processed=len(items),
+            items_processed=processed_items,
             source_metadata_duration_ms=round(source_metadata_duration_ms),
             deferred_metadata_duration_ms=round(deferred_metadata_duration_ms),
             provider_evaluation_duration_ms=round(provider_evaluation_duration_ms),
@@ -831,7 +1035,7 @@ async def run_import_series_matching(
         matched=matched_count,
         no_match=no_match_count,
         duration_ms=round((time.monotonic() - started_at) * 1000),
-        items_processed=len(items),
+        items_processed=processed_items,
         source_metadata_duration_ms=round(source_metadata_duration_ms),
         deferred_metadata_duration_ms=round(deferred_metadata_duration_ms),
         provider_evaluation_duration_ms=round(provider_evaluation_duration_ms),
