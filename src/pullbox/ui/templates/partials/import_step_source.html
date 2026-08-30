@@ -200,16 +200,37 @@
           </div>
         </div>
 
-        <div class="inline-alert inline-alert-info">
-          <span class="inline-alert-icon" aria-hidden="true">
-            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m0 3.75h.008v.008H12v-.008zM11.25 3.75h1.5a8.25 8.25 0 110 16.5h-1.5a8.25 8.25 0 010-16.5z"/>
-            </svg>
-          </span>
-          <div class="min-w-0 text-xs leading-5 text-pb-text-sec">
-            Automatic fallback stays enabled so files that do not fit the selected pattern remain
-            visible and use Pullbox's existing safe detection.
-          </div>
+        <div
+          x-show="layoutChoice !== 'auto'"
+          x-cloak
+          class="rounded-xl border border-pb-border bg-pb-bg/40 p-4"
+        >
+          <label class="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              x-model="layoutFallbackToAuto"
+              @change="scheduleLayoutPreview()"
+              class="checkbox-pb mt-0.5 shrink-0"
+              data-testid="import-layout-fallback"
+            >
+            <span class="min-w-0">
+              <span class="block text-sm font-semibold text-pb-text">
+                Use automatic detection for files that do not fit
+              </span>
+              <span
+                x-show="layoutFallbackToAuto"
+                class="mt-1 block text-xs leading-5 text-pb-text-sec"
+              >
+                Pullbox keeps those files visible and applies its existing safe detection.
+              </span>
+              <span
+                x-show="!layoutFallbackToAuto"
+                class="mt-1 block text-xs leading-5 text-pb-warning"
+              >
+                Files that do not fit will wait for review and will not be matched automatically.
+              </span>
+            </span>
+          </label>
         </div>
 
         <div class="flex flex-wrap items-center gap-3">

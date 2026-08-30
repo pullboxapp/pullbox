@@ -34,7 +34,6 @@ from pullbox.core.collection_scan_grouping import (
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_layout import (
     ImportLayoutMode,
-    LayoutTemplateError,
     SourceLayoutMatch,
     SourceLayoutSpec,
     compile_source_layout,
@@ -178,14 +177,6 @@ class CollectionScanner:
         self._inventory_progress_callback = inventory_progress_callback
         self._extensions = extensions or COMIC_EXTENSIONS
         self._source_layout = resolve_source_layout_spec(source_layout or SourceLayoutSpec())
-        if (
-            self._source_layout.mode != ImportLayoutMode.AUTO
-            and not self._source_layout.fallback_to_auto
-        ):
-            raise LayoutTemplateError(
-                "Selected source layouts require automatic fallback until "
-                "non-fitting review support is available"
-            )
         self._compiled_source_layout = (
             None
             if self._source_layout.mode == ImportLayoutMode.AUTO
@@ -523,6 +514,13 @@ class CollectionScanner:
                     "fallback_used": layout_match is None and self._source_layout.fallback_to_auto,
                     "relative_path": relative_path,
                 }
+                if layout_match is None and not self._source_layout.fallback_to_auto:
+                    layout_diagnostics.update(
+                        {
+                            "review_required": True,
+                            "review_reason": "selected_layout_no_match",
+                        }
+                    )
                 if layout_match is not None and layout_match.issue_title is not None:
                     layout_diagnostics["issue_title"] = layout_match.issue_title
                 metadata_diagnostics["source_layout"] = layout_diagnostics

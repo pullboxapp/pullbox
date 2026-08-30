@@ -590,6 +590,7 @@
           {% set series_diagnostics = item.diagnostics or {} %}
           {% set row_safety_blocked_count = series_diagnostics.get('safety_blocked_files', 0)|int %}
           {% set series_conflict = item.status.value == 'no_match' and series_diagnostics.get('kind') == 'series_conflict' %}
+          {% set source_layout_review = item.status.value == 'no_match' and series_diagnostics.get('kind') == 'source_layout_review' %}
           {% set known_series_target = item.cv_id or item.user_selected_cv_id or item.series_id %}
           {% set file_conflict = item.status.value == 'matched' and item.files_conflict > 0 %}
           {% set file_issue_mismatch = item.status.value == 'no_match' and known_series_target %}
@@ -734,6 +735,14 @@
 	                  data-tip-pos="top"
 	                  data-tip-size="wide"
 	                >Conflict</div>
+	                {% elif source_layout_review %}
+	                <span
+	                  class="inline-flex cursor-help rounded-md text-xs font-medium text-pb-warning outline-none focus-visible:ring-2 focus-visible:ring-pb-focus"
+	                  tabindex="0"
+	                  data-tip="The selected source layout did not fit every file in this row."
+	                  data-tip-pos="top"
+	                  data-tip-size="wide"
+	                >Review required</span>
 	                {% else %}
 	                <span
 	                  class="inline-flex cursor-help rounded-md text-xs font-medium text-pb-warning outline-none focus-visible:ring-2 focus-visible:ring-pb-focus"
@@ -788,7 +797,7 @@
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z"/></svg>
                   Conflict
                 </span>
-	                {% elif item.cv_match_method in ('mylar3_cv_id', 'comicinfo_cv_id', 'user_override') %}
+	                {% elif item.cv_match_method in ('mylar3_cv_id', 'comicinfo_cv_id', 'user_override') and not source_layout_review %}
 	                <span class="pill pill-info">
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/></svg>
                   CV ID
@@ -799,9 +808,12 @@
                   Matched
                 </span>
                 {% elif item.status.value == 'no_match' %}
-                <span class="pill pill-warning">
+                <span
+                  class="pill pill-warning"
+                  {% if source_layout_review %}data-testid="import-review-layout-review"{% endif %}
+                >
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z"/></svg>
-                  {% if series_conflict %}Conflict{% elif file_issue_mismatch %}Needs issue{% else %}Needs series{% endif %}
+                  {% if source_layout_review %}Layout review{% elif series_conflict %}Conflict{% elif file_issue_mismatch %}Needs issue{% else %}Needs series{% endif %}
                 </span>
                 {% elif item.status.value == 'duplicate' %}
                 <span class="pill pill-neutral justify-center">In Library</span>
@@ -1197,17 +1209,21 @@
               <td colspan="{{ series_table_colspan }}" class="bg-pb-card-hover/40 px-4 py-4">
                 <div data-testid="import-review-no-match-detail-grid" class="grid items-start gap-5 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
                   <section class="min-w-0">
-                    <p class="text-[11px] font-semibold uppercase tracking-[0.16em] text-pb-text-dim">{% if series_conflict %}Conflict inputs{% else %}Match inputs{% endif %}</p>
+                    <p class="text-[11px] font-semibold uppercase tracking-[0.16em] text-pb-text-dim">{% if source_layout_review %}Layout review{% elif series_conflict %}Conflict inputs{% else %}Match inputs{% endif %}</p>
                     <dl class="mt-2 grid gap-x-5 gap-y-2 text-sm sm:grid-cols-[8rem_minmax(0,1fr)]">
                       <dt class="text-pb-text-dim">Title</dt>
                       <dd class="font-mono text-xs text-pb-text">{{ series_diagnostics.get('normalized_query') or item.raw_series_name }}</dd>
                       <dt class="text-pb-text-dim">Year</dt>
                       <dd class="text-pb-text">{{ series_diagnostics.get('raw_year') or 'Unknown' }}</dd>
+                      {% if not source_layout_review %}
                       <dt class="text-pb-text-dim">Threshold</dt>
                       <dd class="text-pb-text">{{ ((series_diagnostics.get('threshold') or job.cv_match_threshold) * 100)|round|int }}%</dd>
+                      {% endif %}
                       <dt class="text-pb-text-dim">Result</dt>
                       <dd class="text-pb-warning">
-                          {% if series_diagnostics.get('reason') == 'no_results' %}
+                          {% if series_diagnostics.get('reason') == 'selected_layout_no_match' %}
+                          Selected source layout did not fit this file group
+                          {% elif series_diagnostics.get('reason') == 'no_results' %}
                           ComicVine returned no candidate series
                           {% elif series_diagnostics.get('reason') == 'ambiguous_candidates' %}
                           Multiple strong ComicVine candidates conflicted on the best match
@@ -1220,6 +1236,12 @@
                           {% endif %}
                       </dd>
                     </dl>
+                    {% if source_layout_review %}
+                    {% set layout_review_files = series_diagnostics.get('source_layout_review_files', item.files_no_match)|int %}
+                    <p class="mt-3 text-[12px] leading-5 text-pb-text-sec">
+                      {{ layout_review_files }} file{{ "s" if layout_review_files != 1 else "" }} {{ "do" if layout_review_files != 1 else "does" }} not fit the selected source layout and will not be matched automatically. Review the series before importing.
+                    </p>
+                    {% endif %}
                     {% if series_diagnostics.get('reason') == 'ambiguous_candidates' and series_diagnostics.get('selected_candidate') and series_diagnostics.get('competing_candidate') %}
                     <p class="mt-3 text-[12px] leading-5 text-pb-text-sec">
                         {{ series_diagnostics.get('selected_candidate').get('title') }}{% if series_diagnostics.get('selected_candidate').get('year') %} ({{ series_diagnostics.get('selected_candidate').get('year') }}){% endif %}

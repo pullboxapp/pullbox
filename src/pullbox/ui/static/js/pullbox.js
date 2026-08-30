@@ -2928,6 +2928,7 @@ function importSourceData(config) {
     fileFormats: "cbz, cbr, cb7, cbt, pdf, epub",
     cvMatchThreshold: 70,
     layoutChoice: "auto",
+    layoutFallbackToAuto: true,
     customSeriesPathTemplate: "{Publisher}/{Series} ({Year})",
     customIssueFilenameTemplate: "{Series} {IssueTitle} Issue {Issue:03d}",
     layoutPreview: null,
@@ -2956,7 +2957,7 @@ function importSourceData(config) {
           schema_version: 1,
           mode: "preset",
           preset: "series_folders",
-          fallback_to_auto: true,
+          fallback_to_auto: this.layoutFallbackToAuto,
         };
       }
       if (this.layoutChoice === "publisher_series") {
@@ -2964,7 +2965,7 @@ function importSourceData(config) {
           schema_version: 1,
           mode: "preset",
           preset: "publisher_series",
-          fallback_to_auto: true,
+          fallback_to_auto: this.layoutFallbackToAuto,
         };
       }
       if (this.layoutChoice === "custom") {
@@ -2973,7 +2974,7 @@ function importSourceData(config) {
           mode: "custom",
           series_path_template: this.customSeriesPathTemplate.trim(),
           issue_filename_template: this.customIssueFilenameTemplate.trim() || null,
-          fallback_to_auto: true,
+          fallback_to_auto: this.layoutFallbackToAuto,
         };
       }
       return {

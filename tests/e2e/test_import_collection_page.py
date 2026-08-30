@@ -2478,5 +2478,15 @@ class TestImportCollectionTab:
             import_page.source_layout_preview.text_content() or ""
         )
 
+        import_page.source_layout_fallback_checkbox.uncheck()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+        assert requests[-1]["layout"] == {
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "fallback_to_auto": False,
+        }
+
         import_page.source_layout_custom.click()
         import_page.source_layout_custom_fields.wait_for(state="visible", timeout=5000)

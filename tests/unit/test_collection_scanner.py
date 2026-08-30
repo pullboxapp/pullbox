@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from pullbox.core.collection_scanner import CollectionScanner, DiscoveredSeries
-from pullbox.core.library_layout import ImportLayoutMode, LayoutTemplateError, SourceLayoutSpec
+from pullbox.core.library_layout import ImportLayoutMode, SourceLayoutSpec
 from pullbox.core.source_metadata import MetadataSignal, SourceMetadata, SourceMetadataExtractor
 from pullbox.models.issue import IssueType
 
@@ -158,15 +158,31 @@ class TestThreeLevelWithPublisher:
 class TestSelectedSourceLayout:
     """Explicit source layouts should drive grouping without hiding fallback files."""
 
-    def test_scanner_rejects_selected_layout_without_review_fallback_support(self) -> None:
-        with pytest.raises(LayoutTemplateError, match="automatic fallback"):
-            CollectionScanner(
-                source_layout=SourceLayoutSpec(
-                    mode=ImportLayoutMode.CUSTOM,
-                    series_path_template="{Publisher}/{Series}",
-                    fallback_to_auto=False,
-                )
+    @pytest.mark.asyncio
+    async def test_non_fitting_file_requires_review_without_auto_fallback(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _touch(tmp_path / "Batman (2011)" / "Batman 001.cbz")
+        scanner = CollectionScanner(
+            source_layout=SourceLayoutSpec(
+                mode=ImportLayoutMode.CUSTOM,
+                series_path_template="{Publisher}/{Series}",
+                fallback_to_auto=False,
             )
+        )
+
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Batman"
+        assert results[0].files[0].metadata_diagnostics["source_layout"] == {
+            "fit": False,
+            "fallback_used": False,
+            "review_required": True,
+            "review_reason": "selected_layout_no_match",
+            "relative_path": "Batman (2011)/Batman 001.cbz",
+        }
 
     @pytest.mark.asyncio
     async def test_custom_layout_uses_higher_series_segment_and_exact_issue_text(

@@ -176,6 +176,108 @@ async def test_materialize_discovered_scan_results_persists_safety_blocked_files
     }
 
 
+async def test_materialize_non_fitting_layout_files_as_explicit_review_rows(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    review_file = _discovered_file(name="Batman 001.cbz")
+    review_file.metadata_diagnostics = {
+        "source_layout": {
+            "fit": False,
+            "fallback_used": False,
+            "review_required": True,
+            "review_reason": "selected_layout_no_match",
+            "relative_path": "Batman (2011)/Batman 001.cbz",
+        }
+    }
+    discovered = DiscoveredSeries(
+        raw_series_name="Batman",
+        raw_year=2011,
+        raw_publisher=None,
+        file_count=1,
+        sample_paths=[review_file.file_path],
+        source_folder="/tmp/comics/Batman (2011)",
+        source_folder_relative="Batman (2011)",
+        files=[review_file],
+        has_files=True,
+    )
+
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+
+    series_row = pairs[0][1]
+    file_row = (
+        (await db_session.execute(select(ImportedFile).where(ImportedFile.import_job_id == job.id)))
+        .scalars()
+        .one()
+    )
+    assert series_row.status == ImportSeriesStatus.NO_MATCH
+    assert series_row.diagnostics["kind"] == "source_layout_review"
+    assert series_row.diagnostics["reason"] == "selected_layout_no_match"
+    assert file_row.status == ImportedFileStatus.NO_MATCH
+    assert file_row.include_in_import is False
+    assert file_row.diagnostics["kind"] == "source_layout_review"
+    assert file_row.diagnostics["rejection_reason"] == (
+        "This file does not fit the selected source layout. Review its series before importing."
+    )
+    assert file_row.diagnostics["source_metadata"]["source_layout"]["relative_path"] == (
+        "Batman (2011)/Batman 001.cbz"
+    )
+
+
+async def test_materialize_mixed_layout_keeps_only_non_fitting_file_in_review(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    fitting_file = _discovered_file(name="Batman 001.cbz")
+    fitting_file.metadata_diagnostics = {
+        "source_layout": {
+            "fit": True,
+            "fallback_used": False,
+            "relative_path": "DC Comics/Batman/Batman 001.cbz",
+        }
+    }
+    review_file = _discovered_file(name="Batman Special.cbz")
+    review_file.metadata_diagnostics = {
+        "source_layout": {
+            "fit": False,
+            "fallback_used": False,
+            "review_required": True,
+            "review_reason": "selected_layout_no_match",
+            "relative_path": "Loose/Batman Special.cbz",
+        }
+    }
+    discovered = DiscoveredSeries(
+        raw_series_name="Batman",
+        raw_year=2011,
+        raw_publisher="DC Comics",
+        file_count=2,
+        sample_paths=[fitting_file.file_path, review_file.file_path],
+        source_folder="/tmp/comics/DC Comics/Batman",
+        source_folder_relative="DC Comics/Batman",
+        files=[fitting_file, review_file],
+        has_files=True,
+    )
+
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+
+    assert pairs[0][1].status == ImportSeriesStatus.PENDING
+    files = (
+        (
+            await db_session.execute(
+                select(ImportedFile)
+                .where(ImportedFile.import_job_id == job.id)
+                .order_by(ImportedFile.file_name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {row.file_name: row.status for row in files} == {
+        "Batman 001.cbz": ImportedFileStatus.PENDING,
+        "Batman Special.cbz": ImportedFileStatus.NO_MATCH,
+    }
+
+
 async def test_materialize_discovered_scan_results_uses_comicinfo_cv_when_no_mylar_id(
     db_session: AsyncSession,
 ) -> None:

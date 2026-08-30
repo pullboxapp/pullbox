@@ -139,16 +139,6 @@ async def test_create_job_rejects_existing_active_import(
         ),
         (
             {
-                "source_layout": SourceLayoutSpecPayload(
-                    mode="preset",
-                    preset="publisher_series",
-                    fallback_to_auto=False,
-                )
-            },
-            "without automatic fallback",
-        ),
-        (
-            {
                 "future_layout_requested": True,
                 "future_root_policy": FutureRootPolicyPayload(
                     series_path_template="{Publisher}/{Series} ({Year})",
@@ -204,6 +194,25 @@ async def test_create_job_freezes_normalized_selected_layout(
         "selected_cluster_id": None,
         "fallback_to_auto": True,
     }
+
+
+async def test_create_job_freezes_selected_layout_without_automatic_fallback(
+    db_session: AsyncSession,
+    tmp_path: object,
+) -> None:
+    request = ImportJobCreate(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.FILESYSTEM,
+        source_layout=SourceLayoutSpecPayload(
+            mode="preset",
+            preset="publisher_series",
+            fallback_to_auto=False,
+        ),
+    )
+
+    job = await create_job(db_session, request, log_event=_log_event)
+
+    assert job.source_layout_snapshot["fallback_to_auto"] is False
 
 
 async def test_create_job_rejects_selected_layout_for_mylar_source(

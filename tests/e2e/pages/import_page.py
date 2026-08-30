@@ -88,6 +88,10 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-layout-analyze']").first
 
     @property
+    def source_layout_fallback_checkbox(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-fallback']").first
+
+    @property
     def source_layout_preview(self) -> Locator:
         return self.page.locator("[data-testid='import-layout-preview']").first
 

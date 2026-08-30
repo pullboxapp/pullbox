@@ -54,13 +54,6 @@ async def create_job(
     if request.file_handling_mode == ImportFileHandlingMode.IN_PLACE:
         raise ValidationError("In-place import is not available yet.")
     if (
-        request.source_layout.mode != ImportLayoutMode.AUTO
-        and not request.source_layout.fallback_to_auto
-    ):
-        raise ValidationError(
-            "Selected source layouts without automatic fallback are not available yet."
-        )
-    if (
         request.source_type != ImportSourceType.FILESYSTEM
         and request.source_layout.mode != ImportLayoutMode.AUTO
     ):

@@ -796,8 +796,10 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-layout-custom"' in response.text
         assert 'data-testid="import-layout-analyze"' in response.text
         assert 'data-testid="import-layout-preview"' in response.text
+        assert 'data-testid="import-layout-fallback"' in response.text
         assert "How is this library organized?" in response.text
-        assert "Automatic fallback stays enabled" in response.text
+        assert "Use automatic detection for files that do not fit" in response.text
+        assert "Files that do not fit will wait for review" in response.text
         assert 'data-testid="file-browser-modal"' in response.text
         assert 'data-testid="import-collection-modal-host"' in response.text
 
@@ -811,7 +813,8 @@ class TestImportShellRouteContracts:
         assert "new AbortController()" in source_controller
         assert "layoutPreviewRequestId" in source_controller
         assert "sourceLayoutPayload: function" in source_controller
-        assert "fallback_to_auto: true" in source_controller
+        assert "layoutFallbackToAuto: true" in source_controller
+        assert "fallback_to_auto: this.layoutFallbackToAuto" in source_controller
         assert "source_layout: this.sourceLayoutPayload()" in source_controller
 
     async def test_import_collection_exposes_stable_step_mounts(
@@ -1417,6 +1420,36 @@ class TestImportShellRouteContracts:
         action_bar_index = response.text.index('data-testid="import-review-action-bar"')
         status_bar_index = response.text.index('data-testid="import-review-series-filters"')
         assert action_bar_index < status_bar_index
+
+    async def test_import_review_partial_explains_selected_layout_review(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 11)
+            assert series is not None
+            series.diagnostics = {
+                "kind": "source_layout_review",
+                "reason": "selected_layout_no_match",
+                "rejection_reason": (
+                    "This file does not fit the selected source layout. "
+                    "Review its series before importing."
+                ),
+                "source_layout_review_files": 1,
+            }
+            await session.commit()
+
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+
+        assert response.status_code == 200
+        assert 'data-testid="import-review-layout-review"' in response.text
+        assert "Layout review" in response.text
+        assert "1 file does not fit the selected source layout" in response.text
+        assert "will not be matched automatically" in response.text
 
     async def test_import_review_partial_renders_matched_file_target_tables(
         self,

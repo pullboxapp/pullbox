@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 
 _TRUSTED_SERIES_MATCH_METHODS = frozenset({"mylar3_cv_id", "comicinfo_cv_id", "folder_cv_id"})
+_SOURCE_LAYOUT_REVIEW_MESSAGE = (
+    "This file does not fit the selected source layout. Review its series before importing."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +70,26 @@ def apply_file_match_series_summary(
     metadata_conflict_files = [
         f for f in files if dict(f.diagnostics or {}).get("kind") == "metadata_conflict"
     ]
+    source_layout_review_files = [
+        f for f in files if dict(f.diagnostics or {}).get("kind") == "source_layout_review"
+    ]
     invalidation_diagnostics: dict[str, Any] | None = None
     if (
+        not duplicate_series
+        and imp_series.status == ImportSeriesStatus.MATCHED
+        and source_layout_review_files
+    ):
+        invalidation_diagnostics = {
+            **dict(imp_series.diagnostics or {}),
+            "kind": "source_layout_review",
+            "reason": "selected_layout_no_match",
+            "rejection_reason": _SOURCE_LAYOUT_REVIEW_MESSAGE,
+            "source_layout_review_files": len(source_layout_review_files),
+            "unmatched_files": [file.file_name for file in source_layout_review_files],
+        }
+        imp_series.status = ImportSeriesStatus.NO_MATCH
+        imp_series.diagnostics = invalidation_diagnostics
+    elif (
         not duplicate_series
         and imp_series.cv_match_method not in _TRUSTED_SERIES_MATCH_METHODS
         and imp_series.status == ImportSeriesStatus.MATCHED

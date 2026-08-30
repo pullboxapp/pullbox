@@ -704,6 +704,30 @@ class TestCreateImportJob:
         mock_trigger.assert_called_once_with(resp.json()["id"])
 
     @pytest.mark.asyncio
+    async def test_create_job_accepts_selected_layout_with_review_only_outliers(
+        self,
+        client: AsyncClient,
+        tmp_path: object,
+    ) -> None:
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            resp = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                    "source_layout": {
+                        "mode": "preset",
+                        "preset": "publisher_series",
+                        "fallback_to_auto": False,
+                    },
+                },
+            )
+
+        assert resp.status_code == 201
+        assert resp.json()["source_layout_snapshot"]["fallback_to_auto"] is False
+        mock_trigger.assert_called_once_with(resp.json()["id"])
+
+    @pytest.mark.asyncio
     async def test_create_job_invalid_source_type(
         self,
         client: AsyncClient,
