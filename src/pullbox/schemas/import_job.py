@@ -641,6 +641,13 @@ class ImportProgressEvent(BaseModel):
     total_files_no_match: int | None = None
     total_files_imported: int | None = None
     total_files_failed: int | None = None
+    story_arc_placements_total: int | None = None
+    story_arc_placements_queued: int | None = None
+    story_arc_placements_running: int | None = None
+    story_arc_placements_retry_wait: int | None = None
+    story_arc_placements_failed: int | None = None
+    story_arc_placements_completed: int | None = None
+    story_arc_placements_cancelled: int | None = None
     review_summary: dict[str, int] | None = None
     control_state: dict[str, object] | None = None
 
@@ -903,6 +910,20 @@ class OrphanRecoveryProgressResponse(BaseModel):
 
 class RetryFailedResponse(BaseModel):
     """Result of retrying failed series in a completed import job."""
+
+    job_id: int
+    retrying_count: int
+
+
+class ImportJobDeleteResponse(BaseModel):
+    """Accepted deletion whose cooperative rollback has not finished yet."""
+
+    status: Literal["rollback_pending"] = "rollback_pending"
+    message: str
+
+
+class RetryStoryArcPlacementsResponse(BaseModel):
+    """Result of reopening failed/cancelled placement work for a stalled import."""
 
     job_id: int
     retrying_count: int

@@ -1719,6 +1719,31 @@ class TestCancelImportJob:
         assert resp.status_code == 409
 
     @pytest.mark.asyncio
+    async def test_delete_returns_202_when_story_arc_rollback_is_still_pending(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """DELETE must not report success while a live placement still owns its fence."""
+        service = MagicMock()
+        service.cancel_job = AsyncMock(return_value="rollback_pending")
+
+        with patch(
+            "pullbox.api.v1.import_jobs._make_import_service",
+            return_value=service,
+        ):
+            resp = await client.delete("/api/v1/import/42")
+
+        assert resp.status_code == 202
+        assert resp.json() == {
+            "status": "rollback_pending",
+            "message": (
+                "Rollback is still stopping an in-progress Story Arc placement. "
+                "The import remains in history; delete it again after rollback finishes."
+            ),
+        }
+        service.cancel_job.assert_awaited_once_with(ANY, 42)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "status",
         [
@@ -2564,6 +2589,50 @@ class TestRetryFailedEndpoint:
 # ── Tests: POST /import/{id}/retry ───────────────────────────────────
 
 
+class TestRetryStoryArcPlacementsEndpoint:
+    """Test stalled import-owned Story Arc placement recovery."""
+
+    @pytest.mark.asyncio
+    async def test_retry_story_arc_placements_commits_before_scheduler_nudge(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        job = MagicMock(id=41)
+        service = MagicMock()
+        service.retry_story_arc_placements = AsyncMock(return_value=(job, 2))
+
+        with patch(
+            "pullbox.api.v1.import_jobs._make_import_service",
+            return_value=service,
+        ):
+            resp = await client.post("/api/v1/import/41/story-arc-placements/retry")
+
+        assert resp.status_code == 202
+        assert resp.json() == {"job_id": 41, "retrying_count": 2}
+        service.retry_story_arc_placements.assert_awaited_once_with(ANY, 41)
+        service.schedule_story_arc_sync.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_retry_story_arc_placements_rejects_ineligible_job_without_nudge(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        service = MagicMock()
+        service.retry_story_arc_placements = AsyncMock(
+            side_effect=ValidationError("Import job is not stalled on Story Arc placements.")
+        )
+
+        with patch(
+            "pullbox.api.v1.import_jobs._make_import_service",
+            return_value=service,
+        ):
+            resp = await client.post("/api/v1/import/41/story-arc-placements/retry")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Import job is not stalled on Story Arc placements."
+        service.schedule_story_arc_sync.assert_not_called()
+
+
 class TestRetryImportEndpoint:
     """Test fresh retry API endpoint."""
 
@@ -2662,6 +2731,7 @@ class TestAuthRequired:
             ("POST", "/api/v1/import/orphaned/1/assign"),
             ("POST", "/api/v1/import/orphaned/1/dismiss"),
             ("POST", "/api/v1/import/1/retry-failed"),
+            ("POST", "/api/v1/import/1/story-arc-placements/retry"),
             ("POST", "/api/v1/import/1/retry"),
             # File-level endpoints (R-6)
             ("GET", "/api/v1/import/1/series/1/files"),
@@ -3196,6 +3266,46 @@ class TestHandlersDirect:
             assert result is not None
             assert result.status == ImportJobStatus.ROLLING_BACK
             assert result.control_request == ImportControlRequest.CANCEL
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_placement_wait_commits_and_triggers_rollback(
+        self,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A placement-wait cancel must not strand the job in CANCELLING."""
+        from pullbox.api.v1.import_jobs import request_cancel_import_job
+        from pullbox.models.import_job import ImportControlRequest
+
+        job_id = await _seed_import_job(_db_factory, status=ImportJobStatus.IMPORTING)
+        async with _db_factory() as session:
+            job = await session.get(ImportJob, job_id)
+            assert job is not None
+            job.import_started_at = datetime.now(UTC)
+            job.progress_snapshot = {
+                "status": ImportJobStatus.IMPORTING.value,
+                "mode": "import",
+                "phase": "story_arc_placements",
+                "progress": 99,
+            }
+            await session.commit()
+
+        with patch("pullbox.api.v1.import_jobs.trigger_import_rollback") as trigger_rollback:
+            async with _db_factory() as session:
+                result = await request_cancel_import_job(
+                    job_id=job_id,
+                    _user=MagicMock(),
+                    session=session,
+                )
+
+        assert result is not None
+        assert result.status is ImportJobStatus.ROLLING_BACK
+        assert result.control_request is ImportControlRequest.CANCEL
+        trigger_rollback.assert_called_once_with(job_id)
+
+        async with _db_factory() as session:
+            persisted = await session.get(ImportJob, job_id)
+        assert persisted is not None
+        assert persisted.status is ImportJobStatus.ROLLING_BACK
 
     @pytest.mark.asyncio
     async def test_override_direct(

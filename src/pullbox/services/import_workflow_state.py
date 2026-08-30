@@ -278,6 +278,22 @@ def import_control_state_for_job(job: ImportJob) -> dict[str, object]:
     """Return durable UI control affordances for the current job state."""
     requested_action = snapshot_requested_action_for_job(job)
     action_pending = requested_action != ImportControlRequest.NONE
+    snapshot = dict(job.progress_snapshot or {})
+    placement_wait = (
+        job.status in {ImportJobStatus.IMPORTING, ImportJobStatus.STALLED}
+        and snapshot.get("phase") == "story_arc_placements"
+    )
+    failed_placements = snapshot.get("story_arc_placements_failed")
+    cancelled_placements = snapshot.get("story_arc_placements_cancelled")
+    has_retryable_terminal_placements = (
+        isinstance(failed_placements, int)
+        and not isinstance(failed_placements, bool)
+        and failed_placements >= 0
+        and isinstance(cancelled_placements, int)
+        and not isinstance(cancelled_placements, bool)
+        and cancelled_placements >= 0
+        and failed_placements + cancelled_placements > 0
+    )
     can_pause = (
         job.status
         in {
@@ -288,10 +304,11 @@ def import_control_state_for_job(job: ImportJob) -> dict[str, object]:
             ImportJobStatus.IMPORTING,
         }
         and not action_pending
+        and not placement_wait
     )
-    can_resume = job.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED} or (
-        job.status == ImportJobStatus.REVIEW and job.import_started_at is None
-    )
+    can_resume = (
+        job.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED} and not placement_wait
+    ) or (job.status == ImportJobStatus.REVIEW and job.import_started_at is None)
     can_cancel = (
         job.status
         in ACTIVE_IMPORT_JOB_STATUSES
@@ -327,6 +344,13 @@ def import_control_state_for_job(job: ImportJob) -> dict[str, object]:
         ImportJobStatus.CANCELLED,
         ImportJobStatus.ROLLED_BACK,
     }
+    can_retry_story_arc_placements = bool(
+        job.status is ImportJobStatus.STALLED
+        and job.import_started_at is not None
+        and placement_wait
+        and not action_pending
+        and has_retryable_terminal_placements
+    )
     can_rollback = bool(job.import_started_at) and job.status in {
         ImportJobStatus.COMPLETED,
         ImportJobStatus.FAILED,
@@ -339,6 +363,7 @@ def import_control_state_for_job(job: ImportJob) -> dict[str, object]:
         "can_delete": can_delete,
         "can_view_results": can_view_results,
         "can_retry": can_retry,
+        "can_retry_story_arc_placements": can_retry_story_arc_placements,
         "can_rollback": can_rollback,
         "transfer_method": job.transfer_method,
         "convert_to_preferred_format": job.convert_to_preferred_format,
@@ -463,6 +488,13 @@ def runtime_snapshot_payload(
         "total_files_no_match": job.total_files_no_match,
         "total_files_imported": job.total_files_imported,
         "total_files_failed": job.total_files_failed,
+        "story_arc_placements_total": snapshot.get("story_arc_placements_total"),
+        "story_arc_placements_queued": snapshot.get("story_arc_placements_queued"),
+        "story_arc_placements_running": snapshot.get("story_arc_placements_running"),
+        "story_arc_placements_retry_wait": snapshot.get("story_arc_placements_retry_wait"),
+        "story_arc_placements_failed": snapshot.get("story_arc_placements_failed"),
+        "story_arc_placements_completed": snapshot.get("story_arc_placements_completed"),
+        "story_arc_placements_cancelled": snapshot.get("story_arc_placements_cancelled"),
         "review_summary": (
             review_summary if review_summary is not None else snapshot.get("review_summary")
         ),

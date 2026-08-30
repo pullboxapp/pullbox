@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -15,7 +15,12 @@ from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
-from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+from pullbox.models.import_job import (
+    ImportControlRequest,
+    ImportJob,
+    ImportJobStatus,
+    ImportSourceType,
+)
 from pullbox.models.operation_progress import (
     OperationProgress,
     OperationProgressState,
@@ -37,6 +42,7 @@ from pullbox.tasks.import_task import (
     get_highest_visible_progress_revision,
     get_latest_progress_event,
     get_progress_queue,
+    publish_story_arc_import_updates,
     recover_stuck_import_jobs,
     remove_progress_queue,
     run_import_execute_task,
@@ -77,6 +83,52 @@ def _sqlite_database_locked_error() -> SQLAlchemyOperationalError:
         {},
         sqlite3.OperationalError("database is locked"),
     )
+
+
+@pytest.mark.asyncio
+async def test_story_arc_import_followup_schedules_enrichment_and_clears_retry_marker(
+    async_engine: object,
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session, status=ImportJobStatus.COMPLETED)
+    job.import_started_at = datetime.now(UTC)
+    job.progress_snapshot = {
+        "status": ImportJobStatus.COMPLETED.value,
+        "mode": "import",
+        "phase": "done",
+        "progress": 100,
+        "story_arc_placements_total": 1,
+        "story_arc_placements_completed": 1,
+        "story_arc_placement_followup_pending": True,
+    }
+    job.story_arc_placement_followup_pending = True
+    await db_session.commit()
+    factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    service = AsyncMock()
+    service.schedule_comicinfo_enrichment = Mock()
+
+    with (
+        patch("pullbox.tasks.import_task._import_runner", None),
+        patch(
+            "pullbox.tasks.import_task._build_import_service",
+            new=AsyncMock(return_value=service),
+        ),
+        patch("pullbox.tasks.import_task.publish", new_callable=AsyncMock),
+    ):
+        await publish_story_arc_import_updates(
+            (job.id,),
+            completed_job_ids=(job.id,),
+            session_factory=factory,
+        )
+
+    service.schedule_comicinfo_enrichment.assert_called_once_with(
+        factory,
+        job_id=job.id,
+    )
+    await db_session.refresh(job)
+    assert job.progress_snapshot["phase"] == "done"
+    assert job.progress_snapshot["story_arc_placement_followup_pending"] is False
+    assert job.story_arc_placement_followup_pending is False
 
 
 @pytest.mark.asyncio
@@ -473,6 +525,64 @@ class TestRunImportExecuteTask:
             mock_session_ctx,
             job_id=job.id,
         )
+
+    @pytest.mark.asyncio
+    async def test_execute_task_nudges_story_arc_sync_after_commit(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Import-owned placement work becomes runnable only after its commit."""
+        job = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        await db_session.commit()
+        events: list[str] = []
+        mock_service = AsyncMock()
+
+        async def queue_placements(session, job_id, progress_callback=None):
+            import_job = await session.get(ImportJob, job_id)
+            assert import_job is not None
+            import_job.progress_snapshot = {
+                "mode": "import",
+                "phase": "story_arc_placements",
+                "progress": 99,
+                "story_arc_placements_total": 2,
+                "story_arc_placements_queued": 2,
+                "story_arc_placements_completed": 0,
+                "story_arc_placements_failed": 0,
+            }
+            await session.flush()
+            return RunImportResult(schedule_story_arc_sync=True)
+
+        async def commit_with_event() -> None:
+            await original_commit()
+            events.append("commit")
+
+        mock_service.run_import.side_effect = queue_placements
+        mock_service.schedule_story_arc_sync = Mock(
+            side_effect=lambda: events.append("story_arc_sync")
+        )
+        original_commit = db_session.commit
+
+        @asynccontextmanager
+        async def mock_session_ctx():
+            yield db_session
+
+        with (
+            patch.object(db_session, "commit", new=commit_with_event),
+            patch("pullbox.tasks.import_task.get_session_factory") as mock_factory,
+            patch(
+                "pullbox.tasks.import_task._build_import_service",
+                return_value=mock_service,
+            ),
+        ):
+            mock_factory.return_value = mock_session_ctx
+            await run_import_execute_task(job.id)
+
+        assert events[:2] == ["commit", "story_arc_sync"]
+        mock_service.schedule_story_arc_sync.assert_called_once_with()
+        await db_session.refresh(job)
+        assert job.status is ImportJobStatus.IMPORTING
+        assert job.progress_snapshot["phase"] == "story_arc_placements"
+        assert job.progress_snapshot["progress"] == 99
+        assert job.progress_snapshot["story_arc_placements_total"] == 2
 
     @pytest.mark.asyncio
     async def test_execute_task_cancelled_import_runs_automatic_rollback(
@@ -972,6 +1082,35 @@ class TestStartupRecovery:
         )
 
     @pytest.mark.asyncio
+    async def test_story_arc_placement_phase_survives_startup_recovery(
+        self, async_engine: object, db_session: AsyncSession
+    ) -> None:
+        """A durable placement wait resumes its finalizer instead of replaying import."""
+        job = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        job.progress_snapshot = {
+            "status": ImportJobStatus.IMPORTING.value,
+            "mode": "import",
+            "phase": "story_arc_placements",
+            "progress": 99,
+            "story_arc_placements_total": 3,
+            "story_arc_placements_queued": 2,
+            "story_arc_placements_completed": 1,
+            "story_arc_placements_failed": 0,
+        }
+        await db_session.commit()
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        recovered = await recover_stuck_import_jobs(factory)
+
+        assert recovered == 1
+        await db_session.refresh(job)
+        assert job.status == ImportJobStatus.PAUSED
+        snapshot = dict(job.progress_snapshot or {})
+        assert snapshot["phase"] == "story_arc_placements"
+        assert snapshot["story_arc_placements_total"] == 3
+        assert snapshot["recovered_status"] == ImportJobStatus.IMPORTING.value
+
+    @pytest.mark.asyncio
     async def test_file_matching_job_recovered(
         self, async_engine: object, db_session: AsyncSession
     ) -> None:
@@ -996,13 +1135,13 @@ class TestStartupRecovery:
 
         factory = async_sessionmaker(async_engine, expire_on_commit=False)
         runner = ImportRunner(factory)
-        start_if_idle = AsyncMock()
-        runner._start_if_idle = start_if_idle
+        start_worker = Mock()
+        runner._start_worker_locked = start_worker
 
         recovered = await runner.recover_and_dispatch()
 
         assert recovered == 1
-        start_if_idle.assert_awaited_once_with(job.id)
+        start_worker.assert_called_once_with(job.id)
         await db_session.refresh(job)
         assert job.status == ImportJobStatus.FILE_MATCHING
         snapshot = job.progress_snapshot or {}
@@ -1010,6 +1149,261 @@ class TestStartupRecovery:
         assert snapshot["phase"] == "file_matching"
         assert "pause_reason" not in snapshot
         assert "recovered_status" not in snapshot
+
+    @pytest.mark.asyncio
+    async def test_recover_and_dispatch_drains_multiple_recovered_jobs_serially(
+        self, async_engine: object, db_session: AsyncSession
+    ) -> None:
+        """Every recovered job is resumed in order without overlapping import runners."""
+        first = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        second = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        first.created_at = datetime.now(UTC) - timedelta(minutes=1)
+        second.created_at = datetime.now(UTC)
+        for job in (first, second):
+            job.import_started_at = datetime.now(UTC)
+            job.progress_snapshot = {
+                "status": ImportJobStatus.IMPORTING.value,
+                "mode": "import",
+                "phase": "story_arc_placements",
+                "progress": 99,
+                "story_arc_placements_total": 1,
+            }
+        await db_session.commit()
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        runner = ImportRunner(factory)
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        calls: list[int] = []
+        running = 0
+        maximum_running = 0
+
+        async def finish_recovered_job(job_id: int) -> None:
+            nonlocal maximum_running, running
+            running += 1
+            maximum_running = max(maximum_running, running)
+            calls.append(job_id)
+            try:
+                async with factory() as session:
+                    recovered = await session.get(ImportJob, job_id)
+                    assert recovered is not None
+                    assert recovered.status is ImportJobStatus.IMPORTING
+                    snapshot = dict(recovered.progress_snapshot or {})
+                    assert snapshot.get("pause_reason") is None
+                    assert snapshot.get("recovered_status") is None
+                if job_id == first.id:
+                    first_started.set()
+                    await release_first.wait()
+                async with factory() as session:
+                    recovered = await session.get(ImportJob, job_id)
+                    assert recovered is not None
+                    recovered.status = ImportJobStatus.COMPLETED
+                    recovered.progress_snapshot = {
+                        "status": ImportJobStatus.COMPLETED.value,
+                        "mode": "import",
+                        "phase": "done",
+                        "progress": 100,
+                    }
+                    await session.commit()
+            finally:
+                running -= 1
+
+        runner._run_job = finish_recovered_job  # type: ignore[method-assign]
+
+        recovered_count = await runner.recover_and_dispatch()
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        worker = runner._worker_task
+        assert worker is not None
+
+        await db_session.refresh(first)
+        await db_session.refresh(second)
+        assert first.status is ImportJobStatus.IMPORTING
+        assert second.status is ImportJobStatus.PAUSED
+        assert (second.progress_snapshot or {}).get("pause_reason") == "startup_recovery"
+
+        release_first.set()
+        await asyncio.wait_for(worker, timeout=1)
+
+        assert recovered_count == 2
+        assert calls == [first.id, second.id]
+        assert maximum_running == 1
+        await db_session.refresh(first)
+        await db_session.refresh(second)
+        assert first.status is ImportJobStatus.COMPLETED
+        assert second.status is ImportJobStatus.COMPLETED
+
+    @pytest.mark.parametrize(
+        "status",
+        [ImportJobStatus.MATCHING, ImportJobStatus.ROLLING_BACK],
+    )
+    @pytest.mark.asyncio
+    async def test_recovered_dispatch_ignores_unmarked_active_jobs(
+        self,
+        async_engine: object,
+        db_session: AsyncSession,
+        status: ImportJobStatus,
+    ) -> None:
+        """Normal live work must never be claimed as startup-recovered work."""
+        job = await _create_job(db_session, status=status)
+        job.import_started_at = datetime.now(UTC)
+        job.progress_snapshot = {
+            "status": status.value,
+            "mode": "rollback" if status is ImportJobStatus.ROLLING_BACK else "scan",
+            "phase": "rollback" if status is ImportJobStatus.ROLLING_BACK else "matching",
+        }
+        await db_session.commit()
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        runner = ImportRunner(factory)
+        start_worker = Mock()
+        runner._start_worker_locked = start_worker
+
+        await runner.request_recovered_dispatch()
+
+        start_worker.assert_not_called()
+        await db_session.refresh(job)
+        assert job.status is status
+
+    @pytest.mark.asyncio
+    async def test_stalled_job_blocks_later_startup_recovery_until_terminal(
+        self, async_engine: object, db_session: AsyncSession
+    ) -> None:
+        """A stalled import remains the single active owner until it is resolved."""
+        stalled = await _create_job(db_session, status=ImportJobStatus.STALLED)
+        recovered = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        for job in (stalled, recovered):
+            job.import_started_at = datetime.now(UTC)
+            job.progress_snapshot = {
+                "status": job.status.value,
+                "mode": "import",
+                "phase": "story_arc_placements",
+                "progress": 99,
+                "story_arc_placements_total": 1,
+            }
+        await db_session.commit()
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        runner = ImportRunner(factory)
+        start_worker = Mock()
+        runner._start_worker_locked = start_worker
+
+        assert await runner.recover_and_dispatch() == 1
+        start_worker.assert_not_called()
+        await db_session.refresh(recovered)
+        assert recovered.status is ImportJobStatus.PAUSED
+        assert (recovered.progress_snapshot or {}).get("pause_reason") == "startup_recovery"
+
+        async with factory() as session:
+            resolved = await session.get(ImportJob, stalled.id)
+            assert resolved is not None
+            resolved.status = ImportJobStatus.COMPLETED
+            resolved.progress_snapshot = {
+                "status": ImportJobStatus.COMPLETED.value,
+                "mode": "import",
+                "phase": "done",
+                "progress": 100,
+            }
+            await session.commit()
+
+        await runner.request_recovered_dispatch()
+
+        start_worker.assert_called_once_with(recovered.id)
+        await db_session.refresh(recovered)
+        assert recovered.status is ImportJobStatus.IMPORTING
+        assert (recovered.progress_snapshot or {}).get("pause_reason") is None
+
+    @pytest.mark.asyncio
+    async def test_completed_placement_finalizer_wakes_next_recovered_job(
+        self, async_engine: object, db_session: AsyncSession
+    ) -> None:
+        """Async placement completion resumes the next startup-recovered import."""
+        first = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        second = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        first.created_at = datetime.now(UTC) - timedelta(minutes=1)
+        second.created_at = datetime.now(UTC)
+        for job in (first, second):
+            job.import_started_at = datetime.now(UTC)
+            job.progress_snapshot = {
+                "status": ImportJobStatus.IMPORTING.value,
+                "mode": "import",
+                "phase": "story_arc_placements",
+                "progress": 99,
+                "story_arc_placements_total": 1,
+            }
+        await db_session.commit()
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        runner = ImportRunner(factory)
+        calls: list[int] = []
+
+        async def finish_only_the_second(job_id: int) -> None:
+            calls.append(job_id)
+            if job_id == first.id:
+                return
+            async with factory() as session:
+                recovered = await session.get(ImportJob, job_id)
+                assert recovered is not None
+                assert recovered.status is ImportJobStatus.IMPORTING
+                recovered.status = ImportJobStatus.COMPLETED
+                recovered.progress_snapshot = {
+                    "status": ImportJobStatus.COMPLETED.value,
+                    "mode": "import",
+                    "phase": "done",
+                    "progress": 100,
+                }
+                await session.commit()
+
+        runner._run_job = finish_only_the_second  # type: ignore[method-assign]
+        assert await runner.recover_and_dispatch() == 2
+        initial_worker = runner._worker_task
+        assert initial_worker is not None
+        await asyncio.wait_for(initial_worker, timeout=1)
+        await asyncio.sleep(0)
+
+        await db_session.refresh(first)
+        await db_session.refresh(second)
+        assert first.status is ImportJobStatus.IMPORTING
+        assert second.status is ImportJobStatus.PAUSED
+
+        async with factory() as session:
+            completed = await session.get(ImportJob, first.id)
+            assert completed is not None
+            completed.status = ImportJobStatus.COMPLETED
+            completed.import_completed_at = datetime.now(UTC)
+            completed.story_arc_placement_followup_pending = True
+            completed.progress_snapshot = {
+                "status": ImportJobStatus.COMPLETED.value,
+                "mode": "import",
+                "phase": "done",
+                "progress": 100,
+                "story_arc_placements_total": 1,
+                "story_arc_placements_completed": 1,
+                "story_arc_placement_followup_pending": True,
+            }
+            await session.commit()
+
+        service = AsyncMock()
+        service.schedule_comicinfo_enrichment = Mock()
+        with (
+            patch("pullbox.tasks.import_task._import_runner", runner),
+            patch(
+                "pullbox.tasks.import_task._build_import_service",
+                new=AsyncMock(return_value=service),
+            ),
+            patch("pullbox.tasks.import_task.publish", new_callable=AsyncMock),
+        ):
+            await publish_story_arc_import_updates(
+                (first.id,),
+                completed_job_ids=(first.id,),
+                session_factory=factory,
+            )
+            resumed_worker = runner._worker_task
+            assert resumed_worker is not None
+            await asyncio.wait_for(resumed_worker, timeout=1)
+
+        assert calls == [first.id, second.id]
+        await db_session.refresh(second)
+        assert second.status is ImportJobStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_recover_and_dispatch_leaves_user_paused_job_alone(
@@ -1027,15 +1421,81 @@ class TestStartupRecovery:
 
         factory = async_sessionmaker(async_engine, expire_on_commit=False)
         runner = ImportRunner(factory)
-        start_if_idle = AsyncMock()
-        runner._start_if_idle = start_if_idle
+        start_worker = Mock()
+        runner._start_worker_locked = start_worker
 
         recovered = await runner.recover_and_dispatch()
 
         assert recovered == 0
-        start_if_idle.assert_not_awaited()
+        start_worker.assert_not_called()
         await db_session.refresh(job)
         assert job.status == ImportJobStatus.PAUSED
+
+    @pytest.mark.asyncio
+    async def test_startup_preserves_in_flight_user_pause_without_auto_resume(
+        self, async_engine: object, db_session: AsyncSession
+    ) -> None:
+        job = await _create_job(db_session, status=ImportJobStatus.PAUSING)
+        job.import_started_at = datetime.now(UTC)
+        job.control_request = ImportControlRequest.PAUSE
+        job.progress_snapshot = {
+            "status": ImportJobStatus.PAUSING.value,
+            "mode": "import",
+            "phase": "importing",
+            "requested_action": ImportControlRequest.PAUSE.value,
+        }
+        await db_session.commit()
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        runner = ImportRunner(factory)
+        start_worker = Mock()
+        runner._start_worker_locked = start_worker
+
+        recovered = await runner.recover_and_dispatch()
+
+        assert recovered == 1
+        start_worker.assert_not_called()
+        await db_session.refresh(job)
+        assert job.status is ImportJobStatus.PAUSED
+        assert job.control_request is ImportControlRequest.NONE
+        snapshot = dict(job.progress_snapshot or {})
+        assert snapshot["requested_action"] == ImportControlRequest.NONE.value
+        assert snapshot.get("pause_reason") != "startup_recovery"
+
+    @pytest.mark.asyncio
+    async def test_startup_preserves_cancel_as_rollback_and_dispatches_it(
+        self, async_engine: object, db_session: AsyncSession
+    ) -> None:
+        job = await _create_job(db_session, status=ImportJobStatus.CANCELLING)
+        job.import_started_at = datetime.now(UTC)
+        job.control_request = ImportControlRequest.CANCEL
+        job.story_arc_placement_followup_pending = True
+        job.progress_snapshot = {
+            "status": ImportJobStatus.CANCELLING.value,
+            "mode": "import",
+            "phase": "story_arcs",
+            "requested_action": ImportControlRequest.CANCEL.value,
+        }
+        await db_session.commit()
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        runner = ImportRunner(factory)
+        start_worker = Mock()
+        runner._start_worker_locked = start_worker
+
+        recovered = await runner.recover_and_dispatch()
+
+        assert recovered == 1
+        start_worker.assert_called_once_with(job.id)
+        await db_session.refresh(job)
+        assert job.status is ImportJobStatus.ROLLING_BACK
+        assert job.control_request is ImportControlRequest.CANCEL
+        assert job.story_arc_placement_followup_pending is False
+        snapshot = dict(job.progress_snapshot or {})
+        assert snapshot["status"] == ImportJobStatus.ROLLING_BACK.value
+        assert snapshot["mode"] == "rollback"
+        assert snapshot["phase"] == "queued"
+        assert snapshot["requested_action"] == ImportControlRequest.CANCEL.value
 
     @pytest.mark.asyncio
     async def test_runner_uses_phase_resume_for_scan_states(
@@ -1118,6 +1578,81 @@ class TestStartupRecovery:
             mock_session_ctx,
             job_id=job.id,
         )
+
+    @pytest.mark.asyncio
+    async def test_runner_nudges_story_arc_sync_after_commit(
+        self, db_session: AsyncSession
+    ) -> None:
+        """The durable runner exposes import placement work post-commit only."""
+        job = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        await db_session.commit()
+        events: list[str] = []
+        mock_service = AsyncMock()
+
+        async def queue_placements(session, job_id, progress_callback=None):
+            import_job = await session.get(ImportJob, job_id)
+            assert import_job is not None
+            import_job.progress_snapshot = {"phase": "story_arc_placements"}
+            await session.flush()
+            return RunImportResult(schedule_story_arc_sync=True)
+
+        async def commit_with_event() -> None:
+            await original_commit()
+            events.append("commit")
+
+        mock_service.run_import.side_effect = queue_placements
+        mock_service.schedule_story_arc_sync = Mock(
+            side_effect=lambda: events.append("story_arc_sync")
+        )
+        original_commit = db_session.commit
+
+        @asynccontextmanager
+        async def mock_session_ctx():
+            yield db_session
+
+        runner = ImportRunner(mock_session_ctx)
+        with (
+            patch.object(db_session, "commit", new=commit_with_event),
+            patch("pullbox.tasks.import_task._build_import_service", return_value=mock_service),
+            patch("pullbox.tasks.import_task.publish", new_callable=AsyncMock),
+        ):
+            await runner._run_job(job.id)
+
+        assert events[:2] == ["commit", "story_arc_sync"]
+        mock_service.schedule_story_arc_sync.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_runner_requeues_deferred_story_arc_rollback_after_commit(
+        self, db_session: AsyncSession
+    ) -> None:
+        job = await _create_job(db_session, status=ImportJobStatus.ROLLING_BACK)
+        await db_session.commit()
+        events: list[str] = []
+        mock_service = AsyncMock()
+        mock_service.rollback_import.return_value = False
+        mock_service.schedule_story_arc_sync = Mock(
+            side_effect=lambda: events.append("story_arc_sync")
+        )
+        original_commit = db_session.commit
+
+        async def commit_with_event() -> None:
+            await original_commit()
+            events.append("commit")
+
+        @asynccontextmanager
+        async def mock_session_ctx():
+            yield db_session
+
+        runner = ImportRunner(mock_session_ctx)
+        with (
+            patch.object(db_session, "commit", new=commit_with_event),
+            patch("pullbox.tasks.import_task._build_import_service", return_value=mock_service),
+            patch("pullbox.tasks.import_task.publish", new_callable=AsyncMock),
+        ):
+            await runner._run_job(job.id)
+
+        assert events[:2] == ["commit", "story_arc_sync"]
+        mock_service.schedule_story_arc_sync.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_review_job_untouched(

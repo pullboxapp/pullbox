@@ -186,11 +186,12 @@ class TestGenerateItems:
     """Verify item discovery."""
 
     @pytest.mark.asyncio
-    async def test_manual_scope_discovers_files(self, tmp_path: Path) -> None:
+    async def test_manual_scope_discovers_files(self, db_session, tmp_path: Path) -> None:
         f1 = _create_test_cb7(tmp_path / "batman.cb7")
         f2 = _create_test_cb7(tmp_path / "saga.cb7")
 
         executor = MassConvertPipelineExecutor()
+        executor._session = db_session  # type: ignore[attr-defined]
         items = await executor.generate_items(
             {
                 "steps": [1, 4],
@@ -203,10 +204,11 @@ class TestGenerateItems:
         assert all(item["operation"] == "pipeline" for item in items)
 
     @pytest.mark.asyncio
-    async def test_nonexistent_files_excluded(self, tmp_path: Path) -> None:
+    async def test_nonexistent_files_excluded(self, db_session, tmp_path: Path) -> None:
         f1 = _create_test_cb7(tmp_path / "exists.cb7")
 
         executor = MassConvertPipelineExecutor()
+        executor._session = db_session  # type: ignore[attr-defined]
         items = await executor.generate_items(
             {
                 "steps": [1],
@@ -218,8 +220,9 @@ class TestGenerateItems:
         assert len(items) == 1
 
     @pytest.mark.asyncio
-    async def test_empty_file_paths_returns_empty(self) -> None:
+    async def test_empty_file_paths_returns_empty(self, db_session) -> None:
         executor = MassConvertPipelineExecutor()
+        executor._session = db_session  # type: ignore[attr-defined]
         items = await executor.generate_items(
             {
                 "steps": [1],
@@ -230,13 +233,18 @@ class TestGenerateItems:
         assert items == []
 
     @pytest.mark.asyncio
-    async def test_folder_scope_discovers_files_from_multiple_folders(self, tmp_path: Path) -> None:
+    async def test_folder_scope_discovers_files_from_multiple_folders(
+        self,
+        db_session,
+        tmp_path: Path,
+    ) -> None:
         folder_one = tmp_path / "Batman (2016)"
         folder_two = tmp_path / "Saga (2012)"
         file_one = _create_test_cb7(folder_one / "Batman 001.cb7")
         file_two = _create_test_cb7(folder_two / "Saga 001.cb7")
 
         executor = MassConvertPipelineExecutor()
+        executor._session = db_session  # type: ignore[attr-defined]
         items = await executor.generate_items(
             {
                 "steps": [1],

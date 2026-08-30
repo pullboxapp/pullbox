@@ -130,6 +130,20 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     """
 
     __tablename__ = "import_jobs"
+    __table_args__ = (
+        Index(
+            "ix_import_jobs_story_arc_followup",
+            "status",
+            "story_arc_placement_followup_pending",
+            "id",
+        ),
+        Index(
+            "ix_import_jobs_story_arc_rollback_waiting",
+            "status",
+            "story_arc_rollback_waiting_work_id",
+            "id",
+        ),
+    )
 
     # Source
     source_path: Mapped[str] = mapped_column(String(1000), nullable=False)
@@ -187,6 +201,14 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
         default=ImportControlRequest.NONE,
         server_default=ImportControlRequest.NONE.value,
         nullable=False,
+    )
+    story_arc_placement_followup_pending: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
+    story_arc_rollback_waiting_work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("story_arc_sync_work.id", ondelete="SET NULL")
     )
 
     # Import settings (captured from wizard)
@@ -321,6 +343,7 @@ class ImportJobAction(Base, IdentityMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_import_job_actions_job_seq", "import_job_id", "sequence_no"),
         Index("ix_import_job_actions_job_status", "import_job_id", "status"),
+        Index("ix_import_job_actions_job_id_keyset", "import_job_id", "id"),
     )
 
     import_job_id: Mapped[int] = mapped_column(

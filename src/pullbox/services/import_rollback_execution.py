@@ -17,6 +17,11 @@ from pullbox.models.import_job import (
     ImportJobStatus,
 )
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services.import_comicinfo_enrichment import comicinfo_enrichment_gate
+from pullbox.services.import_job_actions import (
+    StoryArcManagedPlacementRollbackDeferredError,
+)
+from pullbox.services.import_workflow_state import sync_progress_snapshot_state
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -62,8 +67,39 @@ async def rollback_import_job(
     estimate_remaining_seconds: EstimateRemainingSeconds,
     job_stats: JobStats,
     progress_callback: ProgressCallback | None = None,
-) -> None:
+) -> bool:
     """Rollback durable import actions in reverse execution order."""
+    async with comicinfo_enrichment_gate():
+        return await _rollback_import_job_while_enrichment_fenced(
+            session,
+            job_id,
+            rollback_action=rollback_action,
+            restore_review_state=restore_review_state,
+            recompute_series_counters=recompute_series_counters,
+            recompute_file_counters=recompute_file_counters,
+            log_event=log_event,
+            emit_progress=emit_progress,
+            estimate_remaining_seconds=estimate_remaining_seconds,
+            job_stats=job_stats,
+            progress_callback=progress_callback,
+        )
+
+
+async def _rollback_import_job_while_enrichment_fenced(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    rollback_action: RollbackAction,
+    restore_review_state: RestoreReviewState,
+    recompute_series_counters: RecomputeSeriesCounters,
+    recompute_file_counters: RecomputeFileCounters,
+    log_event: LogImportEvent,
+    emit_progress: EmitProgress,
+    estimate_remaining_seconds: EstimateRemainingSeconds,
+    job_stats: JobStats,
+    progress_callback: ProgressCallback | None = None,
+) -> bool:
+    """Execute rollback while holding the process-local filesystem fence."""
     job = await session.get(ImportJob, job_id)
     if job is None:
         raise NotFoundError("ImportJob", job_id)
@@ -112,6 +148,34 @@ async def rollback_import_job(
         )
         try:
             await rollback_action(session, action)
+        except StoryArcManagedPlacementRollbackDeferredError as exc:
+            progress = int((idx / max(total, 1)) * 100)
+            sync_progress_snapshot_state(
+                job,
+                status=ImportJobStatus.ROLLING_BACK,
+                mode="rollback",
+                phase="story_arc_placements",
+                progress=progress,
+                message="Waiting for an in-progress story-arc placement to stop safely...",
+            )
+            snapshot = dict(job.progress_snapshot or {})
+            snapshot["story_arc_rollback_waiting_work_id"] = exc.work_id
+            job.progress_snapshot = snapshot
+            job.story_arc_rollback_waiting_work_id = exc.work_id
+            await session.flush()
+            await log_event(
+                session,
+                job_id,
+                "INFO",
+                "import_rollback_waiting_for_story_arc_placement",
+                message="Rollback is waiting for in-progress story-arc placement work.",
+                action_index=idx + 1,
+                action_count=total,
+                action_type=action.action_type,
+                sequence_no=action.sequence_no,
+                sync_work_id=exc.work_id,
+            )
+            return False
         except Exception as exc:
             await log_event(
                 session,
@@ -170,6 +234,8 @@ async def rollback_import_job(
     job.control_request = ImportControlRequest.NONE
     job.error_message = "Import cancelled by user." if cancelled_during_rollback else None
     job.progress_snapshot = {}
+    job.story_arc_placement_followup_pending = False
+    job.story_arc_rollback_waiting_work_id = None
     await session.flush()
     await log_event(
         session,
@@ -185,3 +251,4 @@ async def rollback_import_job(
         ),
         action_count=total,
     )
+    return True

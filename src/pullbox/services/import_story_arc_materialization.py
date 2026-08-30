@@ -8,9 +8,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
-from sqlalchemy import or_, select, tuple_
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.orm import selectinload
 
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -18,9 +18,14 @@ from pullbox.core.story_arc_naming import (
     validate_story_arc_file_template,
     validate_story_arc_folder_template,
 )
-from pullbox.models.import_job import ImportedFileStatus, ImportJob, ImportSourceType
+from pullbox.models.import_job import (
+    ImportedFileStatus,
+    ImportJob,
+    ImportJobStatus,
+    ImportSourceType,
+)
 from pullbox.models.issue import Issue
-from pullbox.models.library import LibraryRoot
+from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
     IssueStoryArc,
@@ -36,15 +41,24 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.story_arc_service import StoryArcService, StoryArcServiceError
+from pullbox.services.story_arc_sync_queue import (
+    MAX_IMPORT_STORY_ARC_SYNC_ENQUEUE_BATCH_SIZE,
+    ImportStoryArcSyncProposal,
+    StoryArcImportSyncEnqueueResult,
+    enqueue_import_story_arc_sync_work_batch,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.sql.elements import ColumnElement
 
-    from pullbox.services.import_job_execution_types import RecordActionFunc
+    from pullbox.models.import_job import ImportJobAction
+    from pullbox.services.import_job_actions import ImportJobActionSpec
+    from pullbox.services.import_job_execution_types import RecordActionFunc, RecordActionsFunc
 
 
 CancellationCheck = Callable[[], Awaitable[None]]
+DurableCheckpoint = Callable[[], Awaitable[None]]
 CountField = Literal[
     "arcs_created",
     "arcs_merged",
@@ -57,6 +71,8 @@ CountField = Literal[
     "resolved_entries",
     "unresolved_entries",
     "entries_skipped",
+    "managed_placements_queued",
+    "managed_placements_reused",
 ]
 
 _POLICY_FLAGS = ("monitored", "search_missing", "include_upcoming", "sync_enabled")
@@ -124,6 +140,8 @@ class StoryArcMaterializationResult:
     resolved_entries: int = 0
     unresolved_entries: int = 0
     entries_skipped: int = 0
+    managed_placements_queued: int = 0
+    managed_placements_reused: int = 0
     warnings: tuple[StoryArcMaterializationWarning, ...] = ()
 
 
@@ -153,6 +171,8 @@ class _MutableCounts:
     resolved_entries: int = 0
     unresolved_entries: int = 0
     entries_skipped: int = 0
+    managed_placements_queued: int = 0
+    managed_placements_reused: int = 0
 
     def freeze(
         self,
@@ -171,6 +191,8 @@ class _MutableCounts:
             resolved_entries=self.resolved_entries,
             unresolved_entries=self.unresolved_entries,
             entries_skipped=self.entries_skipped,
+            managed_placements_queued=self.managed_placements_queued,
+            managed_placements_reused=self.managed_placements_reused,
             warnings=tuple(warnings),
         )
 
@@ -200,12 +222,20 @@ class _MaterializationBatch:
 class _ArcMaterializationContext:
     staged_arc: ImportedStoryArc
     arc: StoryArc
+    policy: _ValidatedPolicy
     counts: _MutableCounts
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagedPlacementRequest:
+    proposal: ImportStoryArcSyncProposal
+    context: _ArcMaterializationContext
 
 
 @dataclass(slots=True)
 class _EntryPageLookups:
     issues_by_id: dict[int, Issue]
+    library_files_by_issue_id: dict[int, LibraryFile]
     memberships_by_id: dict[int, IssueStoryArc]
     memberships_by_arc_issue: dict[tuple[int, int], IssueStoryArc]
     memberships_by_arc_source: dict[
@@ -255,16 +285,19 @@ async def materialize_confirmed_story_arcs(
     batch_size: int = 100,
     entry_checkpoint_size: int = 250,
     cancellation_check: CancellationCheck | None = None,
+    durable_checkpoint: DurableCheckpoint | None = None,
     record_action: RecordActionFunc | None = None,
+    record_actions: RecordActionsFunc | None = None,
 ) -> StoryArcMaterializationResult:
     """Create or explicitly merge confirmed logical story arcs for one job.
 
     This Step 4 service consumes database staging and canonical issue rows. It
-    never invokes a provider, opens archive content, mutates a source artifact,
-    or commits. Confirmed existing Mylar/folder artifacts may be attached as
+    never invokes a provider, opens archive content, or mutates a source
+    artifact. Confirmed existing Mylar/folder artifacts may be attached as
     referenced placements after metadata-only, no-follow root validation. The
-    caller retains one rollback boundary across canonical file processing and
-    logical story-arc registration.
+    runtime supplies a durable checkpoint that commits each flushed entry/arc
+    page and rechecks job control before later pages. A caller that omits it
+    retains ownership of the surrounding transaction.
     """
     if isinstance(batch_size, bool) or batch_size <= 0:
         raise ValueError("Story-arc materialization batch size must be positive")
@@ -276,6 +309,15 @@ async def materialize_confirmed_story_arcs(
     job = await session.get(ImportJob, import_job_id)
     if job is None:
         raise ValueError(f"Import job {import_job_id} was not found")
+    progress_snapshot = dict(job.progress_snapshot or {})
+    progress_snapshot.update(
+        {
+            "status": ImportJobStatus.IMPORTING.value,
+            "mode": "import",
+            "phase": "story_arcs",
+        }
+    )
+    job.progress_snapshot = progress_snapshot
     await _checkpoint(cancellation_check)
     state = _MaterializationState(
         arcs_by_id={},
@@ -350,8 +392,10 @@ async def materialize_confirmed_story_arcs(
             counts=counts,
             warnings=warnings,
             record_action=record_action,
+            record_actions=record_actions,
             entry_page_size=entry_checkpoint_size,
             cancellation_check=cancellation_check,
+            durable_checkpoint=durable_checkpoint,
         )
         batch_warning_codes = _warning_codes_by_arc(warnings[batch_warning_start:])
         for context in contexts.values():
@@ -364,6 +408,8 @@ async def materialize_confirmed_story_arcs(
                 warning_codes=batch_warning_codes.get(int(context.staged_arc.id), []),
             )
         await session.flush()
+        if durable_checkpoint is not None:
+            await durable_checkpoint()
         last_id = int(staged_arcs[-1].id)
 
     return counts.freeze(warnings)
@@ -691,6 +737,7 @@ async def _materialize_one_arc(
     return _ArcMaterializationContext(
         staged_arc=staged_arc,
         arc=arc,
+        policy=policy,
         counts=arc_counts,
     )
 
@@ -838,8 +885,10 @@ async def _materialize_entry_pages(
     counts: _MutableCounts,
     warnings: list[StoryArcMaterializationWarning],
     record_action: RecordActionFunc | None,
+    record_actions: RecordActionsFunc | None,
     entry_page_size: int,
     cancellation_check: CancellationCheck | None,
+    durable_checkpoint: DurableCheckpoint | None,
 ) -> None:
     if not contexts:
         return
@@ -872,6 +921,7 @@ async def _materialize_entry_pages(
             entries=selected_entries,
         )
         reference_checkpoint = _ReferencePageCheckpoint(cancellation_check)
+        managed_placement_requests: list[_ManagedPlacementRequest] = []
         for entry in selected_entries:
             context = contexts[int(entry.imported_story_arc_id)]
             await _materialize_entry(
@@ -885,8 +935,24 @@ async def _materialize_entry_pages(
                 record_action=record_action,
                 lookups=lookups,
                 reference_checkpoint=reference_checkpoint,
+                managed_placement_requests=managed_placement_requests,
+                managed_placement_journal_available=(
+                    record_actions is not None or record_action is not None
+                ),
             )
         await session.flush()
+        await _enqueue_managed_placement_requests(
+            session,
+            job=job,
+            requests=managed_placement_requests,
+            counts=counts,
+            record_action=record_action,
+            record_actions=record_actions,
+            cancellation_check=cancellation_check,
+            durable_checkpoint=durable_checkpoint,
+        )
+        if not managed_placement_requests and durable_checkpoint is not None:
+            await durable_checkpoint()
         last_entry_id = int(selected_entries[-1].id)
 
 
@@ -903,6 +969,33 @@ async def _prepare_entry_page_lookups(
         {
             int(issue.id): issue
             for issue in (await session.scalars(select(Issue).where(Issue.id.in_(issue_ids)))).all()
+        }
+        if issue_ids
+        else {}
+    )
+    canonical_library_files = (
+        select(
+            LibraryFile.issue_id.label("issue_id"),
+            func.min(LibraryFile.id).label("library_file_id"),
+        )
+        .where(LibraryFile.issue_id.in_(issue_ids))
+        .group_by(LibraryFile.issue_id)
+        .subquery()
+    )
+    library_files_by_issue_id = (
+        {
+            int(library_file.issue_id): library_file
+            for library_file in (
+                await session.scalars(
+                    select(LibraryFile)
+                    .join(
+                        canonical_library_files,
+                        LibraryFile.id == canonical_library_files.c.library_file_id,
+                    )
+                    .order_by(LibraryFile.issue_id)
+                )
+            ).all()
+            if library_file.issue_id is not None
         }
         if issue_ids
         else {}
@@ -981,6 +1074,7 @@ async def _prepare_entry_page_lookups(
         placements_by_membership.setdefault(int(placement.issue_story_arc_id), []).append(placement)
     return _EntryPageLookups(
         issues_by_id=issues,
+        library_files_by_issue_id=library_files_by_issue_id,
         memberships_by_id={int(membership.id): membership for membership in memberships},
         memberships_by_arc_issue={
             (int(membership.story_arc_id), int(membership.issue_id)): membership
@@ -1014,6 +1108,8 @@ async def _materialize_entry(
     record_action: RecordActionFunc | None,
     lookups: _EntryPageLookups,
     reference_checkpoint: _ReferencePageCheckpoint,
+    managed_placement_requests: list[_ManagedPlacementRequest],
+    managed_placement_journal_available: bool,
 ) -> None:
     staged_arc = context.staged_arc
     arc = context.arc
@@ -1180,11 +1276,160 @@ async def _materialize_entry(
         lookups=lookups,
         reference_checkpoint=reference_checkpoint,
     )
+    _prepare_managed_placement_request(
+        context=context,
+        entry=entry,
+        membership=membership,
+        warnings=warnings,
+        lookups=lookups,
+        journal_available=managed_placement_journal_available,
+        requests=managed_placement_requests,
+    )
     _persist_entry_materialization_diagnostics(
         entry,
         membership_id=int(membership.id),
         warning_codes=[warning.code for warning in warnings[entry_warning_start:]],
     )
+
+
+def _prepare_managed_placement_request(
+    *,
+    context: _ArcMaterializationContext,
+    entry: ImportedStoryArcEntry,
+    membership: IssueStoryArc,
+    warnings: list[StoryArcMaterializationWarning],
+    lookups: _EntryPageLookups,
+    journal_available: bool,
+    requests: list[_ManagedPlacementRequest],
+) -> None:
+    """Prepare one exact placement request without writing its journal or outbox."""
+    policy = context.policy
+    mode = policy.snapshot.get("mode") if policy.activated else None
+    if mode not in {"copy", "hardlink", "symlink"}:
+        return
+    if (
+        membership.issue_id is None
+        or membership.resolution_state is not StoryArcResolutionState.RESOLVED
+    ):
+        return
+    library_file = lookups.library_files_by_issue_id.get(int(membership.issue_id))
+    if library_file is None:
+        _warn(
+            warnings,
+            "story_arc_managed_placement_canonical_file_missing",
+            context.staged_arc,
+            entry,
+        )
+        return
+    if not journal_available:
+        _warn(
+            warnings,
+            "story_arc_managed_placement_journal_unavailable",
+            context.staged_arc,
+            entry,
+        )
+        return
+
+    requests.append(
+        _ManagedPlacementRequest(
+            proposal=ImportStoryArcSyncProposal(
+                library_file=library_file,
+                membership=membership,
+                story_arc=context.arc,
+                imported_story_arc_id=int(context.staged_arc.id),
+                imported_story_arc_entry_id=int(entry.id),
+            ),
+            context=context,
+        )
+    )
+
+
+async def _enqueue_managed_placement_requests(
+    session: AsyncSession,
+    *,
+    job: ImportJob,
+    requests: Sequence[_ManagedPlacementRequest],
+    counts: _MutableCounts,
+    record_actions: RecordActionsFunc | None,
+    cancellation_check: CancellationCheck | None,
+    durable_checkpoint: DurableCheckpoint | None = None,
+    record_action: RecordActionFunc | None = None,
+) -> None:
+    """Publish SQL-bounded batches with a durable control checkpoint after each."""
+    if not requests:
+        return
+
+    batch_recorder = record_actions
+    if batch_recorder is None:
+        single_recorder = record_action
+        if single_recorder is None:
+            raise RuntimeError("Managed Story Arc placement journal is unavailable")
+
+        async def record_actions_adapter(
+            callback_session: AsyncSession,
+            callback_job: ImportJob,
+            specs: Sequence[ImportJobActionSpec],
+        ) -> list[ImportJobAction]:
+            return [
+                await single_recorder(
+                    callback_session,
+                    callback_job,
+                    phase=spec.phase,
+                    action_type=spec.action_type,
+                    payload=spec.payload,
+                )
+                for spec in specs
+            ]
+
+        batch_recorder = cast("RecordActionsFunc", record_actions_adapter)
+
+    if batch_recorder is None:
+        raise RuntimeError("Managed Story Arc placement journal is unavailable")
+
+    for start in range(0, len(requests), MAX_IMPORT_STORY_ARC_SYNC_ENQUEUE_BATCH_SIZE):
+        await _checkpoint(cancellation_check)
+        request_batch = requests[start : start + MAX_IMPORT_STORY_ARC_SYNC_ENQUEUE_BATCH_SIZE]
+        results: list[
+            StoryArcImportSyncEnqueueResult
+        ] = await enqueue_import_story_arc_sync_work_batch(
+            session,
+            job=job,
+            proposals=[request.proposal for request in request_batch],
+            record_actions=batch_recorder,
+        )
+        if len(results) != len(request_batch):
+            raise RuntimeError("Managed Story Arc placement batch result count changed")
+        for request, result in zip(request_batch, results, strict=True):
+            if result.classification == "created":
+                _increment_counts(
+                    counts,
+                    request.context.counts,
+                    "managed_placements_queued",
+                )
+                continue
+            if result.classification in {
+                "in_call_duplicate",
+                "in_call_membership_duplicate",
+                "existing_import_membership_duplicate",
+                "existing_import_work_pending",
+            }:
+                continue
+            if result.classification in {
+                "existing_import_work_completed",
+                "existing_non_origin_placement",
+                "existing_managed_placement",
+                "existing_referenced_placement",
+            }:
+                _increment_counts(
+                    counts,
+                    request.context.counts,
+                    "managed_placements_reused",
+                )
+                continue
+            raise RuntimeError(f"Managed Story Arc placement returned {result.classification!r}")
+        await session.flush()
+        if durable_checkpoint is not None:
+            await durable_checkpoint()
 
 
 async def _materialize_referenced_placement(
@@ -2158,6 +2403,8 @@ def _count_snapshot(counts: _MutableCounts) -> dict[str, int]:
         "resolved_entries": counts.resolved_entries,
         "unresolved_entries": counts.unresolved_entries,
         "entries_skipped": counts.entries_skipped,
+        "managed_placements_queued": counts.managed_placements_queued,
+        "managed_placements_reused": counts.managed_placements_reused,
     }
 
 

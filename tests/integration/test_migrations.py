@@ -32,6 +32,7 @@ _ISSUE_NUMBER_TEXT_PARENT_REVISION = "y0z1a2b3c456"
 _STORY_ARC_DOMAIN_PARENT_REVISION = "z1a2b3c4d567"
 _STORY_ARC_DOMAIN_REVISION = "a2b3c4d5e678"
 _STORY_ARC_MANAGED_PLACEMENT_REVISION = "b3c4d5e6f789"
+_STORY_ARC_IMPORT_SYNC_REVISION = "c4d5e6f7a890"
 
 
 @pytest.fixture
@@ -191,6 +192,70 @@ def _seed_story_arc_placement_parents(
         "action_id": action_id,
         "library_root_id": library_root_id,
     }
+
+
+def _seed_story_arc_sync_work_parents(
+    conn: Connection,
+    *,
+    slug: str,
+) -> dict[str, int]:
+    """Seed one canonical file plus the action/membership required by sync work."""
+    parents = _seed_story_arc_placement_parents(conn, slug=slug)
+    issue_id = int(
+        conn.execute(
+            text("SELECT issue_id FROM issue_story_arcs WHERE id = :membership_id"),
+            {"membership_id": parents["membership_id"]},
+        ).scalar_one()
+    )
+    conn.execute(
+        text(
+            "INSERT INTO library_files "
+            "(file_path, file_name, file_size, file_format, file_modified_at, "
+            "match_confidence, naming_snapshot, has_comicinfo, issue_id, library_root_id) "
+            "VALUES (:path, :name, 123, 'CBZ', CURRENT_TIMESTAMP, 'HIGH', '{}', 0, "
+            ":issue_id, :library_root_id)"
+        ),
+        {
+            "path": f"/fixture/root-{slug}/Issue.cbz",
+            "name": "Issue.cbz",
+            "issue_id": issue_id,
+            "library_root_id": parents["library_root_id"],
+        },
+    )
+    parents["library_file_id"] = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+    return parents
+
+
+def _insert_story_arc_sync_work(
+    conn: Connection,
+    *,
+    parents: dict[str, int],
+    generation: str,
+    origin_action_id: int | None,
+    cancel_requested: bool = False,
+) -> int:
+    """Insert one minimal durable sync-work row against the migration schema."""
+    conn.execute(
+        text(
+            "INSERT INTO story_arc_sync_work "
+            "(issue_story_arc_id, library_file_id, desired_generation, "
+            "source_signature_hash, source_file_path, source_file_size, "
+            "source_file_modified_at, story_arc_revision, membership_sequence, "
+            "policy_schema_version, origin_import_action_id, cancel_requested_at) VALUES "
+            "(:membership_id, :library_file_id, :generation, :signature_hash, "
+            ":source_path, 123, CURRENT_TIMESTAMP, 1, 1, 1, :origin_action_id, "
+            f"{'CURRENT_TIMESTAMP' if cancel_requested else 'NULL'})"
+        ),
+        {
+            "membership_id": parents["membership_id"],
+            "library_file_id": parents["library_file_id"],
+            "generation": generation,
+            "signature_hash": generation.ljust(64, "0")[:64],
+            "source_path": f"/fixture/sync/{generation}.cbz",
+            "origin_action_id": origin_action_id,
+        },
+    )
+    return int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
 
 
 class TestMigrationChain:
@@ -893,12 +958,431 @@ class TestMigrationChain:
         finally:
             engine.dispose()
 
+    def test_import_owned_story_arc_sync_schema_enforces_provenance(self, alembic_cfg) -> None:
+        """Import sync provenance is optional, unique when present, and SET NULL safe."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            columns = {
+                column["name"]: column for column in inspector.get_columns("story_arc_sync_work")
+            }
+            foreign_keys = inspector.get_foreign_keys("story_arc_sync_work")
+            import_job_columns = {
+                column["name"]: column for column in inspector.get_columns("import_jobs")
+            }
+            import_job_foreign_keys = inspector.get_foreign_keys("import_jobs")
+            unique_constraints = {
+                constraint["name"]: constraint["column_names"]
+                for constraint in inspector.get_unique_constraints("story_arc_sync_work")
+            }
+            assert columns["origin_import_action_id"]["nullable"] is True
+            assert columns["origin_import_job_id"]["nullable"] is True
+            assert columns["origin_imported_story_arc_id"]["nullable"] is True
+            assert columns["origin_imported_story_arc_entry_id"]["nullable"] is True
+            assert columns["cancel_requested_at"]["nullable"] is True
+            assert any(
+                foreign_key["constrained_columns"] == ["origin_import_action_id"]
+                and foreign_key["referred_table"] == "import_job_actions"
+                and foreign_key["referred_columns"] == ["id"]
+                and foreign_key["options"].get("ondelete") == "SET NULL"
+                for foreign_key in foreign_keys
+            )
+            expected_typed_origins = {
+                ("origin_import_job_id", "import_jobs"),
+                ("origin_imported_story_arc_id", "import_story_arcs"),
+                ("origin_imported_story_arc_entry_id", "import_story_arc_entries"),
+            }
+            assert expected_typed_origins <= {
+                (foreign_key["constrained_columns"][0], foreign_key["referred_table"])
+                for foreign_key in foreign_keys
+                if foreign_key["options"].get("ondelete") == "SET NULL"
+            }
+            assert import_job_columns["story_arc_placement_followup_pending"]["nullable"] is False
+            assert import_job_columns["story_arc_rollback_waiting_work_id"]["nullable"] is True
+            assert any(
+                foreign_key["constrained_columns"] == ["story_arc_rollback_waiting_work_id"]
+                and foreign_key["referred_table"] == "story_arc_sync_work"
+                and foreign_key["referred_columns"] == ["id"]
+                for foreign_key in import_job_foreign_keys
+            )
+            with engine.connect() as conn:
+                rollback_fk = next(
+                    row
+                    for row in conn.execute(text("PRAGMA foreign_key_list(import_jobs)"))
+                    if row[3] == "story_arc_rollback_waiting_work_id"
+                )
+                assert rollback_fk[2] == "story_arc_sync_work"
+                assert rollback_fk[4] == "id"
+                assert rollback_fk[6] == "SET NULL"
+            assert unique_constraints["uq_story_arc_sync_work_origin_import_action"] == [
+                "origin_import_action_id"
+            ]
+            assert _get_indexes(sync_url, "story_arc_placements")[
+                "ix_story_arc_placements_creating_action"
+            ] == ["creating_action_id", "id"]
+            sync_indexes = _get_indexes(sync_url, "story_arc_sync_work")
+            assert sync_indexes["ix_story_arc_sync_work_queued"] == [
+                "claimable",
+                "state",
+                "created_at",
+                "id",
+            ]
+            assert sync_indexes["ix_story_arc_sync_work_stale_claim"] == [
+                "claimable",
+                "state",
+                "claimed_at",
+                "id",
+            ]
+            assert sync_indexes["ix_story_arc_sync_work_origin_job_state"] == [
+                "origin_import_job_id",
+                "state",
+                "id",
+            ]
+            import_job_indexes = _get_indexes(sync_url, "import_jobs")
+            assert import_job_indexes["ix_import_jobs_story_arc_followup"] == [
+                "status",
+                "story_arc_placement_followup_pending",
+                "id",
+            ]
+            assert import_job_indexes["ix_import_jobs_story_arc_rollback_waiting"] == [
+                "status",
+                "story_arc_rollback_waiting_work_id",
+                "id",
+            ]
+            assert _get_indexes(sync_url, "import_job_actions")[
+                "ix_import_job_actions_job_id_keyset"
+            ] == ["import_job_id", "id"]
+
+            with engine.begin() as conn:
+                parents = _seed_story_arc_sync_work_parents(conn, slug="origin-schema")
+                first_unlinked_id = _insert_story_arc_sync_work(
+                    conn,
+                    parents=parents,
+                    generation="unlinked-1",
+                    origin_action_id=None,
+                )
+                second_unlinked_id = _insert_story_arc_sync_work(
+                    conn,
+                    parents=parents,
+                    generation="unlinked-2",
+                    origin_action_id=None,
+                )
+                linked_id = _insert_story_arc_sync_work(
+                    conn,
+                    parents=parents,
+                    generation="linked",
+                    origin_action_id=parents["action_id"],
+                    cancel_requested=True,
+                )
+                lifecycle_defaults = conn.execute(
+                    text(
+                        "SELECT story_arc_placement_followup_pending, "
+                        "story_arc_rollback_waiting_work_id FROM import_jobs "
+                        "WHERE id = :job_id"
+                    ),
+                    {"job_id": parents["import_job_id"]},
+                ).one()
+                assert tuple(lifecycle_defaults) == (0, None)
+
+            with pytest.raises(IntegrityError), engine.begin() as conn:
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+                conn.execute(
+                    text(
+                        "UPDATE story_arc_sync_work SET origin_import_job_id = 999999 "
+                        "WHERE id = :work_id"
+                    ),
+                    {"work_id": linked_id},
+                )
+
+            with pytest.raises(IntegrityError), engine.begin() as conn:
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+                conn.execute(
+                    text(
+                        "UPDATE import_jobs SET story_arc_rollback_waiting_work_id = 999999 "
+                        "WHERE id = :job_id"
+                    ),
+                    {"job_id": parents["import_job_id"]},
+                )
+
+            with pytest.raises(IntegrityError), engine.begin() as conn:
+                _insert_story_arc_sync_work(
+                    conn,
+                    parents=parents,
+                    generation="linked-duplicate",
+                    origin_action_id=parents["action_id"],
+                )
+
+            with engine.begin() as conn:
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+                conn.execute(
+                    text("DELETE FROM import_job_actions WHERE id = :action_id"),
+                    {"action_id": parents["action_id"]},
+                )
+                rows = conn.execute(
+                    text(
+                        "SELECT id, origin_import_action_id, cancel_requested_at "
+                        "FROM story_arc_sync_work ORDER BY id"
+                    )
+                ).fetchall()
+            assert [row.id for row in rows] == [first_unlinked_id, second_unlinked_id, linked_id]
+            assert all(row.origin_import_action_id is None for row in rows)
+            assert rows[-1].cancel_requested_at is not None
+        finally:
+            engine.dispose()
+
+    def test_import_owned_story_arc_sync_migration_round_trips_unlinked_work(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """SQLite batch DDL preserves ordinary queue work across downgrade and re-upgrade."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                parents = _seed_story_arc_sync_work_parents(conn, slug="origin-cycle")
+                work_id = _insert_story_arc_sync_work(
+                    conn,
+                    parents=parents,
+                    generation="cycle",
+                    origin_action_id=None,
+                )
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _STORY_ARC_MANAGED_PLACEMENT_REVISION)
+        assert {
+            "origin_import_action_id",
+            "origin_import_job_id",
+            "origin_imported_story_arc_id",
+            "origin_imported_story_arc_entry_id",
+            "cancel_requested_at",
+        }.isdisjoint(_get_columns(sync_url, "story_arc_sync_work"))
+        assert {
+            "story_arc_placement_followup_pending",
+            "story_arc_rollback_waiting_work_id",
+        }.isdisjoint(_get_columns(sync_url, "import_jobs"))
+        assert "ix_story_arc_placements_creating_action" not in _get_indexes(
+            sync_url, "story_arc_placements"
+        )
+        sync_indexes = _get_indexes(sync_url, "story_arc_sync_work")
+        assert "ix_story_arc_sync_work_queued" not in sync_indexes
+        assert "ix_story_arc_sync_work_stale_claim" not in sync_indexes
+        assert "ix_story_arc_sync_work_origin_job_state" not in sync_indexes
+        assert "ix_import_job_actions_job_id_keyset" not in _get_indexes(
+            sync_url, "import_job_actions"
+        )
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        text("SELECT desired_generation FROM story_arc_sync_work WHERE id = :id"),
+                        {"id": work_id},
+                    ).scalar_one()
+                    == "cycle"
+                )
+                assert (
+                    conn.execute(
+                        text("SELECT COUNT(*) FROM import_jobs WHERE id = :job_id"),
+                        {"job_id": parents["import_job_id"]},
+                    ).scalar_one()
+                    == 1
+                )
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+        assert {
+            "origin_import_action_id",
+            "origin_import_job_id",
+            "origin_imported_story_arc_id",
+            "origin_imported_story_arc_entry_id",
+            "cancel_requested_at",
+        } <= _get_columns(sync_url, "story_arc_sync_work")
+        assert {
+            "story_arc_placement_followup_pending",
+            "story_arc_rollback_waiting_work_id",
+        } <= _get_columns(sync_url, "import_jobs")
+        sync_indexes = _get_indexes(sync_url, "story_arc_sync_work")
+        assert "ix_story_arc_sync_work_queued" in sync_indexes
+        assert "ix_story_arc_sync_work_stale_claim" in sync_indexes
+        assert "ix_story_arc_sync_work_origin_job_state" in sync_indexes
+        assert "ix_import_job_actions_job_id_keyset" in _get_indexes(sync_url, "import_job_actions")
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                restored = conn.execute(
+                    text(
+                        "SELECT desired_generation, origin_import_action_id, "
+                        "cancel_requested_at FROM story_arc_sync_work WHERE id = :id"
+                    ),
+                    {"id": work_id},
+                ).one()
+            assert tuple(restored) == ("cycle", None, None)
+        finally:
+            engine.dispose()
+
+    def test_import_owned_story_arc_sync_downgrade_refuses_linked_work(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Downgrade refuses to erase action provenance while linked work remains."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                parents = _seed_story_arc_sync_work_parents(conn, slug="origin-guard")
+                work_id = _insert_story_arc_sync_work(
+                    conn,
+                    parents=parents,
+                    generation="guard",
+                    origin_action_id=parents["action_id"],
+                )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="import-owned story-arc sync work"):
+            command.downgrade(cfg, _STORY_ARC_MANAGED_PLACEMENT_REVISION)
+
+        assert {
+            "origin_import_action_id",
+            "cancel_requested_at",
+        } <= _get_columns(sync_url, "story_arc_sync_work")
+        assert "ix_story_arc_placements_creating_action" in _get_indexes(
+            sync_url, "story_arc_placements"
+        )
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                    == _STORY_ARC_IMPORT_SYNC_REVISION
+                )
+                assert (
+                    conn.execute(
+                        text(
+                            "SELECT origin_import_action_id FROM story_arc_sync_work WHERE id = :id"
+                        ),
+                        {"id": work_id},
+                    ).scalar_one()
+                    == parents["action_id"]
+                )
+        finally:
+            engine.dispose()
+
+    def test_import_owned_story_arc_sync_downgrade_refuses_detached_held_work(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Downgrade cannot revive held work after its provenance is detached."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+                parents = _seed_story_arc_sync_work_parents(conn, slug="held-guard")
+                work_id = _insert_story_arc_sync_work(
+                    conn,
+                    parents=parents,
+                    generation="held-guard",
+                    origin_action_id=parents["action_id"],
+                )
+                conn.execute(
+                    text(
+                        "UPDATE story_arc_sync_work SET origin_import_job_id = :job_id, "
+                        "claimable = 0 WHERE id = :work_id"
+                    ),
+                    {"job_id": parents["import_job_id"], "work_id": work_id},
+                )
+                conn.execute(
+                    text("DELETE FROM import_jobs WHERE id = :job_id"),
+                    {"job_id": parents["import_job_id"]},
+                )
+                detached = conn.execute(
+                    text(
+                        "SELECT origin_import_action_id, origin_import_job_id, claimable "
+                        "FROM story_arc_sync_work WHERE id = :work_id"
+                    ),
+                    {"work_id": work_id},
+                ).one()
+            assert tuple(detached) == (None, None, 0)
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="held story-arc sync work"):
+            command.downgrade(cfg, _STORY_ARC_MANAGED_PLACEMENT_REVISION)
+
+        assert "claimable" in _get_columns(sync_url, "story_arc_sync_work")
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        text("SELECT claimable FROM story_arc_sync_work WHERE id = :id"),
+                        {"id": work_id},
+                    ).scalar_one()
+                    == 0
+                )
+                assert (
+                    conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                    == _STORY_ARC_IMPORT_SYNC_REVISION
+                )
+        finally:
+            engine.dispose()
+
+    def test_import_owned_story_arc_sync_downgrade_refuses_pending_cancellation(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Downgrade cannot revive work whose cancellation has not yet been consumed."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                parents = _seed_story_arc_sync_work_parents(conn, slug="cancel-guard")
+                work_id = _insert_story_arc_sync_work(
+                    conn,
+                    parents=parents,
+                    generation="cancel-guard",
+                    origin_action_id=None,
+                    cancel_requested=True,
+                )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="pending story-arc sync cancellation"):
+            command.downgrade(cfg, _STORY_ARC_MANAGED_PLACEMENT_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        text("SELECT cancel_requested_at FROM story_arc_sync_work WHERE id = :id"),
+                        {"id": work_id},
+                    ).scalar_one()
+                    is not None
+                )
+                assert (
+                    conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                    == _STORY_ARC_IMPORT_SYNC_REVISION
+                )
+        finally:
+            engine.dispose()
+
     def test_story_arc_domain_revision_is_the_single_head(self, alembic_cfg) -> None:
-        """Managed placements extend the story-arc head without branching."""
+        """Import-owned synchronization extends the story-arc head without branching."""
         cfg, _ = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
 
-        assert script.get_heads() == [_STORY_ARC_MANAGED_PLACEMENT_REVISION]
+        assert script.get_heads() == [_STORY_ARC_IMPORT_SYNC_REVISION]
 
     def test_airdcpp_foundation_backfills_populated_history_and_source_order(
         self,

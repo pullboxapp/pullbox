@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
-from fastapi import APIRouter, Query, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse  # noqa: TC002
+from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy.exc import OperationalError
 
 from pullbox.api.deps import AuthenticatedStreamUser, AuthenticatedUser, DbSession  # noqa: TC001
@@ -27,6 +27,7 @@ from pullbox.api.v1.import_job_control_actions import (
     resume_import_job_response,
     retry_failed_series_response,
     retry_import_job_response,
+    retry_story_arc_placements_response,
     rollback_import_job_response,
 )
 from pullbox.api.v1.import_job_logs import (
@@ -93,6 +94,7 @@ from pullbox.schemas.import_job import (
     ImportedFilesResponse,
     ImportedSeriesRead,
     ImportJobCreate,
+    ImportJobDeleteResponse,
     ImportJobLogsResponse,
     ImportJobRead,
     ImportPreviewResponse,
@@ -101,6 +103,7 @@ from pullbox.schemas.import_job import (
     ImportSelectionBulkUpdateResponse,
     RetryFailedResponse,
     RetryImportResponse,
+    RetryStoryArcPlacementsResponse,
     SeriesSelectionBulkUpdateRequest,
     SeriesSelectionUpdateRequest,
     StoryArcPolicyConfirmationRequest,
@@ -378,20 +381,32 @@ async def clear_import_history(
     return await clear_import_history_response(session)
 
 
-@router.delete("/{job_id}", status_code=204)
+@router.delete(
+    "/{job_id}",
+    status_code=204,
+    responses={
+        202: {
+            "model": ImportJobDeleteResponse,
+            "description": "Deletion is waiting for cooperative Story Arc rollback.",
+        }
+    },
+)
 async def cancel_import_job(
     job_id: int,
     _user: AuthenticatedUser,
     session: DbSession,
-) -> None:
+) -> Response:
     """Cancel an active import job or delete a finished one from history."""
     service = _make_import_service()
-    await cancel_import_job_response(
+    pending = await cancel_import_job_response(
         service,
         session=session,
         job_id=job_id,
         purge_import_runtime_state=purge_import_runtime_state,
     )
+    if pending is not None:
+        return JSONResponse(status_code=202, content=pending.model_dump(mode="json"))
+    return Response(status_code=204)
 
 
 @router.post("/{job_id}/pause", response_model=ImportJobRead)
@@ -467,6 +482,26 @@ async def retry_failed_series(
         session=session,
         job_id=job_id,
         trigger_import_execute=trigger_import_execute,
+    )
+
+
+@router.post(
+    "/{job_id}/story-arc-placements/retry",
+    status_code=202,
+    response_model=RetryStoryArcPlacementsResponse,
+)
+async def retry_import_story_arc_placements(
+    job_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+) -> RetryStoryArcPlacementsResponse:
+    """Retry only failed/cancelled placement work for a stalled import."""
+    service = _make_import_service()
+    return await retry_story_arc_placements_response(
+        service,
+        session=session,
+        job_id=job_id,
+        trigger_story_arc_sync=service.schedule_story_arc_sync,
     )
 
 

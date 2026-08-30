@@ -23,6 +23,9 @@ from pullbox.services.import_workflow_state import (
     sync_paused_job_state,
     sync_progress_snapshot_state,
 )
+from pullbox.services.story_arc_sync_queue import (
+    discard_unpublished_import_story_arc_sync_work,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +48,15 @@ class ImportEventLogger(Protocol):
 JobDeletedLogger = Callable[[int, ImportJobStatus], None]
 
 
+def _is_story_arc_placement_wait(job: ImportJob) -> bool:
+    """Return whether an import is waiting on separately scheduled placements."""
+    return (
+        job.status == ImportJobStatus.IMPORTING
+        and job.import_started_at is not None
+        and dict(job.progress_snapshot or {}).get("phase") == "story_arc_placements"
+    )
+
+
 async def _flush_job_with_sqlite_lock_retry(
     session: AsyncSession,
     job: ImportJob,
@@ -62,7 +74,12 @@ async def _flush_job_with_sqlite_lock_retry(
             if not is_sqlite_locked_error(exc) or attempt == SQLITE_LOCK_RETRY_ATTEMPTS:
                 raise
             await asyncio.sleep(sqlite_lock_retry_delay(attempt))
-            reloaded = await session.get(ImportJob, job_id)
+            reloaded = await session.get(
+                ImportJob,
+                job_id,
+                populate_existing=True,
+                with_for_update=True,
+            )
             if reloaded is None:
                 raise NotFoundError("ImportJob", job_id) from exc
             mutate(reloaded)
@@ -125,11 +142,13 @@ async def cancel_job(
         job.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED}
         and job.import_started_at is None
     ):
+        await discard_unpublished_import_story_arc_sync_work(session, (job_id,))
         await session.delete(job)
         await session.flush()
         return "deleted"
 
     if job.status in deletable:
+        await discard_unpublished_import_story_arc_sync_work(session, (job_id,))
         log_job_deleted(job_id, job.status)
         await session.delete(job)
         await session.flush()
@@ -145,7 +164,12 @@ async def pause_job(
     log_event: ImportEventLogger,
 ) -> ImportJob:
     """Persist or request a pause at the nearest resumable checkpoint."""
-    job = await session.get(ImportJob, job_id)
+    job = await session.get(
+        ImportJob,
+        job_id,
+        populate_existing=True,
+        with_for_update=True,
+    )
     if job is None:
         raise NotFoundError("ImportJob", job_id)
 
@@ -157,6 +181,8 @@ async def pause_job(
         ImportJobStatus.IMPORTING,
     }:
         raise ValidationError(f"Cannot pause job in {job.status} state")
+    if _is_story_arc_placement_wait(job):
+        raise ValidationError("Import cannot be paused while story arc placements are finishing")
 
     def _apply_pause(target: ImportJob) -> None:
         if target.status not in {
@@ -167,6 +193,10 @@ async def pause_job(
             ImportJobStatus.IMPORTING,
         }:
             raise ValidationError(f"Cannot pause job in {target.status} state")
+        if _is_story_arc_placement_wait(target):
+            raise ValidationError(
+                "Import cannot be paused while story arc placements are finishing"
+            )
         if target.status == ImportJobStatus.SCANNING and target.import_started_at is None:
             snapshot = dict(target.progress_snapshot or {})
             target.control_request = ImportControlRequest.PAUSE
@@ -218,6 +248,15 @@ async def resume_job(
         raise ValidationError(f"Cannot resume job in {job.status} state")
 
     phase = str((job.progress_snapshot or {}).get("phase") or "")
+    if (
+        job.status is ImportJobStatus.STALLED
+        and job.import_started_at is not None
+        and phase == "story_arc_placements"
+    ):
+        raise ValidationError(
+            "Retry the failed Story Arc placement work or cancel the import; "
+            "the completed canonical import must not be replayed."
+        )
     mode = snapshot_mode_for_job(job)
     if mode == "scan" and job.import_started_at is not None:
         if phase == "importing":
@@ -265,7 +304,12 @@ async def request_cancel(
     log_event: ImportEventLogger,
 ) -> ImportJob:
     """Request cooperative cancellation or immediate discard for paused scans."""
-    job = await session.get(ImportJob, job_id)
+    job = await session.get(
+        ImportJob,
+        job_id,
+        populate_existing=True,
+        with_for_update=True,
+    )
     if job is None:
         raise NotFoundError("ImportJob", job_id)
 
@@ -278,7 +322,7 @@ async def request_cancel(
         return job
 
     def _apply_cancel(target: ImportJob) -> None:
-        if (
+        if _is_story_arc_placement_wait(target) or (
             target.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED}
             and target.import_started_at is not None
         ):
@@ -298,6 +342,7 @@ async def request_cancel(
             raise ValidationError(f"Cannot cancel job in {target.status} state")
         target.error_message = "Import cancelled by user."
         if target.status == ImportJobStatus.ROLLING_BACK:
+            target.story_arc_placement_followup_pending = False
             target.progress_snapshot = initialize_progress_snapshot(
                 target,
                 mode="rollback",
@@ -351,6 +396,7 @@ async def request_rollback(
 
     job.status = ImportJobStatus.ROLLING_BACK
     job.control_request = ImportControlRequest.NONE
+    job.story_arc_placement_followup_pending = False
     job.progress_snapshot = initialize_progress_snapshot(
         job,
         mode="rollback",

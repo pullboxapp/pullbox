@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     ForeignKey,
     Index,
     Integer,
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin, UTCDateTime
 
 if TYPE_CHECKING:
+    from pullbox.models.import_job import ImportJobAction
     from pullbox.models.library import LibraryFile
     from pullbox.models.story_arc import IssueStoryArc
 
@@ -64,10 +66,35 @@ class StoryArcSyncWork(Base, IdentityMixin, TimestampMixin):
             "desired_generation",
             name="uq_story_arc_sync_work_generation",
         ),
+        UniqueConstraint(
+            "origin_import_action_id",
+            name="uq_story_arc_sync_work_origin_import_action",
+        ),
+        Index(
+            "ix_story_arc_sync_work_queued",
+            "claimable",
+            "state",
+            "created_at",
+            "id",
+        ),
         Index(
             "ix_story_arc_sync_work_ready",
+            "claimable",
             "state",
             "next_attempt_at",
+            "id",
+        ),
+        Index(
+            "ix_story_arc_sync_work_stale_claim",
+            "claimable",
+            "state",
+            "claimed_at",
+            "id",
+        ),
+        Index(
+            "ix_story_arc_sync_work_origin_job_state",
+            "origin_import_job_id",
+            "state",
             "id",
         ),
         Index(
@@ -89,6 +116,18 @@ class StoryArcSyncWork(Base, IdentityMixin, TimestampMixin):
     library_file_id: Mapped[int] = mapped_column(
         ForeignKey("library_files.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    origin_import_action_id: Mapped[int | None] = mapped_column(
+        ForeignKey("import_job_actions.id", ondelete="SET NULL")
+    )
+    origin_import_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="SET NULL")
+    )
+    origin_imported_story_arc_id: Mapped[int | None] = mapped_column(
+        ForeignKey("import_story_arcs.id", ondelete="SET NULL")
+    )
+    origin_imported_story_arc_entry_id: Mapped[int | None] = mapped_column(
+        ForeignKey("import_story_arc_entries.id", ondelete="SET NULL")
     )
     desired_generation: Mapped[str] = mapped_column(String(64), nullable=False)
     source_signature_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -117,6 +156,12 @@ class StoryArcSyncWork(Base, IdentityMixin, TimestampMixin):
         server_default=StoryArcSyncWorkState.QUEUED.value,
         nullable=False,
     )
+    claimable: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="1",
+        nullable=False,
+    )
     attempt_count: Mapped[int] = mapped_column(
         Integer,
         default=0,
@@ -126,6 +171,7 @@ class StoryArcSyncWork(Base, IdentityMixin, TimestampMixin):
     next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     claim_token: Mapped[str | None] = mapped_column(String(64))
     claimed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_error_code: Mapped[str | None] = mapped_column(String(100))
     last_error_category: Mapped[str | None] = mapped_column(String(50))
     last_error_detail: Mapped[str | None] = mapped_column(Text)
@@ -138,3 +184,6 @@ class StoryArcSyncWork(Base, IdentityMixin, TimestampMixin):
 
     issue_story_arc: Mapped[IssueStoryArc] = relationship()
     library_file: Mapped[LibraryFile] = relationship()
+    origin_import_action: Mapped[ImportJobAction | None] = relationship(
+        foreign_keys=[origin_import_action_id]
+    )

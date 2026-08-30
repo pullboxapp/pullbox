@@ -50,6 +50,11 @@ from pullbox.schemas.import_job import (
 )
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.import_service import ComicVineMatchEvaluation, ImportService
+from pullbox.services.import_story_arc_placement_completion import (
+    ImportStoryArcPlacementCompletionOutcome,
+    ImportStoryArcPlacementCompletionState,
+    ImportStoryArcPlacementCounts,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,6 +100,53 @@ def _make_service(
         metadata_service=metadata_service or AsyncMock(),
         event_bus=event_bus or AsyncMock(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "schedule_sync", "schedule_enrichment"),
+    [
+        (ImportStoryArcPlacementCompletionState.PENDING, True, False),
+        (ImportStoryArcPlacementCompletionState.COMPLETED, False, True),
+    ],
+)
+async def test_run_import_resumes_only_the_story_arc_placement_finalizer(
+    db_session: AsyncSession,
+    state: ImportStoryArcPlacementCompletionState,
+    schedule_sync: bool,
+    schedule_enrichment: bool,
+) -> None:
+    job = ImportJob(
+        source_path="/imports/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.IMPORTING,
+        progress_snapshot={"mode": "import", "phase": "story_arc_placements"},
+    )
+    db_session.add(job)
+    await db_session.flush()
+    outcome = ImportStoryArcPlacementCompletionOutcome(
+        job_id=job.id,
+        state=state,
+        counts=ImportStoryArcPlacementCounts(queued=1),
+    )
+    service = _make_service()
+
+    with (
+        patch(
+            "pullbox.services.import_service.finalize_import_story_arc_placements",
+            new=AsyncMock(return_value=outcome),
+        ) as finalize,
+        patch(
+            "pullbox.services.import_service.execute_import_job",
+            new=AsyncMock(),
+        ) as execute,
+    ):
+        result = await service.run_import(db_session, job.id)
+
+    finalize.assert_awaited_once_with(db_session, job.id)
+    execute.assert_not_awaited()
+    assert result.schedule_story_arc_sync is schedule_sync
+    assert result.schedule_comicinfo_enrichment is schedule_enrichment
 
 
 async def test_scan_metadata_provider_skips_persistent_cache_for_in_memory_sqlite(
@@ -3200,6 +3252,27 @@ class TestCancelJob:
         assert result == "deleted"
         service.rollback_import.assert_awaited_once_with(db_session, job.id)
         assert await db_session.get(ImportJob, job.id) is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_paused_import_preserves_job_while_story_arc_rollback_is_deferred(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+    ) -> None:
+        """A live placement fence must survive until cooperative rollback resumes."""
+        job = await _create_job_row(db_session, status=ImportJobStatus.PAUSED)
+        job.import_started_at = datetime.now(UTC)
+        await db_session.flush()
+        service.rollback_import = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+        result = await service.cancel_job(db_session, job.id)
+
+        assert result == "rollback_pending"
+        service.rollback_import.assert_awaited_once_with(db_session, job.id)
+        persisted = await db_session.get(ImportJob, job.id)
+        assert persisted is not None
+        assert persisted.status == ImportJobStatus.ROLLING_BACK
+        assert persisted.control_request == ImportControlRequest.CANCEL
 
 
 class TestRequestCancel:

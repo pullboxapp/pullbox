@@ -18,8 +18,6 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
-from pullbox.models.story_arc import ImportedStoryArcStatus
-from pullbox.models.story_arc_import import ImportedStoryArc
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_active_file_progress import (
     ActiveFileProgressSettings as _ActiveFileProgressSettings,
@@ -76,6 +74,7 @@ from pullbox.services.import_job_execution_types import (
     ProcessSeriesFilesFunc,
     RaiseIfCancelledFunc,
     RecordActionFunc,
+    RecordActionsFunc,
     ReportFileProgressFunc,
     SeriesServiceFunc,
     SlowItemDelayFunc,
@@ -96,6 +95,9 @@ from pullbox.services.import_root_policy_activation import (
 from pullbox.services.import_story_arc_materialization import (
     StoryArcMaterializationResult,
     materialize_confirmed_story_arcs,
+)
+from pullbox.services.import_story_arc_placement_completion import (
+    seal_import_story_arc_placement_origin,
 )
 from pullbox.services.import_story_arc_resolution import (
     StoryArcResolutionResult,
@@ -228,6 +230,7 @@ async def execute_import_job(
     estimate_remaining_seconds: EstimateRemainingFunc,
     maybe_slow_item_delay: SlowItemDelayFunc,
     progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None = None,
+    record_actions: RecordActionsFunc | None = None,
 ) -> None:
     """Execute confirmed new-series imports plus duplicate-series file merges."""
     loaded_job = await session.get(ImportJob, job_id)
@@ -643,12 +646,13 @@ async def execute_import_job(
     job.series_failed = failed_count
     job.total_files_imported = total_files_imported
     job.total_files_failed = total_files_failed
-    job = await _execute_story_arc_materialization(
+    job, story_arc_materialization = await _execute_story_arc_materialization(
         session,
         job,
         job_id=job_id,
         raise_if_cancelled=raise_if_cancelled,
         record_action=record_action,
+        record_actions=record_actions,
         log_event=log_event,
         emit_progress=emit_progress,
         estimate_remaining_seconds=estimate_remaining_seconds,
@@ -656,32 +660,100 @@ async def execute_import_job(
         runtime_revision_state=runtime_revision_state,
         job_started_at=job_started_at,
     )
-    # An unexpected logical-arc failure rolls back only the current arc
-    # transaction. Reapply the durable canonical counters before completion.
     job.series_imported = imported_count
     job.series_failed = failed_count
     job.total_files_imported = total_files_imported
     job.total_files_failed = total_files_failed
-    job.status = ImportJobStatus.COMPLETED
-    job.import_completed_at = datetime.now(UTC)
-    await session.flush()
+    placement_counts = await seal_import_story_arc_placement_origin(session, job_id)
+    if placement_counts.total:
+        job.status = ImportJobStatus.IMPORTING
+        job.import_completed_at = None
+        snapshot = dict(job.progress_snapshot or {})
+        snapshot.update(
+            {
+                "status": ImportJobStatus.IMPORTING.value,
+                "mode": "import",
+                "phase": "story_arc_placements",
+                "progress": 99,
+                "message": (
+                    "Creating the approved story-arc copies and links after the import "
+                    "transaction commits..."
+                ),
+                "story_arc_placements_total": placement_counts.total,
+                "story_arc_placements_queued": placement_counts.queued,
+                "story_arc_placements_running": placement_counts.running,
+                "story_arc_placements_retry_wait": placement_counts.retry_wait,
+                "story_arc_placements_completed": placement_counts.completed,
+                "story_arc_placements_failed": placement_counts.failed,
+                "story_arc_placements_cancelled": placement_counts.cancelled,
+            }
+        )
+        job.progress_snapshot = snapshot
+        await session.flush()
+        await log_event(
+            session,
+            job_id,
+            "INFO",
+            "story_arc_placements_queued",
+            message=(f"Tracking {placement_counts.total} approved story-arc placements."),
+            total=placement_counts.total,
+            queued=placement_counts.queued,
+            reused=story_arc_materialization.managed_placements_reused,
+        )
+        if progress_callback is not None:
+            runtime_revision_state["value"] += 1
+            job.progress_revision = runtime_revision_state["value"]
+            await emit_progress(
+                session,
+                job,
+                ImportProgressEvent(
+                    job_id=job_id,
+                    status=ImportJobStatus.IMPORTING,
+                    mode="import",
+                    phase="story_arc_placements",
+                    progress=99,
+                    message=(
+                        "Creating the approved story-arc copies and links after the "
+                        "import transaction commits..."
+                    ),
+                    estimated_seconds_remaining=None,
+                    series_found=job_series_found,
+                    series_imported=imported_count,
+                    series_failed=failed_count,
+                    total_files_imported=total_files_imported,
+                    total_files_failed=total_files_failed,
+                    story_arc_placements_total=placement_counts.total,
+                    story_arc_placements_queued=placement_counts.queued,
+                    story_arc_placements_running=placement_counts.running,
+                    story_arc_placements_retry_wait=placement_counts.retry_wait,
+                    story_arc_placements_failed=placement_counts.failed,
+                    story_arc_placements_completed=placement_counts.completed,
+                    story_arc_placements_cancelled=placement_counts.cancelled,
+                    progress_revision=runtime_revision_state["value"],
+                ),
+                progress_callback,
+            )
+    else:
+        job.status = ImportJobStatus.COMPLETED
+        job.import_completed_at = datetime.now(UTC)
+        await session.flush()
 
-    await log_event(
-        session,
-        job_id,
-        "INFO",
-        "import_completed",
-        message=(
-            f"Import complete: {imported_count} series imported, "
-            f"{failed_count} series failed, "
-            f"{total_files_imported} files imported, "
-            f"{total_files_failed} files failed"
-        ),
-        imported=imported_count,
-        failed=failed_count,
-        files_imported=total_files_imported,
-        files_failed=total_files_failed,
-    )
+        await log_event(
+            session,
+            job_id,
+            "INFO",
+            "import_completed",
+            message=(
+                f"Import complete: {imported_count} series imported, "
+                f"{failed_count} series failed, "
+                f"{total_files_imported} files imported, "
+                f"{total_files_failed} files failed"
+            ),
+            imported=imported_count,
+            failed=failed_count,
+            files_imported=total_files_imported,
+            files_failed=total_files_failed,
+        )
     for request in pending_catalog_hydrations:
         _schedule_catalog_hydration(
             session,
@@ -698,54 +770,92 @@ async def _execute_story_arc_materialization(
     job_id: int,
     raise_if_cancelled: RaiseIfCancelledFunc,
     record_action: RecordActionFunc,
+    record_actions: RecordActionsFunc | None,
     log_event: LogEventFunc,
     emit_progress: EmitProgressFunc,
     estimate_remaining_seconds: EstimateRemainingFunc,
     progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None,
     runtime_revision_state: dict[str, int],
     job_started_at: datetime | None,
-) -> ImportJob:
-    """Resolve and register confirmed arcs without reopening canonical work."""
+) -> tuple[ImportJob, StoryArcMaterializationResult]:
+    """Resolve and register confirmed arcs through restart-safe durable pages."""
 
     async def cancellation_checkpoint() -> None:
         await raise_if_cancelled(session, job_id)
 
+    async def durable_story_arc_checkpoint() -> None:
+        """Commit one page, yield the writer, then read control in a fresh transaction."""
+        await session.commit()
+        await asyncio.sleep(0)
+        try:
+            await raise_if_cancelled(session, job_id)
+        except BaseException:
+            await session.rollback()
+            raise
+        await session.commit()
+
     try:
+        build_snapshot = dict(job.progress_snapshot or {})
+        build_snapshot.update(
+            {
+                "status": ImportJobStatus.IMPORTING.value,
+                "mode": "import",
+                "phase": "story_arcs",
+                "progress": 98,
+                "message": "Registering approved story arcs in durable batches...",
+            }
+        )
+        job.progress_snapshot = build_snapshot
+        await session.flush()
+        await durable_story_arc_checkpoint()
         resolution = await resolve_staged_story_arc_entries(
             session,
             import_job_id=job_id,
             cancellation_check=cancellation_checkpoint,
+            durable_checkpoint=durable_story_arc_checkpoint,
         )
         materialization = await materialize_confirmed_story_arcs(
             session,
             import_job_id=job_id,
             cancellation_check=cancellation_checkpoint,
+            durable_checkpoint=durable_story_arc_checkpoint,
             record_action=record_action,
+            record_actions=record_actions,
         )
     except (JobPausedError, JobCancelledError):
         raise
     except Exception as exc:
-        # Canonical groups commit independently. Discard only the current
-        # logical-arc transaction, then leave durable review evidence that the
-        # optional registration phase failed.
+        # Earlier canonical and story-arc pages may already be durable. Discard
+        # only the current page, preserve every committed ownership pointer and
+        # journal row, then durably fail the job before propagating the error.
         await session.rollback()
         persisted_job = await session.get(ImportJob, job_id)
         if persisted_job is None:
             raise NotFoundError("ImportJob", job_id) from exc
-        await _mark_story_arc_materialization_failed(session, job_id=job_id)
-        persisted_job.error_message = (
-            "Story-arc registration failed; canonical files remain imported."
+        failure_message = "Story-arc registration failed; canonical files remain imported."
+        persisted_job.status = ImportJobStatus.FAILED
+        persisted_job.import_completed_at = None
+        persisted_job.error_message = failure_message
+        failure_snapshot = dict(persisted_job.progress_snapshot or {})
+        failure_snapshot.update(
+            {
+                "status": ImportJobStatus.FAILED.value,
+                "mode": "import",
+                "phase": "story_arcs",
+                "message": failure_message,
+            }
         )
+        persisted_job.progress_snapshot = failure_snapshot
         await log_event(
             session,
             job_id,
             "ERROR",
             "story_arc_materialization_failed",
-            message="Story-arc registration failed; canonical files remain imported.",
+            message=failure_message,
             failure_type=type(exc).__name__,
         )
-        await session.flush()
-        return persisted_job
+        await session.commit()
+        raise
 
     warning_codes = sorted({warning.code for warning in materialization.warnings})
     level = "WARNING" if materialization.arcs_failed else "INFO"
@@ -765,7 +875,11 @@ async def _execute_story_arc_materialization(
         **_story_arc_log_counts(resolution, materialization),
         warning_codes=warning_codes,
     )
-    if progress_callback is not None and materialization.arcs_examined:
+    if (
+        progress_callback is not None
+        and materialization.arcs_examined
+        and not materialization.managed_placements_queued
+    ):
         runtime_revision_state["value"] += 1
         job.progress_revision = runtime_revision_state["value"]
         await emit_progress(
@@ -791,7 +905,7 @@ async def _execute_story_arc_materialization(
             ),
             progress_callback,
         )
-    return job
+    return job, materialization
 
 
 def _story_arc_log_counts(
@@ -817,39 +931,9 @@ def _story_arc_log_counts(
         "memberships_reused": materialization.memberships_reused,
         "resolved_memberships": materialization.resolved_entries,
         "unresolved_memberships": materialization.unresolved_entries,
+        "managed_placements_queued": materialization.managed_placements_queued,
+        "managed_placements_reused": materialization.managed_placements_reused,
     }
-
-
-async def _mark_story_arc_materialization_failed(
-    session: AsyncSession,
-    *,
-    job_id: int,
-) -> None:
-    """Persist sanitized failure state after the arc transaction is discarded."""
-    staged_arcs = list(
-        (
-            await session.scalars(
-                sa_select(ImportedStoryArc).where(
-                    ImportedStoryArc.import_job_id == job_id,
-                    ImportedStoryArc.status == ImportedStoryArcStatus.CONFIRMED,
-                    ImportedStoryArc.selected_for_import.is_(True),
-                )
-            )
-        ).all()
-    )
-    for staged_arc in staged_arcs:
-        staged_arc.status = ImportedStoryArcStatus.FAILED
-        staged_arc.materialized_story_arc_id = None
-        diagnostics = dict(staged_arc.diagnostics or {})
-        diagnostics["materialization"] = {
-            "schema_version": 1,
-            "status": "failed",
-            "story_arc_id": None,
-            "counts": {},
-            "warning_codes": ["unexpected_materialization_failure"],
-        }
-        staged_arc.diagnostics = diagnostics
-    await session.flush()
 
 
 async def _load_confirmed_import_series(

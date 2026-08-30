@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 
 CancellationCheck = Callable[[], Awaitable[None]]
+DurableCheckpoint = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,12 +51,15 @@ async def resolve_staged_story_arc_entries(
     import_job_id: int,
     batch_size: int = 200,
     cancellation_check: CancellationCheck | None = None,
+    durable_checkpoint: DurableCheckpoint | None = None,
 ) -> StoryArcResolutionResult:
     """Reconcile staged entries without providers, source I/O, or canonical writes.
 
     Exact staged/import associations and trusted ComicVine issue identities are
     authoritative. Names, titles, order, and issue-number similarity are never
-    used to manufacture a match. The caller owns the transaction.
+    used to manufacture a match. The runtime supplies a durable checkpoint that
+    commits each flushed page and rechecks job control before the next page. A
+    caller that omits it retains ownership of the surrounding transaction.
     """
     if batch_size <= 0:
         msg = "Story-arc resolution batch size must be positive."
@@ -103,6 +107,8 @@ async def resolve_staged_story_arc_entries(
             entries_examined += 1
 
         await session.flush()
+        if durable_checkpoint is not None:
+            await durable_checkpoint()
         last_entry_id = entries[-1].id
 
     return StoryArcResolutionResult(

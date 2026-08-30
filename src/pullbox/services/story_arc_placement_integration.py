@@ -30,6 +30,13 @@ from pullbox.core.story_arc_naming import (
     validate_story_arc_file_template,
     validate_story_arc_folder_template,
 )
+from pullbox.models.import_job import (
+    ImportControlRequest,
+    ImportJob,
+    ImportJobAction,
+    ImportJobActionStatus,
+    ImportJobStatus,
+)
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.models.publisher import Publisher
@@ -63,6 +70,7 @@ from pullbox.services.story_arc_placement_service import (
     StoryArcPlacementOwnershipError,
     StoryArcPlacementPlan,
     StoryArcPlacementPreparation,
+    StoryArcPlacementRemovalResult,
     StoryArcPlacementResult,
     StoryArcPlacementSafetyError,
     execute_story_arc_placement,
@@ -76,6 +84,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.elements import ColumnElement
 
 STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION = 1
 MAX_STORY_ARC_PLACEMENT_PAGE_SIZE = 200
@@ -91,6 +100,19 @@ _POLICY_SNAPSHOT_KEYS = frozenset(
         "file_template",
         "symlink_style",
         "synchronize",
+    }
+)
+_IMPORT_PLACEMENT_ACTION_TYPE = "story_arc_managed_placement_requested"
+_IMPORT_PLACEMENT_PHASE = "story_arc_placements"
+_IMPORT_PLACEMENT_PAYLOAD_KEYS = frozenset(
+    {
+        "schema_version",
+        "sync_work_id",
+        "membership_id",
+        "desired_generation",
+        "imported_story_arc_id",
+        "imported_story_arc_entry_id",
+        "source_import_job_id",
     }
 )
 
@@ -240,6 +262,14 @@ class StoryArcPlacementRemovalView:
     canonical_preserved: bool = True
     referenced_artifact_preserved: bool = False
     automatic_sync_disabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class StoryArcPlacementImportProvenance:
+    """Immutable import job/action ownership stamped only on a new managed row."""
+
+    import_job_id: int
+    import_action_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +574,7 @@ class StoryArcPlacementSyncService:
         *,
         adopt_identical_existing: bool = False,
         cancellation_requested: Callable[[], bool] | None = None,
+        import_provenance: StoryArcPlacementImportProvenance | None = None,
     ) -> StoryArcPlacementSyncResult:
         lock_key = (story_arc_id, membership_id)
         async with _membership_sync_lock(lock_key):
@@ -553,6 +584,7 @@ class StoryArcPlacementSyncService:
                 membership_id,
                 adopt_identical_existing=adopt_identical_existing,
                 cancellation_requested=cancellation_requested,
+                import_provenance=import_provenance,
             )
 
     async def retry_placement(
@@ -597,12 +629,13 @@ class StoryArcPlacementSyncService:
         placement_id: int,
         *,
         confirm_managed_artifact_removal: bool = False,
+        abandoned_published_operation_token: str | None = None,
     ) -> StoryArcPlacementRemovalView:
         """Remove only owned placement evidence, never a canonical or referenced file."""
         placement = await _require_placement(session, story_arc_id, placement_id)
         ownership = placement.ownership
+        membership_id = placement.issue_story_arc_id
         if ownership is StoryArcPlacementOwnership.REFERENCED:
-            membership_id = placement.issue_story_arc_id
             # Close the initial read transaction before waiting for an active
             # synchronization.  The durable operation token below remains the
             # cross-process fence; this lock provides deterministic local UX.
@@ -615,11 +648,48 @@ class StoryArcPlacementSyncService:
                         "Story-arc placement ownership changed before it could be forgotten",
                         category="ownership",
                     )
+                reference_token_filter: ColumnElement[bool] = StoryArcPlacement.operation_token.is_(
+                    None
+                )
+                if abandoned_published_operation_token is not None:
+                    _require_published_operation_token(
+                        current,
+                        abandoned_published_operation_token,
+                    )
+                    reference_token_filter = (
+                        StoryArcPlacement.operation_token == abandoned_published_operation_token
+                    )
+                reference_removal_token = uuid4().hex
+                previous_result = dict(current.last_result or {})
+                reserve = await session.execute(
+                    sa_update(StoryArcPlacement)
+                    .where(
+                        StoryArcPlacement.id == placement_id,
+                        StoryArcPlacement.ownership == StoryArcPlacementOwnership.REFERENCED,
+                        reference_token_filter,
+                    )
+                    .values(
+                        operation_token=reference_removal_token,
+                        last_result={
+                            **previous_result,
+                            "schema_version": 1,
+                            "status": "remove_prepared",
+                            "operation_token": reference_removal_token,
+                        },
+                    )
+                )
+                if reserve.rowcount != 1:  # type: ignore[attr-defined]
+                    await session.rollback()
+                    raise StoryArcPlacementIntegrationError(
+                        "placement_operation_in_progress",
+                        "Referenced placement evidence is being updated by another operation",
+                        category="conflict",
+                    )
                 result = await session.execute(
                     delete(StoryArcPlacement).where(
                         StoryArcPlacement.id == placement_id,
                         StoryArcPlacement.ownership == StoryArcPlacementOwnership.REFERENCED,
-                        StoryArcPlacement.operation_token.is_(None),
+                        StoryArcPlacement.operation_token == reference_removal_token,
                     )
                 )
                 if result.rowcount != 1:  # type: ignore[attr-defined]
@@ -661,7 +731,7 @@ class StoryArcPlacementSyncService:
                 ),
             )
 
-        evidence = _managed_evidence(placement)
+        evidence = _managed_removal_evidence(placement)
         if evidence is None:
             raise StoryArcPlacementIntegrationError(
                 "managed_ownership_evidence_missing",
@@ -687,8 +757,14 @@ class StoryArcPlacementSyncService:
         )
         observed_token = placement.operation_token
         previous_result = dict(placement.last_result or {})
+        if abandoned_published_operation_token is not None:
+            _require_published_operation_token(
+                placement,
+                abandoned_published_operation_token,
+            )
         if (
             observed_token is not None
+            and abandoned_published_operation_token is None
             and placement.updated_at > datetime.now(UTC) - _PLACEMENT_OPERATION_LEASE
         ):
             raise StoryArcPlacementIntegrationError(
@@ -698,14 +774,18 @@ class StoryArcPlacementSyncService:
             )
 
         operation_token = uuid4().hex
-        token_filter = (
+        managed_token_filter: ColumnElement[bool] = (
             StoryArcPlacement.operation_token.is_(None)
             if observed_token is None
             else StoryArcPlacement.operation_token == observed_token
         )
         reserve = await session.execute(
             sa_update(StoryArcPlacement)
-            .where(StoryArcPlacement.id == placement_id, token_filter)
+            .where(
+                StoryArcPlacement.id == placement_id,
+                StoryArcPlacement.ownership == StoryArcPlacementOwnership.MANAGED,
+                managed_token_filter,
+            )
             .values(
                 operation_token=operation_token,
                 last_result={
@@ -744,13 +824,26 @@ class StoryArcPlacementSyncService:
                 ),
             )
         except StoryArcPlacementError as exc:
-            await _persist_removal_failure(
-                session,
-                placement_id=placement_id,
-                operation_token=operation_token,
-                error=exc,
-            )
-            raise _translate_filesystem_error(exc) from exc
+            if (
+                not evidence.target_fingerprint
+                and exc.code == "filesystem_error"
+                and isinstance(exc.__cause__, FileNotFoundError)
+            ):
+                # The secure, root-anchored walk proved that an intermediate
+                # target directory is absent.  This is the same idempotent
+                # absence represented by the removal-only ``{}`` sentinel.
+                removed = StoryArcPlacementRemovalResult(
+                    placement_path=evidence.placement_path,
+                    removed=False,
+                )
+            else:
+                await _persist_removal_failure(
+                    session,
+                    placement_id=placement_id,
+                    operation_token=operation_token,
+                    error=exc,
+                )
+                raise _translate_filesystem_error(exc) from exc
         except (OSError, ValueError) as exc:
             error = StoryArcPlacementIntegrationError(
                 "placement_removal_failed",
@@ -768,7 +861,7 @@ class StoryArcPlacementSyncService:
         await _delete_removed_placement_checkpoint(
             session,
             placement_id=placement_id,
-            membership_id=placement.issue_story_arc_id,
+            membership_id=membership_id,
             operation_token=operation_token,
             artifact_removed=removed.removed,
         )
@@ -788,6 +881,7 @@ class StoryArcPlacementSyncService:
         *,
         adopt_identical_existing: bool,
         cancellation_requested: Callable[[], bool] | None,
+        import_provenance: StoryArcPlacementImportProvenance | None,
     ) -> StoryArcPlacementSyncResult:
         arc = await session.get(StoryArc, story_arc_id)
         if arc is None:
@@ -824,6 +918,27 @@ class StoryArcPlacementSyncService:
                 "membership_not_resolved",
                 "Only a resolved story-arc membership can synchronize a placement",
             )
+        if import_provenance is not None:
+            await _validate_import_provenance(
+                session,
+                provenance=import_provenance,
+                story_arc_id=story_arc_id,
+                membership_id=membership_id,
+            )
+            if (
+                policy.mode
+                not in {
+                    StoryArcPlacementPolicyMode.COPY,
+                    StoryArcPlacementPolicyMode.HARDLINK,
+                    StoryArcPlacementPolicyMode.SYMLINK,
+                }
+                or adopt_identical_existing
+            ):
+                raise StoryArcPlacementIntegrationError(
+                    "import_placement_requires_managed_mode",
+                    "Import-origin placement work requires copy, hardlink, or symlink mode",
+                    category="ownership",
+                )
 
         if policy.mode is StoryArcPlacementPolicyMode.LOGICAL:
             outcome = StoryArcPlacementPolicyMode.LOGICAL.value
@@ -895,6 +1010,12 @@ class StoryArcPlacementSyncService:
             .limit(1)
         )
         if existing is not None and existing.ownership is StoryArcPlacementOwnership.REFERENCED:
+            if import_provenance is not None:
+                raise StoryArcPlacementIntegrationError(
+                    "import_placement_reference_not_owned",
+                    "Import-origin work cannot adopt or replace a referenced artifact",
+                    category="ownership",
+                )
             # A prior explicit adoption or crash-safe ownership downgrade stays
             # referenced.  Validate it read-only and never silently promote it
             # to a Pullbox-managed artifact.
@@ -905,6 +1026,12 @@ class StoryArcPlacementSyncService:
                 membership=membership,
                 adopt_identical_existing=False,
                 cancellation_requested=cancellation_requested,
+            )
+        if import_provenance is not None and other_managed is not None:
+            raise StoryArcPlacementIntegrationError(
+                "import_placement_existing_managed_not_owned",
+                "Import-origin work cannot change an existing managed placement",
+                category="ownership",
             )
         if other_managed is not None:
             other_managed.state = StoryArcPlacementState.DRIFTED
@@ -923,6 +1050,19 @@ class StoryArcPlacementSyncService:
                 "policy_destination_changed",
                 "Existing managed placement requires an explicit policy-change repair",
                 category="conflict",
+            )
+        if (
+            import_provenance is not None
+            and existing is not None
+            and (
+                existing.source_import_job_id != import_provenance.import_job_id
+                or existing.creating_action_id != import_provenance.import_action_id
+            )
+        ):
+            raise StoryArcPlacementIntegrationError(
+                "import_placement_existing_managed_not_owned",
+                "Import-origin work cannot retrofit ownership onto an existing placement",
+                category="ownership",
             )
 
         existing_id = existing.id if existing is not None else None
@@ -1045,6 +1185,19 @@ class StoryArcPlacementSyncService:
                 "Canonical issue or library-file context changed during preparation",
                 category="conflict",
             )
+        if import_provenance is not None:
+            await _validate_import_provenance(
+                session,
+                provenance=import_provenance,
+                story_arc_id=story_arc_id,
+                membership_id=membership_id,
+            )
+            if cancellation_requested is not None and cancellation_requested():
+                raise StoryArcPlacementIntegrationError(
+                    "cancelled",
+                    "Import-origin story-arc placement was cancelled before reservation",
+                    category="cancelled",
+                )
         existing = (
             await session.get(StoryArcPlacement, existing_id)
             if existing_id is not None
@@ -1078,6 +1231,12 @@ class StoryArcPlacementSyncService:
                 ownership=StoryArcPlacementOwnership.MANAGED,
                 symlink_style=policy.symlink_style,
                 source_kind=StoryArcSourceKind.PULLBOX,
+                source_import_job_id=(
+                    import_provenance.import_job_id if import_provenance is not None else None
+                ),
+                creating_action_id=(
+                    import_provenance.import_action_id if import_provenance is not None else None
+                ),
                 rendered_reading_order=context.sequence_number,
                 policy_schema_version=STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION,
                 source_fingerprint=dict(preparation.source_fingerprint),
@@ -1320,6 +1479,79 @@ async def validate_story_arc_placement_policy_input(
         symlink_style=symlink_style,
         synchronize=proposal.synchronize,
     )
+
+
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+async def _validate_import_provenance(
+    session: AsyncSession,
+    *,
+    provenance: StoryArcPlacementImportProvenance,
+    story_arc_id: int,
+    membership_id: int,
+) -> None:
+    """Fail closed unless an active import action exactly owns this request."""
+    if not _is_positive_int(provenance.import_job_id) or not _is_positive_int(
+        provenance.import_action_id
+    ):
+        raise StoryArcPlacementIntegrationError(
+            "import_placement_provenance_invalid",
+            "Import placement provenance requires positive job and action identifiers",
+            category="ownership",
+        )
+    action = await session.get(ImportJobAction, provenance.import_action_id)
+    job = await session.get(ImportJob, provenance.import_job_id)
+    if (
+        action is None
+        or job is None
+        or action.import_job_id != job.id
+        or action.phase != _IMPORT_PLACEMENT_PHASE
+        or action.action_type != _IMPORT_PLACEMENT_ACTION_TYPE
+        or action.status is not ImportJobActionStatus.COMPLETED
+    ):
+        raise StoryArcPlacementIntegrationError(
+            "import_placement_provenance_invalid",
+            "Import placement action is missing, inactive, or belongs to another job",
+            category="ownership",
+        )
+    payload = dict(action.payload or {})
+    if (
+        set(payload) != _IMPORT_PLACEMENT_PAYLOAD_KEYS
+        or payload.get("schema_version") != 1
+        or payload.get("membership_id") != membership_id
+        or payload.get("source_import_job_id") != job.id
+        or not _is_positive_int(payload.get("sync_work_id"))
+        or not _is_positive_int(payload.get("imported_story_arc_id"))
+        or not _is_positive_int(payload.get("imported_story_arc_entry_id"))
+        or not isinstance(payload.get("desired_generation"), str)
+        or len(str(payload.get("desired_generation"))) != 64
+    ):
+        raise StoryArcPlacementIntegrationError(
+            "import_placement_payload_invalid",
+            "Import placement action payload does not match the requested membership",
+            category="ownership",
+        )
+    if (
+        job.status is not ImportJobStatus.IMPORTING
+        or job.control_request is not ImportControlRequest.NONE
+        or dict(job.progress_snapshot or {}).get("phase") != _IMPORT_PLACEMENT_PHASE
+    ):
+        raise StoryArcPlacementIntegrationError(
+            "import_placement_job_inactive",
+            "Import job is not actively publishing Story Arc placements",
+            category="cancelled",
+        )
+    membership_arc_id = await session.scalar(
+        select(IssueStoryArc.story_arc_id).where(IssueStoryArc.id == membership_id)
+    )
+    if membership_arc_id != story_arc_id:
+        raise StoryArcPlacementIntegrationError(
+            "import_placement_membership_changed",
+            "Import placement membership no longer belongs to the requested Story Arc",
+            category="ownership",
+        )
 
 
 def _policy_from_arc(arc: StoryArc) -> StoryArcPlacementPolicy:
@@ -2242,6 +2474,29 @@ def _filesystem_mode(mode: StoryArcPlacementPolicyMode) -> StoryArcPlacementMode
     return StoryArcPlacementMode(mode.value)
 
 
+def _require_published_operation_token(
+    placement: StoryArcPlacement,
+    operation_token: str,
+) -> None:
+    """Authorize takeover only from the exact durable post-publish checkpoint."""
+    last_result = dict(placement.last_result or {})
+    target_fingerprint = last_result.get("target_fingerprint")
+    if (
+        not operation_token
+        or placement.operation_token != operation_token
+        or last_result.get("schema_version") != 1
+        or last_result.get("status") != "published_pending_reconcile"
+        or last_result.get("operation_token") != operation_token
+        or not isinstance(target_fingerprint, dict)
+        or not target_fingerprint
+    ):
+        raise StoryArcPlacementIntegrationError(
+            "placement_published_operation_token_invalid",
+            "Placement operation is not an exact abandoned published checkpoint",
+            category="conflict",
+        )
+
+
 def _managed_evidence(
     placement: StoryArcPlacement,
 ) -> ManagedStoryArcPlacementEvidence | None:
@@ -2262,6 +2517,39 @@ def _managed_evidence(
         symlink_style=placement.symlink_style,
         source_fingerprint=dict(placement.source_fingerprint),
         target_fingerprint=dict(target_fingerprint),
+        creating_action_id=ownership_token,
+    )
+
+
+def _managed_removal_evidence(
+    placement: StoryArcPlacement,
+) -> ManagedStoryArcPlacementEvidence | None:
+    """Build removal-only evidence, using an empty fingerprint as absence proof.
+
+    The filesystem removal service checks secure path absence before comparing
+    fingerprints.  Thus ``{}`` can prove only that an absent target is safe to
+    forget; any existing target necessarily mismatches and is preserved.
+    """
+    if placement.ownership is not StoryArcPlacementOwnership.MANAGED:
+        return None
+    raw_target_fingerprint = dict(placement.last_result or {}).get("target_fingerprint")
+    if raw_target_fingerprint is None:
+        target_fingerprint: dict[str, object] = {}
+    elif isinstance(raw_target_fingerprint, dict):
+        target_fingerprint = dict(raw_target_fingerprint)
+    else:
+        return None
+    if not placement.source_fingerprint:
+        return None
+    ownership_token = placement.creating_action_id or placement.id
+    return ManagedStoryArcPlacementEvidence(
+        issue_story_arc_id=placement.issue_story_arc_id,
+        placement_path=Path(placement.placement_path),
+        mode=placement.mode,
+        ownership=placement.ownership,
+        symlink_style=placement.symlink_style,
+        source_fingerprint=dict(placement.source_fingerprint),
+        target_fingerprint=target_fingerprint,
         creating_action_id=ownership_token,
     )
 

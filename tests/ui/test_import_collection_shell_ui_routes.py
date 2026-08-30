@@ -681,6 +681,23 @@ class TestImportShellRouteContracts:
         assert "this.phase = String(data.phase || activeStatus);" in handler
         assert 'this.jobStatus = "importing";' not in handler
 
+    async def test_step_four_has_a_specific_story_arc_placement_retry_control(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        template = Path("src/pullbox/ui/templates/partials/import_step_progress.html").read_text()
+        start = script.index("function importProgressData")
+        end = script.index("function importSeriesDetailsModalData", start)
+        controller = script[start:end]
+
+        assert 'data-testid="import-progress-retry-story-arc-placements"' in template
+        assert '@click="retryStoryArcPlacements()"' in template
+        assert 'x-show="showRetryStoryArcPlacementsAction()"' in template
+        assert 'data-testid="import-progress-story-arc-placement-retry-error"' in template
+        assert 'data-testid="import-progress-story-arc-placement-retry-success"' in template
+        assert "showRetryStoryArcPlacementsAction: function" in controller
+        assert "retryStoryArcPlacements: async function" in controller
+        assert '"/api/v1/import/" + this.jobId + "/story-arc-placements/retry"' in controller
+        assert 'headers: { "X-CSRF-Token": readCsrfTokenFromBody() }' in controller
+
     async def test_import_footer_pagination_has_delegated_click_handler(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
 

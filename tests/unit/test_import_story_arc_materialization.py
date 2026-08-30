@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import pullbox.services.import_job_execution as execution_module
+from pullbox.core.exceptions import JobCancelledError
+from pullbox.models import Base
 from pullbox.models.import_job import (
+    ImportControlRequest,
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
@@ -19,7 +25,7 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.models.issue import Issue
-from pullbox.models.library import LibraryRoot
+from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
@@ -34,11 +40,13 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.models.story_arc_sync import StoryArcSyncWork
 from pullbox.services import import_story_arc_materialization as materialization_module
-from pullbox.services.import_job_actions import record_action
+from pullbox.services.import_job_actions import record_action, record_actions
 from pullbox.services.import_story_arc_materialization import (
     materialize_confirmed_story_arcs,
 )
+from pullbox.services.import_workflow_state import raise_if_job_cancelled
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,6 +88,39 @@ async def _add_issue(
     session.add(issue)
     await session.flush()
     return issue
+
+
+async def _add_library_file(
+    session: AsyncSession,
+    *,
+    issue: Issue,
+    root: LibraryRoot,
+    path: Path,
+) -> LibraryFile:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"canonical-story-arc-issue")
+    stat_result = path.stat()
+    library_file = LibraryFile(
+        file_path=str(path),
+        file_name=path.name,
+        file_size=stat_result.st_size,
+        file_format=FileFormat.CBZ,
+        file_modified_at=datetime.now(UTC),
+        match_confidence=MatchConfidence.HIGH,
+        issue_id=issue.id,
+        library_root_id=root.id,
+        source_signature={
+            "schema_version": 1,
+            "resolved_path": str(path.resolve()),
+            "size": stat_result.st_size,
+            "mtime_ns": stat_result.st_mtime_ns,
+            "device": stat_result.st_dev,
+            "inode": stat_result.st_ino,
+        },
+    )
+    session.add(library_file)
+    await session.flush()
+    return library_file
 
 
 async def _add_staged_arc(
@@ -166,6 +207,7 @@ def _confirmed_policy(
     mode: str = "logical",
     target_library_root_id: int | None = None,
     destination_root: str | None = None,
+    symlink_style: str | None = None,
     synchronize: bool = False,
 ) -> dict[str, object]:
     return {
@@ -183,7 +225,7 @@ def _confirmed_policy(
             "destination_root": destination_root,
             "folder_template": "{StoryArc}",
             "file_template": "{ReadingOrder:03d} - {Series} {IssueNumber}",
-            "symlink_style": None,
+            "symlink_style": symlink_style,
             "synchronize": synchronize,
         },
     }
@@ -306,6 +348,7 @@ async def test_materializes_exact_ordered_entries_identities_and_multiple_arcs(
     assert {warning.code for warning in result.warnings} == {
         "duplicate_issue_membership_reused",
         "policy_not_activated",
+        "story_arc_managed_placement_canonical_file_missing",
     }
     assert len(arcs) == 2
     assert arcs[0].monitored is True
@@ -354,8 +397,843 @@ async def test_materializes_exact_ordered_entries_identities_and_multiple_arcs(
         "resolved_entries": 3,
         "unresolved_entries": 1,
         "entries_skipped": 0,
+        "managed_placements_queued": 0,
+        "managed_placements_reused": 0,
     }
     assert await db_session.scalar(select(func.count()).select_from(StoryArcPlacement)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "symlink_style"),
+    [
+        ("copy", None),
+        ("hardlink", None),
+        ("symlink", "absolute"),
+        ("symlink", "relative"),
+    ],
+)
+async def test_confirmed_managed_policy_queues_one_import_owned_command_when_future_sync_is_off(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    mode: str,
+    symlink_style: str | None,
+) -> None:
+    canonical_root_path = tmp_path / "library"
+    canonical_root_path.mkdir()
+    destination = canonical_root_path / "Story Arcs"
+    destination.mkdir()
+    root = LibraryRoot(name="Comics", path=str(canonical_root_path), enabled=True)
+    db_session.add(root)
+    await db_session.flush()
+    issue = await _add_issue(
+        db_session,
+        series_name="Queued Series",
+        issue_number=1.0,
+        issue_number_text="1",
+    )
+    library_file = await _add_library_file(
+        db_session,
+        issue=issue,
+        root=root,
+        path=canonical_root_path / "Queued Series 001.cbz",
+    )
+    job = await _add_job(db_session)
+    staged = await _add_staged_arc(
+        db_session,
+        job=job,
+        name=f"Queued {mode}",
+        source_key=f"mylar3:queued:{mode}:{symlink_style}",
+        source_arc_id=f"queued-{mode}-{symlink_style}",
+        policy=_confirmed_policy(
+            source="mylar3",
+            mode=mode,
+            target_library_root_id=root.id,
+            destination_root=str(destination),
+            symlink_style=symlink_style,
+            synchronize=False,
+        ),
+    )
+    entry = await _add_staged_entry(
+        db_session,
+        staged_arc=staged,
+        source_ordinal=1,
+        reading_order=1,
+        issue_number_text="1",
+        matched_issue_id=issue.id,
+    )
+
+    first = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+
+    work = (await db_session.scalars(select(StoryArcSyncWork))).one()
+    action = (
+        await db_session.scalars(
+            select(ImportJobAction).where(
+                ImportJobAction.action_type == "story_arc_managed_placement_requested"
+            )
+        )
+    ).one()
+    membership = await db_session.get(IssueStoryArc, entry.materialized_membership_id)
+    assert membership is not None
+    assert first.managed_placements_queued == 1
+    assert first.managed_placements_reused == 0
+    assert membership.sync_eligible is False
+    assert work.library_file_id == library_file.id
+    assert work.issue_story_arc_id == membership.id
+    assert work.origin_import_action_id == action.id
+    assert set(action.payload) == {
+        "schema_version",
+        "sync_work_id",
+        "membership_id",
+        "desired_generation",
+        "imported_story_arc_id",
+        "imported_story_arc_entry_id",
+        "source_import_job_id",
+    }
+    assert action.payload == {
+        "schema_version": 1,
+        "sync_work_id": work.id,
+        "membership_id": membership.id,
+        "desired_generation": work.desired_generation,
+        "imported_story_arc_id": staged.id,
+        "imported_story_arc_entry_id": entry.id,
+        "source_import_job_id": job.id,
+    }
+
+    staged.status = ImportedStoryArcStatus.CONFIRMED
+    await db_session.flush()
+    retry = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+
+    assert retry.managed_placements_queued == 0
+    assert retry.managed_placements_reused == 0
+    assert await db_session.scalar(select(func.count()).select_from(StoryArcSyncWork)) == 1
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(ImportJobAction)
+            .where(ImportJobAction.action_type == "story_arc_managed_placement_requested")
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable_page_boundary", [False, True])
+async def test_duplicate_staged_entries_share_one_import_owned_managed_placement(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    durable_page_boundary: bool,
+) -> None:
+    canonical_root_path = tmp_path / "library"
+    canonical_root_path.mkdir()
+    destination = canonical_root_path / "Story Arcs"
+    destination.mkdir()
+    root = LibraryRoot(name="Comics", path=str(canonical_root_path), enabled=True)
+    db_session.add(root)
+    await db_session.flush()
+    issue = await _add_issue(
+        db_session,
+        series_name="Duplicate Series",
+        issue_number=1.0,
+        issue_number_text="1",
+    )
+    await _add_library_file(
+        db_session,
+        issue=issue,
+        root=root,
+        path=canonical_root_path / "Duplicate Series 001.cbz",
+    )
+    job = await _add_job(db_session)
+    staged = await _add_staged_arc(
+        db_session,
+        job=job,
+        name="Duplicate Managed Arc",
+        source_key=f"mylar3:duplicate-managed:{durable_page_boundary}",
+        source_arc_id=f"duplicate-managed-{durable_page_boundary}",
+        policy=_confirmed_policy(
+            source="mylar3",
+            mode="copy",
+            target_library_root_id=root.id,
+            destination_root=str(destination),
+        ),
+    )
+    first = await _add_staged_entry(
+        db_session,
+        staged_arc=staged,
+        source_ordinal=1,
+        reading_order=1,
+        issue_number_text="1",
+        matched_issue_id=issue.id,
+    )
+    duplicate = await _add_staged_entry(
+        db_session,
+        staged_arc=staged,
+        source_ordinal=2,
+        reading_order=2,
+        issue_number_text="1",
+        matched_issue_id=issue.id,
+    )
+
+    async def commit_checkpoint() -> None:
+        await db_session.commit()
+
+    result = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        entry_checkpoint_size=1 if durable_page_boundary else 100,
+        durable_checkpoint=commit_checkpoint if durable_page_boundary else None,
+        record_actions=record_actions,
+    )
+
+    work = (await db_session.scalars(select(StoryArcSyncWork))).one()
+    managed_action = (
+        await db_session.scalars(
+            select(ImportJobAction).where(
+                ImportJobAction.action_type == "story_arc_managed_placement_requested"
+            )
+        )
+    ).one()
+    assert result.memberships_created == 1
+    assert result.memberships_reused == 1
+    assert result.managed_placements_queued == 1
+    assert result.managed_placements_reused == 0
+    assert first.materialized_membership_id == duplicate.materialized_membership_id
+    assert work.issue_story_arc_id == first.materialized_membership_id
+    assert work.origin_imported_story_arc_entry_id == first.id
+    assert managed_action.payload["imported_story_arc_entry_id"] == first.id
+    assert (
+        "duplicate_issue_membership_reused"
+        in duplicate.diagnostics["materialization"]["warning_codes"]
+    )
+    assert staged.diagnostics["materialization"]["counts"]["managed_placements_queued"] == 1
+
+    staged.status = ImportedStoryArcStatus.CONFIRMED
+    await db_session.flush()
+    replay = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        entry_checkpoint_size=1 if durable_page_boundary else 100,
+        durable_checkpoint=commit_checkpoint if durable_page_boundary else None,
+        record_actions=record_actions,
+    )
+
+    assert replay.managed_placements_queued == 0
+    assert replay.managed_placements_reused == 0
+    assert int(await db_session.scalar(select(func.count(StoryArcSyncWork.id))) or 0) == 1
+    assert (
+        int(
+            await db_session.scalar(
+                select(func.count(ImportJobAction.id)).where(
+                    ImportJobAction.action_type == "story_arc_managed_placement_requested"
+                )
+            )
+            or 0
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_managed_placement_handoff_chunks_a_large_entry_page_at_200(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = ImportJob(
+        id=7,
+        source_path="/private/source",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.IMPORTING,
+        progress_snapshot={"phase": "story_arcs"},
+    )
+    staged_arc = ImportedStoryArc(
+        id=11,
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.MYLAR3,
+        source_key="mylar3:chunked",
+        source_ordinal=1,
+        name="Chunked Arc",
+    )
+    arc = StoryArc(id=13, name="Chunked Arc")
+    context = materialization_module._ArcMaterializationContext(
+        staged_arc=staged_arc,
+        arc=arc,
+        policy=materialization_module._ValidatedPolicy(
+            activated=True,
+            snapshot={"mode": "copy"},
+        ),
+        counts=materialization_module._MutableCounts(),
+    )
+    requests = [
+        materialization_module._ManagedPlacementRequest(
+            proposal=materialization_module.ImportStoryArcSyncProposal(
+                library_file=LibraryFile(id=ordinal, issue_id=ordinal),
+                membership=IssueStoryArc(
+                    id=ordinal,
+                    story_arc_id=arc.id,
+                    issue_id=ordinal,
+                ),
+                story_arc=arc,
+                imported_story_arc_id=int(staged_arc.id),
+                imported_story_arc_entry_id=ordinal,
+            ),
+            context=context,
+        )
+        for ordinal in range(1, 251)
+    ]
+    chunk_sizes: list[int] = []
+
+    async def fake_enqueue_batch(*_args: object, **kwargs: object) -> list[object]:
+        proposals = kwargs["proposals"]
+        chunk_sizes.append(len(proposals))
+        return [
+            materialization_module.StoryArcImportSyncEnqueueResult(
+                work=None,
+                action=None,
+                classification="created",
+                desired_generation=str(index),
+            )
+            for index, _proposal in enumerate(proposals)
+        ]
+
+    async def unused_record_actions(*_args: object, **_kwargs: object) -> list[ImportJobAction]:
+        raise AssertionError("The fake batch enqueue should not invoke the journal callback")
+
+    monkeypatch.setattr(
+        materialization_module,
+        "enqueue_import_story_arc_sync_work_batch",
+        fake_enqueue_batch,
+    )
+    counts = materialization_module._MutableCounts()
+    durable_checkpoint = AsyncMock()
+
+    await materialization_module._enqueue_managed_placement_requests(
+        db_session,
+        job=job,
+        requests=requests,
+        counts=counts,
+        record_actions=unused_record_actions,
+        cancellation_check=None,
+        durable_checkpoint=durable_checkpoint,
+    )
+
+    assert chunk_sizes == [200, 50]
+    assert durable_checkpoint.await_count == 2
+    assert counts.managed_placements_queued == 250
+    assert context.counts.managed_placements_queued == 250
+    assert job.progress_snapshot["phase"] == "story_arcs"
+
+
+@pytest.mark.asyncio
+async def test_managed_placement_handoff_counts_only_created_and_reusable_results(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = ImportJob(
+        id=7,
+        source_path="/private/source",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.IMPORTING,
+        progress_snapshot={"phase": "story_arcs"},
+    )
+    staged_arc = ImportedStoryArc(
+        id=11,
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.MYLAR3,
+        source_key="mylar3:classifications",
+        source_ordinal=1,
+        name="Classification Arc",
+    )
+    arc = StoryArc(id=13, name="Classification Arc")
+    context = materialization_module._ArcMaterializationContext(
+        staged_arc=staged_arc,
+        arc=arc,
+        policy=materialization_module._ValidatedPolicy(
+            activated=True,
+            snapshot={"mode": "copy"},
+        ),
+        counts=materialization_module._MutableCounts(),
+    )
+    classifications = [
+        "created",
+        "in_call_duplicate",
+        "existing_import_work_pending",
+        "existing_import_work_completed",
+        "existing_non_origin_placement",
+        "existing_managed_placement",
+        "existing_referenced_placement",
+    ]
+    requests = [
+        materialization_module._ManagedPlacementRequest(
+            proposal=materialization_module.ImportStoryArcSyncProposal(
+                library_file=LibraryFile(id=ordinal, issue_id=ordinal),
+                membership=IssueStoryArc(
+                    id=ordinal,
+                    story_arc_id=arc.id,
+                    issue_id=ordinal,
+                ),
+                story_arc=arc,
+                imported_story_arc_id=int(staged_arc.id),
+                imported_story_arc_entry_id=ordinal,
+            ),
+            context=context,
+        )
+        for ordinal in range(1, len(classifications) + 1)
+    ]
+
+    async def fake_enqueue_batch(*_args: object, **kwargs: object) -> list[object]:
+        proposals = kwargs["proposals"]
+        assert len(proposals) == len(classifications)
+        return [
+            materialization_module.StoryArcImportSyncEnqueueResult(
+                work=None,
+                action=None,
+                classification=classification,
+                desired_generation=str(index),
+            )
+            for index, classification in enumerate(classifications)
+        ]
+
+    async def unused_record_actions(*_args: object, **_kwargs: object) -> list[ImportJobAction]:
+        raise AssertionError("The fake batch enqueue should not invoke the journal callback")
+
+    monkeypatch.setattr(
+        materialization_module,
+        "enqueue_import_story_arc_sync_work_batch",
+        fake_enqueue_batch,
+    )
+    counts = materialization_module._MutableCounts()
+
+    await materialization_module._enqueue_managed_placement_requests(
+        db_session,
+        job=job,
+        requests=requests,
+        counts=counts,
+        record_actions=unused_record_actions,
+        cancellation_check=None,
+    )
+
+    assert counts.managed_placements_queued == 1
+    assert counts.managed_placements_reused == 4
+    assert context.counts.managed_placements_queued == 1
+    assert context.counts.managed_placements_reused == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["cancel", "crash"])
+async def test_file_sqlite_interruption_between_pages_is_exact_and_restart_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
+    """A durable page remains exact after cross-session cancellation or a crash."""
+
+    class SyntheticWorkerCrash(BaseException):
+        """Model abrupt worker loss without entering the normal failure finalizer."""
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'durable-pages.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    canonical_root_path = tmp_path / "library"
+    canonical_root_path.mkdir()
+    destination = canonical_root_path / "Story Arcs"
+    destination.mkdir()
+    async with factory() as setup_session:
+        root = LibraryRoot(name="Comics", path=str(canonical_root_path), enabled=True)
+        setup_session.add(root)
+        await setup_session.flush()
+        issues: list[Issue] = []
+        for ordinal in (1, 2):
+            issue = await _add_issue(
+                setup_session,
+                series_name=f"Durable Series {ordinal}",
+                issue_number=float(ordinal),
+                issue_number_text=str(ordinal),
+            )
+            await _add_library_file(
+                setup_session,
+                issue=issue,
+                root=root,
+                path=canonical_root_path / f"Durable Series {ordinal} {ordinal:03d}.cbz",
+            )
+            issues.append(issue)
+        job = await _add_job(setup_session)
+        staged = await _add_staged_arc(
+            setup_session,
+            job=job,
+            name="Durable Arc",
+            source_key="mylar3:durable-pages",
+            source_arc_id="durable-pages",
+            policy=_confirmed_policy(
+                source="mylar3",
+                mode="copy",
+                target_library_root_id=root.id,
+                destination_root=str(destination),
+            ),
+        )
+        entries = [
+            await _add_staged_entry(
+                setup_session,
+                staged_arc=staged,
+                source_ordinal=ordinal,
+                reading_order=ordinal,
+                issue_number_text=str(ordinal),
+                matched_issue_id=issue.id,
+            )
+            for ordinal, issue in enumerate(issues, start=1)
+        ]
+        job_id = int(job.id)
+        staged_id = int(staged.id)
+        entry_ids = tuple(int(entry.id) for entry in entries)
+        await setup_session.commit()
+
+    real_materialize = materialization_module.materialize_confirmed_story_arcs
+
+    async def materialize_one_entry_page(
+        session: AsyncSession,
+        **kwargs: object,
+    ) -> materialization_module.StoryArcMaterializationResult:
+        return await real_materialize(
+            session,
+            entry_checkpoint_size=2,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    # Compress the production 200-row handoff boundary to one row so this
+    # two-connection regression stays fast while exercising two queue chunks.
+    monkeypatch.setattr(
+        materialization_module,
+        "MAX_IMPORT_STORY_ARC_SYNC_ENQUEUE_BATCH_SIZE",
+        1,
+    )
+    monkeypatch.setattr(
+        execution_module,
+        "materialize_confirmed_story_arcs",
+        materialize_one_entry_page,
+    )
+
+    async with factory() as worker_session:
+        worker_job = await worker_session.get(ImportJob, job_id)
+        assert worker_job is not None
+        interruption_triggered = False
+
+        async def interrupt_from_second_connection_after_page(
+            current_session: AsyncSession,
+            current_job_id: int,
+        ) -> None:
+            nonlocal interruption_triggered
+            if not interruption_triggered:
+                async with factory() as control_session:
+                    durable_work_count = int(
+                        await control_session.scalar(
+                            select(func.count()).select_from(StoryArcSyncWork)
+                        )
+                        or 0
+                    )
+                    if durable_work_count == 1:
+                        interruption_triggered = True
+                        if interruption == "crash":
+                            raise SyntheticWorkerCrash
+                        controlled_job = await control_session.get(ImportJob, current_job_id)
+                        assert controlled_job is not None
+                        controlled_job.control_request = ImportControlRequest.CANCEL
+                        await control_session.commit()
+            await raise_if_job_cancelled(current_session, current_job_id)
+
+        expected_exception = JobCancelledError if interruption == "cancel" else SyntheticWorkerCrash
+        with pytest.raises(expected_exception):
+            await execution_module._execute_story_arc_materialization(
+                worker_session,
+                worker_job,
+                job_id=job_id,
+                raise_if_cancelled=interrupt_from_second_connection_after_page,
+                record_action=record_action,
+                record_actions=record_actions,
+                log_event=AsyncMock(),
+                emit_progress=AsyncMock(),
+                estimate_remaining_seconds=lambda *_args: None,
+                progress_callback=None,
+                runtime_revision_state={"value": 0},
+                job_started_at=None,
+            )
+        await worker_session.rollback()
+
+    assert interruption_triggered is True
+    async with factory() as observer_session:
+        cancelled_job = await observer_session.get(ImportJob, job_id)
+        staged_after_cancel = await observer_session.get(ImportedStoryArc, staged_id)
+        entries_after_cancel = [
+            await observer_session.get(ImportedStoryArcEntry, entry_id) for entry_id in entry_ids
+        ]
+        first_work = (await observer_session.scalars(select(StoryArcSyncWork))).one()
+        first_managed_action = (
+            await observer_session.scalars(
+                select(ImportJobAction).where(
+                    ImportJobAction.action_type == "story_arc_managed_placement_requested"
+                )
+            )
+        ).one()
+        assert cancelled_job is not None
+        expected_control = (
+            ImportControlRequest.CANCEL if interruption == "cancel" else ImportControlRequest.NONE
+        )
+        assert cancelled_job.control_request is expected_control
+        assert staged_after_cancel is not None
+        assert staged_after_cancel.status is ImportedStoryArcStatus.CONFIRMED
+        assert staged_after_cancel.materialized_story_arc_id is not None
+        assert entries_after_cancel[0] is not None
+        assert entries_after_cancel[0].materialized_membership_id is not None
+        assert entries_after_cancel[1] is not None
+        assert entries_after_cancel[1].materialized_membership_id is not None
+        assert first_work.origin_import_action_id == first_managed_action.id
+        assert first_managed_action.payload["sync_work_id"] == first_work.id
+        first_work_id = int(first_work.id)
+        first_action_id = int(first_managed_action.id)
+
+        cancelled_job.control_request = ImportControlRequest.NONE
+        await observer_session.commit()
+
+    async with factory() as restart_session:
+        restart_job = await restart_session.get(ImportJob, job_id)
+        assert restart_job is not None
+        await execution_module._execute_story_arc_materialization(
+            restart_session,
+            restart_job,
+            job_id=job_id,
+            raise_if_cancelled=raise_if_job_cancelled,
+            record_action=record_action,
+            record_actions=record_actions,
+            log_event=AsyncMock(),
+            emit_progress=AsyncMock(),
+            estimate_remaining_seconds=lambda *_args: None,
+            progress_callback=None,
+            runtime_revision_state={"value": 0},
+            job_started_at=None,
+        )
+        await restart_session.commit()
+
+    async with factory() as final_session:
+        final_staged = await final_session.get(ImportedStoryArc, staged_id)
+        works = list(
+            (
+                await final_session.scalars(select(StoryArcSyncWork).order_by(StoryArcSyncWork.id))
+            ).all()
+        )
+        managed_actions = list(
+            (
+                await final_session.scalars(
+                    select(ImportJobAction)
+                    .where(ImportJobAction.action_type == "story_arc_managed_placement_requested")
+                    .order_by(ImportJobAction.id)
+                )
+            ).all()
+        )
+        all_action_types = list(
+            (
+                await final_session.scalars(
+                    select(ImportJobAction.action_type).order_by(ImportJobAction.id)
+                )
+            ).all()
+        )
+        assert final_staged is not None
+        assert final_staged.status is ImportedStoryArcStatus.IMPORTED
+        assert len(works) == 2
+        assert len(managed_actions) == 2
+        assert all_action_types.count("story_arc_created") == 1
+        assert all_action_types.count("story_arc_membership_created") == 2
+        assert all_action_types.count("story_arc_managed_placement_requested") == 2
+        assert works[0].id == first_work_id
+        assert managed_actions[0].id == first_action_id
+        assert {work.origin_import_action_id for work in works} == {
+            action.id for action in managed_actions
+        }
+        assert {int(action.payload["sync_work_id"]) for action in managed_actions} == {
+            int(work.id) for work in works
+        }
+        assert await final_session.scalar(select(func.count()).select_from(StoryArc)) == 1
+        assert await final_session.scalar(select(func.count()).select_from(IssueStoryArc)) == 2
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_materialization_fetches_only_one_library_file_per_page_issue(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    canonical_root_path = tmp_path / "library"
+    canonical_root_path.mkdir()
+    destination = canonical_root_path / "Story Arcs"
+    destination.mkdir()
+    root = LibraryRoot(name="Comics", path=str(canonical_root_path), enabled=True)
+    db_session.add(root)
+    await db_session.flush()
+    first_issue = await _add_issue(
+        db_session,
+        series_name="First Series",
+        issue_number=1.0,
+        issue_number_text="1",
+    )
+    second_issue = await _add_issue(
+        db_session,
+        series_name="Second Series",
+        issue_number=2.0,
+        issue_number_text="2",
+    )
+    canonical_ids: set[int] = set()
+    for issue, prefix in ((first_issue, "First"), (second_issue, "Second")):
+        issue_file_ids: list[int] = []
+        for ordinal in range(3):
+            library_file = await _add_library_file(
+                db_session,
+                issue=issue,
+                root=root,
+                path=canonical_root_path / f"{prefix} {ordinal}.cbz",
+            )
+            issue_file_ids.append(int(library_file.id))
+        canonical_ids.add(min(issue_file_ids))
+
+    job = await _add_job(db_session)
+    staged = await _add_staged_arc(
+        db_session,
+        job=job,
+        name="Bounded Lookup",
+        source_key="mylar3:bounded-library-file-lookup",
+        source_arc_id="bounded-library-file-lookup",
+        policy=_confirmed_policy(
+            source="mylar3",
+            mode="copy",
+            target_library_root_id=root.id,
+            destination_root=str(destination),
+        ),
+    )
+    for ordinal, issue in enumerate((first_issue, second_issue), start=1):
+        await _add_staged_entry(
+            db_session,
+            staged_arc=staged,
+            source_ordinal=ordinal,
+            reading_order=ordinal,
+            issue_number_text=str(ordinal),
+            matched_issue_id=issue.id,
+        )
+    job_id = int(job.id)
+    db_session.expunge_all()
+
+    loaded_library_file_ids: list[int] = []
+
+    def _capture_loaded_library_files(_session: object, instance: object) -> None:
+        if isinstance(instance, LibraryFile):
+            loaded_library_file_ids.append(int(instance.id))
+
+    event.listen(
+        db_session.sync_session,
+        "loaded_as_persistent",
+        _capture_loaded_library_files,
+    )
+    try:
+        await materialize_confirmed_story_arcs(
+            db_session,
+            import_job_id=job_id,
+            record_action=record_action,
+        )
+    finally:
+        event.remove(
+            db_session.sync_session,
+            "loaded_as_persistent",
+            _capture_loaded_library_files,
+        )
+
+    assert set(loaded_library_file_ids) == canonical_ids
+    assert len(loaded_library_file_ids) == len(canonical_ids)
+
+
+@pytest.mark.asyncio
+async def test_imported_reference_satisfies_initial_managed_policy_without_ownership_theft(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    canonical_root_path = tmp_path / "library"
+    canonical_root_path.mkdir()
+    destination = canonical_root_path / "Story Arcs"
+    destination.mkdir()
+    source_root = tmp_path / "mylar-export"
+    source_root.mkdir()
+    existing_arc_artifact = source_root / "Existing Arc" / "001 - Existing.cbz"
+    existing_arc_artifact.parent.mkdir()
+    existing_arc_artifact.write_bytes(b"pre-existing-user-artifact")
+    root = LibraryRoot(name="Comics", path=str(canonical_root_path), enabled=True)
+    db_session.add(root)
+    await db_session.flush()
+    issue = await _add_issue(
+        db_session,
+        series_name="Existing Series",
+        issue_number=1.0,
+        issue_number_text="1",
+    )
+    await _add_library_file(
+        db_session,
+        issue=issue,
+        root=root,
+        path=canonical_root_path / "Existing Series 001.cbz",
+    )
+    job = await _add_job(
+        db_session,
+        source_type=ImportSourceType.FILESYSTEM,
+        source_path=str(source_root),
+    )
+    staged = await _add_staged_arc(
+        db_session,
+        job=job,
+        name="Existing Arc",
+        source_key="folder:existing-managed-policy",
+        source_arc_id=None,
+        source_kind=StoryArcSourceKind.FOLDER,
+        policy=_confirmed_policy(
+            source="folder",
+            mode="copy",
+            target_library_root_id=root.id,
+            destination_root=str(destination),
+            synchronize=True,
+        ),
+    )
+    await _add_staged_entry(
+        db_session,
+        staged_arc=staged,
+        source_ordinal=1,
+        reading_order=1,
+        issue_number_text="1",
+        matched_issue_id=issue.id,
+        cv_arc_id=None,
+        source_location=str(existing_arc_artifact),
+    )
+
+    result = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+
+    placement = (await db_session.scalars(select(StoryArcPlacement))).one()
+    actions = list(
+        (await db_session.scalars(select(ImportJobAction).order_by(ImportJobAction.id))).all()
+    )
+    assert result.managed_placements_queued == 0
+    assert result.managed_placements_reused == 1
+    assert placement.ownership is StoryArcPlacementOwnership.REFERENCED
+    assert placement.placement_path == str(existing_arc_artifact)
+    assert await db_session.scalar(select(func.count()).select_from(StoryArcSyncWork)) == 0
+    assert "story_arc_referenced_placement_attached" in {action.action_type for action in actions}
+    assert "story_arc_managed_placement_requested" not in {action.action_type for action in actions}
+    assert existing_arc_artifact.read_bytes() == b"pre-existing-user-artifact"
 
 
 @pytest.mark.asyncio
@@ -680,7 +1558,7 @@ async def test_unconfirmed_step_three_rows_never_mutate_canonical_tables(
 
 
 @pytest.mark.asyncio
-async def test_cancellation_is_checked_between_bounded_batches_and_service_never_commits(
+async def test_cancellation_checks_batches_without_committing_when_checkpoint_is_omitted(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

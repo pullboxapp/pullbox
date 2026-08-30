@@ -386,7 +386,11 @@ async def test_preview_routes_delegate(
     monkeypatch.setattr(
         utilities_router,
         "build_convert_preview_response",
-        lambda body, *, allowed_roots: {"kind": "convert", "roots": allowed_roots},
+        lambda body, *, allowed_roots, excluded_paths: {
+            "kind": "convert",
+            "roots": allowed_roots,
+            "excluded_paths": excluded_paths,
+        },
     )
     monkeypatch.setattr(
         utilities_router,
@@ -411,6 +415,7 @@ async def test_preview_routes_delegate(
     )
     assert convert["kind"] == "convert"
     assert convert["roots"] == [tmp_path]
+    assert convert["excluded_paths"] == frozenset()
 
     assert (
         await utilities_router.mass_convert_preview(

@@ -46,6 +46,7 @@ from pullbox.services.import_job_actions import (
     next_action_sequence as next_import_action_sequence,
 )
 from pullbox.services.import_job_actions import record_action as record_import_action
+from pullbox.services.import_job_actions import record_actions as record_import_actions
 from pullbox.services.import_job_actions import rollback_action as rollback_import_action
 from pullbox.services.import_job_controls import (
     raise_if_job_cancelled_immediately as raise_if_import_job_cancelled_immediately,
@@ -103,6 +104,10 @@ from pullbox.services.import_service_job_lifecycle import ImportServiceJobLifecy
 from pullbox.services.import_service_matching import ImportServiceMatchingMixin
 from pullbox.services.import_service_recovery import ImportServiceRecoveryMixin
 from pullbox.services.import_service_review import ImportServiceReviewMixin
+from pullbox.services.import_story_arc_placement_completion import (
+    ImportStoryArcPlacementCompletionState,
+    finalize_import_story_arc_placements,
+)
 from pullbox.services.import_workflow_state import (
     emit_progress,
     estimate_remaining_seconds,
@@ -117,7 +122,7 @@ from pullbox.services.semantic_matching import ImportPolicy, SemanticMatchEngine
 from pullbox.utilities.sse import publish
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -137,6 +142,7 @@ if TYPE_CHECKING:
         ImportProgressEvent,
     )
     from pullbox.services.import_file_execution_protocols import ReportFileProgressFunc
+    from pullbox.services.import_job_actions import ImportJobActionSpec
     from pullbox.services.metadata_service import MetadataService
     from pullbox.services.series_service import SeriesService
 
@@ -151,6 +157,7 @@ class RunImportResult:
     """Post-transaction follow-up work requested by import execution."""
 
     schedule_comicinfo_enrichment: bool = False
+    schedule_story_arc_sync: bool = False
 
 
 # ── ImportService class ──────────────────────────────────────────────────
@@ -449,6 +456,15 @@ class ImportService(
             payload=payload,
         )
 
+    async def _record_actions(
+        self,
+        session: AsyncSession,
+        job: ImportJob,
+        specs: Sequence[ImportJobActionSpec],
+    ) -> list[ImportJobAction]:
+        """Persist one bounded rollback-journal action batch."""
+        return await record_import_actions(session, job, specs)
+
     async def _register_import_library_file(
         self,
         session: AsyncSession,
@@ -555,9 +571,9 @@ class ImportService(
         job_id: int,
         *,
         progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None = None,
-    ) -> None:
+    ) -> bool:
         """Rollback durable import actions in reverse order."""
-        await rollback_import_job(
+        return await rollback_import_job(
             session,
             job_id,
             rollback_action=self._rollback_action,
@@ -579,6 +595,20 @@ class ImportService(
     ) -> RunImportResult:
         """Execute confirmed new-series imports plus duplicate-series file merges."""
         try:
+            current_job = await session.get(ImportJob, job_id)
+            if (
+                current_job is not None
+                and dict(current_job.progress_snapshot or {}).get("phase") == "story_arc_placements"
+            ):
+                outcome = await finalize_import_story_arc_placements(session, job_id)
+                return RunImportResult(
+                    schedule_comicinfo_enrichment=(
+                        outcome.state is ImportStoryArcPlacementCompletionState.COMPLETED
+                    ),
+                    schedule_story_arc_sync=(
+                        outcome.state is ImportStoryArcPlacementCompletionState.PENDING
+                    ),
+                )
             await execute_import_job(
                 session,
                 job_id,
@@ -586,6 +616,7 @@ class ImportService(
                 process_series_files=self._process_series_files,
                 raise_if_cancelled=self._raise_if_job_cancelled,
                 record_action=self._record_action,
+                record_actions=self._record_actions,
                 log_event=self._log_event,
                 emit_progress=self._emit_progress,
                 estimate_remaining_seconds=self._estimate_remaining_seconds,
@@ -593,9 +624,16 @@ class ImportService(
                 progress_callback=progress_callback,
             )
             completed_job = await session.get(ImportJob, job_id)
+            story_arc_placements_pending = (
+                completed_job is not None
+                and completed_job.status == ImportJobStatus.IMPORTING
+                and dict(completed_job.progress_snapshot or {}).get("phase")
+                == "story_arc_placements"
+            )
             return RunImportResult(
                 schedule_comicinfo_enrichment=completed_job is not None
-                and completed_job.status == ImportJobStatus.COMPLETED
+                and completed_job.status == ImportJobStatus.COMPLETED,
+                schedule_story_arc_sync=story_arc_placements_pending,
             )
         finally:
             self._import_runtime_cache_by_job.pop(job_id, None)
@@ -614,6 +652,12 @@ class ImportService(
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
         )
+
+    def schedule_story_arc_sync(self) -> None:
+        """Nudge durable story-arc work only after its import transaction commits."""
+        from pullbox.services.story_arc_sync_queue import request_story_arc_sync_now
+
+        request_story_arc_sync_now()
 
     async def recover_pending_comicinfo_enrichment(
         self,

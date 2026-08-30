@@ -295,7 +295,7 @@ docker-smoke: docker-build-check ## Run Docker smoke tests against the locally b
 		sleep 1; \
 	done
 	@echo "\033[36m──── Smoke Tests ────\033[0m"
-	PULLBOX_SMOKE_URL=http://localhost:18585 $(SECRET) $(VENV)/bin/pytest tests/e2e/test_smoke.py -v || \
+	PYTHONPATH=src PULLBOX_SMOKE_URL=http://localhost:18585 $(SECRET) $(VENV)/bin/pytest tests/e2e/test_smoke.py -v || \
 		(docker logs pullbox-smoke; docker rm -f pullbox-smoke; exit 1)
 	@echo "\033[36m──── Teardown ────\033[0m"
 	@docker rm -f pullbox-smoke

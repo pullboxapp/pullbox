@@ -18,13 +18,23 @@ from pullbox.models.import_job import (
 from pullbox.schemas.import_job import (
     ConfirmImportRequest,
     ImportJobCreate,
+    ImportJobDeleteResponse,
     ImportJobRead,
     ImportPreviewResponse,
     RetryFailedResponse,
     RetryImportResponse,
+    RetryStoryArcPlacementsResponse,
+)
+from pullbox.services.story_arc_sync_queue import (
+    discard_unpublished_import_story_arc_sync_work,
 )
 
 logger = structlog.get_logger(__name__)
+
+_ROLLBACK_PENDING_DELETE_MESSAGE = (
+    "Rollback is still stopping an in-progress Story Arc placement. "
+    "The import remains in history; delete it again after rollback finishes."
+)
 
 _CLEARABLE_HISTORY_STATUSES = (
     ImportJobStatus.COMPLETED,
@@ -124,6 +134,13 @@ async def clear_import_history_response(session: Any) -> dict[str, int]:
     )
     jobs = list(jobs_result.scalars().all())
 
+    try:
+        await discard_unpublished_import_story_arc_sync_work(
+            session,
+            tuple(int(job.id) for job in jobs),
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
     for job in jobs:
         await session.delete(job)
 
@@ -137,7 +154,7 @@ async def cancel_import_job_response(
     session: Any,
     job_id: int,
     purge_import_runtime_state: Any,
-) -> None:
+) -> ImportJobDeleteResponse | None:
     """Cancel an active import job or delete a finished one from history."""
     try:
         action = await service.cancel_job(session, job_id)
@@ -145,11 +162,14 @@ async def cancel_import_job_response(
         raise HTTPException(status_code=409, detail=exc.message) from exc
 
     await session.commit()
-    purge_import_runtime_state(job_id)
-    logger.info(
-        "import_job_deleted" if action == "deleted" else "import_job_cancelled",
-        job_id=job_id,
-    )
+    if action == "deleted":
+        purge_import_runtime_state(job_id)
+        logger.info("import_job_deleted", job_id=job_id)
+        return None
+    if action != "rollback_pending":
+        raise RuntimeError(f"Unsupported import deletion result: {action!r}")
+    logger.info("import_job_delete_waiting_for_story_arc_rollback", job_id=job_id)
+    return ImportJobDeleteResponse(message=_ROLLBACK_PENDING_DELETE_MESSAGE)
 
 
 async def pause_import_job_response(
@@ -243,6 +263,29 @@ async def retry_failed_series_response(
     trigger_import_execute(job_id)
 
     return RetryFailedResponse(job_id=job.id, retrying_count=count)
+
+
+async def retry_story_arc_placements_response(
+    service: Any,
+    *,
+    session: Any,
+    job_id: int,
+    trigger_story_arc_sync: Any,
+) -> RetryStoryArcPlacementsResponse:
+    """Requeue terminal import placement work and nudge its durable worker."""
+    try:
+        job, count = await service.retry_story_arc_placements(session, job_id)
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+
+    await session.commit()
+    logger.info(
+        "import_story_arc_placements_retry_requested",
+        job_id=job_id,
+        retrying_count=count,
+    )
+    trigger_story_arc_sync()
+    return RetryStoryArcPlacementsResponse(job_id=job.id, retrying_count=count)
 
 
 async def allow_safety_blocked_file_once_and_retry_response(

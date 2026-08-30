@@ -65,6 +65,7 @@ def test_story_arc_sync_work_upgrade_and_downgrade(
             "policy_schema_version",
             "reason",
             "state",
+            "claimable",
             "attempt_count",
             "next_attempt_at",
             "claim_token",
@@ -79,8 +80,21 @@ def test_story_arc_sync_work_upgrade_and_downgrade(
             for index in inspector.get_indexes("story_arc_sync_work")
         }
         assert indexes["ix_story_arc_sync_work_ready"] == [
+            "claimable",
             "state",
             "next_attempt_at",
+            "id",
+        ]
+        assert indexes["ix_story_arc_sync_work_queued"] == [
+            "claimable",
+            "state",
+            "created_at",
+            "id",
+        ]
+        assert indexes["ix_story_arc_sync_work_stale_claim"] == [
+            "claimable",
+            "state",
+            "claimed_at",
             "id",
         ]
     finally:

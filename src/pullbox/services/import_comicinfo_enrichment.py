@@ -85,21 +85,20 @@ def schedule_import_comicinfo_enrichment(
         return
 
     async def run_enrichment() -> None:
-        async with comicinfo_enrichment_gate():
-            try:
-                await run_import_comicinfo_enrichment(
-                    session_factory,
-                    job_id=job_id,
-                    build_comicinfo_payload=build_comicinfo_payload,
-                    apply_comicinfo=apply_comicinfo,
-                    log_event=log_event,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "import_comicinfo_enrichment_failed",
-                    job_id=job_id,
-                    error=str(exc),
-                )
+        try:
+            await run_import_comicinfo_enrichment(
+                session_factory,
+                job_id=job_id,
+                build_comicinfo_payload=build_comicinfo_payload,
+                apply_comicinfo=apply_comicinfo,
+                log_event=log_event,
+            )
+        except Exception as exc:
+            logger.warning(
+                "import_comicinfo_enrichment_failed",
+                job_id=job_id,
+                error=str(exc),
+            )
 
     task = asyncio.create_task(run_enrichment())
     comicinfo_enrichment_tasks.add(task)
@@ -114,17 +113,16 @@ async def run_pending_import_comicinfo_enrichment(
     log_event: ImportComicInfoLogEvent,
 ) -> int:
     """Refresh deferred ComicInfo metadata for all completed jobs with pending rows."""
-    async with comicinfo_enrichment_gate():
-        pending_job_ids = await _load_pending_import_job_ids(session_factory)
-        for job_id in pending_job_ids:
-            await run_import_comicinfo_enrichment(
-                session_factory,
-                job_id=job_id,
-                build_comicinfo_payload=build_comicinfo_payload,
-                apply_comicinfo=apply_comicinfo,
-                log_event=log_event,
-            )
-        return len(pending_job_ids)
+    pending_job_ids = await _load_pending_import_job_ids(session_factory)
+    for job_id in pending_job_ids:
+        await run_import_comicinfo_enrichment(
+            session_factory,
+            job_id=job_id,
+            build_comicinfo_payload=build_comicinfo_payload,
+            apply_comicinfo=apply_comicinfo,
+            log_event=log_event,
+        )
+    return len(pending_job_ids)
 
 
 async def run_import_comicinfo_enrichment(
@@ -136,6 +134,27 @@ async def run_import_comicinfo_enrichment(
     log_event: ImportComicInfoLogEvent,
 ) -> None:
     """Refresh deferred ComicInfo metadata for imported files in one import job."""
+    async with comicinfo_enrichment_gate():
+        await _run_import_comicinfo_enrichment_while_fenced(
+            session_factory,
+            job_id=job_id,
+            build_comicinfo_payload=build_comicinfo_payload,
+            apply_comicinfo=apply_comicinfo,
+            log_event=log_event,
+        )
+
+
+async def _run_import_comicinfo_enrichment_while_fenced(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    job_id: int,
+    build_comicinfo_payload: ImportComicInfoBuildPayload,
+    apply_comicinfo: ImportComicInfoApply,
+    log_event: ImportComicInfoLogEvent,
+) -> None:
+    """Run one job while holding the process-local filesystem mutation fence."""
+    if not await _import_job_is_completed(session_factory, job_id=job_id):
+        return
     pending_ids = await _load_pending_imported_file_ids(session_factory, job_id=job_id)
     for imported_file_id in pending_ids:
         try:
@@ -146,6 +165,8 @@ async def run_import_comicinfo_enrichment(
             )
             if prepared is None:
                 continue
+            if not await _import_job_is_completed(session_factory, job_id=job_id):
+                return
 
             if inspect.iscoroutinefunction(apply_comicinfo):
                 await apply_comicinfo(prepared.artifact_path, prepared.payload)
@@ -183,6 +204,18 @@ async def run_import_comicinfo_enrichment(
             )
 
 
+async def _import_job_is_completed(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    job_id: int,
+) -> bool:
+    """Read durable job state at a filesystem safe boundary."""
+    async with session_factory() as session:
+        status = await session.scalar(sa_select(ImportJob.status).where(ImportJob.id == job_id))
+        await session.rollback()
+    return status is ImportJobStatus.COMPLETED
+
+
 async def _load_pending_imported_file_ids(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -191,7 +224,9 @@ async def _load_pending_imported_file_ids(
     async with session_factory() as session:
         result = await session.execute(
             sa_select(ImportedFile.id)
+            .join(ImportJob, ImportedFile.import_job_id == ImportJob.id)
             .where(ImportedFile.import_job_id == job_id)
+            .where(ImportJob.status == ImportJobStatus.COMPLETED)
             .where(ImportedFile.status == ImportedFileStatus.IMPORTED)
         )
         ids: list[int] = []
@@ -288,6 +323,11 @@ async def _prepare_pending_imported_file(
     if not _is_pending_comicinfo_enrichment(imported_file):
         return None
     assert imported_file is not None
+    job_status = await session.scalar(
+        sa_select(ImportJob.status).where(ImportJob.id == imported_file.import_job_id)
+    )
+    if job_status is not ImportJobStatus.COMPLETED:
+        return None
 
     library_file_id = imported_file.library_file_id
     if library_file_id is None:

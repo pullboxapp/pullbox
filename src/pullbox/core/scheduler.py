@@ -79,6 +79,8 @@ from pullbox.services.import_activity import (
     is_missing_import_jobs_table_error,
 )
 
+_IMPORT_PROTECTION_ALLOWED_TASK_IDS = frozenset({"sync_story_arc_placements"})
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
@@ -574,6 +576,9 @@ class PullboxScheduler:
                 maintenance_reason=maintenance_reason,
             )
             return True
+
+        if task_id in _IMPORT_PROTECTION_ALLOWED_TASK_IDS:
+            return False
 
         if self._import_protection_check_disabled:
             return False

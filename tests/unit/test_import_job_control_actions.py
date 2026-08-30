@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from pullbox.api.v1.import_job_control_actions import (
+    cancel_import_job_response,
     clear_import_history_response,
     confirm_import_response,
     get_import_preview_response,
@@ -179,3 +180,25 @@ async def test_clear_import_history_response_deletes_only_terminal_jobs(
     assert response == {"deleted": 2}
     remaining = await db_session.scalars(select(ImportJob.source_path))
     assert set(remaining.all()) == {"/tmp/review"}
+
+
+@pytest.mark.asyncio
+async def test_cancel_response_keeps_runtime_state_while_rollback_is_pending() -> None:
+    """Deferred Story Arc rollback must retain the job runner's live state."""
+    service = AsyncMock()
+    service.cancel_job.return_value = "rollback_pending"
+    session = AsyncMock()
+    purge_runtime_state = MagicMock()
+
+    response = await cancel_import_job_response(
+        service,
+        session=session,
+        job_id=42,
+        purge_import_runtime_state=purge_runtime_state,
+    )
+
+    assert response is not None
+    assert response.status == "rollback_pending"
+    assert "remains in history" in response.message
+    session.commit.assert_awaited_once()
+    purge_runtime_state.assert_not_called()

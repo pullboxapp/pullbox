@@ -9,7 +9,8 @@ from sqlalchemy import CheckConstraint, inspect
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy.exc import IntegrityError
 
-from pullbox.models.import_job import ImportedFile, ImportJob
+from pullbox.models.base import UTCDateTime
+from pullbox.models.import_job import ImportedFile, ImportJob, ImportJobAction
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
@@ -27,6 +28,7 @@ from pullbox.models.story_arc import (
     StoryArcSymlinkStyle,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.models.story_arc_sync import StoryArcSyncWork
 
 _VALID_PLACEMENT_COMBINATIONS = {
     (
@@ -399,6 +401,117 @@ def test_iu6b_placement_schema_freezes_managed_mode_constraints_and_audit_fields
         ownership=StoryArcPlacementOwnership.REFERENCED,
         symlink_style=None,
     ).validate_configuration()
+
+
+def test_import_owned_sync_work_model_preserves_action_provenance_and_cancellation() -> None:
+    """Import-triggered sync work is uniquely attributable and durably cancellable."""
+    columns = StoryArcSyncWork.__table__.c
+    assert columns.origin_import_action_id.nullable is True
+    assert columns.origin_import_job_id.nullable is True
+    assert columns.origin_imported_story_arc_id.nullable is True
+    assert columns.origin_imported_story_arc_entry_id.nullable is True
+    assert columns.cancel_requested_at.nullable is True
+    assert isinstance(columns.cancel_requested_at.type, UTCDateTime)
+
+    origin_foreign_key = next(
+        foreign_key
+        for foreign_key in StoryArcSyncWork.__table__.foreign_key_constraints
+        if tuple(foreign_key.column_keys) == ("origin_import_action_id",)
+    )
+    assert origin_foreign_key.referred_table is ImportJobAction.__table__
+    assert origin_foreign_key.ondelete == "SET NULL"
+    typed_origin_foreign_keys = {
+        tuple(foreign_key.column_keys): foreign_key
+        for foreign_key in StoryArcSyncWork.__table__.foreign_key_constraints
+    }
+    assert (
+        typed_origin_foreign_keys[("origin_import_job_id",)].referred_table is ImportJob.__table__
+    )
+    assert typed_origin_foreign_keys[("origin_import_job_id",)].ondelete == "SET NULL"
+    assert (
+        typed_origin_foreign_keys[("origin_imported_story_arc_id",)].referred_table
+        is ImportedStoryArc.__table__
+    )
+    assert typed_origin_foreign_keys[("origin_imported_story_arc_id",)].ondelete == "SET NULL"
+    assert (
+        typed_origin_foreign_keys[("origin_imported_story_arc_entry_id",)].referred_table
+        is ImportedStoryArcEntry.__table__
+    )
+    assert typed_origin_foreign_keys[("origin_imported_story_arc_entry_id",)].ondelete == "SET NULL"
+
+    constraints = {constraint.name for constraint in StoryArcSyncWork.__table__.constraints}
+    assert "uq_story_arc_sync_work_origin_import_action" in constraints
+    relationships = inspect(StoryArcSyncWork).relationships
+    assert relationships.origin_import_action._calculated_foreign_keys == {
+        columns.origin_import_action_id
+    }
+
+    sync_indexes = {
+        index.name: tuple(index.columns.keys()) for index in StoryArcSyncWork.__table__.indexes
+    }
+    assert sync_indexes["ix_story_arc_sync_work_queued"] == (
+        "claimable",
+        "state",
+        "created_at",
+        "id",
+    )
+    assert sync_indexes["ix_story_arc_sync_work_ready"] == (
+        "claimable",
+        "state",
+        "next_attempt_at",
+        "id",
+    )
+    assert sync_indexes["ix_story_arc_sync_work_stale_claim"] == (
+        "claimable",
+        "state",
+        "claimed_at",
+        "id",
+    )
+    assert sync_indexes["ix_story_arc_sync_work_origin_job_state"] == (
+        "origin_import_job_id",
+        "state",
+        "id",
+    )
+
+    import_job_columns = ImportJob.__table__.c
+    assert import_job_columns.story_arc_placement_followup_pending.nullable is False
+    assert import_job_columns.story_arc_placement_followup_pending.default.arg is False
+    assert import_job_columns.story_arc_rollback_waiting_work_id.nullable is True
+    rollback_foreign_key = next(
+        foreign_key
+        for foreign_key in ImportJob.__table__.foreign_key_constraints
+        if tuple(foreign_key.column_keys) == ("story_arc_rollback_waiting_work_id",)
+    )
+    assert rollback_foreign_key.referred_table is StoryArcSyncWork.__table__
+    assert rollback_foreign_key.ondelete == "SET NULL"
+    import_job_indexes = {
+        index.name: tuple(index.columns.keys()) for index in ImportJob.__table__.indexes
+    }
+    assert import_job_indexes["ix_import_jobs_story_arc_followup"] == (
+        "status",
+        "story_arc_placement_followup_pending",
+        "id",
+    )
+    assert import_job_indexes["ix_import_jobs_story_arc_rollback_waiting"] == (
+        "status",
+        "story_arc_rollback_waiting_work_id",
+        "id",
+    )
+    action_indexes = {
+        index.name: tuple(index.columns.keys()) for index in ImportJobAction.__table__.indexes
+    }
+    assert action_indexes["ix_import_job_actions_job_id_keyset"] == (
+        "import_job_id",
+        "id",
+    )
+
+    placement_indexes = {
+        index.name: tuple(index.columns.keys()) for index in StoryArcPlacement.__table__.indexes
+    }
+    assert placement_indexes["ix_story_arc_placements_creating_action"] == (
+        "creating_action_id",
+        "id",
+    )
 
 
 @pytest.mark.parametrize(

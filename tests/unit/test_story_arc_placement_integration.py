@@ -819,6 +819,108 @@ async def test_managed_placement_can_be_removed_without_touching_canonical_file(
         assert membership.sync_eligible is True
 
 
+@pytest.mark.parametrize(
+    ("checkpoint_status", "checkpoint_token"),
+    [
+        ("published_pending_reconcile", "different-checkpoint-token"),
+        ("prepared", "placement-operation-token"),
+    ],
+)
+async def test_abandoned_publish_takeover_requires_exact_published_checkpoint(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    checkpoint_status: str,
+    checkpoint_token: str,
+) -> None:
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=_copy_policy(root_id, arc_root),
+        )
+        synchronized = await service.sync_membership(session, arc_id, membership_id)
+        assert synchronized.placement is not None
+        placement_id = int(synchronized.placement.id)
+        placement = await session.get(StoryArcPlacement, placement_id)
+        assert placement is not None
+        target = Path(placement.placement_path)
+        target_fingerprint = dict(placement.last_result)["target_fingerprint"]
+        placement.operation_token = "placement-operation-token"
+        placement.last_result = {
+            "schema_version": 1,
+            "status": checkpoint_status,
+            "operation_token": checkpoint_token,
+            "target_fingerprint": target_fingerprint,
+        }
+        await session.commit()
+
+    async with db_factory() as session:
+        with pytest.raises(StoryArcPlacementIntegrationError) as blocked:
+            await service.remove_placement(
+                session,
+                arc_id,
+                placement_id,
+                confirm_managed_artifact_removal=True,
+                abandoned_published_operation_token="placement-operation-token",
+            )
+
+    assert blocked.value.code == "placement_published_operation_token_invalid"
+    assert target.read_bytes() == canonical.read_bytes()
+    async with db_factory() as session:
+        retained = await session.get(StoryArcPlacement, placement_id)
+        assert retained is not None
+        assert retained.operation_token == "placement-operation-token"
+
+
+async def test_live_published_checkpoint_requires_explicit_takeover_authority(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=_copy_policy(root_id, arc_root),
+        )
+        synchronized = await service.sync_membership(session, arc_id, membership_id)
+        assert synchronized.placement is not None
+        placement_id = int(synchronized.placement.id)
+        placement = await session.get(StoryArcPlacement, placement_id)
+        assert placement is not None
+        target = Path(placement.placement_path)
+        target_fingerprint = dict(placement.last_result)["target_fingerprint"]
+        placement.operation_token = "live-published-token"
+        placement.last_result = {
+            "schema_version": 1,
+            "status": "published_pending_reconcile",
+            "operation_token": "live-published-token",
+            "target_fingerprint": target_fingerprint,
+        }
+        await session.commit()
+
+    async with db_factory() as session:
+        with pytest.raises(StoryArcPlacementIntegrationError) as blocked:
+            await service.remove_placement(
+                session,
+                arc_id,
+                placement_id,
+                confirm_managed_artifact_removal=True,
+            )
+
+    assert blocked.value.code == "placement_operation_in_progress"
+    assert target.read_bytes() == canonical.read_bytes()
+
+
 async def test_referenced_placement_record_removal_preserves_user_artifact(
     db_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

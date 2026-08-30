@@ -347,6 +347,11 @@ class StoryArcPlacement(Base, IdentityMixin, TimestampMixin):
         Index("ix_story_arc_placements_membership", "issue_story_arc_id", "id"),
         Index("ix_story_arc_placements_library_file", "library_file_id", "id"),
         Index("ix_story_arc_placements_state", "state", "id"),
+        Index(
+            "ix_story_arc_placements_creating_action",
+            "creating_action_id",
+            "id",
+        ),
     )
 
     issue_story_arc_id: Mapped[int] = mapped_column(

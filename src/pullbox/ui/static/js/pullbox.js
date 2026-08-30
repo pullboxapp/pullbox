@@ -3951,6 +3951,9 @@ function importProgressData(jobId, nextStep, sourceType) {
     pausing: false,
     optimisticPauseRequested: false,
     resuming: false,
+    retryingStoryArcPlacements: false,
+    storyArcPlacementRetryError: "",
+    storyArcPlacementRetrySuccess: "",
     cancelPrompting: false,
     cancelling: false,
     cancelReturnStarted: false,
@@ -4169,6 +4172,16 @@ function importProgressData(jobId, nextStep, sourceType) {
       );
     },
 
+    showRetryStoryArcPlacementsAction: function () {
+      if (!this.isImportMode() || this.completed || this.failed) {
+        return false;
+      }
+      return (
+        this.retryingStoryArcPlacements ||
+        !!(this.controlState && this.controlState.can_retry_story_arc_placements)
+      );
+    },
+
     canResumeAction: function () {
       if (!this.showResumeAction()) {
         return false;
@@ -4227,6 +4240,7 @@ function importProgressData(jobId, nextStep, sourceType) {
         matching: "Matching series against ComicVine...",
         file_matching: "Matching files to issues...",
         importing: "Importing series into Pullbox...",
+        story_arc_placements: "Creating Story Arc placements...",
         rollback: "Rolling back import actions...",
         review: "Complete",
         done: "Run stopped",
@@ -4739,6 +4753,7 @@ function importProgressData(jobId, nextStep, sourceType) {
         return (
           this.showPauseAction() ||
           this.showResumeAction() ||
+          this.showRetryStoryArcPlacementsAction() ||
           this.showCancelAction() ||
           this.failed ||
           this.completed
@@ -5787,6 +5802,75 @@ function importProgressData(jobId, nextStep, sourceType) {
         });
       } finally {
         this.resuming = false;
+      }
+    },
+
+    retryStoryArcPlacements: async function () {
+      if (
+        !this.jobId ||
+        this.retryingStoryArcPlacements ||
+        !this.showRetryStoryArcPlacementsAction()
+      ) {
+        return;
+      }
+
+      this.retryingStoryArcPlacements = true;
+      this.storyArcPlacementRetryError = "";
+      this.storyArcPlacementRetrySuccess = "";
+      try {
+        var response = await fetch(
+          "/api/v1/import/" + this.jobId + "/story-arc-placements/retry",
+          {
+            method: "POST",
+            headers: { "X-CSRF-Token": readCsrfTokenFromBody() },
+          },
+        );
+        var payload = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          var detail =
+            payload && typeof payload.detail === "string"
+              ? payload.detail
+              : "Failed to retry Story Arc placements.";
+          throw new Error(detail);
+        }
+
+        var retryingCount = Math.max(0, Number(payload.retrying_count) || 0);
+        var placementLabel = retryingCount === 1 ? "placement" : "placements";
+        this.controlState = Object.assign({}, this.controlState, {
+          can_pause: false,
+          can_resume: false,
+          can_retry_story_arc_placements: false,
+          can_cancel: true,
+          requested_action: "none",
+        });
+        this.jobStatus = "importing";
+        this.phase = "story_arc_placements";
+        this.phaseLabel = this.phaseLabelForKey(this.phase);
+        this.progress = 99;
+        this.failed = false;
+        this.completed = false;
+        this.message = "Retrying " + retryingCount + " Story Arc " + placementLabel + "...";
+        this.storyArcPlacementRetrySuccess =
+          "Retry requested for " + retryingCount + " Story Arc " + placementLabel + ".";
+        this.emitFooterState();
+        this.startClock();
+        this.startPolling();
+        if (!this.evtSource) {
+          this.connectSSE();
+        }
+      } catch (err) {
+        var retryMessage =
+          err && err.message
+            ? err.message
+            : "Failed to retry Story Arc placements. Please try again.";
+        this.storyArcPlacementRetryError = retryMessage;
+        if (typeof showToast === "function") {
+          showToast({ message: retryMessage, level: "error" });
+        }
+      } finally {
+        this.retryingStoryArcPlacements = false;
       }
     },
 
@@ -14525,8 +14609,18 @@ function importHistoryPage(config) {
         headers: { "X-CSRF-Token": self.csrfToken() },
       })
         .then(function (response) {
+          if (response.status === 202) {
+            return response.json().then(function (data) {
+              return {
+                rollbackPending: true,
+                message:
+                  data.message ||
+                  "Rollback is still finishing. This import remains in history.",
+              };
+            });
+          }
           if (response.ok || response.status === 204) {
-            return null;
+            return { rollbackPending: false };
           }
           return response
             .json()
@@ -14537,11 +14631,16 @@ function importHistoryPage(config) {
               throw new Error(data.detail || "Unable to delete this import job right now.");
             });
         })
-        .then(function () {
+        .then(function (result) {
           var deletedJobId = self.deleteJobId;
-          self.dispatchToast("Import job deleted.", "success");
           self.deleteJobId = null;
           self.deleting = false;
+          if (result && result.rollbackPending) {
+            self.dispatchToast(result.message, "info");
+            self.refreshResults(buildHistoryPath());
+            return;
+          }
+          self.dispatchToast("Import job deleted.", "success");
           self.removeJobRow(deletedJobId);
           self.syncClearHistoryButtonVisibility();
           self.refreshResults(buildHistoryPath());

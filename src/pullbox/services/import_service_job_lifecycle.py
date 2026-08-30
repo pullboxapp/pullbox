@@ -19,6 +19,9 @@ from pullbox.services.import_retry_helpers import (
     copy_retry_import_settings,
 )
 from pullbox.services.import_review_preview import get_preview as get_import_preview
+from pullbox.services.story_arc_sync_queue import (
+    retry_import_story_arc_sync_work as retry_import_story_arc_placements,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -36,7 +39,7 @@ if TYPE_CHECKING:
             job_id: int,
             *,
             progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None = None,
-        ) -> None: ...
+        ) -> bool: ...
 
         async def _log_event(
             self,
@@ -78,7 +81,13 @@ class ImportServiceJobLifecycleMixin:
                 job_id,
                 log_event=self._log_event,
             )
-            await self.rollback_import(session, job_id)
+            rollback_completed = await self.rollback_import(session, job_id)
+            if not rollback_completed:
+                logger.info(
+                    "import_job_delete_waiting_for_story_arc_rollback",
+                    job_id=job_id,
+                )
+                return "rollback_pending"
             reloaded = await session.get(ImportJob, job_id)
             if reloaded is not None:
                 self._log_job_deleted(job_id, reloaded.status)
@@ -144,6 +153,23 @@ class ImportServiceJobLifecycleMixin:
             job_id,
             log_event=self._log_event,
         )
+
+    async def retry_story_arc_placements(
+        self: ImportServiceJobLifecycleContext,
+        session: AsyncSession,
+        job_id: int,
+    ) -> tuple[ImportJob, int]:
+        """Requeue exact failed/cancelled placement work without replaying import."""
+        job, retrying_count = await retry_import_story_arc_placements(session, job_id)
+        await self._log_event(
+            session,
+            job_id,
+            "INFO",
+            "import_story_arc_placements_retry_requested",
+            message=(f"Retrying {retrying_count} failed or cancelled Story Arc placements."),
+            retrying_count=retrying_count,
+        )
+        return job, retrying_count
 
     async def retry_job(
         self: ImportServiceJobLifecycleContext,

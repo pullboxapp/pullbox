@@ -1284,6 +1284,186 @@ class TestImportCollectionTab:
         assert f"resume_job_id={expected_resume['resumeJobId']}" in authed_page.url
         assert f"resume_step={expected_resume['resumeStep']}" in authed_page.url
 
+    def test_import_collection_story_arc_placement_retry_has_truthful_busy_and_success_state(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+
+        state = authed_page.evaluate(
+            """async () => {
+                const originalFetch = window.fetch;
+                try {
+                    const controller = window.importProgressData(
+                        42,
+                        5,
+                        "filesystem",
+                        {
+                            job_id: 42,
+                            status: "stalled",
+                            mode: "import",
+                            phase: "story_arc_placements",
+                            progress: 99,
+                            message: "One or more story-arc placements failed.",
+                            control_state: {
+                                can_pause: false,
+                                can_resume: false,
+                                can_cancel: true,
+                                can_retry_story_arc_placements: true,
+                                requested_action: "none",
+                            },
+                        },
+                        "import",
+                    );
+                    controller.hydrateFromSnapshot();
+                    let pollStarts = 0;
+                    let sseStarts = 0;
+                    let request = null;
+                    let finishFetch = null;
+                    controller.startClock = function () {};
+                    controller.startPolling = function () { pollStarts += 1; };
+                    controller.connectSSE = function () { sseStarts += 1; };
+                    window.fetch = function (url, options) {
+                        request = { url, options };
+                        return new Promise(function (resolve) {
+                            finishFetch = function () {
+                                resolve({
+                                    ok: true,
+                                    json: async function () {
+                                        return { job_id: 42, retrying_count: 2 };
+                                    },
+                                });
+                            };
+                        });
+                    };
+
+                    const pending = controller.retryStoryArcPlacements();
+                    await Promise.resolve();
+                    const busy = {
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                    };
+                    finishFetch();
+                    await pending;
+
+                    return {
+                        busy,
+                        requestUrl: request.url,
+                        requestMethod: request.options.method,
+                        hasCsrf: Boolean(request.options.headers["X-CSRF-Token"]),
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                        canRetry: controller.controlState.can_retry_story_arc_placements,
+                        status: controller.jobStatus,
+                        phase: controller.phase,
+                        progress: controller.progress,
+                        message: controller.message,
+                        success: controller.storyArcPlacementRetrySuccess,
+                        error: controller.storyArcPlacementRetryError,
+                        pollStarts,
+                        sseStarts,
+                    };
+                } finally {
+                    window.fetch = originalFetch;
+                }
+            }"""
+        )
+
+        assert state == {
+            "busy": {"retrying": True, "visible": True},
+            "requestUrl": "/api/v1/import/42/story-arc-placements/retry",
+            "requestMethod": "POST",
+            "hasCsrf": True,
+            "retrying": False,
+            "visible": False,
+            "canRetry": False,
+            "status": "importing",
+            "phase": "story_arc_placements",
+            "progress": 99,
+            "message": "Retrying 2 Story Arc placements...",
+            "success": "Retry requested for 2 Story Arc placements.",
+            "error": "",
+            "pollStarts": 1,
+            "sseStarts": 1,
+        }
+
+    def test_import_collection_story_arc_placement_retry_keeps_recovery_on_error(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+
+        state = authed_page.evaluate(
+            """async () => {
+                const originalFetch = window.fetch;
+                try {
+                    const controller = window.importProgressData(
+                        42,
+                        5,
+                        "filesystem",
+                        {
+                            job_id: 42,
+                            status: "stalled",
+                            mode: "import",
+                            phase: "story_arc_placements",
+                            progress: 99,
+                            control_state: {
+                                can_pause: false,
+                                can_resume: false,
+                                can_cancel: true,
+                                can_retry_story_arc_placements: true,
+                                requested_action: "none",
+                            },
+                        },
+                        "import",
+                    );
+                    controller.hydrateFromSnapshot();
+                    let pollStarts = 0;
+                    let sseStarts = 0;
+                    controller.startPolling = function () { pollStarts += 1; };
+                    controller.connectSSE = function () { sseStarts += 1; };
+                    window.fetch = async function () {
+                        return {
+                            ok: false,
+                            json: async function () {
+                                return { detail: "Placement provenance changed; retry refused." };
+                            },
+                        };
+                    };
+
+                    await controller.retryStoryArcPlacements();
+
+                    return {
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                        canRetry: controller.controlState.can_retry_story_arc_placements,
+                        status: controller.jobStatus,
+                        error: controller.storyArcPlacementRetryError,
+                        success: controller.storyArcPlacementRetrySuccess,
+                        pollStarts,
+                        sseStarts,
+                    };
+                } finally {
+                    window.fetch = originalFetch;
+                }
+            }"""
+        )
+
+        assert state == {
+            "retrying": False,
+            "visible": True,
+            "canRetry": True,
+            "status": "stalled",
+            "error": "Placement provenance changed; retry refused.",
+            "success": "",
+            "pollStarts": 0,
+            "sseStarts": 0,
+        }
+
     def test_import_collection_pause_swaps_to_resume_without_button_gap(
         self,
         authed_page,
