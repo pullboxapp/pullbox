@@ -199,6 +199,152 @@ async def test_path_mapping_rejects_parent_traversal_outside_mapped_root(
 
 
 @pytest.mark.asyncio
+async def test_multiple_path_maps_keep_roots_identities_and_failures_isolated(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    primary_root = tmp_path / "primary-host"
+    secondary_root = tmp_path / "secondary-host"
+    primary_series = primary_root / "DC Comics" / "Batman (2011)"
+    secondary_series = secondary_root / "Image Comics" / "Saga (2012)"
+    primary_issue = primary_series / "Batman 001.cbz"
+    secondary_issue = secondary_series / "Saga 001.cbz"
+    escaped_issue = tmp_path / "escaped" / "Should Not Import 001.cbz"
+    for issue_path in (primary_issue, secondary_issue, escaped_issue):
+        create_minimal_cbz(issue_path)
+
+    source_snapshot = {
+        issue_path: (
+            issue_path.read_bytes(),
+            issue_path.stat().st_mtime_ns,
+            issue_path.stat().st_mode,
+        )
+        for issue_path in (primary_issue, secondary_issue, escaped_issue)
+    }
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": "/primary/DC Comics/Batman (2011)",
+                "Total": 1,
+            },
+            {
+                "ComicID": "CV-67824",
+                "ComicName": "Saga",
+                "ComicYear": "2012",
+                "ComicPublisher": "Image Comics",
+                "ComicLocation": "/secondary/Image Comics/Saga (2012)",
+                "Total": 1,
+            },
+            {
+                "ComicID": "CV-90001",
+                "ComicName": "Escaped",
+                "ComicYear": "2020",
+                "ComicPublisher": "Unsafe Comics",
+                "ComicLocation": "/primary/../escaped",
+                "Total": 1,
+            },
+            {
+                "ComicID": "CV-90002",
+                "ComicName": "Unmapped",
+                "ComicYear": "2021",
+                "ComicPublisher": "Unknown Comics",
+                "ComicLocation": "/unmapped/Unknown Comics/Unmapped (2021)",
+                "Total": 1,
+            },
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "ComicName": "Batman",
+                "IssueName": "The Court of Owls",
+                "Issue_Number": "1",
+                "Location": primary_issue.name,
+                "IssueDate": "2011-09-21",
+            },
+            {
+                "IssueID": "500001",
+                "ComicID": "67824",
+                "ComicName": "Saga",
+                "IssueName": "Chapter One",
+                "Issue_Number": "1",
+                "Location": secondary_issue.name,
+                "IssueDate": "2012-03-14",
+            },
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={
+            "/primary": str(primary_root),
+            "/secondary": str(secondary_root),
+        },
+    ).read_series()
+
+    by_cv_id = {series.mylar3_cv_id: series for series in results}
+    assert set(by_cv_id) == {42721, 67824, 90001, 90002}
+
+    batman = by_cv_id[42721]
+    assert batman.source_folder == str(primary_series.resolve())
+    assert batman.source_folder_relative == "/primary/DC Comics/Batman (2011)"
+    assert batman.diagnostics["mylar3_path"] == {
+        "status": "mapped",
+        "mapping_applied": True,
+    }
+    assert len(batman.files) == 1
+    assert batman.files[0].comicvine_series_id == 42721
+    assert batman.files[0].comicvine_issue_id == 340001
+    assert batman.files[0].metadata_signals["comicvine_series_id"] == "mylar3"
+    assert batman.files[0].metadata_signals["comicvine_issue_id"] == "mylar3"
+
+    saga = by_cv_id[67824]
+    assert saga.source_folder == str(secondary_series.resolve())
+    assert saga.source_folder_relative == "/secondary/Image Comics/Saga (2012)"
+    assert saga.diagnostics["mylar3_path"] == {
+        "status": "mapped",
+        "mapping_applied": True,
+    }
+    assert len(saga.files) == 1
+    assert saga.files[0].comicvine_series_id == 67824
+    assert saga.files[0].comicvine_issue_id == 500001
+    assert saga.files[0].metadata_signals["comicvine_series_id"] == "mylar3"
+    assert saga.files[0].metadata_signals["comicvine_issue_id"] == "mylar3"
+
+    escaped = by_cv_id[90001]
+    assert escaped.files == []
+    assert escaped.source_folder == ""
+    assert escaped.diagnostics["reason"] == "unsafe_path_mapping"
+    assert escaped.diagnostics["mylar3_path"] == {
+        "status": "invalid",
+        "mapping_applied": True,
+    }
+
+    unmapped = by_cv_id[90002]
+    assert unmapped.files == []
+    assert unmapped.source_folder == ""
+    assert unmapped.diagnostics["reason"] == "unmapped_path"
+    assert unmapped.diagnostics["mylar3_path"] == {
+        "status": "unmapped",
+        "mapping_applied": False,
+    }
+
+    assert {
+        issue_path: (
+            issue_path.read_bytes(),
+            issue_path.stat().st_mtime_ns,
+            issue_path.stat().st_mode,
+        )
+        for issue_path in (primary_issue, secondary_issue, escaped_issue)
+    } == source_snapshot
+
+
+@pytest.mark.asyncio
 async def test_annual_row_preserves_release_identity_and_issue_type(tmp_path: Path) -> None:
     db = tmp_path / "mylar.db"
     series_dir = tmp_path / "comics" / "X-Men"
