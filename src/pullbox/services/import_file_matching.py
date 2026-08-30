@@ -54,7 +54,10 @@ from pullbox.services.import_progress_runtime import (
     scan_review_progress_pct,
     scan_review_progress_plan,
 )
-from pullbox.services.import_source_metadata import load_archive_entry_issue_hint_for_import_file
+from pullbox.services.import_source_metadata import (
+    import_file_has_deferred_archive_metadata,
+    load_archive_entry_issue_hint_for_import_file,
+)
 from pullbox.services.import_workflow_state import (
     SCAN_PROGRESS_FILE_MATCH_END,
     SCAN_PROGRESS_FILE_MATCH_START,
@@ -329,6 +332,21 @@ async def run_import_file_matching(
             files_processed += 1
             reset_file_match_state(imp_file)
             file_metadata = source_metadata_for_import_file(imp_series, imp_file)
+            if (
+                imp_series.cv_match_method == "mylar3_cv_id"
+                and load_deferred_source_metadata_for_import_file is not None
+                and _file_has_deferred_archive_metadata(imp_file)
+            ):
+                deferred_metadata_loads += 1
+                deferred_metadata_started_at = time.monotonic()
+                file_metadata = await load_deferred_source_metadata_for_import_file(
+                    imp_series,
+                    imp_file,
+                )
+                deferred_metadata_duration_ms += (
+                    time.monotonic() - deferred_metadata_started_at
+                ) * 1000
+                _persist_deferred_source_evidence(imp_file, file_metadata)
             file_evaluation_started_at = time.monotonic()
             match_candidate, metadata_conflict = _evaluate_file_match_candidate(
                 imp_series=imp_series,
@@ -638,12 +656,23 @@ async def run_import_file_matching(
 
 
 def _file_has_deferred_archive_metadata(imp_file: ImportedFile) -> bool:
+    return import_file_has_deferred_archive_metadata(imp_file)
+
+
+def _persist_deferred_source_evidence(
+    imp_file: ImportedFile,
+    metadata: SourceMetadata,
+) -> None:
+    """Persist local archive evidence without replacing Mylar row authority."""
     diagnostics = dict(imp_file.diagnostics or {})
-    source_metadata = diagnostics.get("source_metadata")
-    return bool(
-        isinstance(source_metadata, dict)
-        and source_metadata.get("archive_metadata_deferred") is True
-    )
+    diagnostics["source_metadata"] = dict(metadata.diagnostics)
+    diagnostics["metadata_signals"] = {
+        key: signal.value for key, signal in metadata.signals.items()
+    }
+    imp_file.diagnostics = diagnostics
+    imp_file.has_comicinfo = bool(metadata.diagnostics.get("has_comicinfo"))
+    if imp_file.comicvine_issue_id is None and metadata.comicvine_issue_id is not None:
+        imp_file.comicvine_issue_id = metadata.comicvine_issue_id
 
 
 def _provider_cache_metrics(metadata_provider: MetadataProvider | None) -> dict[str, Any]:

@@ -28,7 +28,7 @@ from pullbox.core.library_layout import (
 from pullbox.core.naming import parse_filename
 from pullbox.core.naming_type_detection import detect_issue_type
 from pullbox.core.release_parser import normalize_issue_number
-from pullbox.core.source_metadata import MetadataSignal
+from pullbox.core.source_metadata import MetadataSignal, SourceMetadataExtractor
 from pullbox.models.issue import IssueType
 
 logger = structlog.get_logger(__name__)
@@ -198,6 +198,7 @@ class Mylar3Reader:
                     discovered_files = self._build_files(
                         comic_paths,
                         source_location=location,
+                        series_cv_id=cv_id,
                         series_name=row["ComicName"] or "Unknown",
                         series_year=year,
                         series_publisher=row["ComicPublisher"],
@@ -484,6 +485,7 @@ class Mylar3Reader:
         comic_paths: list[Path],
         *,
         source_location: str | None,
+        series_cv_id: int | None,
         series_name: str,
         series_year: int | None,
         series_publisher: str | None,
@@ -494,6 +496,8 @@ class Mylar3Reader:
         """Build DiscoveredFile objects from a list of comic file paths."""
         results: list[DiscoveredFile] = []
         issue_by_file_name = self._issue_records_by_file_name(issue_records)
+        extractor = SourceMetadataExtractor()
+        sidecar_data = extractor.read_sidecars(comic_paths[0].parent) if comic_paths else None
         for fpath in comic_paths:
             file_name = fpath.name
             file_format = fpath.suffix.lstrip(".").lower()
@@ -536,9 +540,92 @@ class Mylar3Reader:
                     parsed_issue_number = normalized_issue_number
                     metadata_signals["issue_number"] = MetadataSignal.MYLAR3.value
 
-            metadata_diagnostics: dict[str, object] = {}
-            comicvine_issue_id: int | None = None
-            comicvine_series_id: int | None = None
+            normalized_sidecar = sidecar_data or {}
+            metadata_diagnostics: dict[str, object] = {
+                "sidecar_files_present": sorted(
+                    str(name) for name in normalized_sidecar.get("files_present") or []
+                ),
+                "archive_metadata_loaded": False,
+                "archive_metadata_deferred": True,
+                "has_comicinfo": False,
+                "mylar3_folder_metadata_scanned": True,
+            }
+            if sidecar_data is not None and (
+                sidecar_data.get("files_present")
+                or sidecar_data.get("series_id") is not None
+                or sidecar_data.get("issue_id") is not None
+                or sidecar_data.get("booktype") is not None
+                or sidecar_data.get("series_status") is not None
+                or sidecar_data.get("issue_count") is not None
+                or sidecar_data.get("series_name") is not None
+                or sidecar_data.get("year") is not None
+                or sidecar_data.get("identity_conflicts")
+            ):
+                sidecar_booktype = sidecar_data.get("booktype")
+                metadata_diagnostics["sidecar_snapshot"] = {
+                    "files_present": list(sidecar_data.get("files_present") or []),
+                    "series_id": sidecar_data.get("series_id"),
+                    "series_id_source": sidecar_data.get("series_id_source"),
+                    "issue_id": sidecar_data.get("issue_id"),
+                    "booktype": (
+                        sidecar_booktype.value
+                        if isinstance(sidecar_booktype, IssueType)
+                        else sidecar_booktype
+                    ),
+                    "series_status": sidecar_data.get("series_status"),
+                    "issue_count": sidecar_data.get("issue_count"),
+                    "series_name": sidecar_data.get("series_name"),
+                    "year": sidecar_data.get("year"),
+                    "identity_conflicts": list(sidecar_data.get("identity_conflicts") or []),
+                }
+            sidecar_identity: dict[str, object] = {}
+            sidecar_series_id = normalized_sidecar.get("series_id")
+            sidecar_issue_id = normalized_sidecar.get("issue_id")
+            if isinstance(sidecar_series_id, int):
+                sidecar_identity["comicvine_series_id"] = sidecar_series_id
+            else:
+                sidecar_series_id = None
+            if isinstance(sidecar_issue_id, int):
+                sidecar_identity["comicvine_issue_id"] = sidecar_issue_id
+            else:
+                sidecar_issue_id = None
+            if sidecar_identity:
+                metadata_diagnostics["sidecar_identity"] = sidecar_identity
+            raw_identity_conflicts = normalized_sidecar.get("identity_conflicts")
+            identity_conflicts = (
+                [
+                    dict(conflict)
+                    for conflict in raw_identity_conflicts
+                    if isinstance(conflict, dict)
+                ]
+                if isinstance(raw_identity_conflicts, list)
+                else []
+            )
+            if (
+                sidecar_series_id is not None
+                and series_cv_id is not None
+                and sidecar_series_id != series_cv_id
+            ):
+                identity_conflicts.append(
+                    {
+                        "field": "comicvine_series_id",
+                        "mylar3": series_cv_id,
+                        "sidecar": sidecar_series_id,
+                    }
+                )
+            if identity_conflicts:
+                metadata_diagnostics["identity_conflicts"] = identity_conflicts
+
+            comicvine_issue_id = sidecar_issue_id
+            comicvine_series_id = series_cv_id or sidecar_series_id
+            if comicvine_issue_id is not None:
+                metadata_signals["comicvine_issue_id"] = MetadataSignal.SIDECAR.value
+            if comicvine_series_id is not None:
+                metadata_signals["comicvine_series_id"] = (
+                    MetadataSignal.MYLAR3.value
+                    if series_cv_id is not None
+                    else MetadataSignal.SIDECAR.value
+                )
             if issue_record is not None:
                 if issue_record.issue_type != IssueType.ISSUE:
                     issue_type = issue_record.issue_type

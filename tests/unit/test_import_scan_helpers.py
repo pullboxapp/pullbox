@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -199,6 +200,83 @@ async def test_validate_discovered_files_safety_reuses_default_policy_for_batch(
         (Path("/tmp/comics/Batman 001.cbz"), False, 123 * 1024 * 1024),
         (Path("/tmp/comics/Batman 002.cbz"), False, 123 * 1024 * 1024),
     ]
+
+
+async def test_validate_discovered_files_safety_reuses_compact_archive_evidence(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "Batman 001.cbz"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Batman 001 p001.jpg", b"page")
+        archive.writestr(
+            "metadata/ComicInfo.xml",
+            (
+                "<ComicInfo><Series>Batman</Series><Number>1</Number>"
+                "<Notes>[cv_vol_id:42721]</Notes></ComicInfo>"
+            ),
+        )
+    discovered = _discovered_series(str(archive_path))
+
+    await validate_discovered_files_safety(db_session, [discovered])
+
+    evidence = discovered.files[0].metadata_diagnostics["archive_member_evidence"]
+    assert evidence == {
+        "member_index_scanned": True,
+        "comicinfo_entry_count": 1,
+        "comicinfo_entry": "metadata/ComicInfo.xml",
+        "comicinfo": {
+            "series": "Batman",
+            "number": "1",
+            "volume": None,
+            "title": None,
+            "year": None,
+            "month": None,
+            "day": None,
+            "publisher": None,
+            "notes": "[cv_vol_id:42721]",
+            "summary": None,
+            "writer": None,
+            "penciller": None,
+            "inker": None,
+            "colorist": None,
+            "letterer": None,
+            "cover_artist": None,
+            "editor": None,
+            "page_count": None,
+            "genre": None,
+            "web": None,
+            "story_arc": None,
+            "series_group": None,
+            "language": None,
+        },
+    }
+    assert "entry_names" not in evidence
+
+
+async def test_validate_discovered_files_safety_closes_metadata_poor_archive_probe(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "Batman 001.cbz"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("page001.jpg", b"page")
+    discovered = _discovered_series(str(archive_path))
+    discovered.files[0].metadata_diagnostics.update(
+        {
+            "archive_metadata_loaded": False,
+            "archive_metadata_deferred": True,
+        }
+    )
+
+    await validate_discovered_files_safety(db_session, [discovered])
+
+    diagnostics = discovered.files[0].metadata_diagnostics
+    assert diagnostics["archive_metadata_loaded"] is True
+    assert diagnostics["archive_metadata_deferred"] is False
+    assert diagnostics["archive_entry_issue_hint_checked"] is True
+    assert diagnostics["has_comicinfo"] is False
+    assert "archive_member_evidence" not in diagnostics
 
 
 async def test_validate_discovered_files_safety_marks_blocked_files_without_raising(

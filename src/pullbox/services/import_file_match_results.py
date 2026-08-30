@@ -70,11 +70,50 @@ def apply_file_match_series_summary(
     metadata_conflict_files = [
         f for f in files if dict(f.diagnostics or {}).get("kind") == "metadata_conflict"
     ]
+    trusted_identity_conflict_files = [
+        f
+        for f in metadata_conflict_files
+        if dict(f.diagnostics or {}).get("conflict_type") == "trusted_source_identity_conflict"
+    ]
     source_layout_review_files = [
         f for f in files if dict(f.diagnostics or {}).get("kind") == "source_layout_review"
     ]
     invalidation_diagnostics: dict[str, Any] | None = None
     if (
+        not duplicate_series
+        and imp_series.status == ImportSeriesStatus.MATCHED
+        and trusted_identity_conflict_files
+    ):
+        identity_conflicts: list[dict[str, object]] = []
+        for imp_file in trusted_identity_conflict_files:
+            raw_conflicts = dict(imp_file.diagnostics or {}).get("identity_conflicts")
+            if not isinstance(raw_conflicts, list):
+                continue
+            for conflict_item in raw_conflicts:
+                if isinstance(conflict_item, dict) and conflict_item not in identity_conflicts:
+                    identity_conflicts.append(dict(conflict_item))
+        invalidation_diagnostics = {
+            **dict(imp_series.diagnostics or {}),
+            "kind": "series_conflict",
+            "reason": "trusted_source_identity_conflict",
+            "raw_name": imp_series.raw_series_name,
+            "raw_year": imp_series.raw_year,
+            "normalized_query": NameMatcher.normalize(imp_series.raw_series_name),
+            "threshold": cv_match_threshold,
+            "identity_conflicts": identity_conflicts,
+            "top_candidates": [],
+            "conflicting_files": [
+                {
+                    "file_name": imp_file.file_name,
+                    "rejection_reason": dict(imp_file.diagnostics or {}).get("rejection_reason"),
+                }
+                for imp_file in trusted_identity_conflict_files
+            ],
+        }
+        imp_series.status = ImportSeriesStatus.NO_MATCH
+        imp_series.diagnostics = invalidation_diagnostics
+        clear_auto_cv_match_fields(imp_series)
+    elif (
         not duplicate_series
         and imp_series.status == ImportSeriesStatus.MATCHED
         and source_layout_review_files

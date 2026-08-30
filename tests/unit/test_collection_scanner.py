@@ -842,16 +842,16 @@ class TestMetadataGrouping:
         )
 
         archive_read_count = 0
-        original_reader = SourceMetadataExtractor._read_archive_comicinfo
+        original_reader = SourceMetadataExtractor._read_archive_evidence
 
-        def counting_reader(path: Path):
+        def counting_reader(path: Path, **kwargs: object):
             nonlocal archive_read_count
             archive_read_count += 1
-            return original_reader(path)
+            return original_reader(path, **kwargs)
 
         monkeypatch.setattr(
             SourceMetadataExtractor,
-            "_read_archive_comicinfo",
+            "_read_archive_evidence",
             staticmethod(counting_reader),
         )
 
@@ -875,16 +875,16 @@ class TestMetadataGrouping:
         (folder / "Absolute Martian Manhunter Vol. 1.cbz").touch()
 
         archive_read_count = 0
-        original_reader = SourceMetadataExtractor._read_archive_comicinfo
+        original_reader = SourceMetadataExtractor._read_archive_evidence
 
-        def counting_reader(path: Path):
+        def counting_reader(path: Path, **kwargs: object):
             nonlocal archive_read_count
             archive_read_count += 1
-            return original_reader(path)
+            return original_reader(path, **kwargs)
 
         monkeypatch.setattr(
             SourceMetadataExtractor,
-            "_read_archive_comicinfo",
+            "_read_archive_evidence",
             staticmethod(counting_reader),
         )
 
@@ -918,16 +918,16 @@ class TestMetadataGrouping:
             )
 
         archive_read_count = 0
-        original_reader = SourceMetadataExtractor._read_archive_comicinfo
+        original_reader = SourceMetadataExtractor._read_archive_evidence
 
-        def counting_reader(path: Path):
+        def counting_reader(path: Path, **kwargs: object):
             nonlocal archive_read_count
             archive_read_count += 1
-            return original_reader(path)
+            return original_reader(path, **kwargs)
 
         monkeypatch.setattr(
             SourceMetadataExtractor,
-            "_read_archive_comicinfo",
+            "_read_archive_evidence",
             staticmethod(counting_reader),
         )
 

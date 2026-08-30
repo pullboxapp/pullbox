@@ -93,6 +93,10 @@ def test_run_safety_checks_inspects_zip_archive_once(
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("safe/page001.jpg", b"ok")
         zf.writestr("safe/page002.jpg", b"ok")
+        zf.writestr(
+            "metadata/ComicInfo.xml",
+            "<ComicInfo><Series>Batman</Series><Number>1</Number></ComicInfo>",
+        )
 
     open_count = 0
     original_zip_file = zipfile.ZipFile
@@ -104,13 +108,27 @@ def test_run_safety_checks_inspects_zip_archive_once(
 
     monkeypatch.setattr(zipfile, "ZipFile", counting_zip_file)
 
-    run_safety_checks(
+    inspection = run_safety_checks(
         archive,
         block_dangerous=True,
         max_archive_size=2000 * 1024 * 1024,
     )
 
     assert open_count == 1
+    assert len(inspection.archives) == 1
+    report = inspection.archives[0]
+    assert report.archive_path == archive
+    assert report.comicinfo is not None
+    assert report.comicinfo.series == "Batman"
+    assert report.comicinfo.number == "1"
+    assert report.comicinfo_entry == "metadata/ComicInfo.xml"
+    assert report.comicinfo_entry_count == 1
+    assert report.comicinfo_error is None
+    assert report.entry_names == (
+        "safe/page001.jpg",
+        "safe/page002.jpg",
+        "metadata/ComicInfo.xml",
+    )
 
 
 def test_run_safety_checks_rejects_dangerous_files_on_disk(tmp_path: Path) -> None:
@@ -159,6 +177,9 @@ def test_archive_helpers_report_size_and_dangerous_entries(tmp_path: Path) -> No
     assert report.total_size == 5
     assert report.traversal_entries == []
     assert report.dangerous_entries == ["scripts/setup.exe"]
+    assert report.entry_names == ("safe/page001.jpg", "scripts/setup.exe")
+    assert report.comicinfo is None
+    assert report.comicinfo_entry_count == 0
     assert inspect_zip_archive_safety(tmp_path / "issue.cbr", block_dangerous=True) is None
 
 

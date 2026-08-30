@@ -124,12 +124,12 @@ class ArchiveReader:
 
         raise ArchiveError(f"Unsupported format: {self._extension}")
 
-    def read_comicinfo(self) -> ComicInfoData | None:
+    def read_comicinfo(self, *, entries: list[str] | None = None) -> ComicInfoData | None:
         """Extract and parse ComicInfo.xml from the archive.
 
         Returns ``None`` if the archive does not contain a ComicInfo.xml.
         """
-        files = self.list_files()
+        files = entries if entries is not None else self.list_files()
 
         # ComicInfo.xml can be at root or in a subdirectory
         comicinfo_name = None

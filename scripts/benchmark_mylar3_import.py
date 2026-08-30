@@ -16,12 +16,15 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import structlog
 from mylar3_import_fixture import create_scaled_mylar3_fixture
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from pullbox.core import file_safety
+from pullbox.core.archive import ArchiveReader
 from pullbox.core.events import EventBus
 from pullbox.models import import_job as _import_job_models  # noqa: F401
 from pullbox.models import issue as _issue_models  # noqa: F401
@@ -91,6 +94,32 @@ async def _run_benchmark(args: argparse.Namespace, workspace: Path) -> dict[str,
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     error: str | None = None
+    archive_metrics = {
+        "safety_inspections": 0,
+        "member_list_reads": 0,
+        "member_payload_reads": 0,
+    }
+    original_inspect = file_safety.inspect_zip_archive_safety
+    original_list_zip = ArchiveReader._list_zip
+    original_read_zip = ArchiveReader._read_zip
+
+    def counting_inspect(*call_args: Any, **call_kwargs: Any) -> Any:
+        archive_metrics["safety_inspections"] += 1
+        return original_inspect(*call_args, **call_kwargs)
+
+    def counting_list_zip(reader: ArchiveReader) -> list[str]:
+        archive_metrics["member_list_reads"] += 1
+        return original_list_zip(reader)
+
+    def counting_read_zip(
+        reader: ArchiveReader,
+        name: str,
+        *,
+        max_bytes: int | None,
+    ) -> bytes:
+        archive_metrics["member_payload_reads"] += 1
+        return original_read_zip(reader, name, max_bytes=max_bytes)
+
     try:
         async with session_factory() as session:
             job = ImportJob(
@@ -102,10 +131,15 @@ async def _run_benchmark(args: argparse.Namespace, workspace: Path) -> dict[str,
             await session.commit()
 
             started_at = time.monotonic()
-            try:
-                await service.start_scan(session, job.id)
-            except Exception as exc:  # benchmark reports failures before exiting
-                error = f"{type(exc).__name__}: {exc}"
+            with (
+                patch.object(file_safety, "inspect_zip_archive_safety", counting_inspect),
+                patch.object(ArchiveReader, "_list_zip", counting_list_zip),
+                patch.object(ArchiveReader, "_read_zip", counting_read_zip),
+            ):
+                try:
+                    await service.start_scan(session, job.id)
+                except Exception as exc:  # benchmark reports failures before exiting
+                    error = f"{type(exc).__name__}: {exc}"
             elapsed_ms = round((time.monotonic() - started_at) * 1000)
             await session.refresh(job)
 
@@ -133,6 +167,10 @@ async def _run_benchmark(args: argparse.Namespace, workspace: Path) -> dict[str,
                 ),
                 "provider_calls": provider.calls,
                 "provider_call_count": len(provider.calls),
+                "archive_safety_inspection_count": archive_metrics["safety_inspections"],
+                "archive_member_list_read_count": archive_metrics["member_list_reads"],
+                "archive_member_payload_read_count": archive_metrics["member_payload_reads"],
+                "archive_probe_count": sum(archive_metrics.values()),
                 "peak_rss_bytes": current_process_peak_rss_bytes(),
                 "final_status": job.status.value,
                 "error": error,
@@ -150,6 +188,12 @@ def _validate_report(report: dict[str, Any]) -> list[str]:
         failures.append(f"final status was {report['final_status']}, expected review")
     if report["provider_call_count"] != 0:
         failures.append(f"metadata provider calls occurred: {report['provider_calls']}")
+    if report["archive_safety_inspection_count"] != report["expected_file_count"]:
+        failures.append("each archive must have exactly one safety inspection")
+    if report["archive_member_list_read_count"] != 0:
+        failures.append("archive member indexes were reopened after safety inspection")
+    if report["archive_member_payload_read_count"] != 0:
+        failures.append("metadata-poor benchmark archives unexpectedly read member payloads")
     if report["materialized_series_count"] != report["expected_discovered_series_count"]:
         failures.append("materialized series count did not match the generated fixture")
     if report["materialized_file_count"] != report["expected_file_count"]:

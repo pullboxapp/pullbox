@@ -53,6 +53,10 @@ def test_import_scan_benchmark_exits_cleanly() -> None:
     assert report["series_count"] == 1
     assert report["files_per_series"] == 1
     assert report["total_files_matched"] == 1
+    assert report["archive_safety_inspection_count"] == 1
+    # A single-file folder is ambiguous during discovery, so the scanner performs
+    # one bounded pre-safety member listing before the unified safety pass.
+    assert report["archive_read_count"] == 1
     assert report["archive_entry_issue_hint_count"] == 1
     assert report["provider_search_calls"] == 0
     assert report["provider_get_series_calls"] == 0
@@ -73,6 +77,8 @@ def test_import_scan_benchmark_uses_stable_provider_ids_for_multi_series() -> No
     assert report["series_matched"] == 4
     assert report["total_files_matched"] == 16
     assert report["total_files_conflict"] == 0
+    assert report["archive_safety_inspection_count"] == 16
+    assert report["archive_read_count"] == 0
     assert report["archive_entry_issue_hint_count"] == 16
     assert report["provider_search_calls"] == 0
     assert report["provider_get_series_calls"] == 0
@@ -93,7 +99,11 @@ def test_import_scan_benchmark_uses_trusted_folder_metadata_without_provider_cal
     assert report["trusted_comicinfo"] is True
     assert report["series_matched"] == 4
     assert report["total_files_matched"] == 16
-    assert report["archive_read_count"] == 4
+    assert report["archive_safety_inspection_count"] == 16
+    assert report["archive_metadata_evidence_count"] == 16
+    assert report["archive_read_count"] == 0
+    assert report["archive_member_payload_read_count"] == 0
+    assert report["archive_entry_issue_hint_count"] == 0
     assert report["provider_search_calls"] == 0
     assert report["provider_get_series_calls"] == 0
     assert report["provider_issue_summary_calls"] == 0

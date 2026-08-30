@@ -104,6 +104,60 @@ async def test_selected_layout_applies_to_mapped_mylar_paths_without_overriding_
 
 
 @pytest.mark.asyncio
+async def test_mylar_series_identity_wins_while_sidecar_conflict_is_preserved(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    series_dir = tmp_path / "comics" / "Batman (2011)"
+    issue_path = series_dir / "Batman 001.cbz"
+    create_minimal_cbz(issue_path)
+    (series_dir / "series.json").write_text(
+        '{"comicid": 99999, "booktype": "TPB", "status": "Ended", '
+        '"total_issues": 12, "name": "Batman", "year": 2011}'
+    )
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": str(series_dir),
+                "Total": 1,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(db).read_series()
+
+    discovered_file = results[0].files[0]
+    assert discovered_file.comicvine_series_id == 42721
+    assert discovered_file.metadata_signals["comicvine_series_id"] == "mylar3"
+    assert discovered_file.metadata_diagnostics["sidecar_files_present"] == ["series.json"]
+    assert discovered_file.metadata_diagnostics["archive_metadata_deferred"] is True
+    assert discovered_file.metadata_diagnostics["sidecar_snapshot"] == {
+        "files_present": ["series.json"],
+        "series_id": 99999,
+        "series_id_source": "series.json",
+        "issue_id": None,
+        "booktype": IssueType.TPB.value,
+        "series_status": "Ended",
+        "issue_count": 12,
+        "series_name": "Batman",
+        "year": 2011,
+        "identity_conflicts": [],
+    }
+    assert discovered_file.metadata_diagnostics["identity_conflicts"] == [
+        {
+            "field": "comicvine_series_id",
+            "mylar3": 42721,
+            "sidecar": 99999,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_path_mapping_rejects_parent_traversal_outside_mapped_root(
     tmp_path: Path,
 ) -> None:
