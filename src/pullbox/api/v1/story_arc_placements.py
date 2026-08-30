@@ -14,6 +14,7 @@ from pullbox.schemas.story_arc_placement import (
     StoryArcPlacementPolicyUpdate,
     StoryArcPlacementPreviewItemResponse,
     StoryArcPlacementPreviewPageResponse,
+    StoryArcPlacementRemovalResponse,
     StoryArcPlacementResponse,
     StoryArcPlacementSyncRequest,
     StoryArcPlacementSyncResponse,
@@ -22,6 +23,7 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementIntegrationError,
     StoryArcPlacementPolicy,
     StoryArcPlacementPolicyInput,
+    StoryArcPlacementRemovalView,
     StoryArcPlacementSyncResult,
     StoryArcPlacementSyncService,
 )
@@ -67,6 +69,19 @@ def _sync_response(result: StoryArcPlacementSyncResult) -> StoryArcPlacementSync
             if result.placement is not None
             else None
         ),
+    )
+
+
+def _removal_response(
+    result: StoryArcPlacementRemovalView,
+) -> StoryArcPlacementRemovalResponse:
+    return StoryArcPlacementRemovalResponse(
+        placement_id=result.placement_id,
+        ownership=result.ownership,
+        artifact_removed=result.artifact_removed,
+        canonical_preserved=result.canonical_preserved,
+        referenced_artifact_preserved=result.referenced_artifact_preserved,
+        automatic_sync_disabled=result.automatic_sync_disabled,
     )
 
 
@@ -256,3 +271,27 @@ async def repair_story_arc_placement(
     except StoryArcPlacementIntegrationError as exc:
         _raise_integration_error(exc)
     return _sync_response(result)
+
+
+@router.delete(
+    "/{story_arc_id}/placements/{placement_id}",
+    response_model=StoryArcPlacementRemovalResponse,
+)
+async def remove_story_arc_placement(
+    story_arc_id: int,
+    placement_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    confirm_managed_artifact_removal: bool = False,
+) -> StoryArcPlacementRemovalResponse:
+    """Remove managed artifacts safely or forget referenced evidence without unlinking it."""
+    try:
+        result = await _service.remove_placement(
+            session,
+            story_arc_id,
+            placement_id,
+            confirm_managed_artifact_removal=confirm_managed_artifact_removal,
+        )
+    except StoryArcPlacementIntegrationError as exc:
+        _raise_integration_error(exc)
+    return _removal_response(result)

@@ -25,6 +25,8 @@ from pullbox.models.story_arc import (
     StoryArc,
     StoryArcExternalIdentity,
     StoryArcPlacement,
+    StoryArcPlacementMode,
+    StoryArcPlacementOwnership,
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
@@ -131,7 +133,9 @@ async def rollback_action(
     if action.action_type != action_type or dict(action.payload or {}) != payload:
         raise ValueError("Import action changed after it was selected for rollback")
 
-    if action_type == "story_arc_membership_created":
+    if action_type == "story_arc_referenced_placement_attached":
+        await _rollback_attached_story_arc_reference(session, action, payload)
+    elif action_type == "story_arc_membership_created":
         await _rollback_created_story_arc_membership(session, action, payload)
     elif action_type == "story_arc_membership_updated":
         await _rollback_updated_story_arc_membership(session, action, payload)
@@ -305,6 +309,50 @@ async def rollback_action(
     action.status = ImportJobActionStatus.ROLLED_BACK
     action.rolled_back_at = datetime.now(UTC)
     await session.flush()
+
+
+async def _rollback_attached_story_arc_reference(
+    session: AsyncSession,
+    action: ImportJobAction,
+    payload: dict[str, Any],
+) -> None:
+    """Detach import-owned database evidence without touching the user artifact."""
+    if payload.get("journal_state") == "prepared" and payload.get("placement_id") is None:
+        return
+    if payload.get("journal_state") != "completed":
+        raise ValueError("Referenced story-arc placement journal is incomplete")
+    placement_id = _positive_int(payload.get("placement_id"), "placement_id")
+    membership_id = _positive_int(payload.get("issue_story_arc_id"), "issue_story_arc_id")
+    imported_entry_id = _positive_int(
+        payload.get("imported_story_arc_entry_id"),
+        "imported_story_arc_entry_id",
+    )
+    if (
+        _positive_int(payload.get("source_import_job_id"), "source_import_job_id")
+        != action.import_job_id
+    ):
+        raise ValueError("Referenced story-arc placement journal job changed")
+    placement = await session.get(StoryArcPlacement, placement_id)
+    if placement is None:
+        return
+    await _require_story_arc_entry_ownership(
+        session,
+        action=action,
+        imported_story_arc_entry_id=imported_entry_id,
+        membership_id=membership_id,
+    )
+    expected_identity = {
+        "issue_story_arc_id": membership_id,
+        "placement_path": _required_string(payload, "placement_path"),
+        "mode": StoryArcPlacementMode.REFERENCE_ONLY.value,
+        "ownership": StoryArcPlacementOwnership.REFERENCED.value,
+        "source_kind": _required_string(payload, "source_kind"),
+        "source_import_job_id": action.import_job_id,
+        "creating_action_id": int(action.id),
+    }
+    if _referenced_placement_rollback_identity(placement) != expected_identity:
+        raise ValueError("Referenced story-arc placement ownership changed; rollback refused")
+    await session.delete(placement)
 
 
 async def _rollback_created_story_arc_membership(
@@ -595,6 +643,21 @@ def _external_identity_state(identity: StoryArcExternalIdentity) -> dict[str, ob
         "external_id": identity.external_id,
         "source_url": identity.source_url,
         "evidence": dict(identity.evidence or {}),
+    }
+
+
+def _referenced_placement_rollback_identity(
+    placement: StoryArcPlacement,
+) -> dict[str, object]:
+    """Return only immutable ownership fields; observed drift is intentionally excluded."""
+    return {
+        "issue_story_arc_id": int(placement.issue_story_arc_id),
+        "placement_path": placement.placement_path,
+        "mode": placement.mode.value,
+        "ownership": placement.ownership.value,
+        "source_kind": placement.source_kind.value,
+        "source_import_job_id": placement.source_import_job_id,
+        "creating_action_id": placement.creating_action_id,
     }
 
 

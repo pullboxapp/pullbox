@@ -16,6 +16,9 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.schemas.import_layout import SourceLayoutSpecPayload
+from pullbox.schemas.story_arc_placement import (  # noqa: TC001 - Pydantic resolves at runtime
+    StoryArcPlacementPolicyPayload,
+)
 
 # ── Request Schemas ──────────────────────────────────────────────────────
 
@@ -195,6 +198,44 @@ class StoryArcReviewDecisionResponse(BaseModel):
     status: str
     selected_for_import: bool
     proposed_story_arc_id: int | None
+
+
+class StoryArcPolicyConfirmationRequest(BaseModel):
+    """Explicitly freeze one staged arc policy during Step 3 review."""
+
+    confirm_policy: Literal[True]
+    expected_policy_digest: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    materialize_filesystem: bool
+    monitored: bool
+    search_missing: bool
+    include_upcoming: bool
+    placement_policy: StoryArcPlacementPolicyPayload
+
+    @model_validator(mode="after")
+    def validate_materialization_choice(self) -> StoryArcPolicyConfirmationRequest:
+        """Keep logical membership and filesystem materialization independent."""
+        logical = self.placement_policy.mode.value == "logical"
+        if self.materialize_filesystem == logical:
+            raise ValueError(
+                "materialize_filesystem must be false for logical policy and true otherwise"
+            )
+        if not self.monitored and (self.search_missing or self.include_upcoming):
+            raise ValueError("search_missing and include_upcoming require monitored to be true")
+        return self
+
+
+class StoryArcPolicyConfirmationResponse(BaseModel):
+    """Sanitized persisted state for one confirmed staged policy."""
+
+    imported_story_arc_id: int
+    activation: Literal["confirmed"]
+    materialize_filesystem: bool
+    mode: str
+    monitored: bool
+    search_missing: bool
+    include_upcoming: bool
+    sync_enabled: bool
+    policy_digest: str
 
 
 class ConfirmImportRequest(BaseModel):

@@ -251,6 +251,42 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "story_arc_detail",
         ),
         (
+            "/story-arcs/{story_arc_id}/placement-policy/preview",
+            ("POST",),
+            "story_arc_placement_policy_preview",
+            "story_arc_placement_policy_preview",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/placement-policy",
+            ("POST",),
+            "story_arc_placement_policy_update",
+            "story_arc_placement_policy_update",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/memberships/{membership_id}/placement-sync",
+            ("POST",),
+            "story_arc_placement_sync",
+            "story_arc_placement_sync",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/placements/{placement_id}/retry",
+            ("POST",),
+            "story_arc_placement_retry",
+            "story_arc_placement_retry",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/placements/{placement_id}/repair",
+            ("POST",),
+            "story_arc_placement_repair",
+            "story_arc_placement_repair",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/placements/{placement_id}/remove",
+            ("POST",),
+            "story_arc_placement_remove",
+            "story_arc_placement_remove",
+        ),
+        (
             "/story-arcs/{story_arc_id}/edit",
             ("POST",),
             "story_arc_edit",

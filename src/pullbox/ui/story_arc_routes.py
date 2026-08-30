@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal
 from urllib.parse import urlencode
 
@@ -13,7 +14,17 @@ from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.core.story_arc_naming import (
+    DEFAULT_STORY_ARC_FILE_TEMPLATE,
+    DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
+)
 from pullbox.models.story_arc import StoryArc, StoryArcLifecycle, StoryArcSourceKind
+from pullbox.services.story_arc_placement_integration import (
+    StoryArcPlacementIntegrationError,
+    StoryArcPlacementPolicyInput,
+    StoryArcPlacementPolicyMode,
+    StoryArcPlacementSyncService,
+)
 from pullbox.services.story_arc_service import (
     StoryArcConflictError,
     StoryArcNotFoundError,
@@ -24,6 +35,7 @@ from pullbox.services.story_arc_service import (
 from pullbox.ui.story_arc_presenters import (
     load_story_arc_detail,
     load_story_arc_list_page,
+    load_story_arc_placement_context,
 )
 
 if TYPE_CHECKING:
@@ -37,6 +49,15 @@ _BuildContext = Callable[..., dict[str, object]]
 _get_templates: _GetTemplates | None = None
 _build_context: _BuildContext | None = None
 _story_arc_service = StoryArcService()
+_placement_service = StoryArcPlacementSyncService()
+
+
+@dataclass(frozen=True, slots=True)
+class _StoryArcTemplateUser:
+    """Session-independent user fields needed by the shared page shell."""
+
+    username: str
+
 
 _NOTICE_MESSAGES = {
     "created": "Story arc created. Add issues when you are ready.",
@@ -49,11 +70,22 @@ _NOTICE_MESSAGES = {
     "resolved": "Story arc entry matched to the canonical issue.",
     "membership-removed": "Issue removed from the story arc. Its canonical record was preserved.",
     "archived": "Story arc archived. Canonical issues and files were preserved.",
+    "placement-policy-updated": "Story Arc placement policy saved.",
+    "placement-synchronized": "Story Arc placement synchronized.",
+    "placement-retried": "Story Arc placement retry completed.",
+    "placement-repaired": "Managed Story Arc placement repaired.",
+    "placement-managed-removed": (
+        "Pullbox-managed Story Arc artifact removed. The canonical library file was preserved."
+    ),
+    "placement-reference-forgotten": (
+        "Story Arc reference forgotten. The user-owned artifact was preserved."
+    ),
 }
 _ERROR_MESSAGES = {
     "conflict": "This story arc changed in another tab. Review the latest state and try again.",
     "not-found": "That story arc entry is no longer available.",
     "validation": "That change could not be saved. Review the fields and try again.",
+    "placement": "Placement failed. Review the policy and placement state.",
 }
 
 
@@ -95,12 +127,15 @@ def _detail_url(
     error: str | None = None,
     page: int | None = None,
     per_page: int | None = None,
+    placement_page: int | None = None,
 ) -> str:
     params: list[tuple[str, str | int]] = []
     if page is not None:
         params.append(("page", page))
     if per_page is not None:
         params.append(("per_page", per_page))
+    if placement_page is not None:
+        params.append(("placement_page", placement_page))
     if error is not None:
         params.append(("error", error))
     if notice is not None:
@@ -133,6 +168,89 @@ def _optional_issue_id(value: str) -> int | None:
     if issue_id < 1:
         raise StoryArcValidationError("Issue ID must be a positive integer")
     return issue_id
+
+
+def _placement_policy_input(
+    *,
+    mode: str,
+    target_library_root_id: str,
+    destination_root: str,
+    folder_template: str,
+    file_template: str,
+    symlink_style: str,
+    synchronize: bool,
+) -> StoryArcPlacementPolicyInput:
+    """Normalize browser blanks while keeping the complete policy explicit."""
+    try:
+        policy_mode = StoryArcPlacementPolicyMode(mode)
+    except ValueError as exc:
+        raise StoryArcPlacementIntegrationError(
+            "unsupported_mode",
+            "Unsupported Story Arc placement mode",
+        ) from exc
+    root_id = _optional_issue_id(target_library_root_id)
+    destination = destination_root.strip() or None
+    style = symlink_style.strip() or None
+    if policy_mode is StoryArcPlacementPolicyMode.LOGICAL:
+        root_id = None
+        destination = None
+        style = None
+        synchronize = False
+    elif policy_mode is not StoryArcPlacementPolicyMode.SYMLINK:
+        style = None
+    return StoryArcPlacementPolicyInput(
+        mode=policy_mode,
+        target_library_root_id=root_id,
+        destination_root=destination,
+        folder_template=folder_template,
+        file_template=file_template,
+        symlink_style=style,
+        synchronize=synchronize,
+    )
+
+
+async def _render_story_arc_detail(
+    *,
+    story_arc_id: int,
+    request: Request,
+    username: str,
+    session: DbSession,
+    page: int,
+    per_page: int,
+    placement_page: int,
+    notice_message: str = "",
+    error_message: str = "",
+    placement_proposal: StoryArcPlacementPolicyInput | None = None,
+    placement_message: str = "",
+) -> Response:
+    detail = await load_story_arc_detail(
+        session,
+        story_arc_id=story_arc_id,
+        page=page,
+        per_page=per_page,
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Story arc not found")
+    placement_ui = await load_story_arc_placement_context(
+        session,
+        story_arc_id=story_arc_id,
+        page=placement_page,
+        proposal=placement_proposal,
+    )
+    context = _ctx(
+        request,
+        _StoryArcTemplateUser(username=username),
+        story_arc=detail,
+        placement_ui=placement_ui,
+        pagination_base_url=f"/story-arcs/{story_arc_id}?{urlencode({'per_page': per_page})}",
+        placement_pagination_base_url=(
+            f"/story-arcs/{story_arc_id}?{urlencode({'page': page, 'per_page': per_page})}"
+        ),
+        notice_message=notice_message,
+        error_message=error_message,
+        placement_message=placement_message,
+    )
+    return _templates().TemplateResponse(request, "pages/story_arc_detail.html", context)
 
 
 async def _nested_memberships(
@@ -228,27 +346,222 @@ async def story_arc_detail(
     session: DbSession,
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 25,
+    placement_page: Annotated[int, Query(ge=1)] = 1,
     notice: str | None = Query(None),
     error: str | None = Query(None),
 ) -> Response:
     """Render arc metadata and one ordered, bounded membership page."""
-    detail = await load_story_arc_detail(
-        session,
+    return await _render_story_arc_detail(
         story_arc_id=story_arc_id,
+        request=request,
+        username=user.username,
+        session=session,
         page=page,
         per_page=per_page,
-    )
-    if detail is None:
-        raise HTTPException(status_code=404, detail="Story arc not found")
-    context = _ctx(
-        request,
-        user,
-        story_arc=detail,
-        pagination_base_url=f"/story-arcs/{story_arc_id}?{urlencode({'per_page': per_page})}",
+        placement_page=placement_page,
         notice_message=_NOTICE_MESSAGES.get(notice or "", ""),
         error_message=_ERROR_MESSAGES.get(error or "", ""),
     )
-    return _templates().TemplateResponse(request, "pages/story_arc_detail.html", context)
+
+
+@router.post(
+    "/story-arcs/{story_arc_id}/placement-policy/preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def story_arc_placement_policy_preview(
+    story_arc_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    expected_revision: Annotated[int, Form(ge=1)],
+    mode: Annotated[str, Form(max_length=50)],
+    target_library_root_id: str = Form(""),
+    destination_root: Annotated[str, Form(max_length=1000)] = "",
+    folder_template: Annotated[str, Form(max_length=1024)] = DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
+    file_template: Annotated[str, Form(max_length=1024)] = DEFAULT_STORY_ARC_FILE_TEMPLATE,
+    symlink_style: Annotated[str, Form(max_length=50)] = "",
+    synchronize: bool = Form(False),
+) -> Response:
+    """Render a bounded candidate preview without persisting policy or files."""
+    username = user.username
+    del expected_revision  # Preview is deliberately write-free; save enforces the revision.
+    try:
+        proposal = _placement_policy_input(
+            mode=mode,
+            target_library_root_id=target_library_root_id,
+            destination_root=destination_root,
+            folder_template=folder_template,
+            file_template=file_template,
+            symlink_style=symlink_style,
+            synchronize=synchronize,
+        )
+        return await _render_story_arc_detail(
+            story_arc_id=story_arc_id,
+            request=request,
+            username=username,
+            session=session,
+            page=1,
+            per_page=25,
+            placement_page=1,
+            placement_proposal=proposal,
+            placement_message="Preview only — no policy or files were changed.",
+        )
+    except (StoryArcPlacementIntegrationError, StoryArcValidationError) as exc:
+        await session.rollback()
+        return await _render_story_arc_detail(
+            story_arc_id=story_arc_id,
+            request=request,
+            username=username,
+            session=session,
+            page=1,
+            per_page=25,
+            placement_page=1,
+            placement_message=str(exc),
+        )
+
+
+@router.post("/story-arcs/{story_arc_id}/placement-policy", include_in_schema=False)
+async def story_arc_placement_policy_update(
+    story_arc_id: int,
+    request: Request,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    expected_revision: Annotated[int, Form(ge=1)],
+    mode: Annotated[str, Form(max_length=50)],
+    target_library_root_id: str = Form(""),
+    destination_root: Annotated[str, Form(max_length=1000)] = "",
+    folder_template: Annotated[str, Form(max_length=1024)] = DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
+    file_template: Annotated[str, Form(max_length=1024)] = DEFAULT_STORY_ARC_FILE_TEMPLATE,
+    symlink_style: Annotated[str, Form(max_length=50)] = "",
+    synchronize: bool = Form(False),
+) -> Response:
+    """Freeze one complete policy using the arc revision shown by the form."""
+    try:
+        await _placement_service.update_policy(
+            session,
+            story_arc_id,
+            expected_revision=expected_revision,
+            proposal=_placement_policy_input(
+                mode=mode,
+                target_library_root_id=target_library_root_id,
+                destination_root=destination_root,
+                folder_template=folder_template,
+                file_template=file_template,
+                symlink_style=symlink_style,
+                synchronize=synchronize,
+            ),
+        )
+    except (StoryArcPlacementIntegrationError, StoryArcValidationError, IntegrityError):
+        await session.rollback()
+        return _redirect(request, _detail_url(story_arc_id, error="placement"))
+    return _redirect(
+        request,
+        _detail_url(story_arc_id, notice="placement-policy-updated"),
+    )
+
+
+@router.post(
+    "/story-arcs/{story_arc_id}/memberships/{membership_id}/placement-sync",
+    include_in_schema=False,
+)
+async def story_arc_placement_sync(
+    story_arc_id: int,
+    membership_id: int,
+    request: Request,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    adopt_identical_existing: bool = Form(False),
+) -> Response:
+    """Synchronize one preview row without changing its canonical file."""
+    try:
+        await _placement_service.sync_membership(
+            session,
+            story_arc_id,
+            membership_id,
+            adopt_identical_existing=adopt_identical_existing,
+        )
+    except StoryArcPlacementIntegrationError:
+        await session.rollback()
+        return _redirect(request, _detail_url(story_arc_id, error="placement"))
+    return _redirect(request, _detail_url(story_arc_id, notice="placement-synchronized"))
+
+
+@router.post(
+    "/story-arcs/{story_arc_id}/placements/{placement_id}/retry",
+    include_in_schema=False,
+)
+async def story_arc_placement_retry(
+    story_arc_id: int,
+    placement_id: int,
+    request: Request,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    adopt_identical_existing: bool = Form(False),
+) -> Response:
+    """Retry one durable placement while preserving referenced ownership."""
+    try:
+        await _placement_service.retry_placement(
+            session,
+            story_arc_id,
+            placement_id,
+            adopt_identical_existing=adopt_identical_existing,
+        )
+    except StoryArcPlacementIntegrationError:
+        await session.rollback()
+        return _redirect(request, _detail_url(story_arc_id, error="placement"))
+    return _redirect(request, _detail_url(story_arc_id, notice="placement-retried"))
+
+
+@router.post(
+    "/story-arcs/{story_arc_id}/placements/{placement_id}/repair",
+    include_in_schema=False,
+)
+async def story_arc_placement_repair(
+    story_arc_id: int,
+    placement_id: int,
+    request: Request,
+    _user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Repair only a Pullbox-managed placement with durable ownership evidence."""
+    try:
+        await _placement_service.repair_placement(session, story_arc_id, placement_id)
+    except StoryArcPlacementIntegrationError:
+        await session.rollback()
+        return _redirect(request, _detail_url(story_arc_id, error="placement"))
+    return _redirect(request, _detail_url(story_arc_id, notice="placement-repaired"))
+
+
+@router.post(
+    "/story-arcs/{story_arc_id}/placements/{placement_id}/remove",
+    include_in_schema=False,
+)
+async def story_arc_placement_remove(
+    story_arc_id: int,
+    placement_id: int,
+    request: Request,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    confirm_managed_artifact_removal: bool = Form(False),
+) -> Response:
+    """Remove managed artifacts or forget references under ownership safeguards."""
+    try:
+        removed = await _placement_service.remove_placement(
+            session,
+            story_arc_id,
+            placement_id,
+            confirm_managed_artifact_removal=confirm_managed_artifact_removal,
+        )
+    except StoryArcPlacementIntegrationError:
+        await session.rollback()
+        return _redirect(request, _detail_url(story_arc_id, error="placement"))
+    notice = (
+        "placement-reference-forgotten"
+        if removed.referenced_artifact_preserved
+        else "placement-managed-removed"
+    )
+    return _redirect(request, _detail_url(story_arc_id, notice=notice))
 
 
 @router.post("/story-arcs/{story_arc_id}/edit", include_in_schema=False)

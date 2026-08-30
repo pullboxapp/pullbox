@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import or_, select, tuple_
 from sqlalchemy.orm import selectinload
 
 from pullbox.core.issue_numbers import normalize_issue_number_text
-from pullbox.models.import_job import ImportedFileStatus, ImportJob
+from pullbox.core.story_arc_naming import (
+    validate_story_arc_file_template,
+    validate_story_arc_folder_template,
+)
+from pullbox.models.import_job import ImportedFileStatus, ImportJob, ImportSourceType
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
 from pullbox.models.story_arc import (
@@ -19,6 +27,10 @@ from pullbox.models.story_arc import (
     StoryArc,
     StoryArcExternalIdentity,
     StoryArcLifecycle,
+    StoryArcPlacement,
+    StoryArcPlacementMode,
+    StoryArcPlacementOwnership,
+    StoryArcPlacementState,
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
@@ -48,7 +60,7 @@ CountField = Literal[
 ]
 
 _POLICY_FLAGS = ("monitored", "search_missing", "include_upcoming", "sync_enabled")
-_POLICY_KEYS = frozenset(
+_CONFIRMED_POLICY_KEYS = frozenset(
     {
         "schema_version",
         "source",
@@ -57,9 +69,22 @@ _POLICY_KEYS = frozenset(
         "search_missing",
         "include_upcoming",
         "sync_enabled",
-        "target_library_root_id",
+        "placement_policy",
     }
 )
+_PLACEMENT_POLICY_KEYS = frozenset(
+    {
+        "schema_version",
+        "mode",
+        "target_library_root_id",
+        "destination_root",
+        "folder_template",
+        "file_template",
+        "symlink_style",
+        "synchronize",
+    }
+)
+_PLACEMENT_POLICY_MODES = frozenset({"logical", "reference_only", "copy", "hardlink", "symlink"})
 _SAFE_IMPORTED_FILE_STATES = frozenset(
     {ImportedFileStatus.IMPORTED, ImportedFileStatus.ALREADY_OWNED}
 )
@@ -187,6 +212,40 @@ class _EntryPageLookups:
         tuple[int, StoryArcSourceKind, str],
         IssueStoryArc,
     ]
+    reference_candidates_by_entry_id: dict[int, _ReferenceCandidateResolution]
+    placements_by_path: dict[str, StoryArcPlacement]
+    placements_by_membership: dict[int, list[StoryArcPlacement]]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReferencePathCandidate:
+    path: Path
+    trusted_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _ReferenceCandidateResolution:
+    candidate: _ReferencePathCandidate | None = None
+    warning_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReferencePathInspection:
+    fingerprint: dict[str, object] | None = None
+    warning_code: str | None = None
+
+
+@dataclass(slots=True)
+class _ReferencePageCheckpoint:
+    cancellation_check: CancellationCheck | None
+    checked: bool = False
+
+    async def ensure_checked(self) -> None:
+        """Check cancellation once before a bounded page touches reference evidence."""
+        if self.checked:
+            return
+        await _checkpoint(self.cancellation_check)
+        self.checked = True
 
 
 async def materialize_confirmed_story_arcs(
@@ -200,10 +259,12 @@ async def materialize_confirmed_story_arcs(
 ) -> StoryArcMaterializationResult:
     """Create or explicitly merge confirmed logical story arcs for one job.
 
-    This Step 4 service consumes database staging and canonical issue rows only.
-    It never invokes a provider, reads or writes a source file, creates a
-    placement, or commits. The caller therefore retains one rollback boundary
-    across canonical file processing and logical story-arc registration.
+    This Step 4 service consumes database staging and canonical issue rows. It
+    never invokes a provider, opens archive content, mutates a source artifact,
+    or commits. Confirmed existing Mylar/folder artifacts may be attached as
+    referenced placements after metadata-only, no-follow root validation. The
+    caller retains one rollback boundary across canonical file processing and
+    logical story-arc registration.
     """
     if isinstance(batch_size, bool) or batch_size <= 0:
         raise ValueError("Story-arc materialization batch size must be positive")
@@ -425,7 +486,12 @@ async def _prepare_materialization_batch(
             target_arc_ids.add(int(staged_arc.proposed_story_arc_id))
         raw_policy = staged_arc.proposed_policy_snapshot
         if isinstance(raw_policy, dict):
-            target_root_id = raw_policy.get("target_library_root_id")
+            placement_policy = raw_policy.get("placement_policy")
+            target_root_id = (
+                placement_policy.get("target_library_root_id")
+                if isinstance(placement_policy, dict)
+                else None
+            )
             if (
                 isinstance(target_root_id, int)
                 and not isinstance(target_root_id, bool)
@@ -480,7 +546,10 @@ async def _prepare_materialization_batch(
             int(root_id)
             for root_id in (
                 await session.scalars(
-                    select(LibraryRoot.id).where(LibraryRoot.id.in_(library_root_ids))
+                    select(LibraryRoot.id).where(
+                        LibraryRoot.id.in_(library_root_ids),
+                        LibraryRoot.enabled.is_(True),
+                    )
                 )
             ).all()
         }
@@ -798,9 +867,11 @@ async def _materialize_entry_pages(
         lookups = await _prepare_entry_page_lookups(
             session,
             import_job_id=import_job_id,
+            job=job,
             contexts=contexts,
             entries=selected_entries,
         )
+        reference_checkpoint = _ReferencePageCheckpoint(cancellation_check)
         for entry in selected_entries:
             context = contexts[int(entry.imported_story_arc_id)]
             await _materialize_entry(
@@ -813,6 +884,7 @@ async def _materialize_entry_pages(
                 warnings=warnings,
                 record_action=record_action,
                 lookups=lookups,
+                reference_checkpoint=reference_checkpoint,
             )
         await session.flush()
         last_entry_id = int(selected_entries[-1].id)
@@ -822,6 +894,7 @@ async def _prepare_entry_page_lookups(
     session: AsyncSession,
     *,
     import_job_id: int,
+    job: ImportJob,
     contexts: Mapping[int, _ArcMaterializationContext],
     entries: Sequence[ImportedStoryArcEntry],
 ) -> _EntryPageLookups:
@@ -874,6 +947,38 @@ async def _prepare_entry_page_lookups(
         if filters
         else []
     )
+    reference_candidates = {
+        int(entry.id): _resolve_reference_candidate(job, entry)
+        for entry in entries
+        if entry.source_location is not None
+    }
+    candidate_paths = {
+        str(resolution.candidate.path)
+        for resolution in reference_candidates.values()
+        if resolution.candidate is not None
+    }
+    membership_ids = {int(membership.id) for membership in memberships}
+    placement_filters: list[ColumnElement[bool]] = []
+    if candidate_paths:
+        placement_filters.append(StoryArcPlacement.placement_path.in_(candidate_paths))
+    if membership_ids:
+        placement_filters.append(StoryArcPlacement.issue_story_arc_id.in_(membership_ids))
+    placements = (
+        list(
+            (
+                await session.scalars(
+                    select(StoryArcPlacement)
+                    .where(or_(*placement_filters))
+                    .order_by(StoryArcPlacement.id)
+                )
+            ).all()
+        )
+        if placement_filters
+        else []
+    )
+    placements_by_membership: dict[int, list[StoryArcPlacement]] = {}
+    for placement in placements:
+        placements_by_membership.setdefault(int(placement.issue_story_arc_id), []).append(placement)
     return _EntryPageLookups(
         issues_by_id=issues,
         memberships_by_id={int(membership.id): membership for membership in memberships},
@@ -891,6 +996,9 @@ async def _prepare_entry_page_lookups(
             for membership in memberships
             if membership.source_entry_id is not None
         },
+        reference_candidates_by_entry_id=reference_candidates,
+        placements_by_path={placement.placement_path: placement for placement in placements},
+        placements_by_membership=placements_by_membership,
     )
 
 
@@ -905,6 +1013,7 @@ async def _materialize_entry(
     warnings: list[StoryArcMaterializationWarning],
     record_action: RecordActionFunc | None,
     lookups: _EntryPageLookups,
+    reference_checkpoint: _ReferencePageCheckpoint,
 ) -> None:
     staged_arc = context.staged_arc
     arc = context.arc
@@ -1060,11 +1169,557 @@ async def _materialize_entry(
         _increment_counts(counts, context.counts, "unresolved_entries")
     if membership.resolution_state == StoryArcResolutionState.SKIPPED:
         _increment_counts(counts, context.counts, "entries_skipped")
+    await _materialize_referenced_placement(
+        session,
+        job=job,
+        staged_arc=staged_arc,
+        entry=entry,
+        membership=membership,
+        warnings=warnings,
+        record_action=record_action,
+        lookups=lookups,
+        reference_checkpoint=reference_checkpoint,
+    )
     _persist_entry_materialization_diagnostics(
         entry,
         membership_id=int(membership.id),
         warning_codes=[warning.code for warning in warnings[entry_warning_start:]],
     )
+
+
+async def _materialize_referenced_placement(
+    session: AsyncSession,
+    *,
+    job: ImportJob,
+    staged_arc: ImportedStoryArc,
+    entry: ImportedStoryArcEntry,
+    membership: IssueStoryArc,
+    warnings: list[StoryArcMaterializationWarning],
+    record_action: RecordActionFunc | None,
+    lookups: _EntryPageLookups,
+    reference_checkpoint: _ReferencePageCheckpoint,
+) -> None:
+    """Attach one confirmed pre-existing artifact without opening or mutating it."""
+    resolution = lookups.reference_candidates_by_entry_id.get(int(entry.id))
+    if resolution is None:
+        return
+    await reference_checkpoint.ensure_checked()
+    if resolution.warning_code is not None or resolution.candidate is None:
+        _warn(
+            warnings,
+            resolution.warning_code or "story_arc_reference_path_invalid",
+            staged_arc,
+            entry,
+        )
+        return
+
+    candidate = resolution.candidate
+    placement_path = str(candidate.path)
+    existing = lookups.placements_by_path.get(placement_path)
+    if existing is not None and not _is_same_import_reference(
+        existing,
+        job=job,
+        entry=entry,
+        membership=membership,
+    ):
+        _warn(warnings, "story_arc_reference_path_collision", staged_arc, entry)
+        return
+    if existing is None:
+        prior_for_membership = [
+            placement
+            for placement in lookups.placements_by_membership.get(int(membership.id), ())
+            if _is_same_import_reference(
+                placement,
+                job=job,
+                entry=entry,
+                membership=membership,
+            )
+        ]
+        if prior_for_membership:
+            _warn(warnings, "story_arc_reference_location_changed", staged_arc, entry)
+            return
+
+    inspection = _inspect_reference_path(candidate)
+    if existing is not None:
+        if existing.creating_action_id is None:
+            _warn(warnings, "story_arc_reference_provenance_incomplete", staged_arc, entry)
+            return
+        _refresh_referenced_placement(
+            existing,
+            inspection=inspection,
+            staged_arc=staged_arc,
+            entry=entry,
+            warnings=warnings,
+        )
+        return
+    if inspection.warning_code is not None or inspection.fingerprint is None:
+        _warn(
+            warnings,
+            inspection.warning_code or "story_arc_reference_path_invalid",
+            staged_arc,
+            entry,
+        )
+        return
+    if record_action is None:
+        _warn(warnings, "story_arc_reference_journal_unavailable", staged_arc, entry)
+        return
+
+    prepared_payload: dict[str, object] = {
+        "schema_version": 1,
+        "journal_state": "prepared",
+        "placement_id": None,
+        "issue_story_arc_id": int(membership.id),
+        "imported_story_arc_entry_id": int(entry.id),
+        "placement_path": placement_path,
+        "source_kind": entry.source_kind.value,
+        "source_import_job_id": int(job.id),
+        "expected_after": None,
+    }
+    action = await record_action(
+        session,
+        job,
+        phase="story_arcs",
+        action_type="story_arc_referenced_placement_attached",
+        payload=prepared_payload,
+    )
+    now = datetime.now(UTC)
+    last_result = _reference_last_result(
+        code="reference_current",
+        baseline=inspection.fingerprint,
+        observed=inspection.fingerprint,
+    )
+    imported_file = entry.import_file
+    library_file_id = (
+        int(imported_file.library_file_id)
+        if imported_file is not None
+        and imported_file.import_job_id == job.id
+        and imported_file.library_file_id is not None
+        else None
+    )
+    placement = StoryArcPlacement(
+        issue_story_arc_id=int(membership.id),
+        library_file_id=library_file_id,
+        placement_path=placement_path,
+        mode=StoryArcPlacementMode.REFERENCE_ONLY,
+        ownership=StoryArcPlacementOwnership.REFERENCED,
+        symlink_style=None,
+        source_kind=entry.source_kind,
+        source_import_job_id=int(job.id),
+        creating_action_id=int(action.id),
+        rendered_reading_order=int(membership.sequence_number),
+        source_fingerprint={},
+        state=StoryArcPlacementState.CURRENT,
+        last_result=last_result,
+        last_checked_at=now,
+    )
+    session.add(placement)
+    await session.flush()
+    action.payload = {
+        **prepared_payload,
+        "journal_state": "completed",
+        "placement_id": int(placement.id),
+        "expected_after": _referenced_placement_state(placement),
+    }
+    await session.flush()
+    lookups.placements_by_path[placement_path] = placement
+    lookups.placements_by_membership.setdefault(int(membership.id), []).append(placement)
+
+
+def _refresh_referenced_placement(
+    placement: StoryArcPlacement,
+    *,
+    inspection: _ReferencePathInspection,
+    staged_arc: ImportedStoryArc,
+    entry: ImportedStoryArcEntry,
+    warnings: list[StoryArcMaterializationWarning],
+) -> None:
+    baseline = _reference_baseline_fingerprint(placement)
+    now = datetime.now(UTC)
+    placement.last_checked_at = now
+    if inspection.warning_code is not None or inspection.fingerprint is None:
+        missing = inspection.warning_code == "story_arc_reference_missing"
+        placement.state = (
+            StoryArcPlacementState.MISSING if missing else StoryArcPlacementState.DRIFTED
+        )
+        placement.last_result = _reference_last_result(
+            code="reference_missing" if missing else "reference_unsafe",
+            baseline=baseline,
+            observed=None,
+            warning_code=inspection.warning_code,
+        )
+        _warn(
+            warnings,
+            inspection.warning_code or "story_arc_reference_path_invalid",
+            staged_arc,
+            entry,
+        )
+        return
+    if baseline is None:
+        placement.state = StoryArcPlacementState.DRIFTED
+        placement.last_result = _reference_last_result(
+            code="reference_provenance_incomplete",
+            baseline=None,
+            observed=inspection.fingerprint,
+        )
+        _warn(warnings, "story_arc_reference_provenance_incomplete", staged_arc, entry)
+        return
+    if baseline != inspection.fingerprint:
+        placement.state = StoryArcPlacementState.DRIFTED
+        placement.last_result = _reference_last_result(
+            code="reference_drifted",
+            baseline=baseline,
+            observed=inspection.fingerprint,
+        )
+        _warn(warnings, "story_arc_reference_drifted", staged_arc, entry)
+        return
+    placement.state = StoryArcPlacementState.CURRENT
+    placement.last_result = _reference_last_result(
+        code="reference_current",
+        baseline=baseline,
+        observed=inspection.fingerprint,
+    )
+
+
+def _is_same_import_reference(
+    placement: StoryArcPlacement,
+    *,
+    job: ImportJob,
+    entry: ImportedStoryArcEntry,
+    membership: IssueStoryArc,
+) -> bool:
+    return (
+        placement.issue_story_arc_id == membership.id
+        and placement.mode is StoryArcPlacementMode.REFERENCE_ONLY
+        and placement.ownership is StoryArcPlacementOwnership.REFERENCED
+        and placement.source_kind is entry.source_kind
+        and placement.source_import_job_id == job.id
+    )
+
+
+def _reference_baseline_fingerprint(
+    placement: StoryArcPlacement,
+) -> dict[str, object] | None:
+    baseline = _mapping(placement.last_result).get("baseline_fingerprint")
+    return dict(baseline) if isinstance(baseline, dict) else None
+
+
+def _reference_last_result(
+    *,
+    code: str,
+    baseline: Mapping[str, object] | None,
+    observed: Mapping[str, object] | None,
+    warning_code: str | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "code": code,
+        "baseline_fingerprint": dict(baseline) if baseline is not None else None,
+        "observed_fingerprint": dict(observed) if observed is not None else None,
+        "warning_code": warning_code,
+    }
+
+
+def _referenced_placement_state(placement: StoryArcPlacement) -> dict[str, object]:
+    return {
+        "issue_story_arc_id": int(placement.issue_story_arc_id),
+        "library_file_id": placement.library_file_id,
+        "placement_path": placement.placement_path,
+        "mode": placement.mode.value,
+        "ownership": placement.ownership.value,
+        "symlink_style": None,
+        "source_kind": placement.source_kind.value,
+        "source_import_job_id": placement.source_import_job_id,
+        "creating_action_id": placement.creating_action_id,
+        "rendered_reading_order": placement.rendered_reading_order,
+        "source_fingerprint": dict(placement.source_fingerprint or {}),
+        "state": placement.state.value,
+        "last_result": dict(placement.last_result or {}),
+    }
+
+
+def _resolve_reference_candidate(
+    job: ImportJob,
+    entry: ImportedStoryArcEntry,
+) -> _ReferenceCandidateResolution:
+    raw_location = entry.source_location
+    if raw_location is None:
+        return _ReferenceCandidateResolution()
+    if _unsafe_path_text(raw_location):
+        return _ReferenceCandidateResolution(warning_code="story_arc_reference_path_invalid")
+    if (
+        job.source_type is ImportSourceType.FILESYSTEM
+        and entry.source_kind is StoryArcSourceKind.FOLDER
+    ):
+        return _candidate_under_trusted_root(
+            raw_location=raw_location,
+            trusted_root=job.source_path,
+        )
+    if (
+        job.source_type is ImportSourceType.MYLAR3
+        and entry.source_kind is StoryArcSourceKind.MYLAR3
+    ):
+        return _mapped_mylar_reference_candidate(
+            raw_location=raw_location,
+            path_map=job.mylar3_path_map,
+        )
+    return _ReferenceCandidateResolution(warning_code="story_arc_reference_source_mismatch")
+
+
+def _candidate_under_trusted_root(
+    *,
+    raw_location: str,
+    trusted_root: str,
+) -> _ReferenceCandidateResolution:
+    if _unsafe_path_text(trusted_root):
+        return _ReferenceCandidateResolution(warning_code="story_arc_reference_root_untrusted")
+    root = Path(trusted_root)
+    candidate = Path(raw_location)
+    if (
+        not root.is_absolute()
+        or not candidate.is_absolute()
+        or root == Path(root.anchor)
+        or ".." in root.parts
+        or ".." in candidate.parts
+    ):
+        return _ReferenceCandidateResolution(warning_code="story_arc_reference_path_invalid")
+    normalized_root = Path(os.path.abspath(root))
+    normalized_candidate = Path(os.path.abspath(candidate))
+    try:
+        normalized_candidate.relative_to(normalized_root)
+    except ValueError:
+        return _ReferenceCandidateResolution(
+            warning_code="story_arc_reference_outside_trusted_root"
+        )
+    if normalized_candidate == normalized_root:
+        return _ReferenceCandidateResolution(warning_code="story_arc_reference_not_regular_file")
+    if len(str(normalized_candidate)) > 1000:
+        return _ReferenceCandidateResolution(warning_code="story_arc_reference_path_invalid")
+    return _ReferenceCandidateResolution(
+        candidate=_ReferencePathCandidate(
+            path=normalized_candidate,
+            trusted_root=normalized_root,
+        )
+    )
+
+
+def _mapped_mylar_reference_candidate(
+    *,
+    raw_location: str,
+    path_map: object,
+) -> _ReferenceCandidateResolution:
+    if not isinstance(path_map, dict) or not path_map:
+        return _ReferenceCandidateResolution(warning_code="story_arc_reference_root_untrusted")
+    mapping_items: list[tuple[PurePath, str, Path]] = []
+    for raw_remote_root, raw_host_root in path_map.items():
+        if not isinstance(raw_remote_root, str) or not isinstance(raw_host_root, str):
+            continue
+        if _unsafe_path_text(raw_remote_root) or _unsafe_path_text(raw_host_root):
+            continue
+        remote_root = _pure_absolute_path(raw_remote_root)
+        host_root = Path(raw_host_root)
+        if (
+            remote_root is None
+            or not host_root.is_absolute()
+            or host_root == Path(host_root.anchor)
+            or ".." in host_root.parts
+        ):
+            continue
+        mapping_items.append((remote_root, raw_host_root, Path(os.path.abspath(host_root))))
+    if not mapping_items:
+        return _ReferenceCandidateResolution(warning_code="story_arc_reference_root_untrusted")
+
+    direct_candidates: list[_ReferenceCandidateResolution] = []
+    for _remote_root, raw_host_root, _normalized_host_root in mapping_items:
+        direct = _candidate_under_trusted_root(
+            raw_location=raw_location,
+            trusted_root=raw_host_root,
+        )
+        if direct.candidate is not None:
+            direct_candidates.append(direct)
+    if direct_candidates:
+        return max(
+            direct_candidates,
+            key=lambda item: (
+                len(item.candidate.trusted_root.parts) if item.candidate is not None else 0
+            ),
+        )
+
+    remote_location = _pure_absolute_path(raw_location)
+    if remote_location is None or ".." in remote_location.parts:
+        return _ReferenceCandidateResolution(warning_code="story_arc_reference_path_invalid")
+    for remote_root, _raw_host_root, host_root in sorted(
+        mapping_items,
+        key=lambda item: len(item[0].parts),
+        reverse=True,
+    ):
+        if type(remote_location) is not type(remote_root):
+            continue
+        try:
+            relative = remote_location.relative_to(remote_root)
+        except ValueError:
+            continue
+        if not relative.parts or ".." in relative.parts:
+            return _ReferenceCandidateResolution(
+                warning_code="story_arc_reference_not_regular_file"
+            )
+        candidate = host_root.joinpath(*relative.parts)
+        if len(str(candidate)) > 1000:
+            return _ReferenceCandidateResolution(warning_code="story_arc_reference_path_invalid")
+        return _ReferenceCandidateResolution(
+            candidate=_ReferencePathCandidate(
+                path=candidate,
+                trusted_root=host_root,
+            )
+        )
+    return _ReferenceCandidateResolution(warning_code="story_arc_reference_outside_trusted_root")
+
+
+def _pure_absolute_path(value: str) -> PurePath | None:
+    windows_path = PureWindowsPath(value)
+    if windows_path.is_absolute():
+        return windows_path
+    posix_path = PurePosixPath(value.replace("\\", "/"))
+    return posix_path if posix_path.is_absolute() else None
+
+
+def _unsafe_path_text(value: str) -> bool:
+    return not value or any(ord(character) < 32 for character in value)
+
+
+def _inspect_reference_path(
+    candidate: _ReferencePathCandidate,
+) -> _ReferencePathInspection:
+    if not _secure_reference_inspection_supported():
+        return _ReferencePathInspection(
+            warning_code="story_arc_reference_secure_inspection_unavailable"
+        )
+    try:
+        before = _secure_reference_stat(candidate)
+        after = _secure_reference_stat(candidate)
+    except _ReferencePathValidationError as exc:
+        return _ReferencePathInspection(warning_code=exc.code)
+    if _reference_stat_identity(before) != _reference_stat_identity(after):
+        return _ReferencePathInspection(
+            warning_code="story_arc_reference_changed_during_inspection"
+        )
+    return _ReferencePathInspection(fingerprint=_reference_metadata_fingerprint(after))
+
+
+class _ReferencePathValidationError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _secure_reference_inspection_supported() -> bool:
+    return bool(
+        os.name == "posix"
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.stat in os.supports_follow_symlinks
+    )
+
+
+def _secure_reference_stat(candidate: _ReferencePathCandidate) -> os.stat_result:
+    root = candidate.trusted_root
+    try:
+        relative = candidate.path.relative_to(root)
+    except ValueError as exc:  # pragma: no cover - candidate constructor invariant
+        raise _ReferencePathValidationError("story_arc_reference_outside_trusted_root") from exc
+    if not relative.parts:
+        raise _ReferencePathValidationError("story_arc_reference_not_regular_file")
+    try:
+        root_stat = root.lstat()
+    except FileNotFoundError as exc:
+        raise _ReferencePathValidationError("story_arc_reference_missing") from exc
+    except OSError as exc:
+        raise _ReferencePathValidationError("story_arc_reference_unavailable") from exc
+    if stat.S_ISLNK(root_stat.st_mode):
+        raise _ReferencePathValidationError("story_arc_reference_symlink")
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise _ReferencePathValidationError("story_arc_reference_root_untrusted")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptors: list[int] = []
+    try:
+        root_fd = os.open(root, flags)
+        descriptors.append(root_fd)
+        opened_root = os.fstat(root_fd)
+        if _reference_stat_node(root_stat) != _reference_stat_node(opened_root):
+            raise _ReferencePathValidationError("story_arc_reference_changed_during_inspection")
+        parent_fd = root_fd
+        for part in relative.parts[:-1]:
+            child_stat = _stat_child_nofollow(parent_fd, part)
+            if stat.S_ISLNK(child_stat.st_mode):
+                raise _ReferencePathValidationError("story_arc_reference_symlink")
+            if not stat.S_ISDIR(child_stat.st_mode):
+                raise _ReferencePathValidationError("story_arc_reference_not_regular_file")
+            try:
+                child_fd = os.open(part, flags, dir_fd=parent_fd)
+            except FileNotFoundError as exc:
+                raise _ReferencePathValidationError("story_arc_reference_missing") from exc
+            except OSError as exc:
+                raise _ReferencePathValidationError(
+                    "story_arc_reference_changed_during_inspection"
+                ) from exc
+            descriptors.append(child_fd)
+            opened_child = os.fstat(child_fd)
+            if _reference_stat_node(child_stat) != _reference_stat_node(opened_child):
+                raise _ReferencePathValidationError("story_arc_reference_changed_during_inspection")
+            parent_fd = child_fd
+        target_stat = _stat_child_nofollow(parent_fd, relative.parts[-1])
+        if stat.S_ISLNK(target_stat.st_mode):
+            raise _ReferencePathValidationError("story_arc_reference_symlink")
+        if not stat.S_ISREG(target_stat.st_mode):
+            raise _ReferencePathValidationError("story_arc_reference_not_regular_file")
+        return target_stat
+    except _ReferencePathValidationError:
+        raise
+    except FileNotFoundError as exc:
+        raise _ReferencePathValidationError("story_arc_reference_missing") from exc
+    except OSError as exc:
+        raise _ReferencePathValidationError("story_arc_reference_unavailable") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _stat_child_nofollow(parent_fd: int, name: str) -> os.stat_result:
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise _ReferencePathValidationError("story_arc_reference_missing") from exc
+    except OSError as exc:
+        raise _ReferencePathValidationError("story_arc_reference_unavailable") from exc
+
+
+def _reference_stat_node(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, value.st_mode
+
+
+def _reference_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _reference_metadata_fingerprint(value: os.stat_result) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "regular_metadata",
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "ctime_ns": int(value.st_ctime_ns),
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+    }
 
 
 def _candidate_issue_ids(
@@ -1175,56 +1830,107 @@ def _validate_policy(
             warning_code="policy_not_activated",
         )
     if (
-        isinstance(raw.get("schema_version"), bool)
+        set(raw) != _CONFIRMED_POLICY_KEYS
+        or isinstance(raw.get("schema_version"), bool)
         or raw.get("schema_version") != 1
         or raw.get("source") != staged_arc.source_kind.value
+        or any(not isinstance(raw.get(key), bool) for key in _POLICY_FLAGS)
+        or (
+            raw.get("monitored") is False
+            and (raw.get("search_missing") is True or raw.get("include_upcoming") is True)
+        )
     ):
         return _ValidatedPolicy(
             activated=False,
             snapshot={},
             warning_code="policy_validation_failed",
         )
-    if any(key in raw and not isinstance(raw[key], bool) for key in _POLICY_FLAGS):
+    placement_snapshot, target_root_id, placement_warning = _validate_placement_policy_snapshot(
+        raw.get("placement_policy"),
+        library_root_ids=library_root_ids,
+    )
+    if placement_warning is not None or placement_snapshot is None:
+        return _ValidatedPolicy(
+            activated=False,
+            snapshot={},
+            warning_code=placement_warning or "policy_validation_failed",
+        )
+    if raw["sync_enabled"] != placement_snapshot["synchronize"]:
         return _ValidatedPolicy(
             activated=False,
             snapshot={},
             warning_code="policy_validation_failed",
         )
-
-    target_root_id = raw.get("target_library_root_id")
-    if target_root_id is not None:
-        if isinstance(target_root_id, bool) or not isinstance(target_root_id, int):
-            return _ValidatedPolicy(
-                activated=False,
-                snapshot={},
-                warning_code="policy_validation_failed",
-            )
-        if target_root_id <= 0 or target_root_id not in library_root_ids:
-            return _ValidatedPolicy(
-                activated=False,
-                snapshot={},
-                warning_code="policy_target_root_missing",
-            )
-
-    snapshot: dict[str, object] = {
-        "schema_version": 1,
-        "source": staged_arc.source_kind.value,
-        "activation": "confirmed",
-        **{key: bool(raw.get(key, False)) for key in _POLICY_FLAGS},
-    }
-    if target_root_id is not None:
-        snapshot["target_library_root_id"] = target_root_id
-    warning_code = "policy_fields_ignored" if set(raw) - _POLICY_KEYS else None
     return _ValidatedPolicy(
         activated=True,
-        snapshot=snapshot,
-        monitored=bool(raw.get("monitored", False)),
-        search_missing=bool(raw.get("search_missing", False)),
-        include_upcoming=bool(raw.get("include_upcoming", False)),
-        sync_enabled=bool(raw.get("sync_enabled", False)),
+        snapshot=placement_snapshot,
+        monitored=bool(raw["monitored"]),
+        search_missing=bool(raw["search_missing"]),
+        include_upcoming=bool(raw["include_upcoming"]),
+        sync_enabled=bool(raw["sync_enabled"]),
         target_library_root_id=target_root_id,
-        warning_code=warning_code,
     )
+
+
+def _validate_placement_policy_snapshot(
+    value: object,
+    *,
+    library_root_ids: set[int],
+) -> tuple[dict[str, object] | None, int | None, str | None]:
+    if not isinstance(value, dict) or set(value) != _PLACEMENT_POLICY_KEYS:
+        return None, None, "policy_validation_failed"
+    if isinstance(value.get("schema_version"), bool) or value.get("schema_version") != 1:
+        return None, None, "policy_validation_failed"
+    mode = value.get("mode")
+    if not isinstance(mode, str) or mode not in _PLACEMENT_POLICY_MODES:
+        return None, None, "policy_validation_failed"
+    synchronize = value.get("synchronize")
+    if not isinstance(synchronize, bool):
+        return None, None, "policy_validation_failed"
+    folder_template = value.get("folder_template")
+    file_template = value.get("file_template")
+    if (
+        not isinstance(folder_template, str)
+        or not isinstance(file_template, str)
+        or len(folder_template.encode("utf-8")) > 1024
+        or len(file_template.encode("utf-8")) > 1024
+    ):
+        return None, None, "policy_validation_failed"
+    try:
+        validate_story_arc_folder_template(folder_template)
+        validate_story_arc_file_template(file_template)
+    except ValueError:
+        return None, None, "policy_validation_failed"
+
+    symlink_style = value.get("symlink_style")
+    if mode == "symlink":
+        if symlink_style not in {"absolute", "relative"}:
+            return None, None, "policy_validation_failed"
+    elif symlink_style is not None:
+        return None, None, "policy_validation_failed"
+
+    target_root_id_raw = value.get("target_library_root_id")
+    destination_root = value.get("destination_root")
+    if mode == "logical":
+        if target_root_id_raw is not None or destination_root is not None or synchronize:
+            return None, None, "policy_validation_failed"
+        target_root_id = None
+    else:
+        if (
+            isinstance(target_root_id_raw, bool)
+            or not isinstance(target_root_id_raw, int)
+            or target_root_id_raw <= 0
+            or not isinstance(destination_root, str)
+            or not destination_root.strip()
+            or len(destination_root) > 1000
+            or _unsafe_path_text(destination_root)
+            or not Path(destination_root).is_absolute()
+        ):
+            return None, None, "policy_validation_failed"
+        if target_root_id_raw not in library_root_ids:
+            return None, None, "policy_target_root_missing"
+        target_root_id = target_root_id_raw
+    return dict(value), target_root_id, None
 
 
 def _apply_policy(

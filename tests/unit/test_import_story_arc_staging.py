@@ -208,6 +208,19 @@ async def test_mylar_staging_preserves_exact_gapped_duplicate_and_missing_entrie
     assert staged_arc.source_settings_snapshot["values"]["STORYARC_LOCATION"]["value"] == (
         "/private/story-arcs"
     )
+    assert staged_arc.proposed_policy_snapshot["activation"] == "requires_confirmation"
+    assert staged_arc.proposed_policy_snapshot["placement_policy"] == {
+        "schema_version": 1,
+        "mode": "reference_only",
+        "target_library_root_id": None,
+        "destination_root": "/private/story-arcs",
+        "folder_template": "{StoryArc}",
+        "file_template": "{Series} {IssueNumber}{IssueTitleOptional}",
+        "symlink_style": None,
+        "synchronize": False,
+    }
+    assert "unknown_value:ARC_FILEOPS" in staged_arc.proposed_policy_snapshot["review_warnings"]
+    assert staged_arc.proposed_policy_snapshot["confirmation"]["ready_for_activation"] is False
     assert staged_arc.diagnostics["duplicate_reading_order"] is True
     assert staged_arc.diagnostics["external_identities"] == [
         {

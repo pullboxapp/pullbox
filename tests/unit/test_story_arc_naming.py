@@ -26,6 +26,7 @@ def _values(**overrides: object) -> StoryArcNamingValues:
         "year": 2019,
         "start_year": 2019,
         "end_year": 2020,
+        "publisher": "Marvel Comics",
         "extension": "cbz",
     }
     values.update(overrides)
@@ -60,6 +61,15 @@ def test_mylar_style_span_year_folder_can_be_previewed_safely() -> None:
     )
 
     assert rendered == Path("Absolute Carnage (2019 - 2020)", "0001 - Venom 1 - Rex.cbz")
+
+
+def test_mylar_publisher_folder_token_is_rendered_as_safe_data() -> None:
+    rendered = render_story_arc_relative_path(
+        _values(publisher="Marvel/Comics"),
+        folder_template="{Publisher} - {StoryArc}",
+    )
+
+    assert rendered == Path("Marvel - Comics - Absolute Carnage", "001 - Venom 1 - Rex.cbz")
 
 
 @pytest.mark.parametrize(

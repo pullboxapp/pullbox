@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -24,6 +25,8 @@ from pullbox.models.story_arc import (
     IssueStoryArc,
     StoryArc,
     StoryArcExternalIdentity,
+    StoryArcPlacement,
+    StoryArcPlacementOwnership,
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
@@ -107,6 +110,28 @@ async def _confirmed_arc(
     return staged
 
 
+def _confirmed_logical_policy(*, monitored: bool) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "source": "folder",
+        "activation": "confirmed",
+        "monitored": monitored,
+        "search_missing": monitored,
+        "include_upcoming": False,
+        "sync_enabled": False,
+        "placement_policy": {
+            "schema_version": 1,
+            "mode": "logical",
+            "target_library_root_id": None,
+            "destination_root": None,
+            "folder_template": "{StoryArc}",
+            "file_template": "{Series} {IssueNumber}",
+            "symlink_style": None,
+            "synchronize": False,
+        },
+    }
+
+
 async def _rollback_story_arc_actions(
     session: AsyncSession,
     *,
@@ -182,6 +207,85 @@ async def test_created_arc_rollback_keeps_canonical_issue_and_library_file(
 
 
 @pytest.mark.asyncio
+async def test_import_rollback_detaches_referenced_placement_without_touching_user_artifact(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "approved-source"
+    source_root.mkdir()
+    artifact = source_root / "Existing Arc" / "001 - Existing.cbz"
+    artifact.parent.mkdir()
+    original_content = b"user-owned-reference"
+    artifact.write_bytes(original_content)
+    artifact_stat = artifact.stat()
+    job = ImportJob(
+        source_path=str(source_root),
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.IMPORTING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    staged = ImportedStoryArc(
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.FOLDER,
+        source_key="folder:rollback-reference",
+        source_ordinal=1,
+        name="Existing Arc",
+        status=ImportedStoryArcStatus.CONFIRMED,
+        selected_for_import=True,
+    )
+    db_session.add(staged)
+    await db_session.flush()
+    entry = ImportedStoryArcEntry(
+        imported_story_arc_id=staged.id,
+        source_ordinal=1,
+        reading_order=1,
+        resolution_state=StoryArcResolutionState.PENDING,
+        source_kind=StoryArcSourceKind.FOLDER,
+        source_entry_id="folder-entry-1",
+        source_issue_number_text="1",
+        source_location=str(artifact),
+        selected_for_import=True,
+    )
+    db_session.add(entry)
+    await db_session.flush()
+    await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+    placement = (await db_session.scalars(select(StoryArcPlacement))).one()
+    assert placement.ownership == StoryArcPlacementOwnership.REFERENCED
+
+    def refuse_unlink(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("referenced story-arc rollback attempted filesystem deletion")
+
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+    actions = await _rollback_story_arc_actions(db_session, job_id=job.id)
+    await restore_review_state_after_rollback(db_session, job.id)
+
+    assert [action.action_type for action in reversed(actions)] == [
+        "story_arc_created",
+        "story_arc_membership_created",
+        "story_arc_referenced_placement_attached",
+    ]
+    assert await db_session.scalar(select(func.count()).select_from(StoryArcPlacement)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(IssueStoryArc)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(StoryArc)) == 0
+    assert artifact.exists()
+    assert artifact.read_bytes() == original_content
+    after_stat = artifact.stat()
+    assert (after_stat.st_dev, after_stat.st_ino) == (
+        artifact_stat.st_dev,
+        artifact_stat.st_ino,
+    )
+    assert staged.status == ImportedStoryArcStatus.CONFIRMED
+    assert staged.materialized_story_arc_id is None
+    assert entry.materialized_membership_id is None
+
+
+@pytest.mark.asyncio
 async def test_merged_arc_policy_rollback_restores_exact_prior_state(
     db_session: AsyncSession,
 ) -> None:
@@ -195,15 +299,7 @@ async def test_merged_arc_policy_rollback_restores_exact_prior_state(
         job=job,
         name="Existing",
         proposed_story_arc_id=existing.id,
-        policy={
-            "schema_version": 1,
-            "source": "folder",
-            "activation": "confirmed",
-            "monitored": True,
-            "search_missing": True,
-            "include_upcoming": False,
-            "sync_enabled": True,
-        },
+        policy=_confirmed_logical_policy(monitored=True),
     )
     await materialize_confirmed_story_arcs(
         db_session,
@@ -321,12 +417,7 @@ async def test_user_edited_merged_arc_causes_fail_safe_rollback_conflict(
         job=job,
         name="Existing",
         proposed_story_arc_id=existing.id,
-        policy={
-            "schema_version": 1,
-            "source": "folder",
-            "activation": "confirmed",
-            "monitored": True,
-        },
+        policy=_confirmed_logical_policy(monitored=True),
     )
     await materialize_confirmed_story_arcs(
         db_session,

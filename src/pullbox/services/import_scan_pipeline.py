@@ -615,6 +615,11 @@ async def _load_mylar3_discovered_series(
         detected = await asyncio.to_thread(lambda: auto_detect_mylar3_path_map(db_path))
         path_map = detected
         if detected:
+            # Freeze the exact mapping used for scan-time path resolution so
+            # later review/execution can validate the same trusted host roots.
+            # Without this snapshot, auto-detected Mylar arc locations become
+            # unverifiable after the reader returns.
+            job.mylar3_path_map = dict(detected)
             await log_event(
                 session,
                 job_id,

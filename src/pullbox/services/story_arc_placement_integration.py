@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -31,6 +32,7 @@ from pullbox.core.story_arc_naming import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile, LibraryRoot
+from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -67,10 +69,11 @@ from pullbox.services.story_arc_placement_service import (
     inspect_story_arc_placement,
     prepare_story_arc_placement,
     recover_prepared_story_arc_placement,
+    remove_managed_story_arc_placement,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -228,6 +231,18 @@ class StoryArcPlacementSyncResult:
 
 
 @dataclass(frozen=True, slots=True)
+class StoryArcPlacementRemovalView:
+    """Truthful ownership-aware result of explicitly removing placement evidence."""
+
+    placement_id: int
+    ownership: StoryArcPlacementOwnership
+    artifact_removed: bool
+    canonical_preserved: bool = True
+    referenced_artifact_preserved: bool = False
+    automatic_sync_disabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class _PlacementContext:
     membership_id: int
     story_arc_id: int
@@ -236,6 +251,7 @@ class _PlacementContext:
     issue_number_text: str
     story_arc_name: str
     series_name: str
+    publisher_name: str | None
     issue_title: str | None
     year: int | None
     series_start_year: int | None
@@ -249,6 +265,7 @@ class _PlacementContext:
             story_arc=self.story_arc_name,
             reading_order=self.sequence_number,
             series=self.series_name,
+            publisher=self.publisher_name,
             issue_number=self.issue_number_text,
             issue_title=self.issue_title,
             year=self.year,
@@ -273,7 +290,29 @@ class _PreviewPlacementEvidence:
     creating_action_id: int | None
 
 
-_sync_locks: dict[tuple[int, int], asyncio.Lock] = {}
+@dataclass(slots=True)
+class _MembershipSyncLock:
+    """One reference-counted process-local membership operation lock."""
+
+    lock: asyncio.Lock
+    users: int = 0
+
+
+_sync_locks: dict[tuple[int, int], _MembershipSyncLock] = {}
+
+
+@asynccontextmanager
+async def _membership_sync_lock(lock_key: tuple[int, int]) -> AsyncIterator[None]:
+    """Serialize sync/removal without dropping a lock that still has waiters."""
+    entry = _sync_locks.setdefault(lock_key, _MembershipSyncLock(lock=asyncio.Lock()))
+    entry.users += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.users -= 1
+        if entry.users == 0 and _sync_locks.get(lock_key) is entry:
+            del _sync_locks[lock_key]
 
 
 class StoryArcPlacementSyncService:
@@ -303,7 +342,11 @@ class StoryArcPlacementSyncService:
                 "story_arc_archived",
                 "Archived story arcs cannot change placement policy",
             )
-        return await _validate_policy_input(session, proposal, revision=arc.revision)
+        return await validate_story_arc_placement_policy_input(
+            session,
+            proposal,
+            revision=arc.revision,
+        )
 
     async def update_policy(
         self,
@@ -503,19 +546,14 @@ class StoryArcPlacementSyncService:
         cancellation_requested: Callable[[], bool] | None = None,
     ) -> StoryArcPlacementSyncResult:
         lock_key = (story_arc_id, membership_id)
-        lock = _sync_locks.setdefault(lock_key, asyncio.Lock())
-        try:
-            async with lock:
-                return await self._sync_membership_locked(
-                    session,
-                    story_arc_id,
-                    membership_id,
-                    adopt_identical_existing=adopt_identical_existing,
-                    cancellation_requested=cancellation_requested,
-                )
-        finally:
-            if not lock.locked():
-                _sync_locks.pop(lock_key, None)
+        async with _membership_sync_lock(lock_key):
+            return await self._sync_membership_locked(
+                session,
+                story_arc_id,
+                membership_id,
+                adopt_identical_existing=adopt_identical_existing,
+                cancellation_requested=cancellation_requested,
+            )
 
     async def retry_placement(
         self,
@@ -550,6 +588,196 @@ class StoryArcPlacementSyncService:
             session,
             story_arc_id,
             placement.issue_story_arc_id,
+        )
+
+    async def remove_placement(
+        self,
+        session: AsyncSession,
+        story_arc_id: int,
+        placement_id: int,
+        *,
+        confirm_managed_artifact_removal: bool = False,
+    ) -> StoryArcPlacementRemovalView:
+        """Remove only owned placement evidence, never a canonical or referenced file."""
+        placement = await _require_placement(session, story_arc_id, placement_id)
+        ownership = placement.ownership
+        if ownership is StoryArcPlacementOwnership.REFERENCED:
+            membership_id = placement.issue_story_arc_id
+            # Close the initial read transaction before waiting for an active
+            # synchronization.  The durable operation token below remains the
+            # cross-process fence; this lock provides deterministic local UX.
+            await session.commit()
+            async with _membership_sync_lock((story_arc_id, membership_id)):
+                current = await _require_placement(session, story_arc_id, placement_id)
+                if current.ownership is not StoryArcPlacementOwnership.REFERENCED:
+                    raise StoryArcPlacementIntegrationError(
+                        "placement_ownership_changed",
+                        "Story-arc placement ownership changed before it could be forgotten",
+                        category="ownership",
+                    )
+                result = await session.execute(
+                    delete(StoryArcPlacement).where(
+                        StoryArcPlacement.id == placement_id,
+                        StoryArcPlacement.ownership == StoryArcPlacementOwnership.REFERENCED,
+                        StoryArcPlacement.operation_token.is_(None),
+                    )
+                )
+                if result.rowcount != 1:  # type: ignore[attr-defined]
+                    await session.rollback()
+                    raise StoryArcPlacementIntegrationError(
+                        "placement_operation_in_progress",
+                        "Referenced placement evidence is being updated by another operation",
+                        category="conflict",
+                    )
+                await session.execute(
+                    sa_update(IssueStoryArc)
+                    .where(IssueStoryArc.id == membership_id)
+                    .values(
+                        sync_eligible=False,
+                        last_materialization_result={
+                            "schema_version": 1,
+                            "status": "placement_reference_removed",
+                            "placement_id": placement_id,
+                            "artifact_removed": False,
+                            "canonical_preserved": True,
+                            "referenced_artifact_preserved": True,
+                        },
+                    )
+                )
+                await session.commit()
+                return StoryArcPlacementRemovalView(
+                    placement_id=placement_id,
+                    ownership=ownership,
+                    artifact_removed=False,
+                    referenced_artifact_preserved=True,
+                )
+
+        if not confirm_managed_artifact_removal:
+            raise StoryArcPlacementIntegrationError(
+                "managed_removal_confirmation_required",
+                (
+                    "Confirm removal of the Pullbox-managed arc artifact; "
+                    "the canonical comic will be preserved"
+                ),
+            )
+
+        evidence = _managed_evidence(placement)
+        if evidence is None:
+            raise StoryArcPlacementIntegrationError(
+                "managed_ownership_evidence_missing",
+                "Managed placement cannot be removed without durable ownership evidence",
+                category="ownership",
+            )
+        policy = await self.get_policy(session, story_arc_id)
+        if policy.destination_root is None or policy.mode in {
+            StoryArcPlacementPolicyMode.LOGICAL,
+            StoryArcPlacementPolicyMode.REFERENCE_ONLY,
+        }:
+            raise StoryArcPlacementIntegrationError(
+                "managed_policy_evidence_missing",
+                "Managed placement has no valid destination policy for safe removal",
+                category="safety",
+            )
+        canonical_path_raw = (
+            await session.scalar(
+                select(LibraryFile.file_path).where(LibraryFile.id == placement.library_file_id)
+            )
+            if placement.library_file_id is not None
+            else None
+        )
+        observed_token = placement.operation_token
+        previous_result = dict(placement.last_result or {})
+        if (
+            observed_token is not None
+            and placement.updated_at > datetime.now(UTC) - _PLACEMENT_OPERATION_LEASE
+        ):
+            raise StoryArcPlacementIntegrationError(
+                "placement_operation_in_progress",
+                "A story-arc placement operation is already in progress",
+                category="conflict",
+            )
+
+        operation_token = uuid4().hex
+        token_filter = (
+            StoryArcPlacement.operation_token.is_(None)
+            if observed_token is None
+            else StoryArcPlacement.operation_token == observed_token
+        )
+        reserve = await session.execute(
+            sa_update(StoryArcPlacement)
+            .where(StoryArcPlacement.id == placement_id, token_filter)
+            .values(
+                operation_token=operation_token,
+                last_result={
+                    **previous_result,
+                    "schema_version": 1,
+                    "status": "remove_prepared",
+                    "operation_token": operation_token,
+                },
+            )
+        )
+        if reserve.rowcount != 1:  # type: ignore[attr-defined]
+            await session.rollback()
+            raise StoryArcPlacementIntegrationError(
+                "placement_operation_superseded",
+                "Another worker reserved this story-arc placement",
+                category="conflict",
+            )
+        await session.commit()
+
+        caller_cancelled = False
+        try:
+            removed, caller_cancelled = await _run_filesystem_call(
+                partial(
+                    remove_managed_story_arc_placement,
+                    evidence,
+                    destination_root=Path(policy.destination_root),
+                    canonical_path=(
+                        Path(canonical_path_raw) if canonical_path_raw is not None else None
+                    ),
+                ),
+                heartbeat=partial(
+                    _refresh_operation_lease,
+                    session,
+                    placement_id=placement_id,
+                    operation_token=operation_token,
+                ),
+            )
+        except StoryArcPlacementError as exc:
+            await _persist_removal_failure(
+                session,
+                placement_id=placement_id,
+                operation_token=operation_token,
+                error=exc,
+            )
+            raise _translate_filesystem_error(exc) from exc
+        except (OSError, ValueError) as exc:
+            error = StoryArcPlacementIntegrationError(
+                "placement_removal_failed",
+                "Story-arc placement removal failed safely",
+                category="safety",
+            )
+            await _persist_removal_failure(
+                session,
+                placement_id=placement_id,
+                operation_token=operation_token,
+                error=error,
+            )
+            raise error from exc
+
+        await _delete_removed_placement_checkpoint(
+            session,
+            placement_id=placement_id,
+            membership_id=placement.issue_story_arc_id,
+            operation_token=operation_token,
+            artifact_removed=removed.removed,
+        )
+        if caller_cancelled:
+            raise asyncio.CancelledError
+        return StoryArcPlacementRemovalView(
+            placement_id=placement_id,
+            ownership=ownership,
+            artifact_removed=removed.removed,
         )
 
     async def _sync_membership_locked(
@@ -959,12 +1187,13 @@ class StoryArcPlacementSyncService:
         return synchronized
 
 
-async def _validate_policy_input(
+async def validate_story_arc_placement_policy_input(
     session: AsyncSession,
     proposal: StoryArcPlacementPolicyInput,
     *,
     revision: int,
 ) -> StoryArcPlacementPolicy:
+    """Validate a complete policy for normal management or staged import confirmation."""
     try:
         mode = StoryArcPlacementPolicyMode(proposal.mode)
     except ValueError as exc:
@@ -1223,9 +1452,10 @@ async def _load_context_page(
     )
     rows = (
         await session.execute(
-            select(IssueStoryArc, Issue, Series)
+            select(IssueStoryArc, Issue, Series, Publisher)
             .outerjoin(Issue, IssueStoryArc.issue_id == Issue.id)
             .outerjoin(Series, Issue.series_id == Series.id)
+            .outerjoin(Publisher, Series.publisher_id == Publisher.id)
             .where(IssueStoryArc.story_arc_id == story_arc_id)
             .order_by(
                 IssueStoryArc.sequence_number.asc(),
@@ -1236,7 +1466,7 @@ async def _load_context_page(
             .offset(offset)
         )
     ).all()
-    issue_ids = [issue.id for _membership, issue, _series in rows if issue is not None]
+    issue_ids = [issue.id for _membership, issue, _series, _publisher in rows if issue is not None]
     files_by_issue: dict[int, LibraryFile] = {}
     if issue_ids:
         files = list(
@@ -1257,9 +1487,10 @@ async def _load_context_page(
             membership,
             issue,
             series,
+            publisher,
             files_by_issue.get(issue.id) if issue is not None else None,
         )
-        for membership, issue, series in rows
+        for membership, issue, series, publisher in rows
     )
 
 
@@ -1273,9 +1504,10 @@ async def _load_one_context(
         raise _not_found("story_arc_not_found", "Story arc was not found")
     row = (
         await session.execute(
-            select(IssueStoryArc, Issue, Series)
+            select(IssueStoryArc, Issue, Series, Publisher)
             .outerjoin(Issue, IssueStoryArc.issue_id == Issue.id)
             .outerjoin(Series, Issue.series_id == Series.id)
+            .outerjoin(Publisher, Series.publisher_id == Publisher.id)
             .where(
                 IssueStoryArc.id == membership_id,
                 IssueStoryArc.story_arc_id == story_arc_id,
@@ -1284,7 +1516,7 @@ async def _load_one_context(
     ).one_or_none()
     if row is None:
         raise _not_found("membership_not_found", "Story-arc membership was not found")
-    membership, issue, series = row
+    membership, issue, series, publisher = row
     library_file = None
     if issue is not None:
         library_file = await session.scalar(
@@ -1293,7 +1525,7 @@ async def _load_one_context(
             .order_by(LibraryFile.id.asc())
             .limit(1)
         )
-    return _context_from_row(arc, membership, issue, series, library_file)
+    return _context_from_row(arc, membership, issue, series, publisher, library_file)
 
 
 def _context_from_row(
@@ -1301,6 +1533,7 @@ def _context_from_row(
     membership: IssueStoryArc,
     issue: Issue | None,
     series: Series | None,
+    publisher: Publisher | None,
     library_file: LibraryFile | None,
 ) -> _PlacementContext:
     exact_number = (
@@ -1327,6 +1560,7 @@ def _context_from_row(
             if series is not None
             else membership.source_series_name or "Unknown Series"
         ),
+        publisher_name=(publisher.name if publisher is not None else membership.source_publisher),
         issue_title=issue.title if issue is not None else membership.source_issue_title,
         year=(
             issue.release_date.year
@@ -1644,11 +1878,11 @@ def _preview_destination_conflict(
     )
 
 
-async def _run_filesystem_call(
-    call: Callable[[], StoryArcPlacementResult],
+async def _run_filesystem_call[FilesystemResultT](
+    call: Callable[[], FilesystemResultT],
     *,
     heartbeat: Callable[[], Awaitable[None]] | None = None,
-) -> tuple[StoryArcPlacementResult, bool]:
+) -> tuple[FilesystemResultT, bool]:
     """Let a worker reach a safe boundary before propagating task cancellation.
 
     Cancelling an await on ``asyncio.to_thread`` does not stop its thread.  A
@@ -1752,6 +1986,50 @@ async def _sync_reference_only(
             category="conflict",
         )
 
+    reference_operation_token: str | None = None
+    if existing is not None:
+        observed_token = existing.operation_token
+        if (
+            observed_token is not None
+            and existing.updated_at > datetime.now(UTC) - _PLACEMENT_OPERATION_LEASE
+        ):
+            raise StoryArcPlacementIntegrationError(
+                "placement_operation_in_progress",
+                "Referenced placement evidence is being updated by another operation",
+                category="conflict",
+            )
+        reference_operation_token = uuid4().hex
+        token_filter = (
+            StoryArcPlacement.operation_token.is_(None)
+            if observed_token is None
+            else StoryArcPlacement.operation_token == observed_token
+        )
+        previous_result = dict(existing.last_result or {})
+        reserve = await session.execute(
+            sa_update(StoryArcPlacement)
+            .where(
+                StoryArcPlacement.id == existing.id,
+                StoryArcPlacement.ownership == StoryArcPlacementOwnership.REFERENCED,
+                token_filter,
+            )
+            .values(
+                operation_token=reference_operation_token,
+                last_result={
+                    **previous_result,
+                    "schema_version": 1,
+                    "status": "reference_validation_prepared",
+                    "operation_token": reference_operation_token,
+                },
+            )
+        )
+        if reserve.rowcount != 1:  # type: ignore[attr-defined]
+            await session.rollback()
+            raise StoryArcPlacementIntegrationError(
+                "placement_operation_superseded",
+                "Another worker reserved this referenced placement",
+                category="conflict",
+            )
+
     # No database transaction remains open during read-only filesystem validation.
     await session.commit()
 
@@ -1769,6 +2047,7 @@ async def _sync_reference_only(
             membership.id,
             error,
             placement_id=existing.id if existing is not None else None,
+            operation_token=reference_operation_token,
         )
         raise error
 
@@ -1814,6 +2093,7 @@ async def _sync_reference_only(
             membership.id,
             exc,
             placement_id=existing.id if existing is not None else None,
+            operation_token=reference_operation_token,
         )
         raise _translate_filesystem_error(exc) from exc
     if result.ownership is not StoryArcPlacementOwnership.REFERENCED:
@@ -1827,12 +2107,24 @@ async def _sync_reference_only(
             membership.id,
             error,
             placement_id=existing.id if existing is not None else None,
+            operation_token=reference_operation_token,
         )
         raise error
 
     placement = await session.scalar(
         select(StoryArcPlacement).where(StoryArcPlacement.placement_path == str(target_path))
     )
+    if existing is not None and (
+        placement is None
+        or placement.id != existing.id
+        or placement.operation_token != reference_operation_token
+    ):
+        await session.rollback()
+        raise StoryArcPlacementIntegrationError(
+            "placement_operation_superseded",
+            "Referenced placement validation lost its ownership lease",
+            category="conflict",
+        )
     if placement is None:
         placement = StoryArcPlacement(
             issue_story_arc_id=context.membership_id,
@@ -1855,19 +2147,25 @@ async def _sync_reference_only(
     placement.source_fingerprint = dict(result.source_fingerprint)
     placement.state = StoryArcPlacementState.CURRENT
     placement.last_checked_at = datetime.now(UTC)
+    placement.operation_token = None
     placement.last_result = {
         "schema_version": 1,
         "status": "complete",
         "outcome": result.state.value,
         "target_fingerprint": dict(result.target_fingerprint),
     }
-    current_membership = await session.get(IssueStoryArc, context.membership_id)
-    if current_membership is not None:
-        current_membership.last_materialization_result = {
-            "schema_version": 1,
-            "status": "complete",
-            "outcome": result.state.value,
-        }
+    await session.execute(
+        sa_update(IssueStoryArc)
+        .where(IssueStoryArc.id == context.membership_id)
+        .values(
+            sync_eligible=policy.synchronize,
+            last_materialization_result={
+                "schema_version": 1,
+                "status": "complete",
+                "outcome": result.state.value,
+            },
+        )
+    )
     await session.commit()
     synchronized = StoryArcPlacementSyncResult(
         membership_id=context.membership_id,
@@ -1885,6 +2183,7 @@ async def _persist_reference_failure(
     error: StoryArcPlacementError | StoryArcPlacementIntegrationError,
     *,
     placement_id: int | None = None,
+    operation_token: str | None = None,
 ) -> None:
     failure = {
         "schema_version": 1,
@@ -1896,6 +2195,10 @@ async def _persist_reference_failure(
     if placement_id is not None:
         placement = await session.get(StoryArcPlacement, placement_id)
         if placement is not None and placement.ownership is StoryArcPlacementOwnership.REFERENCED:
+            await session.refresh(placement)
+            if operation_token is not None and placement.operation_token != operation_token:
+                await session.rollback()
+                return
             previous = dict(placement.last_result or {})
             if isinstance(previous.get("target_fingerprint"), dict):
                 failure["target_fingerprint"] = dict(previous["target_fingerprint"])
@@ -1905,6 +2208,7 @@ async def _persist_reference_failure(
                 else StoryArcPlacementState.DRIFTED
             )
             placement.last_checked_at = datetime.now(UTC)
+            placement.operation_token = None
             placement.last_result = failure
     membership = await session.get(IssueStoryArc, membership_id)
     if membership is not None:
@@ -2055,6 +2359,100 @@ async def _refresh_operation_lease(
             "Story-arc placement operation lost its ownership lease",
             category="conflict",
         )
+    await session.commit()
+
+
+async def _persist_removal_failure(
+    session: AsyncSession,
+    *,
+    placement_id: int,
+    operation_token: str,
+    error: StoryArcPlacementError | StoryArcPlacementIntegrationError,
+) -> None:
+    """Release one removal lease while retaining evidence needed for a safe retry."""
+    session.expire_all()
+    placement = await session.get(StoryArcPlacement, placement_id)
+    if placement is None or placement.operation_token != operation_token:
+        await session.rollback()
+        return
+    previous = dict(placement.last_result or {})
+    failure = {
+        **(
+            {"target_fingerprint": dict(previous["target_fingerprint"])}
+            if isinstance(previous.get("target_fingerprint"), dict)
+            else {}
+        ),
+        "schema_version": 1,
+        "status": "failed",
+        "operation": "remove",
+        "error_code": error.code,
+        "error_category": _error_category(error),
+        "message": str(error),
+    }
+    result = await session.execute(
+        sa_update(StoryArcPlacement)
+        .where(
+            StoryArcPlacement.id == placement_id,
+            StoryArcPlacement.operation_token == operation_token,
+        )
+        .values(
+            state=(
+                StoryArcPlacementState.DRIFTED
+                if _error_category(error) in {"safety", "collision", "ownership"}
+                else StoryArcPlacementState.FAILED
+            ),
+            last_result=failure,
+            operation_token=None,
+        )
+    )
+    if result.rowcount != 1:  # type: ignore[attr-defined]
+        await session.rollback()
+        return
+    await session.execute(
+        sa_update(IssueStoryArc)
+        .where(IssueStoryArc.id == placement.issue_story_arc_id)
+        .values(last_materialization_result=failure)
+    )
+    await session.commit()
+
+
+async def _delete_removed_placement_checkpoint(
+    session: AsyncSession,
+    *,
+    placement_id: int,
+    membership_id: int,
+    operation_token: str,
+    artifact_removed: bool,
+) -> None:
+    """Atomically forget ownership only after the managed artifact is absent."""
+    result = await session.execute(
+        delete(StoryArcPlacement).where(
+            StoryArcPlacement.id == placement_id,
+            StoryArcPlacement.operation_token == operation_token,
+            StoryArcPlacement.ownership == StoryArcPlacementOwnership.MANAGED,
+        )
+    )
+    if result.rowcount != 1:  # type: ignore[attr-defined]
+        await session.rollback()
+        raise StoryArcPlacementIntegrationError(
+            "placement_operation_superseded",
+            "Story-arc placement removal lost its ownership lease",
+            category="conflict",
+        )
+    await session.execute(
+        sa_update(IssueStoryArc)
+        .where(IssueStoryArc.id == membership_id)
+        .values(
+            sync_eligible=False,
+            last_materialization_result={
+                "schema_version": 1,
+                "status": "placement_removed",
+                "placement_id": placement_id,
+                "artifact_removed": artifact_removed,
+                "canonical_preserved": True,
+            },
+        )
+    )
     await session.commit()
 
 
@@ -2327,13 +2725,14 @@ async def _reconcile_result(
         sa_update(IssueStoryArc)
         .where(IssueStoryArc.id == context.membership_id)
         .values(
+            sync_eligible=(policy.synchronize if fence_code is None else False),
             last_materialization_result={
                 "schema_version": 1,
                 "status": final_status,
                 "outcome": result.state.value,
                 "placement_id": prepared_placement_id,
                 **({"error_code": fence_code} if fence_code is not None else {}),
-            }
+            },
         )
     )
     await session.commit()

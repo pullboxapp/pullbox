@@ -19,6 +19,10 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.services.import_story_arc_policy_confirmation import (
+    ImportStoryArcPolicyReview,
+    build_import_story_arc_policy_review,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +58,7 @@ class ImportedStoryArcReviewRow:
     entries_skipped: int
     selection_blocked: bool
     selection_block_reason: str | None
+    policy_review: ImportStoryArcPolicyReview
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +152,11 @@ async def load_import_story_arc_review_page(
                 entries_skipped=counts.get(StoryArcResolutionState.SKIPPED, 0),
                 selection_blocked=bool(block_reason),
                 selection_block_reason=block_reason,
+                policy_review=build_import_story_arc_policy_review(
+                    arc.proposed_policy_snapshot or {},
+                    arc.source_settings_snapshot or {},
+                    arc.diagnostics or {},
+                ),
             )
         )
 

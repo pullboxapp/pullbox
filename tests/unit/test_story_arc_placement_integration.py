@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from pullbox.models import Base
 from pullbox.models.issue import Issue
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -54,6 +55,7 @@ async def _seed_membership(
     *,
     arc_name: str = "Court of Owls",
     issue_number_text: str = "1000000",
+    publisher_name: str | None = None,
 ) -> tuple[int, int, int, Path, Path]:
     canonical = tmp_path / "library" / "Batman.cbz"
     canonical.parent.mkdir(exist_ok=True)
@@ -64,11 +66,13 @@ async def _seed_membership(
 
     async with factory() as session:
         root = LibraryRoot(name="Comics", path=str(tmp_path / "library"), enabled=True)
+        publisher = Publisher(name=publisher_name) if publisher_name is not None else None
         series = Series(
             title="Batman",
             sort_title="batman",
             year_start=2011,
             library_root=root,
+            publisher=publisher,
         )
         issue = Issue(
             series=series,
@@ -154,6 +158,40 @@ async def test_policy_freezes_complete_snapshot_and_rejects_stale_revision(
                 proposal=_copy_policy(root_id, arc_root),
             )
     assert stale.value.code == "revision_conflict"
+
+
+async def test_publisher_folder_token_uses_canonical_series_publisher(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, _membership_id, root_id, _canonical, arc_root = await _seed_membership(
+        db_factory,
+        tmp_path,
+        publisher_name="DC Comics",
+    )
+    service = StoryArcPlacementSyncService()
+    proposal = _copy_policy(root_id, arc_root)
+    proposal = StoryArcPlacementPolicyInput(
+        mode=proposal.mode,
+        target_library_root_id=proposal.target_library_root_id,
+        destination_root=proposal.destination_root,
+        folder_template="{Publisher} - {StoryArc}",
+        file_template=proposal.file_template,
+        symlink_style=proposal.symlink_style,
+        synchronize=proposal.synchronize,
+    )
+
+    async with db_factory() as session:
+        preview = await service.preview_arc(
+            session,
+            arc_id,
+            limit=1,
+            offset=0,
+            proposal=proposal,
+        )
+
+    target = Path(preview.items[0].target_path or "")
+    assert target.parent.name == "DC Comics - Court of Owls"
 
 
 @pytest.mark.parametrize(
@@ -729,6 +767,293 @@ async def test_missing_managed_placement_can_be_repaired(
         )
     assert repaired.outcome == "created"
     assert target.read_bytes() == canonical.read_bytes()
+
+
+async def test_managed_placement_can_be_removed_without_touching_canonical_file(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=_copy_policy(root_id, arc_root),
+        )
+        synced = await service.sync_membership(session, arc_id, membership_id)
+    assert synced.placement is not None
+    target = Path(synced.placement.placement_path)
+
+    async with db_factory() as session:
+        removed = await service.remove_placement(
+            session,
+            arc_id,
+            synced.placement.id,
+            confirm_managed_artifact_removal=True,
+        )
+
+    assert removed.placement_id == synced.placement.id
+    assert removed.ownership is StoryArcPlacementOwnership.MANAGED
+    assert removed.artifact_removed is True
+    assert removed.canonical_preserved is True
+    assert removed.referenced_artifact_preserved is False
+    assert canonical.read_bytes() == b"canonical archive"
+    assert not target.exists()
+    async with db_factory() as session:
+        assert await session.get(StoryArcPlacement, synced.placement.id) is None
+        membership = await session.get(IssueStoryArc, membership_id)
+        assert membership is not None
+        assert membership.sync_eligible is False
+
+    async with db_factory() as session:
+        recreated = await service.sync_membership(session, arc_id, membership_id)
+    assert recreated.outcome == "created"
+    assert target.read_bytes() == canonical.read_bytes()
+    async with db_factory() as session:
+        membership = await session.get(IssueStoryArc, membership_id)
+        assert membership is not None
+        assert membership.sync_eligible is True
+
+
+async def test_referenced_placement_record_removal_preserves_user_artifact(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=_copy_policy(root_id, arc_root),
+        )
+        preview = await service.preview_arc(session, arc_id, limit=1, offset=0)
+    target = Path(preview.items[0].target_path or "")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(canonical.read_bytes())
+
+    async with db_factory() as session:
+        adopted = await service.sync_membership(
+            session,
+            arc_id,
+            membership_id,
+            adopt_identical_existing=True,
+        )
+    assert adopted.placement is not None
+    assert adopted.placement.ownership is StoryArcPlacementOwnership.REFERENCED
+
+    async with db_factory() as session:
+        removed = await service.remove_placement(session, arc_id, adopted.placement.id)
+
+    assert removed.ownership is StoryArcPlacementOwnership.REFERENCED
+    assert removed.artifact_removed is False
+    assert removed.canonical_preserved is True
+    assert removed.referenced_artifact_preserved is True
+    assert target.read_bytes() == canonical.read_bytes()
+    async with db_factory() as session:
+        assert await session.get(StoryArcPlacement, adopted.placement.id) is None
+        membership = await session.get(IssueStoryArc, membership_id)
+        assert membership is not None
+        assert membership.sync_eligible is False
+
+    async with db_factory() as session:
+        readopted = await service.sync_membership(
+            session,
+            arc_id,
+            membership_id,
+            adopt_identical_existing=True,
+        )
+    assert readopted.placement is not None
+    assert readopted.placement.ownership is StoryArcPlacementOwnership.REFERENCED
+    assert target.read_bytes() == canonical.read_bytes()
+    async with db_factory() as session:
+        membership = await session.get(IssueStoryArc, membership_id)
+        assert membership is not None
+        assert membership.sync_eligible is True
+
+
+async def test_referenced_forget_waits_for_in_flight_sync_and_cannot_be_undone(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pullbox.services.story_arc_placement_integration as integration
+
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=_copy_policy(root_id, arc_root),
+        )
+        preview = await service.preview_arc(session, arc_id, limit=1, offset=0)
+    target = Path(preview.items[0].target_path or "")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(canonical.read_bytes())
+    async with db_factory() as session:
+        adopted = await service.sync_membership(
+            session,
+            arc_id,
+            membership_id,
+            adopt_identical_existing=True,
+        )
+    assert adopted.placement is not None
+
+    started = threading.Event()
+    release = threading.Event()
+    execute = integration.execute_story_arc_placement
+
+    def delayed_execute(*args: object, **kwargs: object) -> object:
+        started.set()
+        assert release.wait(timeout=5)
+        return execute(*args, **kwargs)
+
+    monkeypatch.setattr(integration, "execute_story_arc_placement", delayed_execute)
+
+    async def recheck_reference() -> object:
+        async with db_factory() as session:
+            return await service.sync_membership(session, arc_id, membership_id)
+
+    async def forget_reference() -> object:
+        async with db_factory() as session:
+            return await service.remove_placement(session, arc_id, adopted.placement.id)
+
+    sync_task = asyncio.create_task(recheck_reference())
+    assert await asyncio.to_thread(started.wait, 5)
+    forget_task = asyncio.create_task(forget_reference())
+    await asyncio.sleep(0.05)
+    forgot_before_sync_finished = forget_task.done()
+    release.set()
+    await sync_task
+    removed = await forget_task
+
+    assert forgot_before_sync_finished is False
+    assert removed.referenced_artifact_preserved is True
+    assert target.read_bytes() == canonical.read_bytes()
+    async with db_factory() as session:
+        assert await session.get(StoryArcPlacement, adopted.placement.id) is None
+        membership = await session.get(IssueStoryArc, membership_id)
+        assert membership is not None
+        assert membership.sync_eligible is False
+
+
+async def test_changed_managed_placement_is_not_removed(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=_copy_policy(root_id, arc_root),
+        )
+        synced = await service.sync_membership(session, arc_id, membership_id)
+    assert synced.placement is not None
+    target = Path(synced.placement.placement_path)
+    target.write_bytes(b"user changed this arc artifact")
+
+    async with db_factory() as session:
+        with pytest.raises(StoryArcPlacementIntegrationError) as blocked:
+            await service.remove_placement(
+                session,
+                arc_id,
+                synced.placement.id,
+                confirm_managed_artifact_removal=True,
+            )
+
+    assert blocked.value.code == "fingerprint_mismatch"
+    assert blocked.value.category == "safety"
+    assert canonical.read_bytes() == b"canonical archive"
+    assert target.read_bytes() == b"user changed this arc artifact"
+    async with db_factory() as session:
+        assert await session.get(StoryArcPlacement, synced.placement.id) is not None
+
+
+async def test_managed_removal_recovers_after_unlink_before_database_checkpoint(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pullbox.services.story_arc_placement_integration as integration
+
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=_copy_policy(root_id, arc_root),
+        )
+        synced = await service.sync_membership(session, arc_id, membership_id)
+    assert synced.placement is not None
+    target = Path(synced.placement.placement_path)
+    checkpoint = integration._delete_removed_placement_checkpoint
+
+    async def crash_after_unlink(*_args: object, **_kwargs: object) -> None:
+        raise StoryArcPlacementIntegrationError(
+            "remove_checkpoint_interrupted",
+            "Simulated crash after managed placement unlink",
+            category="conflict",
+        )
+
+    monkeypatch.setattr(
+        integration,
+        "_delete_removed_placement_checkpoint",
+        crash_after_unlink,
+    )
+    async with db_factory() as session:
+        with pytest.raises(StoryArcPlacementIntegrationError, match="Simulated crash"):
+            await service.remove_placement(
+                session,
+                arc_id,
+                synced.placement.id,
+                confirm_managed_artifact_removal=True,
+            )
+    assert not target.exists()
+    assert canonical.read_bytes() == b"canonical archive"
+
+    async with db_factory() as session:
+        prepared = await session.get(StoryArcPlacement, synced.placement.id)
+        assert prepared is not None
+        assert prepared.last_result["status"] == "remove_prepared"
+        prepared.updated_at = datetime.now(UTC) - timedelta(minutes=10)
+        await session.commit()
+
+    monkeypatch.setattr(
+        integration,
+        "_delete_removed_placement_checkpoint",
+        checkpoint,
+    )
+    async with db_factory() as session:
+        recovered = await service.remove_placement(
+            session,
+            arc_id,
+            synced.placement.id,
+            confirm_managed_artifact_removal=True,
+        )
+    assert recovered.artifact_removed is False
+    assert canonical.read_bytes() == b"canonical archive"
+    async with db_factory() as session:
+        assert await session.get(StoryArcPlacement, synced.placement.id) is None
 
 
 async def test_managed_policy_destination_change_is_blocked_until_migrated(

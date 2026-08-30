@@ -268,6 +268,10 @@ async def load_import_review_context(
             requested_series_status = None
 
     if current_view == "story_arcs":
+        library_roots_result = await session.execute(
+            select(LibraryRoot).where(LibraryRoot.enabled.is_(True)).order_by(LibraryRoot.id)
+        )
+        library_roots = list(library_roots_result.scalars().all())
         story_arc_page = await load_import_story_arc_review_page(
             session,
             job_id,

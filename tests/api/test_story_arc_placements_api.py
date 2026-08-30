@@ -283,6 +283,31 @@ async def test_sync_list_retry_and_repair_have_categorized_state(
     assert repaired.json()["outcome"] == "created"
     assert target.read_bytes() == canonical.read_bytes()
 
+    unconfirmed_removal = await client.delete(
+        f"/api/v1/story-arcs/{arc_id}/placements/{placement['id']}"
+    )
+    assert unconfirmed_removal.status_code == 422
+    assert unconfirmed_removal.json()["detail"]["code"] == ("managed_removal_confirmation_required")
+    assert target.read_bytes() == canonical.read_bytes()
+
+    removed = await client.delete(
+        f"/api/v1/story-arcs/{arc_id}/placements/{placement['id']}",
+        params={"confirm_managed_artifact_removal": True},
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {
+        "placement_id": placement["id"],
+        "ownership": "managed",
+        "artifact_removed": True,
+        "canonical_preserved": True,
+        "referenced_artifact_preserved": False,
+        "automatic_sync_disabled": True,
+    }
+    assert canonical.read_bytes() == b"canonical"
+    assert not target.exists()
+    listed_after_removal = await client.get(f"/api/v1/story-arcs/{arc_id}/placements")
+    assert listed_after_removal.json()["total"] == 0
+
 
 async def test_symlink_root_preview_returns_safe_category(
     client: AsyncClient,

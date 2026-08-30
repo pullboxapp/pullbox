@@ -6328,6 +6328,106 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       }
     },
 
+    confirmStoryArcPolicy: async function (id, formElement) {
+      var numericId = Number(id);
+      if (!Number.isFinite(numericId) || !formElement) {
+        return;
+      }
+
+      var field = function (name) {
+        return formElement.querySelector("[name='" + name + "']");
+      };
+      var checked = function (name) {
+        var element = field(name);
+        return Boolean(element && element.checked);
+      };
+      var materialize = checked("materialize_filesystem");
+      var modeElement = field("mode");
+      var mode = materialize && modeElement ? modeElement.value : "logical";
+      var rootElement = field("target_library_root_id");
+      var rootId = materialize && rootElement ? Number(rootElement.value) : null;
+      if (!Number.isFinite(rootId)) {
+        rootId = null;
+      }
+      var destinationElement = field("destination_root");
+      var symlinkElement = field("symlink_style");
+      var digestElement = field("expected_policy_digest");
+      var folderElement = field("folder_template");
+      var fileElement = field("file_template");
+      var monitored = checked("monitored");
+
+      var payload = {
+        confirm_policy: checked("confirm_policy"),
+        expected_policy_digest: digestElement ? digestElement.value : "",
+        materialize_filesystem: materialize,
+        monitored: monitored,
+        search_missing: monitored && checked("search_missing"),
+        include_upcoming: monitored && checked("include_upcoming"),
+        placement_policy: {
+          mode: mode,
+          target_library_root_id: materialize ? rootId : null,
+          destination_root:
+            materialize && destinationElement ? destinationElement.value : null,
+          folder_template: folderElement ? folderElement.value : "{StoryArc}",
+          file_template:
+            fileElement
+              ? fileElement.value
+              : "{ReadingOrder:03d} - {Series} {IssueNumber}",
+          symlink_style:
+            materialize && mode === "symlink" && symlinkElement
+              ? symlinkElement.value
+              : null,
+          synchronize: materialize && checked("synchronize"),
+        },
+      };
+
+      try {
+        var response = await fetch(
+          "/api/v1/import/" +
+            this.jobId +
+            "/story-arcs/" +
+            numericId +
+            "/policy-confirmation",
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": readCsrfTokenFromBody(),
+            },
+            body: JSON.stringify(payload),
+          },
+        );
+        if (!response.ok) {
+          var error = await response
+            .json()
+            .catch(function () {
+              return {};
+            });
+          var detail = error.detail;
+          if (Array.isArray(detail)) {
+            detail = detail
+              .map(function (item) {
+                return item && item.msg ? item.msg : "Invalid policy field";
+              })
+              .join("; ");
+          }
+          throw new Error(detail || "Failed to confirm story arc policy.");
+        }
+        await this.refreshSeriesReview();
+        if (typeof showToast === "function") {
+          showToast({ message: "Story arc policy confirmed.", level: "success" });
+        }
+      } catch (err) {
+        if (typeof showToast === "function") {
+          showToast({
+            message:
+              err && err.message ? err.message : "Failed to confirm story arc policy.",
+            level: "error",
+          });
+        }
+      }
+    },
+
     toggleDuplicateSeriesFiles: async function (id, checked, checkboxEl) {
       var numericId = Number(id);
       if (!Number.isFinite(numericId)) {

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import select
 
+from pullbox.core.mylar_story_arc_policy import build_mylar_story_arc_policy_draft
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
@@ -156,7 +157,7 @@ async def stage_mylar_story_arcs(
                 name=_bounded_text(source_arc.name, 500),
                 description=None,
                 status=status,
-                proposed_policy_snapshot=_mylar_proposed_policy(snapshot.arc_settings),
+                proposed_policy_snapshot=build_mylar_story_arc_policy_draft(snapshot.arc_settings),
                 source_settings_snapshot=settings_snapshot,
                 diagnostics=_mylar_arc_diagnostics(
                     snapshot=snapshot,
@@ -706,16 +707,6 @@ def _mylar_settings_snapshot(snapshot: Mylar3CollectionSnapshot) -> dict[str, ob
             "count": max(int(snapshot.readlist_count), 0),
             "import_state": "deferred_v1.5.0",
         },
-    }
-
-
-def _mylar_proposed_policy(settings: Mylar3ArcSettingsSnapshot) -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "source": "mylar3",
-        "activation": "requires_confirmation",
-        "settings_present": bool(settings.present),
-        "settings_review_required": bool(settings.parse_warnings),
     }
 
 

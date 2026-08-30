@@ -1,7 +1,8 @@
-"""Step 4 materializes confirmed logical story arcs without source I/O."""
+"""Step 4 materializes arcs without archive-content reads or source mutations."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -18,6 +19,7 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.models.issue import Issue
+from pullbox.models.library import LibraryRoot
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
@@ -25,10 +27,14 @@ from pullbox.models.story_arc import (
     StoryArc,
     StoryArcExternalIdentity,
     StoryArcPlacement,
+    StoryArcPlacementMode,
+    StoryArcPlacementOwnership,
+    StoryArcPlacementState,
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.services import import_story_arc_materialization as materialization_module
 from pullbox.services.import_job_actions import record_action
 from pullbox.services.import_story_arc_materialization import (
     materialize_confirmed_story_arcs,
@@ -42,11 +48,14 @@ async def _add_job(
     session: AsyncSession,
     *,
     source_type: ImportSourceType = ImportSourceType.MYLAR3,
+    source_path: str = "/private/source",
+    mylar3_path_map: dict[str, str] | None = None,
 ) -> ImportJob:
     job = ImportJob(
-        source_path="/private/source",
+        source_path=source_path,
         source_type=source_type,
         status=ImportJobStatus.IMPORTING,
+        mylar3_path_map=mylar3_path_map or {},
     )
     session.add(job)
     await session.flush()
@@ -121,6 +130,7 @@ async def _add_staged_entry(
     source_entry_id: str | None = None,
     cv_arc_id: str | None = "4045-12",
     selected: bool = True,
+    source_location: str | None = None,
 ) -> ImportedStoryArcEntry:
     entry = ImportedStoryArcEntry(
         imported_story_arc_id=staged_arc.id,
@@ -139,6 +149,7 @@ async def _add_staged_entry(
         source_series_name=f"Series {source_ordinal}",
         source_issue_title=f"Issue {issue_number_text}",
         evidence={"schema_version": 1, "cv_arc_id": cv_arc_id},
+        source_location=source_location,
         selected_for_import=selected,
     )
     session.add(entry)
@@ -146,11 +157,46 @@ async def _add_staged_entry(
     return entry
 
 
+def _confirmed_policy(
+    *,
+    source: str,
+    monitored: bool = True,
+    search_missing: bool = True,
+    include_upcoming: bool = False,
+    mode: str = "logical",
+    target_library_root_id: int | None = None,
+    destination_root: str | None = None,
+    synchronize: bool = False,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "source": source,
+        "activation": "confirmed",
+        "monitored": monitored,
+        "search_missing": search_missing,
+        "include_upcoming": include_upcoming,
+        "sync_enabled": synchronize,
+        "placement_policy": {
+            "schema_version": 1,
+            "mode": mode,
+            "target_library_root_id": target_library_root_id,
+            "destination_root": destination_root,
+            "folder_template": "{StoryArc}",
+            "file_template": "{ReadingOrder:03d} - {Series} {IssueNumber}",
+            "symlink_style": None,
+            "synchronize": synchronize,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_materializes_exact_ordered_entries_identities_and_multiple_arcs(
     db_session: AsyncSession,
 ) -> None:
     job = await _add_job(db_session)
+    policy_root = LibraryRoot(name="Arc Policy", path="/canonical/arc-policy", enabled=True)
+    db_session.add(policy_root)
+    await db_session.flush()
     million = await _add_issue(
         db_session,
         series_name="Million",
@@ -163,15 +209,13 @@ async def test_materializes_exact_ordered_entries_identities_and_multiple_arcs(
         issue_number=1.0,
         issue_number_text="1AU",
     )
-    policy = {
-        "schema_version": 1,
-        "source": "mylar3",
-        "activation": "confirmed",
-        "monitored": True,
-        "search_missing": True,
-        "include_upcoming": False,
-        "sync_enabled": True,
-    }
+    policy = _confirmed_policy(
+        source="mylar3",
+        mode="copy",
+        target_library_root_id=policy_root.id,
+        destination_root="/canonical/story-arcs",
+        synchronize=True,
+    )
     first_arc = await _add_staged_arc(
         db_session,
         job=job,
@@ -268,7 +312,9 @@ async def test_materializes_exact_ordered_entries_identities_and_multiple_arcs(
     assert arcs[0].search_missing is True
     assert arcs[0].include_upcoming is False
     assert arcs[0].sync_enabled is True
-    assert arcs[0].policy_snapshot == policy
+    assert arcs[0].target_library_root_id == policy_root.id
+    assert arcs[0].policy_schema_version == 1
+    assert arcs[0].policy_snapshot == policy["placement_policy"]
     assert [item.sequence_number for item in memberships if item.story_arc_id == arcs[0].id] == [
         2,
         7,
@@ -384,6 +430,69 @@ async def test_explicit_merge_uses_safe_imported_file_match_and_unconfirmed_poli
     assert membership.story_arc_id == existing.id
     assert membership.issue_id == issue.id
     assert entry.materialized_membership_id == membership.id
+
+
+@pytest.mark.asyncio
+async def test_confirmed_policy_rejects_noncanonical_or_mismatched_envelopes(
+    db_session: AsyncSession,
+) -> None:
+    job = await _add_job(db_session)
+    malformed_policies = [
+        {
+            **_confirmed_policy(source="mylar3"),
+            "unexpected": True,
+        },
+        {
+            **_confirmed_policy(source="mylar3"),
+            "placement_policy": {
+                **_confirmed_policy(source="mylar3")["placement_policy"],
+                "unexpected": True,
+            },
+        },
+        {
+            **_confirmed_policy(source="mylar3"),
+            "sync_enabled": True,
+        },
+        {
+            **_confirmed_policy(source="mylar3"),
+            "monitored": False,
+        },
+        _confirmed_policy(
+            source="mylar3",
+            mode="copy",
+            target_library_root_id=987_654,
+            destination_root="/missing/story-arcs",
+        ),
+    ]
+    staged_arcs: list[ImportedStoryArc] = []
+    for ordinal, policy in enumerate(malformed_policies, start=1):
+        staged_arcs.append(
+            await _add_staged_arc(
+                db_session,
+                job=job,
+                name=f"Rejected Policy {ordinal}",
+                source_key=f"mylar3:rejected-policy:{ordinal}",
+                source_arc_id=f"rejected-policy-{ordinal}",
+                policy=policy,
+            )
+        )
+
+    result = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+    )
+
+    warning_codes = [warning.code for warning in result.warnings]
+    assert warning_codes.count("policy_validation_failed") == 4
+    assert warning_codes.count("policy_target_root_missing") == 1
+    arcs = list((await db_session.scalars(select(StoryArc).order_by(StoryArc.id))).all())
+    assert len(arcs) == len(staged_arcs)
+    assert all(arc.monitored is False for arc in arcs)
+    assert all(arc.search_missing is False for arc in arcs)
+    assert all(arc.sync_enabled is False for arc in arcs)
+    assert all(arc.target_library_root_id is None for arc in arcs)
+    assert all(arc.policy_schema_version is None for arc in arcs)
+    assert all(arc.policy_snapshot == {} for arc in arcs)
 
 
 @pytest.mark.asyncio
@@ -673,3 +782,382 @@ async def test_actual_mutations_are_journaled_once_in_reverse_safe_order(
     ]
     assert [action.id for action in second_actions] == [action.id for action in first_actions]
     assert first_actions[-1].payload["expected_after"]["source_issue_number_text"] == ("1000000")
+
+
+@pytest.mark.asyncio
+async def test_existing_folder_arc_artifact_is_journaled_as_reference_without_content_io(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "approved-source"
+    source_root.mkdir()
+    artifact = source_root / "Imported Arc" / "001 - Existing.cbz"
+    artifact.parent.mkdir()
+    original_content = b"pre-existing-user-archive"
+    artifact.write_bytes(original_content)
+    job = await _add_job(
+        db_session,
+        source_type=ImportSourceType.FILESYSTEM,
+        source_path=str(source_root),
+    )
+    staged = await _add_staged_arc(
+        db_session,
+        job=job,
+        name="Imported Arc",
+        source_key="folder:referenced",
+        source_arc_id=None,
+        source_kind=StoryArcSourceKind.FOLDER,
+    )
+    entry = await _add_staged_entry(
+        db_session,
+        staged_arc=staged,
+        source_ordinal=1,
+        reading_order=1,
+        issue_number_text="1",
+        cv_arc_id=None,
+        source_location=str(artifact),
+    )
+    original_open = Path.open
+
+    def refuse_archive_open(path: Path, *args: object, **kwargs: object) -> object:
+        if path == artifact:
+            raise AssertionError("story-arc reference materialization opened archive content")
+        return original_open(path, *args, **kwargs)
+
+    def refuse_descriptor_read(_descriptor: int, _size: int) -> bytes:
+        raise AssertionError("story-arc reference materialization read archive content")
+
+    monkeypatch.setattr(Path, "open", refuse_archive_open)
+    monkeypatch.setattr(materialization_module.os, "read", refuse_descriptor_read)
+    journal_observations: list[int] = []
+
+    async def observe_record_action(*args: object, **kwargs: object) -> ImportJobAction:
+        if kwargs.get("action_type") == "story_arc_referenced_placement_attached":
+            journal_observations.append(
+                int(
+                    await db_session.scalar(select(func.count()).select_from(StoryArcPlacement))
+                    or 0
+                )
+            )
+        return await record_action(*args, **kwargs)  # type: ignore[arg-type]
+
+    await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=observe_record_action,
+    )
+
+    placement = (await db_session.scalars(select(StoryArcPlacement))).one()
+    action = (
+        await db_session.scalars(
+            select(ImportJobAction).where(
+                ImportJobAction.action_type == "story_arc_referenced_placement_attached"
+            )
+        )
+    ).one()
+    assert journal_observations == [0]
+    assert placement.issue_story_arc_id == entry.materialized_membership_id
+    assert placement.placement_path == str(artifact)
+    assert placement.mode == StoryArcPlacementMode.REFERENCE_ONLY
+    assert placement.ownership == StoryArcPlacementOwnership.REFERENCED
+    assert placement.source_kind == StoryArcSourceKind.FOLDER
+    assert placement.source_import_job_id == job.id
+    assert placement.creating_action_id == action.id
+    assert placement.state == StoryArcPlacementState.CURRENT
+    assert placement.source_fingerprint == {}
+    assert placement.last_result["code"] == "reference_current"
+    assert (
+        placement.last_result["baseline_fingerprint"]
+        == placement.last_result["observed_fingerprint"]
+    )
+    assert placement.last_result["observed_fingerprint"]["size"] == len(original_content)
+    assert action.payload["journal_state"] == "completed"
+    assert action.payload["placement_id"] == placement.id
+    with original_open(artifact, "rb") as stream:
+        assert stream.read() == original_content
+
+
+@pytest.mark.asyncio
+async def test_mylar_reference_location_uses_the_confirmed_host_path_mapping(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    host_root = tmp_path / "host-comics"
+    artifact = host_root / "Arc" / "Issue 001.cbr"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"existing-mylar-arc-copy")
+    job = await _add_job(
+        db_session,
+        source_path=str(tmp_path / "mylar.db"),
+        mylar3_path_map={"/comics": str(host_root)},
+    )
+    staged = await _add_staged_arc(
+        db_session,
+        job=job,
+        name="Mylar Arc",
+        source_key="mylar3:referenced",
+        source_arc_id="mylar-arc",
+    )
+    await _add_staged_entry(
+        db_session,
+        staged_arc=staged,
+        source_ordinal=1,
+        reading_order=1,
+        issue_number_text="1",
+        cv_arc_id=None,
+        source_location="/comics/Arc/Issue 001.cbr",
+    )
+
+    await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+
+    placement = (await db_session.scalars(select(StoryArcPlacement))).one()
+    assert placement.placement_path == str(artifact)
+    assert placement.source_kind == StoryArcSourceKind.MYLAR3
+    assert placement.source_import_job_id == job.id
+
+
+@pytest.mark.asyncio
+async def test_unsafe_or_missing_reference_locations_warn_without_ownership_claims(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "approved-source"
+    source_root.mkdir()
+    outside = tmp_path / "outside.cbz"
+    outside.write_bytes(b"outside")
+    directory = source_root / "not-a-file.cbz"
+    directory.mkdir()
+    real_parent = source_root / "real-parent"
+    real_parent.mkdir()
+    (real_parent / "issue.cbz").write_bytes(b"symlink-parent")
+    symlink_parent = source_root / "linked-parent"
+    symlink_parent.symlink_to(real_parent, target_is_directory=True)
+    real_file = source_root / "real-file.cbz"
+    real_file.write_bytes(b"symlink-file")
+    symlink_file = source_root / "linked-file.cbz"
+    symlink_file.symlink_to(real_file)
+    job = await _add_job(
+        db_session,
+        source_type=ImportSourceType.FILESYSTEM,
+        source_path=str(source_root),
+    )
+    locations = (
+        str(tmp_path / "outside.cbz"),
+        str(source_root / "missing.cbz"),
+        str(directory),
+        str(symlink_parent / "issue.cbz"),
+        str(symlink_file),
+    )
+    entries: list[ImportedStoryArcEntry] = []
+    for ordinal, location in enumerate(locations, start=1):
+        staged = await _add_staged_arc(
+            db_session,
+            job=job,
+            name=f"Unsafe {ordinal}",
+            source_key=f"folder:unsafe:{ordinal}",
+            source_arc_id=None,
+            source_kind=StoryArcSourceKind.FOLDER,
+        )
+        entries.append(
+            await _add_staged_entry(
+                db_session,
+                staged_arc=staged,
+                source_ordinal=1,
+                reading_order=ordinal,
+                issue_number_text=str(ordinal),
+                cv_arc_id=None,
+                source_location=location,
+            )
+        )
+
+    result = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+
+    reference_codes = {
+        warning.code
+        for warning in result.warnings
+        if warning.code.startswith("story_arc_reference_")
+    }
+    assert reference_codes == {
+        "story_arc_reference_missing",
+        "story_arc_reference_not_regular_file",
+        "story_arc_reference_outside_trusted_root",
+        "story_arc_reference_symlink",
+    }
+    assert await db_session.scalar(select(func.count()).select_from(StoryArcPlacement)) == 0
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(ImportJobAction)
+            .where(ImportJobAction.action_type == "story_arc_referenced_placement_attached")
+        )
+        == 0
+    )
+    assert all(
+        any(
+            code.startswith("story_arc_reference_")
+            for code in entry.diagnostics["materialization"]["warning_codes"]
+        )
+        for entry in entries
+    )
+    assert all(str(tmp_path) not in warning.code for warning in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_reference_retry_is_idempotent_and_reports_changed_artifact_as_drift(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "approved-source"
+    source_root.mkdir()
+    artifact = source_root / "Existing.cbz"
+    artifact.write_bytes(b"original")
+    job = await _add_job(
+        db_session,
+        source_type=ImportSourceType.FILESYSTEM,
+        source_path=str(source_root),
+    )
+    staged = await _add_staged_arc(
+        db_session,
+        job=job,
+        name="Retry Arc",
+        source_key="folder:retry-reference",
+        source_arc_id=None,
+        source_kind=StoryArcSourceKind.FOLDER,
+    )
+    await _add_staged_entry(
+        db_session,
+        staged_arc=staged,
+        source_ordinal=1,
+        reading_order=1,
+        issue_number_text="1",
+        cv_arc_id=None,
+        source_location=str(artifact),
+    )
+    await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+    placement = (await db_session.scalars(select(StoryArcPlacement))).one()
+    baseline = dict(placement.last_result["baseline_fingerprint"])
+    first_action_id = placement.creating_action_id
+    artifact.write_bytes(b"changed-and-longer")
+    staged.status = ImportedStoryArcStatus.CONFIRMED
+    await db_session.flush()
+
+    result = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+
+    await db_session.refresh(placement)
+    assert placement.state == StoryArcPlacementState.DRIFTED
+    assert placement.last_result["code"] == "reference_drifted"
+    assert placement.last_result["baseline_fingerprint"] == baseline
+    assert placement.last_result["observed_fingerprint"]["size"] == len(b"changed-and-longer")
+    assert placement.creating_action_id == first_action_id
+    assert await db_session.scalar(select(func.count()).select_from(StoryArcPlacement)) == 1
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(ImportJobAction)
+            .where(ImportJobAction.action_type == "story_arc_referenced_placement_attached")
+        )
+        == 1
+    )
+    assert "story_arc_reference_drifted" in {warning.code for warning in result.warnings}
+
+    artifact.unlink()
+    staged.status = ImportedStoryArcStatus.CONFIRMED
+    await db_session.flush()
+    missing_result = await materialize_confirmed_story_arcs(
+        db_session,
+        import_job_id=job.id,
+        record_action=record_action,
+    )
+
+    await db_session.refresh(placement)
+    assert placement.state == StoryArcPlacementState.MISSING
+    assert placement.last_result["code"] == "reference_missing"
+    assert placement.last_result["baseline_fingerprint"] == baseline
+    assert placement.last_result["observed_fingerprint"] is None
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(ImportJobAction)
+            .where(ImportJobAction.action_type == "story_arc_referenced_placement_attached")
+        )
+        == 1
+    )
+    assert "story_arc_reference_missing" in {warning.code for warning in missing_result.warnings}
+
+
+@pytest.mark.asyncio
+async def test_cancellation_checkpoint_after_membership_never_claims_reference_ownership(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "approved-source"
+    source_root.mkdir()
+    artifact = source_root / "Existing.cbz"
+    original_content = b"untouched-on-cancel"
+    artifact.write_bytes(original_content)
+    job = await _add_job(
+        db_session,
+        source_type=ImportSourceType.FILESYSTEM,
+        source_path=str(source_root),
+    )
+    staged = await _add_staged_arc(
+        db_session,
+        job=job,
+        name="Cancel Arc",
+        source_key="folder:cancel-reference",
+        source_arc_id=None,
+        source_kind=StoryArcSourceKind.FOLDER,
+    )
+    await _add_staged_entry(
+        db_session,
+        staged_arc=staged,
+        source_ordinal=1,
+        reading_order=1,
+        issue_number_text="1",
+        cv_arc_id=None,
+        source_location=str(artifact),
+    )
+
+    async def cancel_after_membership() -> None:
+        membership_count = int(
+            await db_session.scalar(select(func.count()).select_from(IssueStoryArc)) or 0
+        )
+        if membership_count:
+            raise RuntimeError("cancel before reference attachment")
+
+    with pytest.raises(RuntimeError, match="cancel before reference attachment"):
+        await materialize_confirmed_story_arcs(
+            db_session,
+            import_job_id=job.id,
+            record_action=record_action,
+            cancellation_check=cancel_after_membership,
+        )
+
+    assert await db_session.scalar(select(func.count()).select_from(IssueStoryArc)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(StoryArcPlacement)) == 0
+    assert (
+        await db_session.scalar(
+            select(func.count())
+            .select_from(ImportJobAction)
+            .where(ImportJobAction.action_type == "story_arc_referenced_placement_attached")
+        )
+        == 0
+    )
+    assert artifact.read_bytes() == original_content

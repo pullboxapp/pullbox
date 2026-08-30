@@ -14,7 +14,7 @@ DEFAULT_STORY_ARC_FILE_TEMPLATE = "{ReadingOrder:03d} - {Series} {IssueNumber}{I
 _MAX_TEMPLATE_BYTES = 1024
 _TOKEN_RE = re.compile(r"\{(?P<name>[A-Za-z][A-Za-z0-9]*)(?::(?P<format>[^{}]+))?\}")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_FOLDER_TOKENS = frozenset({"StoryArc", "StartYear", "EndYear", "SpanYears"})
+_FOLDER_TOKENS = frozenset({"StoryArc", "Publisher", "StartYear", "EndYear", "SpanYears"})
 _FILE_TOKENS = frozenset(
     {
         "ReadingOrder",
@@ -42,6 +42,7 @@ class StoryArcNamingValues:
     year: int | None = None
     start_year: int | None = None
     end_year: int | None = None
+    publisher: str | None = None
 
 
 def validate_story_arc_folder_template(template: str) -> None:
@@ -103,6 +104,7 @@ def render_story_arc_relative_path(
 
     folder_values = {
         "StoryArc": safe(values.story_arc),
+        "Publisher": safe(values.publisher) if values.publisher else "",
         "StartYear": start_year,
         "EndYear": end_year,
         "SpanYears": span_years,

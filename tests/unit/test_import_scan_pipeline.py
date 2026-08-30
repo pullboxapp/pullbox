@@ -259,6 +259,51 @@ async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
     assert captured_layouts == [expected_layout]
 
 
+async def test_load_mylar3_persists_auto_detected_path_map_for_execution(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    db_path.touch()
+    host_root = tmp_path / "host-comics"
+    host_root.mkdir()
+    detected = {"/comics": str(host_root)}
+    job = ImportJob(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    job_id = job.id
+    captured_maps: list[dict[str, str] | None] = []
+
+    class ReaderDouble:
+        def __init__(self, *, db_path, path_map, source_layout) -> None:
+            captured_maps.append(path_map)
+
+        async def read_series(self) -> list[DiscoveredSeries]:
+            return []
+
+    async def log_event(*_args, **_kwargs) -> None:
+        return None
+
+    await _load_mylar3_discovered_series(
+        db_session,
+        job,
+        job_id=job_id,
+        mylar3_reader_cls=ReaderDouble,
+        auto_detect_mylar3_path_map=lambda _path: detected,
+        log_event=log_event,
+    )
+
+    assert captured_maps == [detected]
+    db_session.expire_all()
+    persisted = await db_session.get(ImportJob, job_id)
+    assert persisted is not None
+    assert persisted.mylar3_path_map == detected
+
+
 async def test_load_mylar3_discovered_series_logs_path_resolution_counts(
     db_session,
     tmp_path: Path,

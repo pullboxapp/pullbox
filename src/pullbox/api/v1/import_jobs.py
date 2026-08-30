@@ -39,6 +39,7 @@ from pullbox.api.v1.import_job_review_actions import (
     allow_safety_blocked_file_once_response,
     bulk_update_file_selection_response,
     bulk_update_series_selection_response,
+    confirm_story_arc_policy_response,
     get_selection_state_response,
     list_conflicts_response,
     list_import_files_response,
@@ -102,6 +103,8 @@ from pullbox.schemas.import_job import (
     RetryImportResponse,
     SeriesSelectionBulkUpdateRequest,
     SeriesSelectionUpdateRequest,
+    StoryArcPolicyConfirmationRequest,
+    StoryArcPolicyConfirmationResponse,
     StoryArcReviewDecisionRequest,
     StoryArcReviewDecisionResponse,
 )
@@ -634,6 +637,28 @@ async def update_story_arc_decision(
     service = _make_import_service()
     response = await update_story_arc_decision_response(
         service,
+        session,
+        job_id,
+        imported_story_arc_id,
+        body,
+    )
+    await session.commit()
+    return response
+
+
+@router.put(
+    "/{job_id}/story-arcs/{imported_story_arc_id}/policy-confirmation",
+    response_model=StoryArcPolicyConfirmationResponse,
+)
+async def confirm_story_arc_policy(
+    job_id: int,
+    imported_story_arc_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    body: StoryArcPolicyConfirmationRequest,
+) -> StoryArcPolicyConfirmationResponse:
+    """Explicitly confirm one complete Step 3 story-arc policy."""
+    response = await confirm_story_arc_policy_response(
         session,
         job_id,
         imported_story_arc_id,

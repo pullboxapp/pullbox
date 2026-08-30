@@ -134,3 +134,14 @@ class StoryArcPlacementSyncResponse(BaseModel):
     membership_id: int
     outcome: str
     placement: StoryArcPlacementResponse | None
+
+
+class StoryArcPlacementRemovalResponse(BaseModel):
+    """Ownership-aware removal result that makes preservation guarantees explicit."""
+
+    placement_id: int
+    ownership: StoryArcPlacementOwnership
+    artifact_removed: bool
+    canonical_preserved: bool
+    referenced_artifact_preserved: bool
+    automatic_sync_disabled: bool
