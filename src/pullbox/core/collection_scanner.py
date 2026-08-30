@@ -747,7 +747,11 @@ class CollectionScanner:
         return ScanInventory(directory_count=directory_count, file_count=file_count)
 
     async def scan(self, root_path: str | Path) -> AsyncGenerator[DiscoveredSeries, None]:
-        """Yield series while retaining only a bounded active path window."""
+        """Yield series from a disk inventory with bounded ordinary bucket work.
+
+        A single oversized directory is processed alone, but its paths and
+        grouped results still materialize together until chunked grouping lands.
+        """
         root = Path(root_path).resolve()
         if not root.is_dir():
             msg = f"Scan root is not a directory: {root}"
@@ -858,7 +862,7 @@ class CollectionScanner:
         root: Path,
         cancellation_bridge: _CancellationBridge,
     ) -> AsyncGenerator[list[DiscoveredSeries], None]:
-        """Materialize spooled buckets under worker and cumulative path bounds."""
+        """Bound ordinary bucket work; process an oversized bucket alone."""
         comicinfo_sem = asyncio.Semaphore(ARCHIVE_READ_CONCURRENCY)
         file_task_slots = asyncio.Semaphore(ARCHIVE_READ_CONCURRENCY)
         series_worker_sem = asyncio.Semaphore(SERIES_SCAN_WORKERS)
@@ -1008,11 +1012,9 @@ class CollectionScanner:
                 if not pending:
                     continue
 
-                # Preserve the legacy deterministic bucket order even though
-                # adjacent buckets are inspected concurrently.  Yielding an
-                # arbitrary member of FIRST_COMPLETED can reorder series from
-                # one scan to the next and, more importantly, changes which
-                # review group is executed first after a partial failure.
+                # Keep inventory order deterministic even though adjacent
+                # buckets are inspected concurrently. Completion timing must
+                # not determine the order of the resulting review groups.
                 oldest_task = next(iter(pending))
                 done, _not_done = await asyncio.wait(
                     (oldest_task,),

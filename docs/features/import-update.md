@@ -23,7 +23,7 @@ issue number. Issue titles in filenames and publisher/series nesting are also
 supported. Embedded ComicInfo or MetronInfo and supported series sidecars remain
 matching evidence, with conflicts kept visible for review.
 
-Mylar imports include series, issues, Story Arc/reading-list evidence, and
+Mylar imports include series, issues, Story Arc evidence, and
 existing arc-file references. Logical Story Arc import and optional separate
 arc-file materialization are independent choices. Step 3 remains the final
 review before anything is registered or created.
@@ -61,6 +61,8 @@ fails closed when migration is required.
 
 The unused operation-journal schema is not part of this v1.3 candidate. It is
 preserved separately for the later executor, rollback, and recovery work.
+Named/private reading lists and full Mylar `readlist` semantics remain a later
+roadmap item; they are not implied by Story Arc import.
 
 ## Focused user test checklist
 
@@ -79,7 +81,7 @@ Start with a disposable representative sample before trying a complete library.
   while the selected library receives managed artifacts.
 - Enable future layout separately, inspect the before/after examples, and add
   one later managed file. Existing files should not be renamed.
-- Import a copy of a Mylar database containing Story Arcs and reading lists.
+- Import a copy of a Mylar database containing Story Arcs.
   Compare membership order, missing issues, and existing arc-file references.
   Test logical-only import and optional separate copies/links independently.
 - Create a Story Arc, add local issues, reorder them through the preview and

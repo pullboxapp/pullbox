@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added independent options to keep existing files in place and use an approved
   layout for future managed files without reorganizing an existing library.
 - Added first-class Story Arcs with ordered memberships, local issue selection,
-  monitoring, Mylar reading-list import, and folder-based arc evidence.
+  monitoring, Mylar Story Arc import, and folder-based arc evidence.
 - Added optional separate Story Arc copies or links, reading-order filename
   prefixes, and safe previewed reordering while preserving canonical files and
   user-owned arc references.
