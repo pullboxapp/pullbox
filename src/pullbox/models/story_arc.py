@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
@@ -24,6 +25,9 @@ from pullbox.core.story_arc_identity import normalize_story_arc_name
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin, UTCDateTime
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
+    from sqlalchemy.orm import Mapper
+
     from pullbox.models.import_job import ImportJob, ImportJobAction
     from pullbox.models.issue import Issue
     from pullbox.models.library import LibraryFile, LibraryRoot
@@ -322,25 +326,23 @@ class StoryArcExternalIdentity(Base, IdentityMixin, TimestampMixin):
 class StoryArcPlacement(Base, IdentityMixin, TimestampMixin):
     """Optional representation of a canonical issue in an arc location.
 
-    IU6-A may only persist references to pre-existing user artifacts. Managed
-    copy/link execution is blocked until the independently reviewed IU6-B
-    action-journal workflow lands.
+    Database constraints are authoritative for the complete placement matrix.
+    ORM writes also validate the final combination immediately before insert or
+    update so keyword and attribute assignment order cannot change the result.
     """
 
     __tablename__ = "story_arc_placements"
     __table_args__ = (
         UniqueConstraint("placement_path", name="uq_story_arc_placements_path"),
         CheckConstraint(
-            "mode = 'reference_only'",
-            name="ck_story_arc_placements_reference_only_mode",
+            "((mode = 'reference_only' AND ownership = 'referenced') OR "
+            "(mode IN ('copy', 'hardlink', 'symlink') AND ownership = 'managed'))",
+            name="ck_story_arc_placements_mode_ownership",
         ),
         CheckConstraint(
-            "ownership = 'referenced'",
-            name="ck_story_arc_placements_reference_only_owner",
-        ),
-        CheckConstraint(
-            "symlink_style IS NULL",
-            name="ck_story_arc_placements_no_symlink_style",
+            "((mode = 'symlink' AND symlink_style IS NOT NULL) OR "
+            "(mode != 'symlink' AND symlink_style IS NULL))",
+            name="ck_story_arc_placements_symlink_style",
         ),
         Index("ix_story_arc_placements_membership", "issue_story_arc_id", "id"),
         Index("ix_story_arc_placements_library_file", "library_file_id", "id"),
@@ -386,6 +388,7 @@ class StoryArcPlacement(Base, IdentityMixin, TimestampMixin):
     )
     rendered_reading_order: Mapped[int | None] = mapped_column(Integer)
     policy_schema_version: Mapped[int | None] = mapped_column(Integer)
+    operation_token: Mapped[str | None] = mapped_column(String(32))
     source_fingerprint: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}", nullable=False
     )
@@ -408,32 +411,45 @@ class StoryArcPlacement(Base, IdentityMixin, TimestampMixin):
         foreign_keys=[creating_action_id]
     )
 
-    @validates("mode")
-    def _validate_materialization_mode(
-        self,
-        _key: str,
-        value: StoryArcPlacementMode,
-    ) -> StoryArcPlacementMode:
-        if value is not StoryArcPlacementMode.REFERENCE_ONLY:
-            raise ValueError("IU6-A placements must use reference-only mode")
-        return value
+    def validate_configuration(self) -> None:
+        """Validate one complete placement combination independent of assignment order."""
+        raw_mode = self.__dict__.get("mode", StoryArcPlacementMode.REFERENCE_ONLY)
+        raw_ownership = self.__dict__.get(
+            "ownership",
+            StoryArcPlacementOwnership.REFERENCED,
+        )
+        raw_symlink_style = self.__dict__.get("symlink_style")
+        try:
+            mode = StoryArcPlacementMode(raw_mode)
+            ownership = StoryArcPlacementOwnership(raw_ownership)
+            symlink_style = (
+                StoryArcSymlinkStyle(raw_symlink_style) if raw_symlink_style is not None else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Story arc placement uses an unsupported mode or style") from exc
 
-    @validates("ownership")
-    def _validate_ownership(
-        self,
-        _key: str,
-        value: StoryArcPlacementOwnership,
-    ) -> StoryArcPlacementOwnership:
-        if value is not StoryArcPlacementOwnership.REFERENCED:
-            raise ValueError("IU6-A placements must remain referenced")
-        return value
+        expected_ownership = (
+            StoryArcPlacementOwnership.REFERENCED
+            if mode is StoryArcPlacementMode.REFERENCE_ONLY
+            else StoryArcPlacementOwnership.MANAGED
+        )
+        if ownership is not expected_ownership:
+            raise ValueError(
+                f"Story arc placement mode {mode.value} requires "
+                f"{expected_ownership.value} ownership"
+            )
+        if mode is StoryArcPlacementMode.SYMLINK and symlink_style is None:
+            raise ValueError("A symlink story arc placement requires a symlink style")
+        if mode is not StoryArcPlacementMode.SYMLINK and symlink_style is not None:
+            raise ValueError("Only a symlink story arc placement may specify a symlink style")
 
-    @validates("symlink_style")
-    def _validate_symlink_style(
-        self,
-        _key: str,
-        value: StoryArcSymlinkStyle | None,
-    ) -> StoryArcSymlinkStyle | None:
-        if value is not None:
-            raise ValueError("IU6-A reference-only placements cannot set a symlink style")
-        return value
+
+@event.listens_for(StoryArcPlacement, "before_insert")
+@event.listens_for(StoryArcPlacement, "before_update")
+def _validate_story_arc_placement_before_write(
+    _mapper: Mapper[StoryArcPlacement],
+    _connection: Connection,
+    target: StoryArcPlacement,
+) -> None:
+    """Fail ORM writes before SQL while leaving database checks authoritative."""
+    target.validate_configuration()

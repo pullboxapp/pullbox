@@ -52,6 +52,10 @@ from pullbox.services.import_review_queries import (
     get_files_for_series as get_import_files_for_series,
 )
 from pullbox.services.import_review_selection import load_import_review_selection_state
+from pullbox.services.import_story_arc_review import (
+    StoryArcReviewAction,
+    update_import_story_arc_decision,
+)
 
 if TYPE_CHECKING:
     from typing import Protocol
@@ -60,6 +64,7 @@ if TYPE_CHECKING:
 
     from pullbox.models.import_job import ImportedFile, ImportedFileStatus
     from pullbox.models.issue import Issue
+    from pullbox.models.story_arc_import import ImportedStoryArc
 
     class ImportServiceReviewContext(Protocol):
         _sync_import_file_source_metadata: Any
@@ -277,6 +282,24 @@ class ImportServiceReviewMixin:
             job_id,
             imported_series_id,
             include_in_import=include_in_import,
+        )
+
+    async def update_story_arc_decision(
+        self,
+        session: AsyncSession,
+        job_id: int,
+        imported_story_arc_id: int,
+        *,
+        action: StoryArcReviewAction,
+        proposed_story_arc_id: int | None,
+    ) -> ImportedStoryArc:
+        """Persist one staged story-arc select/skip decision."""
+        return await update_import_story_arc_decision(
+            session,
+            job_id,
+            imported_story_arc_id,
+            action=action,
+            proposed_story_arc_id=proposed_story_arc_id,
         )
 
     async def allow_safety_blocked_file_once(

@@ -415,6 +415,22 @@
         "count_inactive_class": "count-badge-neutral",
       }) %}
       {% endif %}
+      {% set story_arc_count = review_summary.story_arcs_total if review_summary else story_arc_total|default(0) %}
+      {% if story_arc_count > 0 %}
+      {% set _ = series_filter_items.append({
+        "filter_key": "story_arcs",
+        "label": "Story Arcs",
+        "href": "#",
+        "hx_get": "/import/" ~ job.id ~ "/review-partial?status=story_arcs&page=1",
+        "hx_target": "#import-step-review-shell",
+        "testid": "import-review-tab-story-arcs",
+        "active": active_review_view == 'story_arcs',
+        "count": story_arc_count,
+        "active_class": "chip-btn-info",
+        "count_active_class": "count-badge-info",
+        "count_inactive_class": "count-badge-neutral",
+      }) %}
+      {% endif %}
       {% for status_val, label, active_class, badge_class in series_status_config %}
       {% set cnt = status_counts.get(status_val, 0) %}
       {% if cnt > 0 %}
@@ -580,7 +596,9 @@
         </div>
         {% endif %}
 
-        {% if active_review_view == 'conflicts' %}
+        {% if active_review_view == 'story_arcs' %}
+        {% include "partials/import_story_arc_review_table.html" %}
+        {% elif active_review_view == 'conflicts' %}
         {% set conflict_refresh_mode = "review" %}
         {% set conflict_refresh_target = "#import-step-review-shell" %}
         {% set conflict_refresh_swap = "outerHTML" %}
@@ -1364,7 +1382,7 @@
 
     </div>
 </div>
-{% set import_review_footer_mode = "conflicts" if active_review_view == 'conflicts' else "series" %}
+{% set import_review_footer_mode = active_review_view if active_review_view in ('conflicts', 'story_arcs') else "series" %}
 {% if active_review_view == 'conflicts' %}
   {% set conflict_footer_base_url = "/import/" ~ job.id ~ "/review-partial?status=conflicts&sort=" ~ sort %}
   {% set conflict_footer_hx_target = "#import-step-review-shell" %}

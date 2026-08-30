@@ -13,6 +13,12 @@ from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcLifecycle,
+    StoryArcResolutionState,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,6 +75,39 @@ class IssueSearchOutcome:
 
 
 SearchOutcomeCallback = Callable[[IssueSearchOutcome], Awaitable[None]]
+
+
+def wanted_issue_eligibility_filter() -> Any:
+    """Return the shared series-or-story-arc wanted-search eligibility filter.
+
+    Story arcs only widen the existing target gate. A resolved arc member may
+    retain the canonical series-owned SKIPPED state, but it still enters the
+    normal wanted-search runner, so provider cooldowns, result selection,
+    pending intervention suppression, and duplicate acquisition remain shared.
+    """
+    monitored_story_arc = exists().where(
+        and_(
+            IssueStoryArc.issue_id == Issue.id,
+            IssueStoryArc.story_arc_id == StoryArc.id,
+            IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+            StoryArc.lifecycle == StoryArcLifecycle.ACTIVE,
+            StoryArc.monitored.is_(True),
+            StoryArc.search_missing.is_(True),
+        )
+    )
+    return and_(
+        Issue.manual_skip.is_(False),
+        or_(
+            and_(
+                Issue.status == IssueStatus.WANTED,
+                Series.monitored.is_(True),
+            ),
+            and_(
+                Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
+                monitored_story_arc,
+            ),
+        ),
+    )
 
 
 class SearchIssueTargetFunc(Protocol):
@@ -217,8 +256,7 @@ async def load_wanted_issue_search_targets(
 ) -> list[IssueSearchTarget]:
     """Load wanted issue targets for the global sweep."""
     filters = [
-        Issue.status == IssueStatus.WANTED,
-        Series.monitored.is_(True),
+        wanted_issue_eligibility_filter(),
         ~exists().where(
             and_(
                 PendingMatch.issue_id == Issue.id,
@@ -286,8 +324,7 @@ async def load_wanted_issue_search_targets_by_ids(
         .join(Series, Series.id == Issue.series_id)
         .where(
             Issue.id.in_(issue_ids),
-            Issue.status == IssueStatus.WANTED,
-            Series.monitored.is_(True),
+            wanted_issue_eligibility_filter(),
             ~exists().where(
                 and_(
                     PendingMatch.issue_id == Issue.id,

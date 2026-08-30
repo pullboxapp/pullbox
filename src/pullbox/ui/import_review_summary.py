@@ -14,6 +14,8 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
+from pullbox.models.story_arc import ImportedStoryArcStatus, StoryArcResolutionState
+from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.import_review_selection import load_import_review_selection_state
 from pullbox.services.import_safety_diagnostics import summarize_import_safety_failures
 
@@ -105,6 +107,48 @@ async def load_import_review_summary(
             )
         ).scalar_one()
     )
+    story_arc_counts_result = await session.execute(
+        select(ImportedStoryArc.status, func.count(ImportedStoryArc.id))
+        .where(ImportedStoryArc.import_job_id == job.id)
+        .group_by(ImportedStoryArc.status)
+    )
+    story_arc_counts = {
+        status.value if hasattr(status, "value") else str(status): int(count)
+        for status, count in story_arc_counts_result.all()
+    }
+    story_arc_entry_counts_result = await session.execute(
+        select(ImportedStoryArcEntry.resolution_state, func.count(ImportedStoryArcEntry.id))
+        .join(
+            ImportedStoryArc,
+            ImportedStoryArc.id == ImportedStoryArcEntry.imported_story_arc_id,
+        )
+        .where(ImportedStoryArc.import_job_id == job.id)
+        .group_by(ImportedStoryArcEntry.resolution_state)
+    )
+    story_arc_entry_counts = {
+        state.value if hasattr(state, "value") else str(state): int(count)
+        for state, count in story_arc_entry_counts_result.all()
+    }
+    story_arcs_selected = int(
+        await session.scalar(
+            select(func.count(ImportedStoryArc.id)).where(
+                ImportedStoryArc.import_job_id == job.id,
+                ImportedStoryArc.selected_for_import.is_(True),
+            )
+        )
+        or 0
+    )
+    story_arc_reviewable_statuses = {
+        ImportedStoryArcStatus.DETECTED.value,
+        ImportedStoryArcStatus.NEEDS_REVIEW.value,
+        ImportedStoryArcStatus.READY.value,
+        ImportedStoryArcStatus.CONFIRMED.value,
+    }
+    story_arcs_reviewable = sum(
+        count
+        for status, count in story_arc_counts.items()
+        if status in story_arc_reviewable_statuses
+    )
 
     row_summary = {
         "series_total": sum(series_counts.values()),
@@ -136,9 +180,46 @@ async def load_import_review_summary(
         "duplicate_series_importable": duplicate_importable_series_count,
         "duplicate_series_selected": duplicate_selected_series_count,
         "selected_series_total": matched_selected_series_count + duplicate_selected_series_count,
-        "selected_items_total": _object_to_int(selection_state["selected_item_count"]),
-        "importable_items_total": _object_to_int(selection_state["importable_item_count"]),
+        "selected_items_total": _object_to_int(selection_state["selected_item_count"])
+        + story_arcs_selected,
+        "importable_items_total": _object_to_int(selection_state["importable_item_count"])
+        + story_arcs_reviewable,
         "resolved_file_conflict_groups": resolved_file_conflict_groups,
+        "story_arcs_total": sum(story_arc_counts.values()),
+        "story_arcs_detected": story_arc_counts.get(ImportedStoryArcStatus.DETECTED.value, 0),
+        "story_arcs_needs_review": story_arc_counts.get(
+            ImportedStoryArcStatus.NEEDS_REVIEW.value,
+            0,
+        ),
+        "story_arcs_ready": story_arc_counts.get(ImportedStoryArcStatus.READY.value, 0),
+        "story_arcs_selected": story_arcs_selected,
+        "story_arcs_reviewable": story_arcs_reviewable,
+        "story_arcs_skipped": story_arc_counts.get(ImportedStoryArcStatus.SKIPPED.value, 0),
+        "story_arc_entries_total": sum(story_arc_entry_counts.values()),
+        "story_arc_entries_resolved": story_arc_entry_counts.get(
+            StoryArcResolutionState.RESOLVED.value,
+            0,
+        ),
+        "story_arc_entries_missing": story_arc_entry_counts.get(
+            StoryArcResolutionState.MISSING.value,
+            0,
+        ),
+        "story_arc_entries_ambiguous": story_arc_entry_counts.get(
+            StoryArcResolutionState.AMBIGUOUS.value,
+            0,
+        ),
+        "story_arc_entries_conflict": story_arc_entry_counts.get(
+            StoryArcResolutionState.CONFLICT.value,
+            0,
+        ),
+        "story_arc_entries_pending": story_arc_entry_counts.get(
+            StoryArcResolutionState.PENDING.value,
+            0,
+        ),
+        "story_arc_entries_skipped": story_arc_entry_counts.get(
+            StoryArcResolutionState.SKIPPED.value,
+            0,
+        ),
         "duplicate_files_duplicate": duplicate_file_counts.get(
             ImportedFileStatus.DUPLICATE_FILE.value,
             0,

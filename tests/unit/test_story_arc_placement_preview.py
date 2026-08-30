@@ -164,6 +164,65 @@ def test_existing_symlink_parent_cannot_escape_destination_root(tmp_path: Path) 
     assert preview.collision == StoryArcCollisionKind.PATH_ESCAPE
 
 
+def test_existing_symlink_parent_inside_root_is_still_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "source.cbz"
+    source.write_bytes(b"canonical")
+    root = tmp_path / "arcs"
+    physical_parent = root / "physical-parent"
+    physical_parent.mkdir(parents=True)
+    (root / "Court of Owls").symlink_to(physical_parent, target_is_directory=True)
+
+    preview = preview_story_arc_placement(
+        canonical_path=source,
+        destination_root=root,
+        values=_values(),
+        mode=StoryArcPlacementMode.COPY,
+    )
+
+    assert preview.state == StoryArcPlacementPreviewState.BLOCKED
+    assert preview.collision == StoryArcCollisionKind.SYMLINK_PARENT
+    assert "symbolic-link parent" in (preview.reason or "")
+
+
+def test_existing_non_directory_parent_is_blocked_like_execution(tmp_path: Path) -> None:
+    source = tmp_path / "source.cbz"
+    source.write_bytes(b"canonical")
+    root = tmp_path / "arcs"
+    root.mkdir()
+    (root / "Court of Owls").write_bytes(b"not a directory")
+
+    preview = preview_story_arc_placement(
+        canonical_path=source,
+        destination_root=root,
+        values=_values(),
+        mode=StoryArcPlacementMode.COPY,
+    )
+
+    assert preview.state == StoryArcPlacementPreviewState.BLOCKED
+    assert preview.collision == StoryArcCollisionKind.PARENT_NOT_DIRECTORY
+
+
+def test_symlink_destination_root_is_blocked_during_preview(tmp_path: Path) -> None:
+    source = tmp_path / "source.cbz"
+    source.write_bytes(b"canonical")
+    physical_root = tmp_path / "physical-arcs"
+    physical_root.mkdir()
+    configured_root = tmp_path / "configured-arcs"
+    configured_root.symlink_to(physical_root, target_is_directory=True)
+
+    preview = preview_story_arc_placement(
+        canonical_path=source,
+        destination_root=configured_root,
+        values=_values(),
+        mode=StoryArcPlacementMode.COPY,
+    )
+
+    assert preview.state == StoryArcPlacementPreviewState.BLOCKED
+    assert preview.collision == StoryArcCollisionKind.SYMLINK_ROOT
+    assert preview.target_path is None
+    assert "symbolic link" in (preview.reason or "")
+
+
 def test_case_only_existing_name_is_reported_before_writes(tmp_path: Path) -> None:
     source = tmp_path / "source.cbz"
     source.write_bytes(b"canonical")
@@ -181,3 +240,30 @@ def test_case_only_existing_name_is_reported_before_writes(tmp_path: Path) -> No
 
     assert preview.state == StoryArcPlacementPreviewState.BLOCKED
     assert preview.collision == StoryArcCollisionKind.CASE_ONLY
+
+
+def test_collision_preview_fails_closed_when_directory_scan_limit_is_reached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.cbz"
+    source.write_bytes(b"canonical")
+    target_parent = tmp_path / "arcs" / "Court of Owls"
+    target_parent.mkdir(parents=True)
+    for name in ("one.cbz", "two.cbz", "three.cbz"):
+        (target_parent / name).write_bytes(b"other")
+    monkeypatch.setattr(
+        "pullbox.services.story_arc_placement_preview._MAX_CASE_SCAN_ENTRIES",
+        2,
+    )
+
+    preview = preview_story_arc_placement(
+        canonical_path=source,
+        destination_root=tmp_path / "arcs",
+        values=_values(),
+        mode=StoryArcPlacementMode.COPY,
+    )
+
+    assert preview.state == StoryArcPlacementPreviewState.BLOCKED
+    assert preview.collision == StoryArcCollisionKind.DIRECTORY_SCAN_LIMIT
+    assert "bounded" in (preview.reason or "")

@@ -34,6 +34,11 @@ class StoryArcCollisionKind(enum.StrEnum):
     PATH_ESCAPE = "path_escape"
     CROSS_DEVICE = "cross_device"
     ROOT_UNAVAILABLE = "root_unavailable"
+    SYMLINK_ROOT = "symlink_root"
+    SYMLINK_PARENT = "symlink_parent"
+    PARENT_NOT_DIRECTORY = "parent_not_directory"
+    DIRECTORY_SCAN_LIMIT = "directory_scan_limit"
+    COLLISION_SCAN_FAILED = "collision_scan_failed"
     SOURCE_UNAVAILABLE = "source_unavailable"
 
 
@@ -49,6 +54,15 @@ class StoryArcPlacementPreview:
     required_bytes: int = 0
     proposed_ownership: str = "managed"
     overwrite_allowed: bool = False
+
+
+_MAX_CASE_SCAN_ENTRIES = 10_000
+
+
+class _CollisionScanError(RuntimeError):
+    def __init__(self, collision: StoryArcCollisionKind, reason: str) -> None:
+        self.collision = collision
+        super().__init__(reason)
 
 
 def preview_story_arc_placement(
@@ -111,6 +125,13 @@ def preview_story_arc_placement(
             StoryArcCollisionKind.ROOT_UNAVAILABLE,
             "Story-arc destination root is unavailable",
         )
+    if destination_root.is_symlink():
+        return _blocked(
+            effective_mode,
+            None,
+            StoryArcCollisionKind.SYMLINK_ROOT,
+            "Story-arc destination root cannot be a symbolic link",
+        )
     if not destination_root.exists() or not destination_root.is_dir():
         return _blocked(
             effective_mode,
@@ -135,7 +156,23 @@ def preview_story_arc_placement(
     )
     target_path = destination_root / relative_path
     resolved_root = destination_root.resolve(strict=True)
-    resolved_target = target_path.resolve(strict=False)
+    parent_collision = _existing_parent_collision(
+        destination_root,
+        target_path.parent,
+        resolved_root,
+    )
+    if parent_collision is not None:
+        collision, reason = parent_collision
+        return _blocked(
+            effective_mode,
+            target_path,
+            collision,
+            reason,
+        )
+    # Containment applies to the destination entry and its parents.  Do not
+    # follow an existing final symlink here: symlink mode intentionally points
+    # at the canonical issue, which commonly lives outside the arc root.
+    resolved_target = target_path.parent.resolve(strict=False) / target_path.name
     if not resolved_target.is_relative_to(resolved_root):
         return _blocked(
             effective_mode,
@@ -144,7 +181,15 @@ def preview_story_arc_placement(
             "Rendered story-arc path resolves outside the selected root",
         )
 
-    case_collision = _find_case_only_collision(target_path)
+    try:
+        case_collision = _find_case_only_collision(target_path)
+    except _CollisionScanError as exc:
+        return _blocked(
+            effective_mode,
+            target_path,
+            exc.collision,
+            str(exc),
+        )
     if case_collision is not None:
         return _blocked(
             effective_mode,
@@ -193,17 +238,70 @@ def preview_story_arc_placement(
     )
 
 
+def _existing_parent_collision(
+    root: Path,
+    parent: Path,
+    resolved_root: Path,
+) -> tuple[StoryArcCollisionKind, str] | None:
+    """Mirror execution's fail-closed rule for every existing parent."""
+    current = root
+    for part in parent.relative_to(root).parts:
+        current = current / part
+        try:
+            current.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return (
+                StoryArcCollisionKind.COLLISION_SCAN_FAILED,
+                "Story-arc destination parent could not be inspected safely",
+            )
+        if current.is_symlink():
+            try:
+                resolved = current.resolve(strict=True)
+            except OSError:
+                return (
+                    StoryArcCollisionKind.SYMLINK_PARENT,
+                    "Story-arc destination has an unsafe symbolic-link parent",
+                )
+            collision = (
+                StoryArcCollisionKind.PATH_ESCAPE
+                if not resolved.is_relative_to(resolved_root)
+                else StoryArcCollisionKind.SYMLINK_PARENT
+            )
+            return (
+                collision,
+                "Story-arc destination has a symbolic-link parent",
+            )
+        if not current.is_dir():
+            return (
+                StoryArcCollisionKind.PARENT_NOT_DIRECTORY,
+                "Story-arc destination parent is not a directory",
+            )
+    return None
+
+
 def _find_case_only_collision(target_path: Path) -> Path | None:
     parent = target_path.parent
     if not parent.exists() or not parent.is_dir():
         return None
     target_key = target_path.name.casefold()
     try:
-        for child in parent.iterdir():
+        for index, child in enumerate(parent.iterdir(), start=1):
+            if index > _MAX_CASE_SCAN_ENTRIES:
+                raise _CollisionScanError(
+                    StoryArcCollisionKind.DIRECTORY_SCAN_LIMIT,
+                    "Story-arc collision preview exceeded its bounded directory scan limit",
+                )
             if child.name != target_path.name and child.name.casefold() == target_key:
                 return child
-    except OSError:
-        return None
+    except _CollisionScanError:
+        raise
+    except OSError as exc:
+        raise _CollisionScanError(
+            StoryArcCollisionKind.COLLISION_SCAN_FAILED,
+            "Story-arc destination collision preview failed",
+        ) from exc
     return None
 
 

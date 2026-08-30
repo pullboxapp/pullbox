@@ -28,6 +28,8 @@ from pullbox.schemas.import_job import (
     ImportSelectionBulkUpdateResponse,
     SeriesSelectionBulkUpdateRequest,
     SeriesSelectionUpdateRequest,
+    StoryArcReviewDecisionRequest,
+    StoryArcReviewDecisionResponse,
 )
 
 
@@ -167,6 +169,32 @@ async def update_series_selection_response(
     except ValidationError as exc:
         _raise_validation_http(exc)
     return ImportedSeriesRead.model_validate(imported_series)
+
+
+async def update_story_arc_decision_response(
+    service: Any,
+    session: Any,
+    job_id: int,
+    imported_story_arc_id: int,
+    body: StoryArcReviewDecisionRequest,
+) -> StoryArcReviewDecisionResponse:
+    """Persist one explicit staged story-arc review decision."""
+    try:
+        staged_arc = await service.update_story_arc_decision(
+            session,
+            job_id,
+            imported_story_arc_id,
+            action=body.action,
+            proposed_story_arc_id=body.proposed_story_arc_id,
+        )
+    except ValidationError as exc:
+        _raise_validation_http(exc)
+    return StoryArcReviewDecisionResponse(
+        imported_story_arc_id=int(staged_arc.id),
+        status=staged_arc.status.value,
+        selected_for_import=bool(staged_arc.selected_for_import),
+        proposed_story_arc_id=staged_arc.proposed_story_arc_id,
+    )
 
 
 async def get_selection_state_response(

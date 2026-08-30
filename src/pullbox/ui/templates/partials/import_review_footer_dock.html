@@ -23,6 +23,27 @@
       hx_push_url="false"
     ) }}
   </div>
+{% elif import_review_footer_mode == "story_arcs" %}
+  {% set story_arc_total_pages = ((story_arc_total - 1) // page_size) + 1 if story_arc_total > 0 else 1 %}
+  {% set story_arc_pagination_base_url = "/import/" ~ job.id ~ "/review-partial?status=story_arcs&story_arc_id=" ~ (story_arc_selected_id or '') ~ "&arc_entry_state=" ~ story_arc_entry_state_filter.value ~ "&arc_entry_page=1" %}
+  <div data-testid="import-story-arc-pagination" class="px-4 sm:px-6">
+    {{ page_dock(
+      page=page,
+      total_pages=story_arc_total_pages,
+      base_url=story_arc_pagination_base_url,
+      status_items=[
+        {"label": "visible", "value": story_arc_items|length|string},
+        {"label": "arcs", "value": story_arc_total|string},
+        {"label": "per page", "value": page_size|string},
+      ],
+      hx_target="#import-step-review-shell",
+      hx_swap="outerHTML",
+      hx_select="",
+      hx_base_url=story_arc_pagination_base_url,
+      hx_sync="#import-step-review-shell:replace",
+      hx_push_url="false"
+    ) }}
+  </div>
 {% else %}
   {% set total_pages = ((total - 1) // page_size) + 1 if total > 0 else 1 %}
   {% set review_pagination_params = [] %}

@@ -17,6 +17,10 @@ from pullbox.models.import_job import (
 from pullbox.models.library import LibraryRoot
 from pullbox.services.import_review_selection import load_import_review_selection_state
 from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
+from pullbox.services.import_story_arc_review import (
+    ImportedStoryArcReviewRow,
+    load_import_story_arc_review_page,
+)
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
 from pullbox.ui.import_review_summary import (
     load_import_review_summary,
@@ -31,6 +35,11 @@ from pullbox.ui.import_review_tables import (
     _normalize_import_review_series_sort,
     _safety_blocked_files_filter,
     _series_conflict_kind_filter,
+)
+from pullbox.ui.import_story_arc_entry_review import (
+    ImportedStoryArcEntryReviewRow,
+    StoryArcEntryResolutionFilter,
+    load_import_story_arc_entry_review_page,
 )
 
 if TYPE_CHECKING:
@@ -51,7 +60,7 @@ def _resolve_review_view(status: str | None) -> tuple[str, ImportSeriesStatus | 
     current_view = "series"
     if status == "conflicts":
         current_view = "conflicts"
-    elif status in {"needs_series", "needs_issue", "safety_blocked"}:
+    elif status in {"needs_series", "needs_issue", "safety_blocked", "story_arcs"}:
         current_view = status
     elif status:
         with contextlib.suppress(ValueError):
@@ -220,6 +229,9 @@ async def load_import_review_context(
     status: str | None,
     page: int,
     sort: str | None,
+    story_arc_id: int | None = None,
+    arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
+    arc_entry_page: int = 1,
 ) -> dict[str, object]:
     """Load the template context for the Step 3 review table."""
     job_id = int(job.id)
@@ -232,6 +244,13 @@ async def load_import_review_context(
     conflict_review_ctx: dict[str, object] | None = None
     matched_file_targets_by_series_id: dict[int, list[dict[str, object]]] = {}
     review_file_groups_by_series_id: dict[int, list[dict[str, object]]] = {}
+    story_arc_items: tuple[ImportedStoryArcReviewRow, ...] = ()
+    story_arc_total = 0
+    story_arc_selected_item: ImportedStoryArcReviewRow | None = None
+    story_arc_entry_items: tuple[ImportedStoryArcEntryReviewRow, ...] = ()
+    story_arc_entry_total = 0
+    story_arc_entry_page_size = 25
+    safety_blocked_files_by_series_id: dict[int, list[ImportedFile]] = {}
     safety_rematch_pending = False
 
     if current_view == "safety_blocked":
@@ -248,7 +267,37 @@ async def load_import_review_context(
             current_view = "series"
             requested_series_status = None
 
-    if current_view == "conflicts":
+    if current_view == "story_arcs":
+        story_arc_page = await load_import_story_arc_review_page(
+            session,
+            job_id,
+            page=page,
+            page_size=page_size,
+        )
+        story_arc_items = story_arc_page.items
+        story_arc_total = story_arc_page.total
+        total = story_arc_page.total
+        page = story_arc_page.page
+        page_size = story_arc_page.page_size
+        normalized_sort = "source_order"
+        story_arc_selected_item = next(
+            (item for item in story_arc_items if item.id == story_arc_id),
+            story_arc_items[0] if story_arc_items else None,
+        )
+        if story_arc_selected_item is not None:
+            story_arc_entry_page_result = await load_import_story_arc_entry_review_page(
+                session,
+                job_id=job_id,
+                imported_story_arc_id=story_arc_selected_item.id,
+                resolution_state=arc_entry_state.resolution_state,
+                page=arc_entry_page,
+                page_size=story_arc_entry_page_size,
+            )
+            story_arc_entry_items = story_arc_entry_page_result.items
+            story_arc_entry_total = story_arc_entry_page_result.total
+            arc_entry_page = story_arc_entry_page_result.page
+            story_arc_entry_page_size = story_arc_entry_page_result.page_size
+    elif current_view == "conflicts":
         conflict_review_ctx = await _load_import_conflict_review_context(
             job_id,
             session,
@@ -259,7 +308,6 @@ async def load_import_review_context(
         page = _object_to_int(conflict_review_ctx["page"])
         page_size = _object_to_int(conflict_review_ctx["page_size"])
         normalized_sort = str(conflict_review_ctx["sort"])
-        safety_blocked_files_by_series_id: dict[int, list[ImportedFile]] = {}
     else:
         filters = _review_filters(
             job_id=job_id,
@@ -304,6 +352,18 @@ async def load_import_review_context(
     template_ctx: dict[str, object] = {
         "job": job,
         "series_items": series_items,
+        "story_arc_items": story_arc_items,
+        "story_arc_total": story_arc_total,
+        "story_arc_selected_item": story_arc_selected_item,
+        "story_arc_selected_id": (
+            story_arc_selected_item.id if story_arc_selected_item is not None else None
+        ),
+        "story_arc_entry_items": story_arc_entry_items,
+        "story_arc_entry_total": story_arc_entry_total,
+        "story_arc_entry_page": arc_entry_page,
+        "story_arc_entry_page_size": story_arc_entry_page_size,
+        "story_arc_entry_state_filter": arc_entry_state,
+        "story_arc_entry_state_options": tuple(StoryArcEntryResolutionFilter),
         "library_roots": library_roots,
         "total": total,
         "page": page,

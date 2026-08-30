@@ -49,6 +49,7 @@ from pullbox.ui import (
     series_detail_routes,
     series_routes,
     settings_routes,
+    story_arc_routes,
     system_routes,
     utilities_routes,
     whats_new_routes,
@@ -762,6 +763,16 @@ reading_routes.configure_reading_routes(
 router.include_router(reading_routes.router)
 
 reading_workspace = reading_routes.reading_workspace
+
+
+story_arc_routes.configure_story_arc_routes(
+    get_templates=lambda: templates,
+    build_context=_ctx,
+)
+router.include_router(story_arc_routes.router)
+
+story_arc_list = story_arc_routes.story_arc_list
+story_arc_detail = story_arc_routes.story_arc_detail
 
 
 router.include_router(series_routes.htmx_router)

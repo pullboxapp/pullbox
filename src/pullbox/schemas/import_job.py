@@ -151,6 +151,52 @@ class ConflictResolution(BaseModel):
     chosen_file_id: int = Field(..., gt=0, description="ImportedFile ID to keep")
 
 
+class StoryArcReviewDecision(BaseModel):
+    """Explicit Step 3 decision for one staged story arc."""
+
+    imported_story_arc_id: int = Field(..., gt=0, description="ImportedStoryArc ID")
+    action: Literal["select", "skip"] = Field(..., description="Import or skip this arc")
+    proposed_story_arc_id: int | None = Field(
+        None,
+        gt=0,
+        description="Existing StoryArc target when the staged arc should be merged",
+    )
+
+    @model_validator(mode="after")
+    def validate_skip_has_no_merge_target(self) -> StoryArcReviewDecision:
+        """A skipped staged arc cannot retain an active merge decision."""
+        if self.action == "skip" and self.proposed_story_arc_id is not None:
+            raise ValueError("proposed_story_arc_id is only valid when action is select")
+        return self
+
+
+class StoryArcReviewDecisionRequest(BaseModel):
+    """Update one staged story-arc decision from the Step 3 review UI."""
+
+    action: Literal["select", "skip"] = Field(..., description="Import or skip this arc")
+    proposed_story_arc_id: int | None = Field(
+        None,
+        gt=0,
+        description="Existing StoryArc target when the staged arc should be merged",
+    )
+
+    @model_validator(mode="after")
+    def validate_skip_has_no_merge_target(self) -> StoryArcReviewDecisionRequest:
+        """A skipped staged arc cannot retain an active merge decision."""
+        if self.action == "skip" and self.proposed_story_arc_id is not None:
+            raise ValueError("proposed_story_arc_id is only valid when action is select")
+        return self
+
+
+class StoryArcReviewDecisionResponse(BaseModel):
+    """Persisted review state for one staged story arc."""
+
+    imported_story_arc_id: int
+    status: str
+    selected_for_import: bool
+    proposed_story_arc_id: int | None
+
+
 class ConfirmImportRequest(BaseModel):
     """Confirm which series to import from a REVIEW-state job."""
 
@@ -192,6 +238,17 @@ class ConfirmImportRequest(BaseModel):
     conflict_resolutions: list[ConflictResolution] = Field(
         default_factory=list, description="Conflict group resolutions"
     )
+    story_arc_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Compatibility list of staged story arcs to select. Durable per-arc "
+            "review decisions remain authoritative when already present."
+        ),
+    )
+    story_arc_decisions: list[StoryArcReviewDecision] = Field(
+        default_factory=list,
+        description="Explicit select/skip and optional merge decisions for staged story arcs",
+    )
 
     @field_validator("series_ids")
     @classmethod
@@ -201,6 +258,26 @@ class ConfirmImportRequest(BaseModel):
             msg = "All series_ids must be positive integers"
             raise ValueError(msg)
         return list(dict.fromkeys(v))
+
+    @field_validator("story_arc_ids")
+    @classmethod
+    def validate_story_arc_ids(cls, v: list[int]) -> list[int]:
+        """Keep story-arc identity separate from series selection."""
+        if any(arc_id <= 0 for arc_id in v):
+            raise ValueError("All story_arc_ids must be positive integers")
+        return list(dict.fromkeys(v))
+
+    @field_validator("story_arc_decisions")
+    @classmethod
+    def validate_unique_story_arc_decisions(
+        cls,
+        v: list[StoryArcReviewDecision],
+    ) -> list[StoryArcReviewDecision]:
+        """Reject ambiguous duplicate decisions in one confirmation request."""
+        ids = [decision.imported_story_arc_id for decision in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("story_arc_decisions must contain at most one decision per arc")
+        return v
 
 
 class SeriesSearchOverride(BaseModel):

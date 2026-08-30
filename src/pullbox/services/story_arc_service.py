@@ -6,6 +6,7 @@ import enum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import selectinload
 
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -15,6 +16,8 @@ from pullbox.models.story_arc import (
     IssueStoryArc,
     StoryArc,
     StoryArcLifecycle,
+    StoryArcPlacement,
+    StoryArcPlacementOwnership,
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
@@ -133,6 +136,12 @@ class StoryArcService:
 
         if isinstance(name, str):
             display_name, normalized_name = _display_name_and_key(name)
+            if (
+                display_name != arc.name or normalized_name != arc.normalized_name
+            ) and await self._has_managed_placements(session, story_arc_id=arc.id):
+                raise StoryArcValidationError(
+                    "Story-arc name cannot change while a managed placement exists"
+                )
             arc.name = display_name
             arc.normalized_name = normalized_name
 
@@ -152,6 +161,13 @@ class StoryArcService:
         for attribute, value in requested_flags.items():
             if isinstance(value, bool):
                 setattr(arc, attribute, value)
+
+        if isinstance(sync_enabled, bool):
+            await self._set_membership_sync_eligibility(
+                session,
+                story_arc_id=arc.id,
+                enabled=sync_enabled,
+            )
 
         arc.revision += 1
         await session.flush()
@@ -174,6 +190,11 @@ class StoryArcService:
         arc.search_missing = False
         arc.include_upcoming = False
         arc.sync_enabled = False
+        await self._set_membership_sync_eligibility(
+            session,
+            story_arc_id=arc.id,
+            enabled=False,
+        )
         arc.revision += 1
         await session.flush()
         return arc
@@ -255,6 +276,7 @@ class StoryArcService:
             ),
             source_kind=source_kind,
             source_issue_number_text=exact_number,
+            sync_eligible=issue_id is not None and bool(arc.sync_enabled),
         )
         session.add(membership)
         arc.revision += 1
@@ -274,6 +296,18 @@ class StoryArcService:
         """Update order or review state while preserving canonical ownership."""
         membership = await self._get_membership(session, membership_id)
         arc = await self._get_active_arc(session, membership.story_arc_id)
+        if any(
+            value is not None
+            for value in (
+                sequence_number,
+                source_ordinal,
+                source_issue_number_text,
+                intentionally_skipped,
+            )
+        ) and await self._has_managed_placements(session, membership_id=membership.id):
+            raise StoryArcValidationError(
+                "Story-arc membership cannot change while a managed placement exists"
+            )
         changed = False
 
         if sequence_number is not None:
@@ -301,7 +335,11 @@ class StoryArcService:
             )
             if membership.resolution_state != next_state:
                 membership.resolution_state = next_state
-                membership.sync_eligible = not intentionally_skipped
+                membership.sync_eligible = bool(
+                    not intentionally_skipped
+                    and membership.issue_id is not None
+                    and arc.sync_enabled
+                )
                 changed = True
 
         if changed:
@@ -339,10 +377,14 @@ class StoryArcService:
             and membership.resolution_state == StoryArcResolutionState.RESOLVED
         ):
             return membership
+        if await self._has_managed_placements(session, membership_id=membership.id):
+            raise StoryArcValidationError(
+                "Story-arc membership cannot resolve differently while a managed placement exists"
+            )
 
         membership.issue_id = issue_id
         membership.resolution_state = StoryArcResolutionState.RESOLVED
-        membership.sync_eligible = True
+        membership.sync_eligible = bool(arc.sync_enabled)
         if membership.source_issue_number_text is None:
             membership.source_issue_number_text = issue.effective_issue_number_text
         arc.revision += 1
@@ -365,6 +407,10 @@ class StoryArcService:
         )
         if not memberships:
             return 0
+        if await self._has_managed_placements(session, issue_id=issue_id):
+            raise StoryArcValidationError(
+                "Canonical issue cannot detach while a managed story-arc placement exists"
+            )
 
         affected_arc_ids: set[int] = set()
         for membership in memberships:
@@ -413,6 +459,10 @@ class StoryArcService:
         """Apply one complete, duplicate-free order with optimistic locking."""
         arc = await self._get_active_arc(session, story_arc_id)
         self._assert_revision(arc, expected_revision)
+        if await self._has_managed_placements(session, story_arc_id=story_arc_id):
+            raise StoryArcValidationError(
+                "Story-arc memberships cannot reorder while a managed placement exists"
+            )
         memberships = await self.list_memberships(session, story_arc_id)
         existing_ids = {membership.id for membership in memberships}
         requested_ids = set(ordered_membership_ids)
@@ -437,6 +487,10 @@ class StoryArcService:
         """Remove one association without touching its canonical issue."""
         membership = await self._get_membership(session, membership_id)
         arc = await self._get_active_arc(session, membership.story_arc_id)
+        if await self._has_managed_placements(session, membership_id=membership.id):
+            raise StoryArcValidationError(
+                "Story-arc membership cannot be removed while a managed placement exists"
+            )
         await session.delete(membership)
         arc.revision += 1
         await session.flush()
@@ -519,6 +573,43 @@ class StoryArcService:
         )
         for arc in arcs:
             arc.revision += 1
+
+    @staticmethod
+    async def _has_managed_placements(
+        session: AsyncSession,
+        *,
+        story_arc_id: int | None = None,
+        membership_id: int | None = None,
+        issue_id: int | None = None,
+    ) -> bool:
+        statement = (
+            select(StoryArcPlacement.id)
+            .join(IssueStoryArc, StoryArcPlacement.issue_story_arc_id == IssueStoryArc.id)
+            .where(StoryArcPlacement.ownership == StoryArcPlacementOwnership.MANAGED)
+        )
+        if story_arc_id is not None:
+            statement = statement.where(IssueStoryArc.story_arc_id == story_arc_id)
+        if membership_id is not None:
+            statement = statement.where(IssueStoryArc.id == membership_id)
+        if issue_id is not None:
+            statement = statement.where(IssueStoryArc.issue_id == issue_id)
+        return await session.scalar(statement.limit(1)) is not None
+
+    @staticmethod
+    async def _set_membership_sync_eligibility(
+        session: AsyncSession,
+        *,
+        story_arc_id: int,
+        enabled: bool,
+    ) -> None:
+        await session.execute(
+            sa_update(IssueStoryArc)
+            .where(
+                IssueStoryArc.story_arc_id == story_arc_id,
+                IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+            )
+            .values(sync_eligible=enabled)
+        )
 
     @staticmethod
     def _assert_revision(arc: StoryArc, expected_revision: int) -> None:

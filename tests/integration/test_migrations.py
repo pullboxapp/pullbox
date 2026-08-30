@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,7 @@ _AIRDCPP_SETTINGS_PARENT_REVISION = "r3s4t5u6v789"
 _ISSUE_NUMBER_TEXT_PARENT_REVISION = "y0z1a2b3c456"
 _STORY_ARC_DOMAIN_PARENT_REVISION = "z1a2b3c4d567"
 _STORY_ARC_DOMAIN_REVISION = "a2b3c4d5e678"
+_STORY_ARC_MANAGED_PLACEMENT_REVISION = "b3c4d5e6f789"
 
 
 @pytest.fixture
@@ -141,6 +143,54 @@ def _seed_minimal_import_job(conn: Connection, *, source_path: str) -> int:
         {"source_path": source_path},
     )
     return int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+
+
+def _seed_story_arc_placement_parents(
+    conn: Connection,
+    *,
+    slug: str,
+) -> dict[str, int]:
+    """Seed bounded parents needed for migration-level placement inserts."""
+    _, issue_id = _seed_reader_state_owner(conn, slug=slug)
+    conn.execute(
+        text("INSERT INTO story_arcs (name) VALUES (:name)"),
+        {"name": f"Placement {slug}"},
+    )
+    story_arc_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+    conn.execute(
+        text(
+            "INSERT INTO issue_story_arcs "
+            "(story_arc_id, issue_id, sequence_number, source_ordinal, "
+            "legacy_sequence_was_null, resolution_state, source_kind) VALUES "
+            "(:story_arc_id, :issue_id, 1, 1, 0, 'resolved', 'legacy')"
+        ),
+        {"story_arc_id": story_arc_id, "issue_id": issue_id},
+    )
+    membership_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+    import_job_id = _seed_minimal_import_job(
+        conn,
+        source_path=f"/fixture/{slug}",
+    )
+    conn.execute(
+        text(
+            "INSERT INTO import_job_actions "
+            "(import_job_id, sequence_no, phase, action_type, status) VALUES "
+            "(:job_id, 1, 'story_arc', 'placement', 'COMPLETED')"
+        ),
+        {"job_id": import_job_id},
+    )
+    action_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+    conn.execute(
+        text("INSERT INTO library_roots (name, path, enabled) VALUES (:name, :path, 1)"),
+        {"name": f"Root {slug}", "path": f"/fixture/root-{slug}"},
+    )
+    library_root_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+    return {
+        "membership_id": membership_id,
+        "import_job_id": import_job_id,
+        "action_id": action_id,
+        "library_root_id": library_root_id,
+    }
 
 
 class TestMigrationChain:
@@ -554,7 +604,7 @@ class TestMigrationChain:
                         "(issue_story_arc_id, placement_path, mode, "
                         "ownership, source_kind, state) VALUES "
                         "(:membership_id, '/fixture/arcs/legacy-event/managed.cbz', "
-                        "'copy', 'managed', 'pullbox', 'current')"
+                        "'copy', 'referenced', 'pullbox', 'current')"
                     ),
                     {"membership_id": membership_id},
                 )
@@ -643,12 +693,212 @@ class TestMigrationChain:
 
         assert "resolution_state" in _get_columns(sync_url, "issue_story_arcs")
 
+    def test_managed_story_arc_placement_migration_preserves_referenced_rows_losslessly(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """IU6-A referenced placement evidence survives upgrade and downgrade exactly."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, _STORY_ARC_DOMAIN_REVISION)
+
+        row_sql = text(
+            "SELECT id, issue_story_arc_id, library_file_id, library_root_id, "
+            "placement_path, mode, ownership, symlink_style, source_kind, "
+            "source_import_job_id, creating_action_id, rendered_reading_order, "
+            "policy_schema_version, source_fingerprint, state, last_result, "
+            "last_checked_at, created_at, updated_at "
+            "FROM story_arc_placements WHERE placement_path = :path"
+        )
+        placement_path = "/fixture/arcs/reference/017.cbz"
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                parents = _seed_story_arc_placement_parents(conn, slug="preserve")
+                conn.execute(
+                    text(
+                        "INSERT INTO story_arc_placements "
+                        "(issue_story_arc_id, library_root_id, placement_path, mode, "
+                        "ownership, symlink_style, source_kind, source_import_job_id, "
+                        "creating_action_id, rendered_reading_order, policy_schema_version, "
+                        "source_fingerprint, state, last_result, last_checked_at) VALUES "
+                        "(:membership_id, :library_root_id, :path, 'reference_only', "
+                        "'referenced', NULL, 'mylar3', :job_id, :action_id, 17, 1, "
+                        ":source_fingerprint, 'drifted', :last_result, "
+                        "'2026-08-30 12:34:56')"
+                    ),
+                    {
+                        "membership_id": parents["membership_id"],
+                        "library_root_id": parents["library_root_id"],
+                        "path": placement_path,
+                        "job_id": parents["import_job_id"],
+                        "action_id": parents["action_id"],
+                        "source_fingerprint": '{"size":123,"mtime_ns":456}',
+                        "last_result": '{"result":"preserved"}',
+                    },
+                )
+                before = dict(conn.execute(row_sql, {"path": placement_path}).mappings().one())
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, _STORY_ARC_MANAGED_PLACEMENT_REVISION)
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                upgraded = dict(conn.execute(row_sql, {"path": placement_path}).mappings().one())
+        finally:
+            engine.dispose()
+        assert upgraded == before
+
+        command.downgrade(cfg, _STORY_ARC_DOMAIN_REVISION)
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                downgraded = dict(conn.execute(row_sql, {"path": placement_path}).mappings().one())
+        finally:
+            engine.dispose()
+        assert downgraded == before
+
+    def test_managed_story_arc_placement_migration_enforces_complete_mode_matrix(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Every valid combination persists and every invalid combination is rejected."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+
+        valid = {
+            ("reference_only", "referenced", None),
+            ("copy", "managed", None),
+            ("hardlink", "managed", None),
+            ("symlink", "managed", "absolute"),
+            ("symlink", "managed", "relative"),
+        }
+        all_combinations = set(
+            product(
+                ("reference_only", "copy", "hardlink", "symlink"),
+                ("referenced", "managed"),
+                (None, "absolute", "relative"),
+            )
+        )
+        invalid = sorted(
+            all_combinations - valid,
+            key=lambda item: (item[0], item[1], str(item[2])),
+        )
+        insert_sql = text(
+            "INSERT INTO story_arc_placements "
+            "(issue_story_arc_id, placement_path, mode, ownership, symlink_style) "
+            "VALUES (:membership_id, :path, :mode, :ownership, :symlink_style)"
+        )
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                parents = _seed_story_arc_placement_parents(conn, slug="matrix")
+                for ordinal, (mode, ownership, symlink_style) in enumerate(
+                    sorted(valid, key=lambda item: (item[0], item[1], str(item[2]))),
+                    start=1,
+                ):
+                    conn.execute(
+                        insert_sql,
+                        {
+                            "membership_id": parents["membership_id"],
+                            "path": f"/fixture/arcs/matrix/valid-{ordinal}.cbz",
+                            "mode": mode,
+                            "ownership": ownership,
+                            "symlink_style": symlink_style,
+                        },
+                    )
+
+            for ordinal, (mode, ownership, symlink_style) in enumerate(invalid, start=1):
+                with pytest.raises(IntegrityError), engine.begin() as conn:
+                    conn.execute(
+                        insert_sql,
+                        {
+                            "membership_id": parents["membership_id"],
+                            "path": f"/fixture/arcs/matrix/invalid-{ordinal}.cbz",
+                            "mode": mode,
+                            "ownership": ownership,
+                            "symlink_style": symlink_style,
+                        },
+                    )
+
+            with pytest.raises(IntegrityError), engine.begin() as conn:
+                conn.execute(
+                    insert_sql,
+                    {
+                        "membership_id": parents["membership_id"],
+                        "path": "/fixture/arcs/matrix/move.cbz",
+                        "mode": "move",
+                        "ownership": "managed",
+                        "symlink_style": None,
+                    },
+                )
+
+            with pytest.raises(IntegrityError), engine.begin() as conn:
+                conn.execute(
+                    insert_sql,
+                    {
+                        "membership_id": parents["membership_id"],
+                        "path": "/fixture/arcs/matrix/valid-1.cbz",
+                        "mode": "copy",
+                        "ownership": "managed",
+                        "symlink_style": None,
+                    },
+                )
+
+            with engine.connect() as conn:
+                assert conn.execute(
+                    text("SELECT COUNT(*) FROM story_arc_placements")
+                ).scalar_one() == len(valid)
+        finally:
+            engine.dispose()
+
+    def test_managed_story_arc_placement_downgrade_refuses_managed_rows(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Downgrade fails before DDL rather than silently discarding managed evidence."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                parents = _seed_story_arc_placement_parents(conn, slug="guard")
+                conn.execute(
+                    text(
+                        "INSERT INTO story_arc_placements "
+                        "(issue_story_arc_id, placement_path, mode, ownership) VALUES "
+                        "(:membership_id, '/fixture/arcs/guard/001.cbz', "
+                        "'copy', 'managed')"
+                    ),
+                    {"membership_id": parents["membership_id"]},
+                )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="managed story-arc placements"):
+            command.downgrade(cfg, _STORY_ARC_DOMAIN_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one() == (_STORY_ARC_MANAGED_PLACEMENT_REVISION)
+                assert (
+                    conn.execute(text("SELECT mode FROM story_arc_placements")).scalar_one()
+                    == "copy"
+                )
+        finally:
+            engine.dispose()
+
     def test_story_arc_domain_revision_is_the_single_head(self, alembic_cfg) -> None:
-        """The story-arc schema extends the exact-number head without branching."""
+        """Managed placements extend the story-arc head without branching."""
         cfg, _ = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
 
-        assert script.get_heads() == [_STORY_ARC_DOMAIN_REVISION]
+        assert script.get_heads() == [_STORY_ARC_MANAGED_PLACEMENT_REVISION]
 
     def test_airdcpp_foundation_backfills_populated_history_and_source_order(
         self,

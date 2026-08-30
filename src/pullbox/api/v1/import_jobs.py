@@ -52,6 +52,7 @@ from pullbox.api.v1.import_job_review_actions import (
     unmatch_series_match_response,
     update_file_selection_response,
     update_series_selection_response,
+    update_story_arc_decision_response,
 )
 from pullbox.api.v1.import_job_streams import (
     ensure_import_job_exists_for_stream as _ensure_import_job_exists_for_stream,
@@ -101,6 +102,8 @@ from pullbox.schemas.import_job import (
     RetryImportResponse,
     SeriesSelectionBulkUpdateRequest,
     SeriesSelectionUpdateRequest,
+    StoryArcReviewDecisionRequest,
+    StoryArcReviewDecisionResponse,
 )
 from pullbox.schemas.import_layout import LayoutAnalysisResponse, LayoutPreviewRequest
 from pullbox.services.import_layout_analysis import ImportLayoutAnalyzer
@@ -610,6 +613,30 @@ async def update_series_selection(
         session,
         job_id,
         imported_series_id,
+        body,
+    )
+    await session.commit()
+    return response
+
+
+@router.put(
+    "/{job_id}/story-arcs/{imported_story_arc_id}/decision",
+    response_model=StoryArcReviewDecisionResponse,
+)
+async def update_story_arc_decision(
+    job_id: int,
+    imported_story_arc_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    body: StoryArcReviewDecisionRequest,
+) -> StoryArcReviewDecisionResponse:
+    """Persist an explicit Step 3 select/skip decision for one staged story arc."""
+    service = _make_import_service()
+    response = await update_story_arc_decision_response(
+        service,
+        session,
+        job_id,
+        imported_story_arc_id,
         body,
     )
     await session.commit()

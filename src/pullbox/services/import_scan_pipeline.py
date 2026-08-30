@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError, NotFoundError
 from pullbox.core.library_layout import SourceLayoutSpec
+from pullbox.core.mylar3_reader import Mylar3ArcSettingsSnapshot, Mylar3CollectionSnapshot
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
 from pullbox.models.import_job import (
     ImportJob,
@@ -20,6 +22,15 @@ from pullbox.models.import_job import (
 )
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_progress_runtime import current_item_payload
+from pullbox.services.import_story_arc_resolution import (
+    StoryArcResolutionResult,
+    resolve_staged_story_arc_entries,
+)
+from pullbox.services.import_story_arc_staging import (
+    StoryArcStagingResult,
+    stage_folder_story_arcs,
+    stage_mylar_story_arcs,
+)
 from pullbox.services.import_workflow_state import (
     SCAN_PROGRESS_ANALYZE_START,
     SCAN_PROGRESS_FILE_MATCH_START,
@@ -71,6 +82,57 @@ def _scan_failure_message(exc: Exception) -> str:
             "Please retry the import; WAL mode and shorter UI transactions help prevent this."
         )
     return str(exc)
+
+
+async def _log_story_arc_staging_summary(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    source_type: ImportSourceType,
+    result: StoryArcStagingResult,
+    log_event: LogEventFunc,
+) -> None:
+    """Log path-free counts for review-only story-arc staging."""
+    await log_event(
+        session,
+        job_id,
+        "INFO",
+        "import_story_arc_staging_completed",
+        message="Story-arc evidence staged for review",
+        source_type=source_type.value,
+        arcs_staged=result.arcs_staged,
+        entries_staged=result.entries_staged,
+        needs_review=result.needs_review,
+        cohorts_examined=result.cohorts_examined,
+        cohorts_skipped=result.cohorts_skipped,
+        readlist_present=result.readlist_present,
+        readlist_count=result.readlist_count,
+    )
+
+
+async def _log_story_arc_resolution_summary(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    result: StoryArcResolutionResult,
+    log_event: LogEventFunc,
+) -> None:
+    """Log path-free story-arc resolution counts."""
+    await log_event(
+        session,
+        job_id,
+        "INFO",
+        "import_story_arc_resolution_completed",
+        message="Staged story-arc entries resolved for review",
+        entries_examined=result.entries_examined,
+        resolved=result.resolved,
+        pending=result.pending,
+        missing=result.missing,
+        ambiguous=result.ambiguous,
+        conflicts=result.conflicts,
+        skipped=result.skipped,
+        linked_files=result.linked_files,
+    )
 
 
 async def run_import_scan_pipeline(
@@ -249,6 +311,7 @@ async def run_import_scan_pipeline(
                 mylar3_reader_cls=mylar3_reader_cls,
                 auto_detect_mylar3_path_map=auto_detect_mylar3_path_map,
                 log_event=log_event,
+                raise_if_cancelled=raise_if_cancelled,
             )
             await emit_scan_progress(
                 status=ImportJobStatus.SCANNING,
@@ -284,6 +347,24 @@ async def run_import_scan_pipeline(
                 session,
                 job,
                 discovered_list,
+            )
+
+        if job.source_type == ImportSourceType.FILESYSTEM:
+
+            async def check_folder_staging_cancellation() -> None:
+                await raise_if_cancelled(session, job_id)
+
+            story_arc_staging = await stage_folder_story_arcs(
+                session,
+                import_job_id=job_id,
+                cancellation_check=check_folder_staging_cancellation,
+            )
+            await _log_story_arc_staging_summary(
+                session,
+                job_id=job_id,
+                source_type=job.source_type,
+                result=story_arc_staging,
+                log_event=log_event,
             )
 
         await log_event(
@@ -407,6 +488,21 @@ async def run_import_scan_pipeline(
         file_matching_started_at = time.monotonic()
         await run_file_matching(session, job, progress_callback=progress_callback)
         file_matching_duration_ms = round((time.monotonic() - file_matching_started_at) * 1000)
+
+        async def check_story_arc_resolution_cancellation() -> None:
+            await raise_if_cancelled(session, job_id)
+
+        story_arc_resolution = await resolve_staged_story_arc_entries(
+            session,
+            import_job_id=job_id,
+            cancellation_check=check_story_arc_resolution_cancellation,
+        )
+        await _log_story_arc_resolution_summary(
+            session,
+            job_id=job_id,
+            result=story_arc_resolution,
+            log_event=log_event,
+        )
         await raise_if_cancelled(session, job_id)
 
         job.status = ImportJobStatus.REVIEW
@@ -508,6 +604,7 @@ async def _load_mylar3_discovered_series(
     mylar3_reader_cls: Any,
     auto_detect_mylar3_path_map: AutoDetectPathMapFunc,
     log_event: LogEventFunc,
+    raise_if_cancelled: RaiseIfCancelledFunc | None = None,
 ) -> list[DiscoveredSeries]:
     db_path = Path(job.source_path)
     if db_path.is_dir():
@@ -540,7 +637,29 @@ async def _load_mylar3_discovered_series(
         path_map=path_map or None,
         source_layout=SourceLayoutSpec.from_dict(dict(job.source_layout_snapshot or {})),
     )
-    discovered_list = await reader.read_series()
+    if raise_if_cancelled is not None:
+        await raise_if_cancelled(session, job_id)
+
+    snapshot = await _read_mylar3_collection_snapshot(reader)
+    discovered_list = list(snapshot.series)
+
+    async def check_mylar_staging_cancellation() -> None:
+        if raise_if_cancelled is not None:
+            await raise_if_cancelled(session, job_id)
+
+    story_arc_staging = await stage_mylar_story_arcs(
+        session,
+        import_job_id=job_id,
+        snapshot=snapshot,
+        cancellation_check=check_mylar_staging_cancellation,
+    )
+    await _log_story_arc_staging_summary(
+        session,
+        job_id=job_id,
+        source_type=job.source_type,
+        result=story_arc_staging,
+        log_event=log_event,
+    )
 
     path_status_counts: dict[str, int] = {}
     mapping_applied_series = 0
@@ -575,6 +694,31 @@ async def _load_mylar3_discovered_series(
     job.series_found = len(discovered_list)
     await session.commit()
     return list(discovered_list)
+
+
+async def _read_mylar3_collection_snapshot(reader: Any) -> Mylar3CollectionSnapshot:
+    """Read one complete Mylar snapshot, with a series-only test-double fallback."""
+    read_collection = getattr(reader, "read_collection", None)
+    if callable(read_collection) and inspect.iscoroutinefunction(read_collection):
+        return cast("Mylar3CollectionSnapshot", await read_collection())
+
+    read_snapshot = getattr(reader, "read_snapshot", None)
+    if callable(read_snapshot) and inspect.iscoroutinefunction(read_snapshot):
+        return cast("Mylar3CollectionSnapshot", await read_snapshot())
+
+    discovered_list = await reader.read_series()
+    return Mylar3CollectionSnapshot(
+        series=tuple(discovered_list),
+        story_arcs=(),
+        storyarcs_present=False,
+        readlist_present=False,
+        readlist_count=0,
+        arc_settings=Mylar3ArcSettingsSnapshot(
+            present=False,
+            parse_warnings=(),
+            values=(),
+        ),
+    )
 
 
 async def _scan_collection_discovered_series(

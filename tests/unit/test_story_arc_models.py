@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from itertools import product
+
 import pytest
 from sqlalchemy import CheckConstraint, inspect
 from sqlalchemy import Enum as SQLAlchemyEnum
+from sqlalchemy.exc import IntegrityError
 
 from pullbox.models.import_job import ImportedFile, ImportJob
 from pullbox.models.issue import Issue
+from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
     IssueStoryArc,
@@ -23,6 +27,35 @@ from pullbox.models.story_arc import (
     StoryArcSymlinkStyle,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+
+_VALID_PLACEMENT_COMBINATIONS = {
+    (
+        StoryArcPlacementMode.REFERENCE_ONLY,
+        StoryArcPlacementOwnership.REFERENCED,
+        None,
+    ),
+    (StoryArcPlacementMode.COPY, StoryArcPlacementOwnership.MANAGED, None),
+    (StoryArcPlacementMode.HARDLINK, StoryArcPlacementOwnership.MANAGED, None),
+    (
+        StoryArcPlacementMode.SYMLINK,
+        StoryArcPlacementOwnership.MANAGED,
+        StoryArcSymlinkStyle.ABSOLUTE,
+    ),
+    (
+        StoryArcPlacementMode.SYMLINK,
+        StoryArcPlacementOwnership.MANAGED,
+        StoryArcSymlinkStyle.RELATIVE,
+    ),
+}
+_INVALID_PLACEMENT_COMBINATIONS = tuple(
+    combination
+    for combination in product(
+        tuple(StoryArcPlacementMode),
+        tuple(StoryArcPlacementOwnership),
+        (None, *tuple(StoryArcSymlinkStyle)),
+    )
+    if combination not in _VALID_PLACEMENT_COMBINATIONS
+)
 
 
 def _column_names(model: type[object]) -> set[str]:
@@ -307,7 +340,7 @@ def test_imported_files_capture_folder_cohort_order_without_reorganizing_source(
     assert "ix_import_files_job_cohort_order" in indexes
 
 
-def test_iu6a_placement_schema_accepts_only_referenced_existing_artifacts() -> None:
+def test_iu6b_placement_schema_freezes_managed_mode_constraints_and_audit_fields() -> None:
     assert StoryArcPlacement.__tablename__ == "story_arc_placements"
     assert {
         "issue_story_arc_id",
@@ -322,6 +355,7 @@ def test_iu6a_placement_schema_accepts_only_referenced_existing_artifacts() -> N
         "creating_action_id",
         "rendered_reading_order",
         "policy_schema_version",
+        "operation_token",
         "source_fingerprint",
         "state",
         "last_result",
@@ -341,10 +375,17 @@ def test_iu6a_placement_schema_accepts_only_referenced_existing_artifacts() -> N
     indexes = {index.name for index in StoryArcPlacement.__table__.indexes}
     assert "uq_story_arc_placements_path" in constraints
     assert {
-        "ck_story_arc_placements_reference_only_mode",
-        "ck_story_arc_placements_reference_only_owner",
-        "ck_story_arc_placements_no_symlink_style",
+        "ck_story_arc_placements_mode_ownership",
+        "ck_story_arc_placements_symlink_style",
     } <= constraints
+    assert (
+        not {
+            "ck_story_arc_placements_reference_only_mode",
+            "ck_story_arc_placements_reference_only_owner",
+            "ck_story_arc_placements_no_symlink_style",
+        }
+        & constraints
+    )
     assert {
         "ix_story_arc_placements_membership",
         "ix_story_arc_placements_library_file",
@@ -357,22 +398,116 @@ def test_iu6a_placement_schema_accepts_only_referenced_existing_artifacts() -> N
         mode=StoryArcPlacementMode.REFERENCE_ONLY,
         ownership=StoryArcPlacementOwnership.REFERENCED,
         symlink_style=None,
+    ).validate_configuration()
+
+
+@pytest.mark.parametrize(
+    ("mode", "ownership", "symlink_style"),
+    sorted(
+        _VALID_PLACEMENT_COMBINATIONS,
+        key=lambda item: (item[0].value, item[1].value, str(item[2])),
+    ),
+)
+def test_iu6b_placement_validation_accepts_every_valid_combination_in_any_kwarg_order(
+    mode: StoryArcPlacementMode,
+    ownership: StoryArcPlacementOwnership,
+    symlink_style: StoryArcSymlinkStyle | None,
+) -> None:
+    forward = StoryArcPlacement(
+        issue_story_arc_id=1,
+        placement_path=f"arc/forward-{mode.value}-{symlink_style}.cbz",
+        mode=mode,
+        ownership=ownership,
+        symlink_style=symlink_style,
     )
-    with pytest.raises(ValueError, match="reference-only"):
-        StoryArcPlacement(
-            issue_story_arc_id=1,
-            placement_path="arc/001.cbz",
+    reverse_kwargs = {
+        "symlink_style": symlink_style,
+        "ownership": ownership,
+        "mode": mode,
+        "placement_path": f"arc/reverse-{mode.value}-{symlink_style}.cbz",
+        "issue_story_arc_id": 1,
+    }
+    reverse = StoryArcPlacement(**reverse_kwargs)
+
+    forward.validate_configuration()
+    reverse.validate_configuration()
+
+
+@pytest.mark.parametrize(
+    ("mode", "ownership", "symlink_style"),
+    _INVALID_PLACEMENT_COMBINATIONS,
+)
+def test_iu6b_placement_validation_rejects_every_invalid_combination(
+    mode: StoryArcPlacementMode,
+    ownership: StoryArcPlacementOwnership,
+    symlink_style: StoryArcSymlinkStyle | None,
+) -> None:
+    placement = StoryArcPlacement(
+        issue_story_arc_id=1,
+        placement_path=f"arc/invalid-{mode.value}-{ownership.value}-{symlink_style}.cbz",
+        mode=mode,
+        ownership=ownership,
+        symlink_style=symlink_style,
+    )
+
+    with pytest.raises(ValueError, match="placement"):
+        placement.validate_configuration()
+
+
+@pytest.mark.asyncio
+async def test_iu6b_create_all_schema_enforces_managed_mode_matrix(db_session) -> None:
+    """Base.metadata.create_all carries the authoritative combination checks."""
+    series = Series(title="Placement Matrix", sort_title="placement matrix")
+    issue = Issue(series=series, issue_number=1)
+    arc = StoryArc(name="Placement Matrix")
+    membership = IssueStoryArc(
+        story_arc=arc,
+        issue=issue,
+        sequence_number=1,
+        source_ordinal=1,
+        resolution_state=StoryArcResolutionState.RESOLVED,
+    )
+    db_session.add_all([series, issue, arc, membership])
+    await db_session.flush()
+
+    await db_session.execute(
+        StoryArcPlacement.__table__.insert().values(
+            issue_story_arc_id=membership.id,
+            placement_path="arc/managed-copy.cbz",
             mode=StoryArcPlacementMode.COPY,
-        )
-    with pytest.raises(ValueError, match="referenced"):
-        StoryArcPlacement(
-            issue_story_arc_id=1,
-            placement_path="arc/001.cbz",
             ownership=StoryArcPlacementOwnership.MANAGED,
+            symlink_style=None,
         )
-    with pytest.raises(ValueError, match="symlink style"):
-        StoryArcPlacement(
-            issue_story_arc_id=1,
-            placement_path="arc/001.cbz",
-            symlink_style=StoryArcSymlinkStyle.RELATIVE,
+    )
+    orm_symlink = StoryArcPlacement(
+        symlink_style=StoryArcSymlinkStyle.RELATIVE,
+        ownership=StoryArcPlacementOwnership.MANAGED,
+        mode=StoryArcPlacementMode.SYMLINK,
+        placement_path="arc/managed-relative-symlink.cbz",
+        issue_story_arc_id=membership.id,
+    )
+    db_session.add(orm_symlink)
+    await db_session.flush()
+
+    savepoint = await db_session.begin_nested()
+    with pytest.raises(IntegrityError):
+        await db_session.execute(
+            StoryArcPlacement.__table__.insert().values(
+                issue_story_arc_id=membership.id,
+                placement_path="arc/invalid-referenced-copy.cbz",
+                mode=StoryArcPlacementMode.COPY,
+                ownership=StoryArcPlacementOwnership.REFERENCED,
+                symlink_style=None,
+            )
         )
+    await savepoint.rollback()
+
+    invalid_orm = StoryArcPlacement(
+        issue_story_arc_id=membership.id,
+        placement_path="arc/invalid-orm-copy.cbz",
+        mode=StoryArcPlacementMode.COPY,
+        ownership=StoryArcPlacementOwnership.REFERENCED,
+    )
+    db_session.add(invalid_orm)
+    with pytest.raises(ValueError, match="requires managed ownership"):
+        await db_session.flush()

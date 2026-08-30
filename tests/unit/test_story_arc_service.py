@@ -8,10 +8,15 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, select
 
-from pullbox.models.issue import Issue
+from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
-from pullbox.models.story_arc import IssueStoryArc
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArcPlacement,
+    StoryArcPlacementMode,
+    StoryArcPlacementOwnership,
+)
 from pullbox.services.story_arc_service import (
     DuplicateStoryArcMembershipError,
     StoryArcConflictError,
@@ -135,6 +140,117 @@ async def test_one_canonical_issue_can_belong_to_multiple_arcs(db_session) -> No
     assert first.story_arc_id != second.story_arc_id
     assert await db_session.scalar(select(func.count(Issue.id))) == 1
     assert await db_session.scalar(select(func.count(IssueStoryArc.id))) == 2
+
+
+async def test_arc_monitoring_keeps_canonical_issue_state_independent_from_series_monitoring(
+    db_session,
+) -> None:
+    service = StoryArcService()
+    issue = await _issue(
+        db_session,
+        series_name="Unmonitored Series",
+        number=1,
+        exact_number="1",
+    )
+    issue.series.monitored = False
+    issue.status = IssueStatus.SKIPPED
+    arc = await service.create(
+        db_session,
+        name="Monitored Arc",
+        monitored=True,
+        search_missing=True,
+    )
+
+    membership = await service.add_membership(
+        db_session,
+        arc.id,
+        issue_id=issue.id,
+        sequence_number=1,
+    )
+
+    assert membership.sync_eligible is False
+    assert issue.status == IssueStatus.SKIPPED
+
+
+async def test_enabling_arc_search_preserves_existing_canonical_skip_state(
+    db_session,
+) -> None:
+    service = StoryArcService()
+    searchable = await _issue(
+        db_session,
+        series_name="Searchable Series",
+        number=1,
+        exact_number="1",
+    )
+    manually_skipped = await _issue(
+        db_session,
+        series_name="Manual Skip Series",
+        number=2,
+        exact_number="2",
+    )
+    searchable.status = IssueStatus.SKIPPED
+    manually_skipped.status = IssueStatus.SKIPPED
+    manually_skipped.manual_skip = True
+    arc = await service.create(db_session, name="Deferred Monitoring")
+    await service.add_membership(
+        db_session,
+        arc.id,
+        issue_id=searchable.id,
+        sequence_number=1,
+    )
+    await service.add_membership(
+        db_session,
+        arc.id,
+        issue_id=manually_skipped.id,
+        sequence_number=2,
+    )
+
+    await service.update(
+        db_session,
+        arc.id,
+        expected_revision=3,
+        monitored=True,
+        search_missing=True,
+    )
+
+    assert searchable.status == IssueStatus.SKIPPED
+    assert manually_skipped.status == IssueStatus.SKIPPED
+
+
+async def test_arc_sync_toggle_updates_resolved_membership_eligibility(db_session) -> None:
+    service = StoryArcService()
+    issue = await _issue(
+        db_session,
+        series_name="Synchronization Series",
+        number=1,
+        exact_number="1",
+    )
+    arc = await service.create(db_session, name="Synchronization Arc")
+    membership = await service.add_membership(
+        db_session,
+        arc.id,
+        issue_id=issue.id,
+        sequence_number=1,
+    )
+    assert membership.sync_eligible is False
+
+    await service.update(
+        db_session,
+        arc.id,
+        expected_revision=2,
+        sync_enabled=True,
+    )
+    await db_session.refresh(membership)
+    assert membership.sync_eligible is True
+
+    await service.update(
+        db_session,
+        arc.id,
+        expected_revision=3,
+        sync_enabled=False,
+    )
+    await db_session.refresh(membership)
+    assert membership.sync_eligible is False
 
 
 async def test_add_membership_is_idempotent_but_rejects_conflicting_duplicate(db_session) -> None:
@@ -382,6 +498,53 @@ async def test_update_remove_and_reorder_memberships_preserve_canonical_issue(
     assert await db_session.get(Issue, second_issue.id) is second_issue
     assert await db_session.get(IssueStoryArc, second.id) is None
     assert await db_session.scalar(select(func.count(Issue.id))) == 2
+
+
+async def test_managed_placement_blocks_mutations_without_a_filesystem_plan(
+    db_session,
+) -> None:
+    service = StoryArcService()
+    issue = await _issue(
+        db_session,
+        series_name="Batman",
+        number=1,
+        exact_number="1",
+    )
+    arc = await service.create(db_session, name="Court of Owls")
+    membership = await service.add_membership(
+        db_session,
+        arc.id,
+        issue_id=issue.id,
+        sequence_number=1,
+    )
+    db_session.add(
+        StoryArcPlacement(
+            issue_story_arc_id=membership.id,
+            placement_path="/arcs/Court of Owls/001.cbz",
+            mode=StoryArcPlacementMode.COPY,
+            ownership=StoryArcPlacementOwnership.MANAGED,
+        )
+    )
+    await db_session.flush()
+
+    with pytest.raises(StoryArcValidationError, match="managed placement"):
+        await service.update(
+            db_session,
+            arc.id,
+            expected_revision=2,
+            name="The Court of Owls",
+        )
+    with pytest.raises(StoryArcValidationError, match="managed placement"):
+        await service.update_membership(db_session, membership.id, sequence_number=2)
+    with pytest.raises(StoryArcValidationError, match="managed placement"):
+        await service.reorder_memberships(
+            db_session,
+            arc.id,
+            ordered_membership_ids=[membership.id],
+            expected_revision=2,
+        )
+    with pytest.raises(StoryArcValidationError, match="managed placement"):
+        await service.remove_membership(db_session, membership.id)
 
 
 def test_story_arc_service_has_no_provider_dependency() -> None:

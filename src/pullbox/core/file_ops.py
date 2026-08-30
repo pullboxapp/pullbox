@@ -100,6 +100,27 @@ logger = structlog.get_logger(__name__)
 _DEFERRED_REPLACEMENT_STASHES_KEY = "pullbox_deferred_replacement_stashes"
 
 
+async def _enqueue_story_arc_sync_safely(
+    session: AsyncSession,
+    library_file: LibraryFile,
+) -> None:
+    """Persist automatic arc work without allowing outbox failure to abort ingestion."""
+    from pullbox.services.story_arc_sync_queue import enqueue_story_arc_sync_work
+
+    try:
+        async with session.begin_nested():
+            await enqueue_story_arc_sync_work(session, library_file)
+    except Exception:
+        # The scheduled discrepancy pass can recover missing work. Canonical
+        # registration must remain durable even when this optional producer fails.
+        logger.warning(
+            "story_arc_sync_enqueue_deferred",
+            library_file_id=library_file.id,
+            issue_id=library_file.issue_id,
+            exc_info=True,
+        )
+
+
 def _safe_move(src: Path, dst: Path) -> None:
     """Compatibility wrapper for older move-path callers."""
     _library_safe_move(src, dst)
@@ -134,6 +155,8 @@ def _pending_replacement_stashes(session: AsyncSession) -> list[_ReplacementStas
 @event.listens_for(AsyncSession.sync_session_class, "after_commit")
 def _cleanup_deferred_replacement_stashes(session: Any) -> None:
     """Discard staged originals only after the database commit succeeds."""
+    if session.in_nested_transaction():
+        return
     stashes = session.info.pop(_DEFERRED_REPLACEMENT_STASHES_KEY, [])
     for stash in stashes:
         _discard_replacement_stash_sync(stash)
@@ -142,6 +165,8 @@ def _cleanup_deferred_replacement_stashes(session: Any) -> None:
 @event.listens_for(AsyncSession.sync_session_class, "after_rollback")
 def _restore_deferred_replacement_stashes(session: Any) -> None:
     """Restore staged originals when a caller rolls back after registration."""
+    if session.in_nested_transaction():
+        return
     stashes = session.info.pop(_DEFERRED_REPLACEMENT_STASHES_KEY, [])
     for stash in reversed(stashes):
         _restore_replacement_stash_sync(stash)
@@ -710,6 +735,7 @@ async def register_library_file_with_metadata(
                     registered_file=existing,
                 )
                 await session.flush()
+                await _enqueue_story_arc_sync_safely(session, existing)
                 _defer_replacement_stash_cleanup(session, replacement_stash)
                 replacement_finalized = True
                 logger.info(
@@ -778,6 +804,7 @@ async def register_library_file_with_metadata(
         )
 
         await session.flush()
+        await _enqueue_story_arc_sync_safely(session, lf)
         _defer_replacement_stash_cleanup(session, replacement_stash)
         replacement_finalized = True
 

@@ -1,0 +1,348 @@
+<section data-testid="import-review-story-arcs" aria-labelledby="import-story-arc-review-heading">
+  <div class="border-b border-pb-border px-4 py-4">
+    <h3 id="import-story-arc-review-heading" class="text-sm font-semibold text-pb-text">
+      Story arcs detected for this import
+    </h3>
+    <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+      Choose whether to create or merge each arc. Missing entries stay in reading order; safety and identity conflicts must be fixed before selection.
+    </p>
+  </div>
+
+  <div class="overflow-x-auto">
+    <table class="downloads-table min-w-[920px] text-sm">
+      <caption class="sr-only">
+        Staged story arcs with source order, provenance, entry resolution counts, merge target, and import decision.
+      </caption>
+      <thead>
+        <tr>
+          <th>Story arc</th>
+          <th class="w-28">Source</th>
+          <th class="w-32">Order</th>
+          <th>Entry review</th>
+          <th>Import target</th>
+          <th class="w-48 is-right">Decision</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for arc in story_arc_items %}
+        {% set source_label = {
+          'mylar3': 'Mylar3',
+          'folder': 'Folder',
+          'comicinfo': 'ComicInfo',
+          'provider': 'Provider',
+          'pullbox': 'Pullbox',
+          'legacy': 'Legacy',
+        }.get(arc.source_kind.value, arc.source_kind.value|replace('_', ' ')|title) %}
+        {% set arc_entry_review_url = "/import/" ~ job.id ~ "/review-partial?status=story_arcs&page=" ~ page ~ "&story_arc_id=" ~ arc.id ~ "&arc_entry_state=" ~ story_arc_entry_state_filter.value ~ "&arc_entry_page=1" %}
+        <tr
+          data-import-story-arc-row="{{ arc.id }}"
+          {% if story_arc_selected_id == arc.id %}class="bg-pb-card-hover/40"{% endif %}
+        >
+          <td>
+            <p class="font-medium text-pb-text">{{ arc.name }}</p>
+            <p class="mt-0.5 text-[11px] text-pb-text-dim">
+              {{ 'Merge into ' ~ arc.proposed_story_arc_name if arc.proposed_story_arc_name else 'Create a new canonical story arc' }}
+            </p>
+          </td>
+          <td>
+            <span class="pill pill-neutral">{{ source_label }}</span>
+          </td>
+          <td class="font-mono text-xs text-pb-text-sec">Source order {{ arc.source_ordinal }}</td>
+          <td>
+            <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs text-pb-text-sec">
+              <span>{{ arc.entries_resolved }} resolved</span>
+              <span>{{ arc.entries_missing }} missing</span>
+              <span>{{ arc.entries_conflict }} conflicts</span>
+              {% if arc.entries_pending %}<span>{{ arc.entries_pending }} pending</span>{% endif %}
+              {% if arc.entries_ambiguous %}<span>{{ arc.entries_ambiguous }} ambiguous</span>{% endif %}
+              {% if arc.entries_skipped %}<span>{{ arc.entries_skipped }} skipped</span>{% endif %}
+            </div>
+            <p class="mt-1 text-[11px] text-pb-text-dim">{{ arc.entries_total }} entries total</p>
+            <button
+              type="button"
+              data-testid="import-story-arc-review-entries-{{ arc.id }}"
+              aria-pressed="{{ 'true' if story_arc_selected_id == arc.id else 'false' }}"
+              hx-get="{{ arc_entry_review_url }}"
+              hx-target="#import-step-review-shell"
+              hx-swap="outerHTML"
+              hx-sync="#import-step-review-shell:replace"
+              hx-push-url="false"
+              class="btn-ghost btn-sm mt-2"
+            >
+              {{ 'Reviewing entries' if story_arc_selected_id == arc.id else 'Review entries' }}
+            </button>
+          </td>
+          <td>
+            <label for="import-story-arc-target-{{ arc.id }}" class="sr-only">Import target for {{ arc.name }}</label>
+            <select
+              id="import-story-arc-target-{{ arc.id }}"
+              class="input-pb min-w-48 text-xs"
+              {% if arc.selection_blocked %}disabled{% endif %}
+            >
+              <option value="" {% if not arc.proposed_story_arc_id %}selected{% endif %}>Create new story arc</option>
+              {% for candidate in arc.merge_candidates %}
+              <option value="{{ candidate.id }}" {% if candidate.id == arc.proposed_story_arc_id %}selected{% endif %}>
+                Merge into {{ candidate.name }}
+              </option>
+              {% endfor %}
+            </select>
+          </td>
+          <td class="is-right">
+            <fieldset aria-label="Story arc decision for {{ arc.name }}" class="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                data-testid="import-story-arc-select-{{ arc.id }}"
+                @click="updateStoryArcDecision({{ arc.id }}, 'select', document.getElementById('import-story-arc-target-{{ arc.id }}'))"
+                {% if arc.selection_blocked %}disabled{% endif %}
+                class="btn-primary btn-sm disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {{ 'Selected' if arc.selected_for_import else 'Select arc' }}
+              </button>
+              <button
+                type="button"
+                data-testid="import-story-arc-skip-{{ arc.id }}"
+                @click="updateStoryArcDecision({{ arc.id }}, 'skip', null)"
+                class="btn-ghost btn-sm"
+              >
+                {{ 'Skipped' if arc.status.value == 'skipped' else 'Skip' }}
+              </button>
+            </fieldset>
+            {% if arc.selection_block_reason %}
+            <p class="mt-2 max-w-64 text-right text-[11px] leading-4 text-pb-warning">
+              {{ arc.selection_block_reason }}
+            </p>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="6" class="px-4 py-8 text-center text-pb-text-dim">
+            No story arcs were staged for this import.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if story_arc_selected_item %}
+  <section
+    data-testid="import-story-arc-entry-review"
+    aria-labelledby="import-story-arc-entry-review-heading"
+    class="border-t border-pb-border"
+  >
+    <div class="flex flex-col gap-3 border-b border-pb-border px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
+      <div>
+        <h4 id="import-story-arc-entry-review-heading" class="text-sm font-semibold text-pb-text">
+          Review {{ story_arc_selected_item.name }} entries
+        </h4>
+        <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+          Check the source order and exact issue text before you import this story arc.
+        </p>
+        {% set attention_parts = [] %}
+        {% if story_arc_selected_item.entries_missing %}
+          {% set _ = attention_parts.append(story_arc_selected_item.entries_missing ~ " missing") %}
+        {% endif %}
+        {% if story_arc_selected_item.entries_conflict %}
+          {% set _ = attention_parts.append(story_arc_selected_item.entries_conflict ~ " conflict" ~ ("s" if story_arc_selected_item.entries_conflict != 1 else "")) %}
+        {% endif %}
+        {% if story_arc_selected_item.entries_ambiguous %}
+          {% set _ = attention_parts.append(story_arc_selected_item.entries_ambiguous ~ " ambiguous") %}
+        {% endif %}
+        {% if story_arc_selected_item.entries_pending %}
+          {% set _ = attention_parts.append(story_arc_selected_item.entries_pending ~ " pending") %}
+        {% endif %}
+        {% if attention_parts %}
+        <p class="mt-2 text-xs font-medium text-pb-warning">
+          Needs attention: {{ attention_parts|join(', ') }}.
+        </p>
+        {% endif %}
+      </div>
+
+      <form
+        method="get"
+        action="/import/{{ job.id }}/review-partial"
+        hx-get="/import/{{ job.id }}/review-partial"
+        hx-target="#import-step-review-shell"
+        hx-swap="outerHTML"
+        hx-sync="#import-step-review-shell:replace"
+        hx-push-url="false"
+        class="flex flex-wrap items-end gap-2"
+      >
+        <input type="hidden" name="status" value="story_arcs">
+        <input type="hidden" name="page" value="{{ page }}">
+        <input type="hidden" name="story_arc_id" value="{{ story_arc_selected_id }}">
+        <input type="hidden" name="arc_entry_page" value="1">
+        <div>
+          <label for="import-story-arc-entry-state" class="mb-1 block text-xs font-medium text-pb-text-sec">
+            Entry state
+          </label>
+          <select
+            id="import-story-arc-entry-state"
+            name="arc_entry_state"
+            data-testid="import-story-arc-entry-filter"
+            class="input-pb min-w-40 text-xs"
+          >
+            {% for state_option in story_arc_entry_state_options %}
+            <option
+              value="{{ state_option.value }}"
+              {% if state_option == story_arc_entry_state_filter %}selected{% endif %}
+            >
+              {{ 'All states' if state_option.value == 'all' else state_option.value|replace('_', ' ')|title }}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+        <button type="submit" class="btn-secondary btn-sm">Apply filter</button>
+      </form>
+    </div>
+
+    {% if story_arc_entry_items %}
+    <div class="overflow-x-auto">
+      <table class="downloads-table min-w-[1040px] text-sm">
+        <caption class="sr-only">
+          Ordered entries for {{ story_arc_selected_item.name }}, including exact source issue text and canonical match state.
+        </caption>
+        <thead>
+          <tr>
+            <th class="w-40">Order</th>
+            <th>Source issue</th>
+            <th>Issue title</th>
+            <th>Canonical match</th>
+            <th class="w-44">Source evidence</th>
+            <th class="w-28">Decision</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in story_arc_entry_items %}
+          {% set resolution_class = {
+            'resolved': 'pill-success',
+            'missing': 'pill-warning',
+            'ambiguous': 'pill-warning',
+            'conflict': 'pill-error',
+            'pending': 'pill-neutral',
+            'skipped': 'pill-neutral',
+          }.get(entry.resolution_state.value, 'pill-neutral') %}
+          <tr data-import-story-arc-entry-row="{{ entry.id }}">
+            <td>
+              <p class="font-mono text-xs text-pb-text-sec">Source order {{ entry.source_ordinal }}</p>
+              <p class="mt-1 font-mono text-[11px] text-pb-text-dim">
+                {% if entry.reading_order_text %}
+                  Reading order {{ entry.reading_order_text }}
+                {% elif entry.reading_order is not none %}
+                  Reading order {{ entry.reading_order }}
+                {% else %}
+                  Reading order not provided
+                {% endif %}
+              </p>
+            </td>
+            <td>
+              <p class="font-medium text-pb-text">{{ entry.source_series_name or 'Series not provided' }}</p>
+              <p class="mt-1 font-mono text-xs text-pb-text-sec">
+                Issue {{ entry.source_issue_number_text or 'not provided' }}
+              </p>
+            </td>
+            <td>
+              <p class="text-pb-text-sec">{{ entry.source_issue_title or 'No issue title provided' }}</p>
+            </td>
+            <td>
+              <span class="pill {{ resolution_class }}">{{ entry.resolution_state.value|replace('_', ' ')|title }}</span>
+              {% if entry.matched_issue_id and entry.matched_series_title and entry.matched_issue_number_text %}
+              <p class="mt-1 text-xs text-pb-text-sec">
+                Matched to {{ entry.matched_series_title }} #{{ entry.matched_issue_number_text }}
+              </p>
+              {% if entry.matched_issue_title %}
+              <p class="mt-0.5 text-[11px] text-pb-text-dim">{{ entry.matched_issue_title }}</p>
+              {% endif %}
+              {% elif entry.resolution_state.value == 'resolved' %}
+              <p class="mt-1 text-xs text-pb-warning">Canonical match details aren't available.</p>
+              {% elif entry.resolution_state.value == 'conflict' %}
+              <p class="mt-1 text-xs text-pb-warning">Multiple canonical matches need review.</p>
+              {% elif entry.resolution_state.value == 'missing' %}
+              <p class="mt-1 text-xs text-pb-text-sec">No canonical issue matched this entry.</p>
+              {% elif entry.resolution_state.value == 'ambiguous' %}
+              <p class="mt-1 text-xs text-pb-warning">The available evidence isn't specific enough.</p>
+              {% elif entry.resolution_state.value == 'pending' %}
+              <p class="mt-1 text-xs text-pb-text-sec">Matching hasn't finished for this entry.</p>
+              {% else %}
+              <p class="mt-1 text-xs text-pb-text-sec">This entry won't be imported.</p>
+              {% endif %}
+            </td>
+            <td>
+              <p class="text-xs text-pb-text-sec">
+                {{ 'Source location recorded' if entry.source_location_present else 'No source location recorded' }}
+              </p>
+              <p class="mt-1 text-[11px] text-pb-text-dim">
+                {{ entry.source_kind.value|replace('_', ' ')|title }} evidence
+              </p>
+            </td>
+            <td>
+              <span class="pill {{ 'pill-success' if entry.selected_for_import else 'pill-neutral' }}">
+                {{ 'Selected' if entry.selected_for_import else 'Skipped' }}
+              </span>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-8 text-center">
+      {% if story_arc_entry_total == 0 and story_arc_entry_state_filter.value == 'all' %}
+      <p class="text-sm font-medium text-pb-text">This story arc has no entries to review.</p>
+      <p class="mt-1 text-xs text-pb-text-sec">You can skip the arc or return after its source data is fixed.</p>
+      {% else %}
+      <p class="text-sm font-medium text-pb-text">
+        No {{ story_arc_entry_state_filter.value|replace('_', ' ') }} entries in this story arc.
+      </p>
+      <p class="mt-1 text-xs text-pb-text-sec">Choose All states to review every entry.</p>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% set story_arc_entry_total_pages = ((story_arc_entry_total - 1) // story_arc_entry_page_size) + 1 if story_arc_entry_total > 0 else 1 %}
+    {% set story_arc_entry_pagination_base = "/import/" ~ job.id ~ "/review-partial?status=story_arcs&page=" ~ page ~ "&story_arc_id=" ~ story_arc_selected_id ~ "&arc_entry_state=" ~ story_arc_entry_state_filter.value %}
+    <div
+      data-testid="import-story-arc-entry-pagination"
+      class="flex items-center justify-between gap-3 border-t border-pb-border px-4 py-3"
+    >
+      <p class="text-xs text-pb-text-sec">
+        {{ story_arc_entry_total }} {{ 'entry' if story_arc_entry_total == 1 else 'entries' }}
+        · Page {{ story_arc_entry_page }} of {{ story_arc_entry_total_pages }}
+      </p>
+      {% if story_arc_entry_total_pages > 1 %}
+      <nav aria-label="Story arc entry pages" class="flex items-center gap-2">
+        {% if story_arc_entry_page > 1 %}
+        <button
+          type="button"
+          data-testid="import-story-arc-entry-page-prev"
+          hx-get="{{ story_arc_entry_pagination_base }}&arc_entry_page={{ story_arc_entry_page - 1 }}"
+          hx-target="#import-step-review-shell"
+          hx-swap="outerHTML"
+          hx-sync="#import-step-review-shell:replace"
+          hx-push-url="false"
+          class="btn-ghost btn-sm"
+        >
+          Prev
+        </button>
+        {% endif %}
+        {% if story_arc_entry_page < story_arc_entry_total_pages %}
+        <button
+          type="button"
+          data-testid="import-story-arc-entry-page-next"
+          hx-get="{{ story_arc_entry_pagination_base }}&arc_entry_page={{ story_arc_entry_page + 1 }}"
+          hx-target="#import-step-review-shell"
+          hx-swap="outerHTML"
+          hx-sync="#import-step-review-shell:replace"
+          hx-push-url="false"
+          class="btn-ghost btn-sm"
+        >
+          Next
+        </button>
+        {% endif %}
+      </nav>
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+</section>

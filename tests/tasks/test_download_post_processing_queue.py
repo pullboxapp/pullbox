@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -13,7 +14,11 @@ from pullbox.models import Base
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
-from pullbox.tasks.download_post_processing_queue import _claim_completed_download
+from pullbox.tasks import download_post_processing_queue
+from pullbox.tasks.download_post_processing_queue import (
+    _claim_completed_download,
+    process_completed,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -96,3 +101,30 @@ async def test_stale_completed_download_claim_is_restart_recoverable(
 
     assert recovered is not None
     assert recovered != "abandoned"
+
+
+@pytest.mark.asyncio
+async def test_story_arc_sync_nudge_failure_does_not_fail_canonical_completion(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    download_id = await _seed_completed(db_factory)
+    nudge = Mock(side_effect=RuntimeError("scheduler unavailable"))
+    monkeypatch.setattr(
+        download_post_processing_queue,
+        "request_story_arc_sync_now",
+        nudge,
+    )
+
+    async def post_process(_session: AsyncSession, _download: DownloadHistory) -> None:
+        return None
+
+    await process_completed(post_process, session_factory=db_factory)
+
+    async with db_factory() as session:
+        download = await session.get(DownloadHistory, download_id)
+    assert download is not None
+    assert download.state is DownloadState.COMPLETED
+    assert download.imported_at is not None
+    assert download.error_message is None
+    nudge.assert_called_once_with()

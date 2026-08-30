@@ -6276,6 +6276,58 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       }
     },
 
+    updateStoryArcDecision: async function (id, action, targetElement) {
+      var numericId = Number(id);
+      if (!Number.isFinite(numericId) || ["select", "skip"].indexOf(action) === -1) {
+        return;
+      }
+
+      var proposedStoryArcId = null;
+      if (action === "select" && targetElement && targetElement.value) {
+        proposedStoryArcId = Number(targetElement.value);
+        if (!Number.isFinite(proposedStoryArcId)) {
+          proposedStoryArcId = null;
+        }
+      }
+
+      try {
+        var response = await fetch(
+          "/api/v1/import/" + this.jobId + "/story-arcs/" + numericId + "/decision",
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": readCsrfTokenFromBody(),
+            },
+            body: JSON.stringify({
+              action: action,
+              proposed_story_arc_id: proposedStoryArcId,
+            }),
+          },
+        );
+
+        if (!response.ok) {
+          var error = await response
+            .json()
+            .catch(function () {
+              return {};
+            });
+          throw new Error(error.detail || "Failed to update story arc decision.");
+        }
+
+        await this.refreshReviewSummary();
+        await this.refreshSeriesReview();
+      } catch (err) {
+        if (typeof showToast === "function") {
+          showToast({
+            message:
+              err && err.message ? err.message : "Failed to update story arc decision.",
+            level: "error",
+          });
+        }
+      }
+    },
+
     toggleDuplicateSeriesFiles: async function (id, checked, checkboxEl) {
       var numericId = Number(id);
       if (!Number.isFinite(numericId)) {
@@ -6737,6 +6789,8 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
           },
           body: JSON.stringify({
             series_ids: [],
+            story_arc_ids: [],
+            story_arc_decisions: [],
           }),
         });
 

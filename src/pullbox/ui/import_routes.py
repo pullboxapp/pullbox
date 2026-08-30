@@ -38,6 +38,7 @@ from pullbox.ui.import_results_context import load_import_results_context
 from pullbox.ui.import_review_context import load_import_review_context
 from pullbox.ui.import_review_summary import load_import_review_summary
 from pullbox.ui.import_series_details_context import load_import_series_details_context
+from pullbox.ui.import_story_arc_entry_review import StoryArcEntryResolutionFilter
 
 router = APIRouter()
 
@@ -473,6 +474,9 @@ async def import_review_partial(
     status: str | None = Query(None),
     page: int = Query(1, ge=1),
     sort: str | None = Query(None),
+    story_arc_id: int | None = Query(None, ge=1),
+    arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
+    arc_entry_page: int = Query(1, ge=1),
 ) -> Response:
     """Render the review table partial for an import job."""
     from pullbox.core.exceptions import NotFoundError
@@ -487,6 +491,9 @@ async def import_review_partial(
         status=status,
         page=page,
         sort=sort,
+        story_arc_id=story_arc_id,
+        arc_entry_state=arc_entry_state,
+        arc_entry_page=arc_entry_page,
     )
 
     return _templates().TemplateResponse(

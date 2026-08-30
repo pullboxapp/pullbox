@@ -41,6 +41,7 @@ from pullbox.services.import_file_resolution import (
     load_issue_lookup_for_series,
 )
 from pullbox.services.import_folder_adoption import apply_import_series_folder_adoption
+from pullbox.services.import_job_actions import seed_action_sequence_cache
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.utilities.settings import restore_file_from_utility_trash
 
@@ -581,6 +582,11 @@ async def process_import_series_files(
             nonlocal next_action_sequence
             async with record_action_lock:
                 next_action_sequence += 1
+                seed_action_sequence_cache(
+                    session,
+                    int(job.id),
+                    last_sequence=next_action_sequence - 1,
+                )
                 action = await record_action(
                     session,
                     job,

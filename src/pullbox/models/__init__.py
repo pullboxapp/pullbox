@@ -95,6 +95,11 @@ from pullbox.models.story_arc import (
     StoryArcSymlinkStyle,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.models.story_arc_sync import (
+    StoryArcSyncReason,
+    StoryArcSyncWork,
+    StoryArcSyncWorkState,
+)
 from pullbox.models.user import APIKey, User
 from pullbox.models.whats_new import WhatsNewCacheKind, WhatsNewReleaseCache
 from pullbox.utilities.models import (
@@ -204,6 +209,9 @@ __all__ = [
     "StoryArcResolutionState",
     "StoryArcSourceKind",
     "StoryArcSymlinkStyle",
+    "StoryArcSyncReason",
+    "StoryArcSyncWork",
+    "StoryArcSyncWorkState",
     "SuggestionStatus",
     "SystemConfig",
     "TimestampMixin",

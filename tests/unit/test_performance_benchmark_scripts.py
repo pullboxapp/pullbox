@@ -118,6 +118,27 @@ def test_import_execute_benchmark_exits_cleanly() -> None:
     assert report["files_per_series"] == 1
 
 
+def test_import_metadata_scale_benchmark_uses_no_archive_payloads_or_providers() -> None:
+    report = _run_benchmark(
+        _repo_root(),
+        "scripts/benchmark_import_metadata_scale.py",
+        "--story-arc-count",
+        "3",
+    )
+
+    assert report["profile"] == "metadata_only"
+    assert report["represented_file_count"] == 1
+    assert report["story_arc_count"] == 3
+    assert report["archive_payload_count"] == 0
+    assert report["provider_call_count"] == 0
+    assert report["filesystem_scan_count"] == 0
+    assert report["confirmed_arc_count"] == 3
+    assert report["final_matched_series_count"] == 1
+    assert report["final_no_match_file_count"] == 1
+    assert report["final_confirmed_arc_count"] == 3
+    assert int(report["peak_rss_bytes"] or 0) > 0
+
+
 def test_import_execute_mixed_file_work_profile_uses_real_registration() -> None:
     report = _run_benchmark(
         _repo_root(),
