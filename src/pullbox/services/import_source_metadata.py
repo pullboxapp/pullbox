@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 from sqlalchemy import select as sa_select
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.release_parser import normalize_issue_number, parse_release_title
 from pullbox.core.source_metadata import (
@@ -157,7 +158,7 @@ def _archive_entry_issue_hint(diagnostics: dict[str, Any]) -> dict[str, Any] | N
 def _format_issue_number(issue_number: float | None) -> str:
     if issue_number is None:
         return "unknown"
-    return f"{issue_number:g}"
+    return format_issue_number(issue_number)
 
 
 def _issue_numbers_equal(left: float, right: float) -> bool:

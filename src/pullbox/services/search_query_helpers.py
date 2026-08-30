@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.issue_title import collection_title_fragment, collection_title_subtitle
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.issue import IssueType
@@ -141,7 +142,7 @@ def _standard_issue_query_variants(series_title: str, issue_number: float | None
     if issue_number is None:
         return [_sanitize_query(series_title)]
     if issue_number != int(issue_number):
-        return [_sanitize_query(f"{series_title} {issue_number}")]
+        return [_sanitize_query(f"{series_title} {format_issue_number(issue_number)}")]
 
     issue_int = int(issue_number)
     variants = [
@@ -168,7 +169,7 @@ def _build_type_queries(
     keywords = _TYPE_QUERY_KEYWORDS.get(issue_type.value, [])
 
     def _fmt_issue(num: float) -> str:
-        return str(int(num)) if num == int(num) else str(num)
+        return format_issue_number(num)
 
     if not keywords:
         return _standard_issue_query_variants(series_title, issue_number)

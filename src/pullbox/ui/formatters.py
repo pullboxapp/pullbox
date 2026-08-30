@@ -9,6 +9,7 @@ from markupsafe import Markup
 
 from pullbox.core.duration_format import format_duration_ms_label
 from pullbox.core.html_sanitizer import sanitize_rich_html
+from pullbox.core.issue_numbers import format_issue_number as _format_issue_number
 from pullbox.models.series import SeriesStatus
 
 
@@ -19,7 +20,7 @@ def sanitize_rich_html_filter(value: str | None) -> Markup:
 
 def format_issue_number(value: float) -> str:
     """Format issue number, stripping unnecessary trailing zeros."""
-    return f"{value:g}"
+    return _format_issue_number(value)
 
 
 def format_filesize(value: int) -> str:

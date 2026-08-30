@@ -16,6 +16,7 @@ import structlog
 
 from pullbox.core.collection_scanner import COMIC_EXTENSIONS, DiscoveredFile, DiscoveredSeries
 from pullbox.core.exceptions import MylarReadError
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.naming import parse_filename
 from pullbox.core.release_parser import normalize_issue_number
 from pullbox.models.issue import IssueType
@@ -368,10 +369,7 @@ class Mylar3Reader:
                     issue_type = IssueType(parsed.issue_type)
                 except ValueError:
                     issue_type = IssueType.ISSUE
-                if parsed.issue_number == int(parsed.issue_number):
-                    issue_number_raw = str(int(parsed.issue_number))
-                else:
-                    issue_number_raw = str(parsed.issue_number)
+                issue_number_raw = format_issue_number(parsed.issue_number)
 
             if issue_record is not None and issue_record.issue_number:
                 issue_number_raw = issue_record.issue_number

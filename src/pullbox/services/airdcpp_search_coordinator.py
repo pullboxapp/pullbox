@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from pydantic import ValidationError
 
 from pullbox.core.acquisition import AcquisitionProtocol
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.providers.airdcpp.contracts import (
     AirDcppSearchResult,
     AirDcppSearchResultEvent,
@@ -537,11 +538,7 @@ class AirDcppSearchCoordinator:
 
 
 def _query_pattern(target: IssueSearchTarget) -> str:
-    number = (
-        str(int(target.issue_number))
-        if target.issue_number.is_integer()
-        else str(target.issue_number)
-    )
+    number = format_issue_number(target.issue_number)
     return f"{target.series_title} {number}"
 
 

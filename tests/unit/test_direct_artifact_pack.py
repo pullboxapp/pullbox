@@ -9,6 +9,7 @@ import pytest
 
 from pullbox.services.direct_artifact_pack import (
     DirectArtifactPackError,
+    _issue_path_token,
     extract_same_series_issue_files,
 )
 
@@ -20,6 +21,10 @@ def _write_nested_pack(path: Path, *names: str) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         for name in names:
             archive.writestr(name, b"nested comic")
+
+
+def test_large_issue_path_token_never_uses_float_or_scientific_suffixes() -> None:
+    assert _issue_path_token(1_000_000.0) == "1000000"
 
 
 def test_extracts_separate_contiguous_issue_files(tmp_path: Path) -> None:

@@ -137,6 +137,11 @@ _YEAR_PAREN_RE = re.compile(r"\((\d{4})\)")
 # Issue number with hash prefix: #045, #5, #5.1
 _ISSUE_HASH_RE = re.compile(r"#(\d+(?:\.\d+)?)")
 
+# DC's One Million event used the literal issue number 1,000,000 across
+# multiple ongoing titles. Keep this exact exception narrow so arbitrary long
+# numeric title tokens do not become issue numbers.
+_DC_ONE_MILLION_ISSUE_RE = re.compile(r"(?<=\s)(1000000)(?=\s|$)")
+
 # Long-running UK weekly anthologies often label issue numbers as "Prog 2483".
 _PROG_ISSUE_RE = re.compile(r"\bProg(?:ramme)?\.?\s*#?\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE)
 
@@ -729,7 +734,14 @@ def _extract_issue_number(title: str, issue_type: IssueType) -> tuple[float | No
         remaining = clean[: m.start()] + clean[m.end() :]
         return num, remaining.strip()
 
-    # Priority 2: Anthology "Prog" marker — supports long-running series
+    # Priority 2: DC One Million's literal issue 1,000,000 without a hash.
+    m = _DC_ONE_MILLION_ISSUE_RE.search(clean)
+    if m:
+        num = float(m.group(1))
+        remaining = clean[: m.start()] + clean[m.end() :]
+        return num, remaining.strip()
+
+    # Priority 3: Anthology "Prog" marker — supports long-running series
     # whose issue numbers exceed the usual 2-3 digit positional heuristic.
     m = _PROG_ISSUE_RE.search(clean)
     if m:
@@ -737,14 +749,14 @@ def _extract_issue_number(title: str, issue_type: IssueType) -> tuple[float | No
         remaining = clean[: m.start()] + clean[m.end() :]
         return num, remaining.strip()
 
-    # Priority 3: "No." pattern from dot-separated titles
+    # Priority 4: "No." pattern from dot-separated titles
     m = _DOT_NO_ISSUE_RE.search(clean)
     if m:
         num = float(m.group(1))
         remaining = clean[: m.start()] + clean[m.end() :]
         return num, remaining.strip()
 
-    # Priority 4: Inline limited-series marker — "02 of 03".  The first number
+    # Priority 5: Inline limited-series marker — "02 of 03".  The first number
     # is the issue; the second is the total issue count.
     m = _INLINE_LIMITED_SERIES_RE.search(clean)
     if m:
@@ -752,7 +764,7 @@ def _extract_issue_number(title: str, issue_type: IssueType) -> tuple[float | No
         remaining = clean[: m.start()] + clean[m.end() :]
         return num, remaining.strip()
 
-    # Priority 5: Positional number — a 2-3 digit number that sits between
+    # Priority 6: Positional number — a 2-3 digit number that sits between
     # the series name and metadata (year/brackets)
     # Match a number preceded by space (or after series-name text)
     # but NOT part of an alphanumeric word like "D4VE2" or "Spider-Man 2099"
@@ -778,7 +790,7 @@ def _extract_issue_number(title: str, issue_type: IssueType) -> tuple[float | No
         remaining = clean[: m.start()] + clean[m.end() :]
         return num, remaining.strip()
 
-    # Priority 6: Single digit number at word boundary after text
+    # Priority 7: Single digit number at word boundary after text
     # Must NOT be followed by a word (e.g. "4 Covers" is a count, not issue #4)
     m = re.search(r"(?<=\s)(\d)(?=\s|$)", clean)
     if m:

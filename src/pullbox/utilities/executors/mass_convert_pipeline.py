@@ -28,6 +28,7 @@ from sqlalchemy.orm import joinedload
 
 from pullbox.core.file_safety import classify_resource_safety_exception
 from pullbox.core.filesystem_scan import iter_supported_files
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.issue import Issue
 from pullbox.models.library import FileFormat, LibraryFile
 from pullbox.models.series import Series
@@ -70,10 +71,7 @@ def _is_relative_to(path: Path, other: Path) -> bool:
 def _format_issue_number(value: float | int | None) -> str | None:
     if value is None:
         return None
-    numeric = float(value)
-    if numeric.is_integer():
-        return str(int(numeric))
-    return f"{numeric:g}"
+    return format_issue_number(value)
 
 
 def _build_comicinfo_metadata(library_file: LibraryFile) -> dict[str, Any]:

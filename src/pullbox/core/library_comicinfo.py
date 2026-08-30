@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 
 from pullbox.core.archive import inspect_archive_page_count
 from pullbox.core.exceptions import ConfigurationError
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 from pullbox.utilities.comicinfo import embed_comicinfo_in_cbz
@@ -140,9 +141,7 @@ async def apply_comicinfo_to_imported_artifact(
 def format_comicinfo_issue_number(issue_number: float | None) -> str | None:
     if issue_number is None:
         return None
-    if float(issue_number).is_integer():
-        return str(int(issue_number))
-    return f"{issue_number:g}"
+    return format_issue_number(issue_number)
 
 
 def cleanup_prepared_paths(paths: list[Path]) -> None:

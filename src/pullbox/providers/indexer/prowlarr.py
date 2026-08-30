@@ -16,6 +16,7 @@ import httpx
 import structlog
 
 from pullbox.core.acquisition import AcquisitionProtocol
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.providers.base import (
     IndexerCapabilities,
     ProviderHealthResult,
@@ -148,11 +149,7 @@ class ProwlarrIndexer:
 
         search_term = query.series_title
         if query.issue_number is not None:
-            issue_str = (
-                str(int(query.issue_number))
-                if query.issue_number == int(query.issue_number)
-                else str(query.issue_number)
-            )
+            issue_str = format_issue_number(query.issue_number)
             search_term = f"{search_term} {issue_str}"
 
         params: dict[str, Any] = {"query": search_term, "type": "search"}

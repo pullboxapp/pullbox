@@ -190,6 +190,18 @@ class TestSearch:
             timeout=45.0,
         )
 
+    async def test_search_formats_large_issue_without_scientific_notation(self) -> None:
+        indexer = _make_indexer()
+        indexer._api_request = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+        await indexer.search(SearchQuery(series_title="Wonder Woman", issue_number=1_000_000.0))
+
+        indexer._api_request.assert_awaited_once_with(  # type: ignore[attr-defined]
+            "/search",
+            {"query": "Wonder Woman 1000000", "type": "search"},
+            timeout=45.0,
+        )
+
     async def test_search_propagates_prowlarr_error(self) -> None:
         indexer = _make_indexer()
         indexer._api_request = AsyncMock(side_effect=ProwlarrError("down"))  # type: ignore[method-assign]

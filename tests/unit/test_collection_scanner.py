@@ -468,6 +468,180 @@ class TestMetadataGrouping:
         }
 
     @pytest.mark.asyncio
+    async def test_issue_titles_after_numbers_use_the_series_folder_identity(
+        self, tmp_path: Path
+    ) -> None:
+        _make_series_dir(
+            tmp_path,
+            "Absolute Batman 2024",
+            files=[
+                "Issue 14 Abomination, Conclusion.cbz",
+                "Issue 15 The Joker.cbz",
+            ],
+        )
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Absolute Batman"
+        assert results[0].raw_year == 2024
+        assert results[0].file_count == 2
+        assert {file.parsed_series for file in results[0].files} == {"Absolute Batman"}
+        assert {file.parsed_issue_number for file in results[0].files} == {14.0, 15.0}
+
+    @pytest.mark.asyncio
+    async def test_issue_titles_before_issue_markers_use_the_series_folder_identity(
+        self, tmp_path: Path
+    ) -> None:
+        _make_series_dir(
+            tmp_path,
+            "Batman (2011)",
+            files=[
+                "Batman The Court of Owls, Part One Issue 001.cbz",
+                "Batman The City of Owls, Part Two Issue 002.cbz",
+            ],
+        )
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Batman"
+        assert results[0].raw_year == 2011
+        assert results[0].file_count == 2
+        assert {file.parsed_series for file in results[0].files} == {"Batman"}
+        assert {file.parsed_issue_number for file in results[0].files} == {1.0, 2.0}
+
+    @pytest.mark.asyncio
+    async def test_ordered_mixed_series_folder_is_not_collapsed_to_the_folder_name(
+        self, tmp_path: Path
+    ) -> None:
+        _make_series_dir(
+            tmp_path,
+            "Axis",
+            files=[
+                "001 - Avengers 001.cbz",
+                "002 - X-Men 001.cbz",
+            ],
+        )
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 2
+        assert all(result.raw_series_name != "Axis" for result in results)
+        assert all(result.diagnostics["mixed_bucket"] is True for result in results)
+
+    @pytest.mark.asyncio
+    async def test_issue_title_files_in_generic_staging_folder_stay_split(
+        self, tmp_path: Path
+    ) -> None:
+        _make_series_dir(
+            tmp_path,
+            "staging",
+            files=[
+                "Issue 14 Abomination, Conclusion.cbz",
+                "Issue 15 The Joker.cbz",
+            ],
+        )
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 2
+        assert all(result.raw_series_name != "staging" for result in results)
+        assert all(result.diagnostics["mixed_bucket"] is True for result in results)
+
+    @pytest.mark.asyncio
+    async def test_real_series_named_issue_keeps_its_folder_identity(self, tmp_path: Path) -> None:
+        _make_series_dir(
+            tmp_path,
+            "Issue (2021)",
+            files=["Issue 001.cbz", "Issue 002.cbz"],
+        )
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Issue"
+        assert results[0].raw_year == 2021
+        assert results[0].file_count == 2
+
+    @pytest.mark.asyncio
+    async def test_issue_title_files_at_scan_root_do_not_assume_root_is_a_series(
+        self, tmp_path: Path
+    ) -> None:
+        _touch(tmp_path / "Issue 14 Abomination, Conclusion.cbz")
+        _touch(tmp_path / "Issue 15 The Joker.cbz")
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 2
+        assert all(result.raw_series_name != tmp_path.name for result in results)
+        assert all(result.diagnostics["mixed_bucket"] is True for result in results)
+
+    @pytest.mark.asyncio
+    async def test_issue_title_and_agreeing_comicinfo_series_share_one_folder_bucket(
+        self, tmp_path: Path
+    ) -> None:
+        series_dir = tmp_path / "Batman (2011)"
+        series_dir.mkdir()
+        _make_cbz(
+            series_dir / "cover.cbz",
+            "<ComicInfo><Series>Batman</Series><Number>1</Number></ComicInfo>",
+        )
+        _touch(series_dir / "Batman The Court of Owls, Part Two Issue 002.cbz")
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Batman"
+        assert results[0].file_count == 2
+        assert results[0].diagnostics["mixed_bucket"] is False
+
+    @pytest.mark.asyncio
+    async def test_conflicting_comicinfo_series_stays_separate_from_folder_identity(
+        self, tmp_path: Path
+    ) -> None:
+        series_dir = tmp_path / "Batman (2011)"
+        series_dir.mkdir()
+        _make_cbz(
+            series_dir / "cover.cbz",
+            "<ComicInfo><Series>Superman</Series><Number>1</Number></ComicInfo>",
+        )
+        _touch(series_dir / "Batman The Court of Owls, Part Two Issue 002.cbz")
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 2
+        assert {result.raw_series_name for result in results} == {"Batman", "Superman"}
+        assert all(result.diagnostics["mixed_bucket"] is True for result in results)
+
+    @pytest.mark.asyncio
+    async def test_issue_title_grouping_preserves_publisher_hierarchy(self, tmp_path: Path) -> None:
+        _make_series_dir(
+            tmp_path,
+            "DC Comics",
+            "Absolute Batman 2024",
+            files=[
+                "Issue 14 Abomination, Conclusion.cbz",
+                "Issue 15 The Joker.cbz",
+            ],
+        )
+
+        scanner = CollectionScanner()
+        results = await _scan_all(scanner, tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Absolute Batman"
+        assert results[0].raw_publisher == "DC Comics"
+
+    @pytest.mark.asyncio
     async def test_folder_sidecar_preserves_series_type_and_cv_id(self, tmp_path: Path) -> None:
         folder = tmp_path / "Absolute Martian Manhunter [TPB]"
         folder.mkdir()

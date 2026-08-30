@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 import structlog
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.naming import detect_issue_type
 from pullbox.providers.base import (
     IssueMetadata,
@@ -119,7 +120,7 @@ def _parse_issue_number(value: str | None) -> float:
 
 def _format_issue_number_filter(value: float) -> str:
     """Format an issue number for ComicVine's exact issue_number filter."""
-    return str(int(value)) if value == int(value) else f"{value:g}"
+    return format_issue_number(value)
 
 
 def _safe_int(value: Any) -> int | None:

@@ -26,10 +26,12 @@ from pullbox.core.collection_scan_grouping import (
     _non_standard_group_discriminator,
     _normalize_series_identity,
     _should_collapse_to_folder_identity,
+    _should_use_folder_identity_for_issue_title_file,
     _source_issue_type_for_group,
     _strip_year_volume_tokens,
     _type_qualified_issue_like_label,
 )
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.source_metadata import MetadataSignal, SourceMetadata, SourceMetadataExtractor
 from pullbox.models.issue import IssueType
 
@@ -466,17 +468,9 @@ class CollectionScanner:
             parsed = metadata.parsed_release
             issue_number_raw: str | None = None
             if parsed is not None and parsed.issue_number is not None:
-                issue_number_raw = (
-                    str(int(parsed.issue_number))
-                    if parsed.issue_number == int(parsed.issue_number)
-                    else str(parsed.issue_number)
-                )
+                issue_number_raw = format_issue_number(parsed.issue_number)
             elif metadata.issue_number is not None:
-                issue_number_raw = (
-                    str(int(metadata.issue_number))
-                    if metadata.issue_number == int(metadata.issue_number)
-                    else str(metadata.issue_number)
-                )
+                issue_number_raw = format_issue_number(metadata.issue_number)
 
             return DiscoveredFile(
                 file_path=str(fpath),
@@ -565,6 +559,7 @@ class CollectionScanner:
             tuple[str, int | None, str | None],
         ] = {}
         folder_identity = _normalize_series_identity(folder_name)
+        folder_is_series_boundary = root is None or source_dir != root
 
         for discovered_file in discovered_files:
             identity = self._identity_for_file(
@@ -578,9 +573,18 @@ class CollectionScanner:
             collapse_to_folder = bool(
                 discovered_file.parsed_series
                 and folder_identity
-                and _should_collapse_to_folder_identity(
-                    discovered_file.parsed_series,
-                    folder_name,
+                and (
+                    _should_collapse_to_folder_identity(
+                        discovered_file.parsed_series,
+                        folder_name,
+                    )
+                    or (
+                        folder_is_series_boundary
+                        and _should_use_folder_identity_for_issue_title_file(
+                            discovered_file,
+                            folder_name,
+                        )
+                    )
                 )
             )
             type_discriminator = _non_standard_group_discriminator(discovered_file.issue_type)

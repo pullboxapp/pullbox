@@ -15,6 +15,7 @@ import structlog
 from sqlalchemy import select
 
 from pullbox.core.acquisition import AcquisitionProtocol
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.issue_title import collection_title_number
 from pullbox.core.log_sanitizer import sanitize_log_mapping, sanitize_log_string
 from pullbox.core.name_matcher import NameMatcher
@@ -226,7 +227,7 @@ async def persist_direct_search_discoveries(
     """Persist redacted candidate evidence and return server-issued IDs."""
     pending: list[tuple[DirectAcquisitionAttempt, DirectValidatedCandidate, bool]] = []
     fingerprint_groups: list[tuple[DirectAcquisitionAttempt, list[DirectAcquisitionAttempt]]] = []
-    issue_number = f"{target.issue_number:g}"
+    issue_number = format_issue_number(target.issue_number)
     volume = _target_volume(target)
     for primary in (*outcome.matched, *outcome.rejected):
         group_attempts: list[DirectAcquisitionAttempt] = []
@@ -520,7 +521,7 @@ def _is_explicit_direct_pack_for_target(
     candidate: DirectCandidate,
     target: IssueSearchTarget,
 ) -> bool:
-    target_issue = f"{target.issue_number:g}"
+    target_issue = format_issue_number(target.issue_number)
     return (
         len(candidate.parsed.issue_numbers) > 1 and target_issue in candidate.parsed.issue_numbers
     )
@@ -532,7 +533,7 @@ def _direct_pack_member_title(
 ) -> str:
     year = candidate.parsed.year or target.search_year
     suffix = f" ({year})" if year is not None else ""
-    return f"{candidate.parsed.series_title} #{target.issue_number:g}{suffix}"
+    return f"{candidate.parsed.series_title} #{format_issue_number(target.issue_number)}{suffix}"
 
 
 def _validation_alternate_names(
@@ -609,7 +610,7 @@ def _resolver_retry_allowed(exc: DirectProviderClientError) -> bool:
 
 
 def _build_intent(target: IssueSearchTarget) -> DirectSearchIntent:
-    issue_number = f"{target.issue_number:g}"
+    issue_number = format_issue_number(target.issue_number)
     return DirectSearchIntent(
         series_title=target.series_title,
         normalized_title=NameMatcher.normalize(target.series_title),
@@ -630,7 +631,7 @@ def _target_volume(target: IssueSearchTarget) -> str | None:
     """Map collection issue numbering onto provider volume coverage."""
     if issue_type_family(target.issue_type) is not TypeFamily.COLLECTION:
         return None
-    return collection_title_number(target.issue_title) or f"{target.issue_number:g}"
+    return collection_title_number(target.issue_title) or format_issue_number(target.issue_number)
 
 
 def _candidate_release(

@@ -31,6 +31,7 @@ def test_format_comicinfo_issue_number_handles_empty_integer_and_fractional() ->
     assert format_comicinfo_issue_number(None) is None
     assert format_comicinfo_issue_number(12.0) == "12"
     assert format_comicinfo_issue_number(12.25) == "12.25"
+    assert format_comicinfo_issue_number(1_000_000.0) == "1000000"
 
 
 @pytest.mark.asyncio

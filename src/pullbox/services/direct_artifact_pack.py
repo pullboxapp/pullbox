@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pullbox.core.archive import ArchiveError, ArchiveReader
 from pullbox.core.file_safety import has_archive_member_path_traversal
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.release_parser import parse_release_title
 
@@ -151,7 +152,7 @@ def _normalized_issue_numbers(issue_numbers: frozenset[str]) -> set[float]:
 
 
 def _issue_path_token(issue_number: float) -> str:
-    return str(issue_number).replace(".", "_")
+    return format_issue_number(issue_number).replace(".", "_")
 
 
 def _issue_number_from_member(name: str) -> float | None:

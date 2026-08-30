@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,6 +15,7 @@ from pullbox.services.airdcpp_search_cooldown import AirDcppCooldownReservation
 from pullbox.services.airdcpp_search_coordinator import (
     AirDcppSearchClient,
     AirDcppSearchCoordinator,
+    _query_pattern,
 )
 from pullbox.services.airdcpp_search_types import (
     AirDcppSearchProgressState,
@@ -38,6 +40,10 @@ def _target() -> IssueSearchTarget:
         issue_type=IssueType.ISSUE,
         series_year=2026,
     )
+
+
+def test_large_issue_query_pattern_never_uses_scientific_notation() -> None:
+    assert _query_pattern(replace(_target(), issue_number=1_000_000.0)) == "Example Comic 1000000"
 
 
 def _instance() -> AirDcppSearchInstance:
