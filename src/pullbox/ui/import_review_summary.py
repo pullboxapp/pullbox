@@ -17,7 +17,11 @@ from pullbox.models.import_job import (
 from pullbox.models.story_arc import ImportedStoryArcStatus, StoryArcResolutionState
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.import_review_selection import load_import_review_selection_state
-from pullbox.services.import_safety_diagnostics import summarize_import_safety_failures
+from pullbox.services.import_safety_diagnostics import (
+    ImportSafetyCategory,
+    ImportSafetyFailureSummaryAccumulator,
+    normalize_import_safety_diagnostics,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -283,26 +287,65 @@ async def load_import_review_summary(
 async def load_import_safety_failure_summary(
     session: AsyncSession,
     job: ImportJob,
+    *,
+    page_size: int = 1_000,
 ) -> list[dict[str, object]]:
-    """Return actionable safety/source-failure categories for import review."""
-    result = await session.execute(
-        select(
-            ImportedFile.file_name,
-            ImportedFile.diagnostics,
-        ).where(
-            ImportedFile.import_job_id == job.id,
-            ImportedFile.status.in_([ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.FAILED]),
+    """Return complete safety categories using bounded keyset pages."""
+    if page_size < 1 or page_size > 5_000:
+        raise ValueError("Safety summary page_size must be between 1 and 5000")
+
+    accumulator = ImportSafetyFailureSummaryAccumulator()
+    bulk_overrideable_counts: dict[str, int] = {}
+    cursor = 0
+    while True:
+        result = await session.execute(
+            select(
+                ImportedFile.id,
+                ImportedFile.file_name,
+                ImportedFile.diagnostics,
+                ImportedFile.status,
+            )
+            .where(
+                ImportedFile.import_job_id == job.id,
+                ImportedFile.status.in_(
+                    [ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.FAILED]
+                ),
+                ImportedFile.id > cursor,
+            )
+            .order_by(ImportedFile.id)
+            .limit(page_size)
         )
-    )
-    failures: list[tuple[str, Mapping[str, object]]] = []
-    for file_name, diagnostics in result.all():
-        if not isinstance(diagnostics, Mapping):
-            continue
-        safety_block = diagnostics.get("safety_block")
-        if isinstance(safety_block, Mapping):
-            failures.append((str(file_name), safety_block))
-            continue
-        source_revalidation = diagnostics.get("source_revalidation")
-        if isinstance(source_revalidation, Mapping):
-            failures.append((str(file_name), source_revalidation))
-    return summarize_import_safety_failures(failures)
+        rows = result.all()
+        if not rows:
+            break
+        for file_id, file_name, diagnostics, status in rows:
+            cursor = int(file_id)
+            if not isinstance(diagnostics, Mapping):
+                continue
+            safety_block = diagnostics.get("safety_block")
+            if isinstance(safety_block, Mapping):
+                accumulator.add(str(file_name), safety_block)
+                normalized = normalize_import_safety_diagnostics(safety_block)
+                category = str(normalized["category"])
+                if (
+                    status == ImportedFileStatus.SAFETY_BLOCKED
+                    and category == ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT.value
+                    and normalized["overrideable"] is True
+                ):
+                    bulk_overrideable_counts[category] = (
+                        bulk_overrideable_counts.get(category, 0) + 1
+                    )
+                continue
+            source_revalidation = diagnostics.get("source_revalidation")
+            if isinstance(source_revalidation, Mapping):
+                accumulator.add(str(file_name), source_revalidation)
+        if len(rows) < page_size:
+            break
+
+    summaries = accumulator.summaries()
+    for summary in summaries:
+        category = str(summary["category"])
+        bulk_overrideable_count = bulk_overrideable_counts.get(category, 0)
+        summary["bulk_overrideable_count"] = bulk_overrideable_count
+        summary["bulk_overrideable"] = bulk_overrideable_count > 0
+    return summaries

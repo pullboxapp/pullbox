@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -345,69 +345,95 @@ def _safe_example_name(value: str) -> str:
     return safe_leaf or "File"
 
 
+@dataclass(slots=True)
+class _ImportSafetySummaryBucket:
+    category: ImportSafetyCategory
+    reason: object
+    retryable: bool
+    overrideable: bool
+    count: int = 0
+    overrideable_count: int = 0
+    codes: set[str] = field(default_factory=set)
+    examples: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ImportSafetyFailureSummaryAccumulator:
+    """Accumulate a complete safety summary with bounded retained detail."""
+
+    example_limit: int = 3
+    code_limit: int = 16
+    _buckets: dict[ImportSafetyCategory, _ImportSafetySummaryBucket] = field(
+        init=False,
+        default_factory=dict,
+    )
+
+    def add(self, example: str, raw_diagnostics: Mapping[str, object]) -> None:
+        """Add one failure while retaining only bounded codes and examples."""
+        diagnostics = normalize_import_safety_diagnostics(raw_diagnostics)
+        try:
+            category = ImportSafetyCategory(str(diagnostics["category"]))
+        except ValueError:
+            category = ImportSafetyCategory.UNKNOWN
+        bucket = self._buckets.get(category)
+        if bucket is None:
+            bucket = _ImportSafetySummaryBucket(
+                category=category,
+                reason=diagnostics["sanitized_reason"],
+                retryable=bool(diagnostics["retryable"]),
+                overrideable=bool(diagnostics["overrideable"]),
+            )
+            self._buckets[category] = bucket
+
+        bucket.count += 1
+        code = str(diagnostics["code"])
+        if code in bucket.codes or len(bucket.codes) < max(self.code_limit, 0):
+            bucket.codes.add(code)
+        safe_example = _safe_example_name(example)
+        if (
+            len(bucket.examples) < max(self.example_limit, 0)
+            and safe_example not in bucket.examples
+        ):
+            bucket.examples.append(safe_example)
+        bucket.retryable = bucket.retryable and bool(diagnostics["retryable"])
+        bucket.overrideable = bucket.overrideable and bool(diagnostics["overrideable"])
+        if bool(diagnostics["overrideable"]):
+            bucket.overrideable_count += 1
+
+    def summaries(self) -> list[dict[str, object]]:
+        """Return deterministic category summaries for every accumulated row."""
+        summaries: list[dict[str, object]] = []
+        for category in ImportSafetyCategory:
+            bucket = self._buckets.get(category)
+            if bucket is None:
+                continue
+            summaries.append(
+                {
+                    "category": category.value,
+                    "label": _CATEGORY_LABELS[category],
+                    "count": bucket.count,
+                    "codes": sorted(bucket.codes),
+                    "reason": bucket.reason,
+                    "retryable": bucket.retryable,
+                    "overrideable": bucket.overrideable,
+                    "overrideable_count": bucket.overrideable_count,
+                    "examples": bucket.examples,
+                    "bulk_overrideable": (
+                        category is ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT
+                        and bucket.overrideable_count > 0
+                    ),
+                }
+            )
+        return summaries
+
+
 def summarize_import_safety_failures(
     failures: Iterable[tuple[str, Mapping[str, object]]],
     *,
     example_limit: int = 3,
 ) -> list[dict[str, object]]:
     """Return deterministic category counts with bounded basename-only examples."""
-    buckets: dict[ImportSafetyCategory, dict[str, object]] = {}
+    accumulator = ImportSafetyFailureSummaryAccumulator(example_limit=example_limit)
     for example, raw_diagnostics in failures:
-        diagnostics = normalize_import_safety_diagnostics(raw_diagnostics)
-        try:
-            category = ImportSafetyCategory(str(diagnostics["category"]))
-        except ValueError:
-            category = ImportSafetyCategory.UNKNOWN
-        bucket = buckets.setdefault(
-            category,
-            {
-                "category": category.value,
-                "label": _CATEGORY_LABELS[category],
-                "count": 0,
-                "codes": set(),
-                "reason": diagnostics["sanitized_reason"],
-                "retryable": bool(diagnostics["retryable"]),
-                "overrideable": bool(diagnostics["overrideable"]),
-                "overrideable_count": 0,
-                "examples": [],
-            },
-        )
-        current_count = bucket["count"]
-        bucket["count"] = current_count + 1 if isinstance(current_count, int) else 1
-        codes = bucket["codes"]
-        if isinstance(codes, set):
-            codes.add(str(diagnostics["code"]))
-        examples = bucket["examples"]
-        safe_example = _safe_example_name(example)
-        if (
-            isinstance(examples, list)
-            and len(examples) < max(example_limit, 0)
-            and safe_example not in examples
-        ):
-            examples.append(safe_example)
-        bucket["retryable"] = bool(bucket["retryable"]) and bool(diagnostics["retryable"])
-        bucket["overrideable"] = bool(bucket["overrideable"]) and bool(diagnostics["overrideable"])
-        current_overrideable_count = bucket["overrideable_count"]
-        if bool(diagnostics["overrideable"]):
-            bucket["overrideable_count"] = (
-                current_overrideable_count + 1 if isinstance(current_overrideable_count, int) else 1
-            )
-
-    summaries: list[dict[str, object]] = []
-    for category in ImportSafetyCategory:
-        summary_bucket = buckets.get(category)
-        if summary_bucket is None:
-            continue
-        codes = summary_bucket["codes"]
-        summaries.append(
-            {
-                **summary_bucket,
-                "codes": sorted(codes) if isinstance(codes, set) else [],
-                "bulk_overrideable": (
-                    category is ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT
-                    and isinstance(summary_bucket["overrideable_count"], int)
-                    and summary_bucket["overrideable_count"] > 0
-                ),
-            }
-        )
-    return summaries
+        accumulator.add(example, raw_diagnostics)
+    return accumulator.summaries()
