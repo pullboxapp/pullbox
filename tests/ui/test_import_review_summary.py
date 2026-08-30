@@ -137,6 +137,8 @@ async def test_load_import_review_summary_uses_persisted_review_rows(
             "reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
             "retryable": False,
             "overrideable": True,
+            "overrideable_count": 1,
+            "bulk_overrideable": True,
             "examples": ["Crossed Annual.cbz"],
         }
     ]
@@ -220,6 +222,8 @@ async def test_load_import_safety_failure_summary_classifies_source_revalidation
             ),
             "retryable": True,
             "overrideable": False,
+            "overrideable_count": 0,
+            "bulk_overrideable": False,
             "examples": ["Changed Source 001.cbz"],
         }
     ]

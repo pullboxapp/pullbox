@@ -368,6 +368,7 @@ def summarize_import_safety_failures(
                 "reason": diagnostics["sanitized_reason"],
                 "retryable": bool(diagnostics["retryable"]),
                 "overrideable": bool(diagnostics["overrideable"]),
+                "overrideable_count": 0,
                 "examples": [],
             },
         )
@@ -386,6 +387,11 @@ def summarize_import_safety_failures(
             examples.append(safe_example)
         bucket["retryable"] = bool(bucket["retryable"]) and bool(diagnostics["retryable"])
         bucket["overrideable"] = bool(bucket["overrideable"]) and bool(diagnostics["overrideable"])
+        current_overrideable_count = bucket["overrideable_count"]
+        if bool(diagnostics["overrideable"]):
+            bucket["overrideable_count"] = (
+                current_overrideable_count + 1 if isinstance(current_overrideable_count, int) else 1
+            )
 
     summaries: list[dict[str, object]] = []
     for category in ImportSafetyCategory:
@@ -397,6 +403,11 @@ def summarize_import_safety_failures(
             {
                 **summary_bucket,
                 "codes": sorted(codes) if isinstance(codes, set) else [],
+                "bulk_overrideable": (
+                    category is ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT
+                    and isinstance(summary_bucket["overrideable_count"], int)
+                    and summary_bucket["overrideable_count"] > 0
+                ),
             }
         )
     return summaries

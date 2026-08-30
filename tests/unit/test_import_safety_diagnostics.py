@@ -193,6 +193,8 @@ def test_summarize_import_safety_failures_counts_categories_and_bounds_examples(
             "reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
             "retryable": False,
             "overrideable": True,
+            "overrideable_count": 4,
+            "bulk_overrideable": True,
             "examples": ["Omnibus 1.cbz", "Omnibus 2.cbz", "Omnibus 3.cbz"],
         },
         {
@@ -205,8 +207,30 @@ def test_summarize_import_safety_failures_counts_categories_and_bounds_examples(
             ),
             "retryable": False,
             "overrideable": False,
+            "overrideable_count": 0,
+            "bulk_overrideable": False,
             "examples": ["Unsafe.cbz"],
         },
     ]
     assert "/mnt/private" not in str(summary)
     assert "C:\\private" not in str(summary)
+
+
+def test_summarize_import_safety_failures_exposes_partial_bulk_eligibility() -> None:
+    eligible = build_import_safety_diagnostics(
+        "Archive decompressed size exceeds limit",
+        kind="archive_decompressed_size",
+    )
+    ineligible = {**eligible, "overrideable": False}
+
+    summary = summarize_import_safety_failures(
+        [
+            ("/private/Eligible.cbz", eligible),
+            ("/private/Ineligible.cbz", ineligible),
+        ]
+    )
+
+    assert len(summary) == 1
+    assert summary[0]["overrideable"] is False
+    assert summary[0]["overrideable_count"] == 1
+    assert summary[0]["bulk_overrideable"] is True
