@@ -183,6 +183,7 @@ async def load_file_match_target_index_with_progress(
     job_id: int,
     item: ImportedSeries,
     files_to_match: list[ImportedFile],
+    series_file_count: int | None = None,
     duplicate_series: bool,
     metadata_provider: MetadataProvider | None,
     series_idx: int,
@@ -202,6 +203,7 @@ async def load_file_match_target_index_with_progress(
             duplicate_series=duplicate_series,
             metadata_provider=metadata_provider,
             files=files_to_match,
+            series_file_count=series_file_count,
         )
 
     await emit_file_matching_progress(
@@ -223,6 +225,7 @@ async def load_file_match_target_index_with_progress(
             duplicate_series=duplicate_series,
             metadata_provider=metadata_provider,
             files=files_to_match,
+            series_file_count=series_file_count,
         )
 
     heartbeat_interval = (
@@ -238,6 +241,7 @@ async def load_file_match_target_index_with_progress(
             duplicate_series=duplicate_series,
             metadata_provider=metadata_provider,
             files=files_to_match,
+            series_file_count=series_file_count,
         )
 
     task: asyncio.Task[FileMatchTargetIndex] = asyncio.create_task(_load_targets())

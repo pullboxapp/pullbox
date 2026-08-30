@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from pullbox.core.issue_numbers import (
+    issue_number_text_matches_numeric,
+    normalize_issue_number_text,
+)
 from pullbox.core.release_parser import normalize_issue_number, parse_release_title
 
 if TYPE_CHECKING:
@@ -56,3 +60,17 @@ def candidate_issue_number(imp_file: ImportedFile) -> float | None:
     if parsed_issue_number is not None:
         return parsed_issue_number
     return volume_issue_number(imp_file)
+
+
+def candidate_issue_number_text(imp_file: ImportedFile) -> str | None:
+    """Return a validated exact issue designation when the source preserved one."""
+    issue_number = candidate_issue_number(imp_file)
+    if not imp_file.issue_number_raw or issue_number is None:
+        return None
+    try:
+        normalized = normalize_issue_number_text(imp_file.issue_number_raw)
+    except ValueError:
+        return None
+    if not issue_number_text_matches_numeric(issue_number, normalized):
+        return None
+    return normalized

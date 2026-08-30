@@ -7,13 +7,10 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select as sa_select
 from sqlalchemy.orm import joinedload
 
-from pullbox.core.issue_numbers import (
-    issue_number_text_matches_numeric,
-    normalize_issue_number_text,
-)
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
+from pullbox.services.import_file_issue_signals import candidate_issue_number_text
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -81,18 +78,6 @@ async def load_issue_lookup_for_series(
     return cv_id_to_issue, exact_number_to_issue, number_to_issue
 
 
-def _imported_file_exact_issue_number(imp_file: ImportedFile) -> str | None:
-    if not imp_file.issue_number_raw or imp_file.parsed_issue_number is None:
-        return None
-    try:
-        normalized = normalize_issue_number_text(imp_file.issue_number_raw)
-    except ValueError:
-        return None
-    if not issue_number_text_matches_numeric(imp_file.parsed_issue_number, normalized):
-        return None
-    return normalized
-
-
 async def resolve_import_file_issue(
     session: AsyncSession,
     imp_file: ImportedFile,
@@ -117,7 +102,7 @@ async def resolve_import_file_issue(
         if resolved_issue is not None:
             return resolved_issue
 
-    exact_issue_number = _imported_file_exact_issue_number(imp_file)
+    exact_issue_number = candidate_issue_number_text(imp_file)
     if exact_issue_number is not None:
         return exact_number_to_issue.get(exact_issue_number)
 

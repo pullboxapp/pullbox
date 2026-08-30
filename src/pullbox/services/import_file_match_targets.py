@@ -42,6 +42,7 @@ class FileMatchTargetIndex:
     """Issue lookup maps used while matching imported files."""
 
     cv_id_map: dict[int, FileMatchTargetEntry] = field(default_factory=dict)
+    exact_number_map: dict[str, FileMatchTargetEntry] = field(default_factory=dict)
     number_map: dict[float, FileMatchTargetEntry] = field(default_factory=dict)
     synthetic_issue_types: dict[float, IssueType] = field(default_factory=dict)
     synthetic_issue_titles: dict[float, str | None] = field(default_factory=dict)
@@ -52,7 +53,7 @@ class FileMatchTargetIndex:
     @property
     def has_targets(self) -> bool:
         """Return True when at least one target issue identity is available."""
-        return bool(self.cv_id_map or self.number_map)
+        return bool(self.cv_id_map or self.exact_number_map or self.number_map)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,7 @@ async def load_file_match_target_index(
     duplicate_series: bool,
     metadata_provider: MetadataProvider | None,
     files: list[ImportedFile] | None = None,
+    series_file_count: int | None = None,
 ) -> FileMatchTargetIndex:
     """Load issue identity maps for a matched or duplicate imported series."""
     target_index = FileMatchTargetIndex()
@@ -79,12 +81,20 @@ async def load_file_match_target_index(
             .outerjoin(LibraryFile, LibraryFile.issue_id == Issue.id)
             .where(Issue.series_id == imp_series.series_id)
         )
+        ambiguous_issue_numbers: set[float] = set()
         for issue, library_file_id in issues_result.all():
             has_library_file = library_file_id is not None
             target_index.issue_entries.append((issue, has_library_file))
             entry = (issue.id, issue.comicvine_id, has_library_file, issue, issue.title)
             if issue.comicvine_id is not None:
                 target_index.cv_id_map[issue.comicvine_id] = entry
+            target_index.exact_number_map[issue.effective_issue_number_text] = entry
+            if issue.issue_number in ambiguous_issue_numbers:
+                continue
+            if issue.issue_number in target_index.number_map:
+                target_index.number_map.pop(issue.issue_number)
+                ambiguous_issue_numbers.add(issue.issue_number)
+                continue
             target_index.number_map[issue.issue_number] = entry
         return target_index
 
@@ -120,7 +130,11 @@ async def load_file_match_target_index(
                     f"(cv_id={imp_series.cv_id})."
                 ),
             )
-        placeholder = _provider_zero_issue_placeholder_target(imp_series, files or [])
+        placeholder = _provider_zero_issue_placeholder_target(
+            imp_series,
+            files or [],
+            series_file_count=series_file_count,
+        )
         if not load_result.summaries and load_result.exhaustive and placeholder is not None:
             issue_number, issue_type, issue_title = placeholder
             target_index.number_map[issue_number] = (None, None, False, None, issue_title)
@@ -538,9 +552,12 @@ def _should_full_fetch_requested_issue_numbers(
 def _provider_zero_issue_placeholder_target(
     imp_series: ImportedSeries,
     files: list[ImportedFile],
+    *,
+    series_file_count: int | None = None,
 ) -> tuple[float, IssueType, str | None] | None:
     """Return a synthetic issue target for exact one-shot/special volumes with no issues."""
-    if imp_series.cv_issue_count != 0 or len(files) != 1:
+    effective_file_count = len(files) if series_file_count is None else series_file_count
+    if imp_series.cv_issue_count != 0 or effective_file_count != 1 or len(files) != 1:
         return None
     if not (
         imp_series.cv_match_method == "exact_title_year"
