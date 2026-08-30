@@ -68,7 +68,7 @@ async def _seed_reorder_arc(
     issue_count: int = 3,
 ) -> tuple[int, tuple[int, ...], tuple[Path, ...], tuple[Path, ...]]:
     library_root_path = tmp_path / "library"
-    destination = tmp_path / "arcs"
+    destination = library_root_path / "StoryArcs"
     library_root_path.mkdir()
     destination.mkdir()
     now = datetime.now(UTC)

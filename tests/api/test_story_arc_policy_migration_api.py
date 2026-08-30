@@ -110,8 +110,8 @@ async def _seed_api_scope(
     tmp_path: Path,
 ) -> tuple[int, int, Path, Path]:
     library = tmp_path / "api-library"
-    old_root = tmp_path / "api-old-arcs"
-    new_root = tmp_path / "api-new-arcs"
+    old_root = library / "OldStoryArcs"
+    new_root = library / "NewStoryArcs"
     library.mkdir()
     old_root.mkdir()
     new_root.mkdir()

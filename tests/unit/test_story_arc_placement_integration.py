@@ -60,7 +60,7 @@ async def _seed_membership(
     canonical = tmp_path / "library" / "Batman.cbz"
     canonical.parent.mkdir(exist_ok=True)
     canonical.write_bytes(b"canonical archive")
-    arc_root = tmp_path / "arcs"
+    arc_root = canonical.parent / "StoryArcs"
     arc_root.mkdir(exist_ok=True)
     now = datetime.now(UTC)
 
@@ -240,6 +240,56 @@ async def test_policy_validation_fails_closed(
                 proposal=proposal,
             )
     assert error.value.code == code
+
+
+@pytest.mark.parametrize(
+    "destination_parts",
+    [
+        pytest.param(("outside", "StoryArcs"), id="outside-root"),
+        pytest.param(("library-sibling", "StoryArcs"), id="sibling-prefix"),
+    ],
+)
+async def test_policy_rejects_destination_outside_selected_library_root(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    destination_parts: tuple[str, ...],
+) -> None:
+    arc_id, _membership_id, root_id, _canonical, _arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    destination = tmp_path.joinpath(*destination_parts)
+    destination.mkdir(parents=True)
+
+    async with db_factory() as session:
+        with pytest.raises(StoryArcPlacementIntegrationError) as error:
+            await StoryArcPlacementSyncService().validate_policy(
+                session,
+                arc_id,
+                _copy_policy(root_id, destination),
+            )
+
+    assert error.value.code == "destination_root_outside_library_root"
+    assert error.value.category == "safety"
+
+
+async def test_policy_accepts_nested_destination_within_selected_library_root(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, _membership_id, root_id, canonical, _arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    destination = canonical.parent / "Collections" / "StoryArcs"
+    destination.mkdir(parents=True)
+
+    async with db_factory() as session:
+        policy = await StoryArcPlacementSyncService().validate_policy(
+            session,
+            arc_id,
+            _copy_policy(root_id, destination),
+        )
+
+    assert policy.destination_root == str(destination.resolve())
 
 
 async def test_preview_and_copy_sync_preserve_exact_issue_and_are_idempotent(
@@ -1175,7 +1225,7 @@ async def test_managed_policy_destination_change_is_blocked_until_migrated(
         )
         await service.sync_membership(session, arc_id, membership_id)
 
-    replacement_root = tmp_path / "replacement-arcs"
+    replacement_root = arc_root.parent / "ReplacementStoryArcs"
     replacement_root.mkdir()
     async with db_factory() as session:
         with pytest.raises(StoryArcPlacementIntegrationError) as blocked:

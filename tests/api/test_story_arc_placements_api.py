@@ -122,7 +122,7 @@ async def _seed(
     canonical = tmp_path / "library" / "Batman.cbz"
     canonical.parent.mkdir(exist_ok=True)
     canonical.write_bytes(b"canonical")
-    destination = tmp_path / "arcs"
+    destination = canonical.parent / "StoryArcs"
     destination.mkdir(exist_ok=True)
     async with db_factory() as session:
         root = LibraryRoot(name="Comics", path=str(canonical.parent), enabled=True)
@@ -226,6 +226,28 @@ async def test_policy_routes_require_auth_preview_without_mutation_and_use_revis
     }
 
 
+async def test_policy_preview_rejects_sibling_prefix_destination(
+    client: AsyncClient,
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, _membership_id, root_id, canonical, _destination = await _seed(db_factory, tmp_path)
+    sibling = canonical.parent.with_name(f"{canonical.parent.name}-archive")
+    sibling.mkdir()
+
+    response = await client.post(
+        f"/api/v1/story-arcs/{arc_id}/placement-policy/preview",
+        json=_policy_payload(root_id, sibling),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "destination_root_outside_library_root",
+        "category": "safety",
+        "message": "Story-arc destination root must be within the selected library root",
+    }
+
+
 async def test_sync_list_retry_and_repair_have_categorized_state(
     client: AsyncClient,
     db_factory: async_sessionmaker[AsyncSession],
@@ -315,9 +337,10 @@ async def test_symlink_root_preview_returns_safe_category(
     tmp_path: Path,
 ) -> None:
     arc_id, _membership_id, root_id, _canonical, _destination = await _seed(db_factory, tmp_path)
-    physical = tmp_path / "physical-arcs"
+    library = tmp_path / "library"
+    physical = library / "physical-arcs"
     physical.mkdir()
-    linked = tmp_path / "linked-arcs"
+    linked = library / "linked-arcs"
     linked.symlink_to(physical, target_is_directory=True)
     payload = _policy_payload(root_id, linked)
     payload["mode"] = "symlink"

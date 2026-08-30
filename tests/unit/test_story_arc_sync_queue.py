@@ -117,7 +117,7 @@ async def _add_membership(
     sequence_number: int = 1,
     policy_synchronize: bool = True,
 ) -> int:
-    destination = tmp_path / f"arcs-{name}"
+    destination = tmp_path / "library" / f"StoryArcs-{name}"
     destination.mkdir(exist_ok=True)
     async with factory() as session:
         root_id = int(

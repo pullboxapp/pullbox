@@ -80,8 +80,8 @@ async def _seed_migration_scope(
     tmp_path: Path,
 ) -> tuple[int, int, Path, Path, tuple[Path, ...]]:
     library = tmp_path / "library"
-    current_root = tmp_path / "current-arcs"
-    proposed_root = tmp_path / "proposed-arcs"
+    current_root = library / "CurrentStoryArcs"
+    proposed_root = library / "ProposedStoryArcs"
     library.mkdir()
     current_root.mkdir()
     proposed_root.mkdir()

@@ -182,7 +182,7 @@ async def test_managed_policy_requires_and_freezes_an_enabled_root_and_existing_
 ) -> None:
     job, arc = await _stage(db_session)
     library = tmp_path / "library"
-    destination = tmp_path / "StoryArcs"
+    destination = library / "StoryArcs"
     library.mkdir()
     destination.mkdir()
     root = LibraryRoot(name="Comics", path=str(library), enabled=True)

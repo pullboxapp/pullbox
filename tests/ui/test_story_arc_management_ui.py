@@ -182,7 +182,7 @@ async def _seed_placement_arc(
     canonical = tmp_path / "library" / "DC One Million 1000000.cbz"
     canonical.parent.mkdir()
     canonical.write_bytes(b"canonical story arc issue")
-    destination = tmp_path / "story-arcs"
+    destination = canonical.parent / "StoryArcs"
     destination.mkdir()
     service = StoryArcService()
     async with factory() as session:

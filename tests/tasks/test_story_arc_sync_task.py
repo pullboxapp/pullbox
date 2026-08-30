@@ -82,7 +82,7 @@ async def _seed_two_work_items(
     canonical = tmp_path / "library" / "Batman.cbz"
     canonical.parent.mkdir(exist_ok=True)
     canonical.write_bytes(b"canonical")
-    arc_root = tmp_path / "arcs"
+    arc_root = canonical.parent / "StoryArcs"
     arc_root.mkdir(exist_ok=True)
     async with factory() as session:
         root = LibraryRoot(name="Comics", path=str(canonical.parent), enabled=True)
@@ -176,7 +176,7 @@ async def _seed_origin_work(
     canonical = tmp_path / f"library-{mode.value}" / "Batman.cbz"
     canonical.parent.mkdir(exist_ok=True)
     canonical.write_bytes(b"canonical import placement")
-    destination = tmp_path / f"import-arcs-{mode.value}"
+    destination = canonical.parent / f"ImportStoryArcs-{mode.value}"
     destination.mkdir(exist_ok=True)
     async with factory() as session:
         root = LibraryRoot(name="Comics", path=str(canonical.parent), enabled=True)

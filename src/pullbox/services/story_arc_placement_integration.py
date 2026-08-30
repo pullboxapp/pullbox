@@ -1468,6 +1468,26 @@ async def validate_story_arc_placement_policy_input(
             "Story-arc destination root is not a directory",
             category="safety",
         )
+    try:
+        resolved_library_root = Path(library_root.path).resolve(strict=True)
+    except OSError as exc:
+        raise StoryArcPlacementIntegrationError(
+            "target_library_root_unavailable",
+            "Selected story-arc library root is unavailable",
+            category="safety",
+        ) from exc
+    if not resolved_library_root.is_dir():
+        raise StoryArcPlacementIntegrationError(
+            "target_library_root_unavailable",
+            "Selected story-arc library root is unavailable",
+            category="safety",
+        )
+    if not resolved_destination.is_relative_to(resolved_library_root):
+        raise StoryArcPlacementIntegrationError(
+            "destination_root_outside_library_root",
+            "Story-arc destination root must be within the selected library root",
+            category="safety",
+        )
     return StoryArcPlacementPolicy(
         configured=True,
         revision=revision,
