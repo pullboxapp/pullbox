@@ -80,7 +80,21 @@ from pullbox.models.series import (
     SeriesStatusOverride,
     SeriesType,
 )
-from pullbox.models.story_arc import IssueStoryArc, StoryArc
+from pullbox.models.story_arc import (
+    ImportedStoryArcStatus,
+    IssueStoryArc,
+    StoryArc,
+    StoryArcExternalIdentity,
+    StoryArcLifecycle,
+    StoryArcPlacement,
+    StoryArcPlacementMode,
+    StoryArcPlacementOwnership,
+    StoryArcPlacementState,
+    StoryArcResolutionState,
+    StoryArcSourceKind,
+    StoryArcSymlinkStyle,
+)
+from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.models.user import APIKey, User
 from pullbox.models.whats_new import WhatsNewCacheKind, WhatsNewReleaseCache
 from pullbox.utilities.models import (
@@ -141,6 +155,9 @@ __all__ = [
     "ImportedFile",
     "ImportedFileStatus",
     "ImportedSeries",
+    "ImportedStoryArc",
+    "ImportedStoryArcEntry",
+    "ImportedStoryArcStatus",
     "IndexerConfig",
     "IndexerSource",
     "IndexerType",
@@ -178,6 +195,15 @@ __all__ = [
     "SeriesStatusOverride",
     "SeriesType",
     "StoryArc",
+    "StoryArcExternalIdentity",
+    "StoryArcLifecycle",
+    "StoryArcPlacement",
+    "StoryArcPlacementMode",
+    "StoryArcPlacementOwnership",
+    "StoryArcPlacementState",
+    "StoryArcResolutionState",
+    "StoryArcSourceKind",
+    "StoryArcSymlinkStyle",
     "SuggestionStatus",
     "SystemConfig",
     "TimestampMixin",

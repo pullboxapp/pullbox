@@ -28,6 +28,8 @@ class FolderArcFileEvidence:
     issue_number: str | None
     story_arc: str | None = None
     story_arc_number: str | None = None
+    story_arc_number_source: str | None = None
+    evidence_complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,18 @@ def detect_folder_story_arc(
         assert item.story_arc is not None
         display_name = _collapse_whitespace(item.story_arc)
         normalized_names.setdefault(normalize_story_arc_name(display_name), display_name)
+
+    if any(not item.evidence_complete for item in files) and (
+        len(series_keys) > 1 or bool(named) or bool(ordered)
+    ):
+        return _result(
+            FolderArcClassification.NEEDS_REVIEW,
+            "incomplete_arc_evidence",
+            next(iter(normalized_names.values()), _clean_folder_label(folder_label)),
+            files,
+            series_keys,
+            ordered,
+        )
 
     if len(normalized_names) > 1:
         return _result(

@@ -8,6 +8,7 @@ generator, enabling SSE streaming during long-running scans.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 
 import structlog
 
@@ -117,6 +118,8 @@ class DiscoveredFile:
     metadata_signals: dict[str, str] = field(default_factory=dict)
     metadata_diagnostics: dict[str, object] = field(default_factory=dict)
     source_signature: dict[str, int | str] = field(default_factory=dict)
+    source_folder_cohort_key: str | None = None
+    source_ordinal: int | None = None
 
 
 @dataclass
@@ -287,6 +290,10 @@ class CollectionScanner:
 
         # Identify series directories (leaf dirs with comics, not parents of other series dirs).
         series_dirs = self._identify_series_dirs(dir_files)
+        source_ordinal_by_path = self._build_source_ordinal_index(
+            (path for files in dir_files.values() for path in files),
+            root=root,
+        )
 
         # Limit concurrent archive reads and per-series materialization work.
         comicinfo_sem = asyncio.Semaphore(ARCHIVE_READ_CONCURRENCY)
@@ -309,6 +316,12 @@ class CollectionScanner:
                     root=root,
                     folder_publisher=folder_publisher,
                     allow_weak_file_identity=allow_weak_file_identity,
+                )
+                self._stamp_source_folder_cohort(
+                    discovered_files,
+                    source_dir=series_dir,
+                    root=root,
+                    source_ordinal_by_path=source_ordinal_by_path,
                 )
                 return self._build_series_candidates(
                     source_dir=series_dir,
@@ -408,6 +421,10 @@ class CollectionScanner:
         comicinfo_sem = asyncio.Semaphore(ARCHIVE_READ_CONCURRENCY)
         discovered_list: list[DiscoveredSeries] = []
         root = Path(root_path).resolve() if root_path is not None else None
+        source_ordinal_by_path = self._build_source_ordinal_index(
+            (path for files in dir_files.values() for path in files),
+            root=root,
+        )
 
         for series_dir, comic_files in sorted(dir_files.items()):
             name, year, folder_cv_id = self._extract_folder_identity(series_dir.name)
@@ -419,6 +436,12 @@ class CollectionScanner:
             )
             if not discovered_files:
                 continue
+            self._stamp_source_folder_cohort(
+                discovered_files,
+                source_dir=series_dir,
+                root=root,
+                source_ordinal_by_path=source_ordinal_by_path,
+            )
 
             publisher: str | None = None
             discovered_list.extend(
@@ -440,6 +463,53 @@ class CollectionScanner:
             files_found=sum(s.file_count for s in discovered_list),
         )
         return discovered_list
+
+    @staticmethod
+    def _relative_source_path(path: Path, *, root: Path | None) -> str:
+        """Return a stable non-absolute source path when a scan root is known."""
+        if root is not None:
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                pass
+            else:
+                return "(root)" if relative == "." else relative
+        digest = hashlib.sha256(str(path.resolve(strict=False)).encode("utf-8")).hexdigest()
+        return f"selected:{digest}"
+
+    @classmethod
+    def _build_source_ordinal_index(
+        cls,
+        paths: Iterable[Path],
+        *,
+        root: Path | None,
+    ) -> dict[str, int]:
+        """Assign deterministic one-based ordinals across a scan's source files."""
+        path_items = list(paths)
+        ordered = sorted(
+            path_items,
+            key=lambda item: (
+                cls._relative_source_path(item, root=root).casefold(),
+                cls._relative_source_path(item, root=root),
+                str(item),
+            ),
+        )
+        return {str(path): ordinal for ordinal, path in enumerate(ordered, start=1)}
+
+    @classmethod
+    def _stamp_source_folder_cohort(
+        cls,
+        discovered_files: list[DiscoveredFile],
+        *,
+        source_dir: Path,
+        root: Path | None,
+        source_ordinal_by_path: dict[str, int],
+    ) -> None:
+        """Attach the complete pre-split folder cohort to every discovered file."""
+        cohort_key = cls._relative_source_path(source_dir, root=root)
+        for discovered_file in discovered_files:
+            discovered_file.source_folder_cohort_key = cohort_key
+            discovered_file.source_ordinal = source_ordinal_by_path.get(discovered_file.file_path)
 
     async def _build_discovered_files(
         self,

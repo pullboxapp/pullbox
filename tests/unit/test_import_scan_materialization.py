@@ -64,6 +64,8 @@ def _discovered_file(
             "device": 1,
             "inode": 2,
         },
+        source_folder_cohort_key="Absolute Wonder Woman",
+        source_ordinal=19,
     )
 
 
@@ -130,6 +132,8 @@ async def test_materialize_discovered_scan_results_persists_series_and_files(
     assert file_row.has_comicinfo is True
     assert file_row.comicvine_issue_id == 123456
     assert file_row.issue_number_raw == "019"
+    assert file_row.source_folder_cohort_key == "Absolute Wonder Woman"
+    assert file_row.source_ordinal == 19
     assert file_row.status == ImportedFileStatus.PENDING
     assert file_row.source_signature == {
         "schema_version": 1,

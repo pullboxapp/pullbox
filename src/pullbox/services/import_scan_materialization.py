@@ -140,6 +140,8 @@ async def materialize_discovered_scan_results(
                 has_comicinfo=df.has_comicinfo,
                 comicvine_issue_id=df.comicvine_issue_id,
                 issue_number_raw=df.issue_number_raw,
+                source_folder_cohort_key=df.source_folder_cohort_key,
+                source_ordinal=df.source_ordinal,
                 source_signature=dict(df.source_signature),
                 status=file_status,
                 include_in_import=False,

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from pullbox.models.creator import Creator
     from pullbox.models.library import LibraryFile
     from pullbox.models.series import Series
-    from pullbox.models.story_arc import StoryArc
+    from pullbox.models.story_arc import IssueStoryArc, StoryArc
 
 
 class IssueType(enum.StrEnum):
@@ -170,8 +170,9 @@ class Issue(Base, IdentityMixin, TimestampMixin):
         secondary="issue_creators", back_populates="issues"
     )
     story_arcs: Mapped[list[StoryArc]] = relationship(
-        secondary="issue_story_arcs", back_populates="issues"
+        secondary="issue_story_arcs", back_populates="issues", viewonly=True
     )
+    story_arc_memberships: Mapped[list[IssueStoryArc]] = relationship(back_populates="issue")
 
     @validates("issue_number")
     def _dual_write_issue_number(self, _key: str, value: float) -> float:

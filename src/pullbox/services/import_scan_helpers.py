@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete as sa_delete
+from sqlalchemy import select as sa_select
 
 from pullbox.core.file_safety import (
     FileSafetyError,
@@ -19,6 +20,7 @@ from pullbox.core.file_safety import (
 )
 from pullbox.core.source_metadata import archive_entry_issue_hint_from_names
 from pullbox.models.import_job import ImportedFile, ImportedSeries, ImportJob
+from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 
 if TYPE_CHECKING:
@@ -35,6 +37,15 @@ FileSafetyCheck = Callable[
 
 async def reset_scan_artifacts(session: AsyncSession, job: ImportJob) -> None:
     """Clear scan-produced rows and counters before a fresh/recovered scan run."""
+    staged_arc_ids = sa_select(ImportedStoryArc.id).where(ImportedStoryArc.import_job_id == job.id)
+    await session.execute(
+        sa_delete(ImportedStoryArcEntry).where(
+            ImportedStoryArcEntry.imported_story_arc_id.in_(staged_arc_ids)
+        )
+    )
+    await session.execute(
+        sa_delete(ImportedStoryArc).where(ImportedStoryArc.import_job_id == job.id)
+    )
     await session.execute(sa_delete(ImportedFile).where(ImportedFile.import_job_id == job.id))
     await session.execute(sa_delete(ImportedSeries).where(ImportedSeries.import_job_id == job.id))
 

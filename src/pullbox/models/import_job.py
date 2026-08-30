@@ -30,6 +30,7 @@ from pullbox.models.base import Base, IdentityMixin, TimestampMixin, UTCDateTime
 if TYPE_CHECKING:
     from pullbox.models.library import LibraryRoot
     from pullbox.models.series import Series
+    from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 
 
 class ImportSourceType(enum.StrEnum):
@@ -278,6 +279,11 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="ImportJobAction.sequence_no",
     )
+    story_arcs: Mapped[list[ImportedStoryArc]] = relationship(
+        back_populates="import_job",
+        cascade="all, delete-orphan",
+        order_by="ImportedStoryArc.id",
+    )
 
 
 class ImportJobLog(Base, IdentityMixin):
@@ -417,7 +423,16 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     """
 
     __tablename__ = "import_files"
-    __table_args__ = (Index("ix_import_files_job_series", "import_job_id", "import_series_id"),)
+    __table_args__ = (
+        Index("ix_import_files_job_series", "import_job_id", "import_series_id"),
+        Index(
+            "ix_import_files_job_cohort_order",
+            "import_job_id",
+            "source_folder_cohort_key",
+            "source_ordinal",
+            "id",
+        ),
+    )
 
     # Parent references
     import_job_id: Mapped[int] = mapped_column(
@@ -470,6 +485,8 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     source_signature: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}", nullable=False
     )
+    source_folder_cohort_key: Mapped[str | None] = mapped_column(String(1000))
+    source_ordinal: Mapped[int | None] = mapped_column(Integer)
 
     # Import outcome
     library_file_id: Mapped[int | None] = mapped_column(
@@ -483,3 +500,7 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     # Relationships
     import_job: Mapped[ImportJob] = relationship(back_populates="files")
     import_series: Mapped[ImportedSeries] = relationship(back_populates="files")
+    story_arc_entries: Mapped[list[ImportedStoryArcEntry]] = relationship(
+        back_populates="import_file",
+        foreign_keys="ImportedStoryArcEntry.import_file_id",
+    )

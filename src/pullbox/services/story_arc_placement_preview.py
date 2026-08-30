@@ -13,21 +13,10 @@ from pullbox.core.story_arc_naming import (
     StoryArcNamingValues,
     render_story_arc_relative_path,
 )
+from pullbox.models.story_arc import StoryArcPlacementMode, StoryArcSymlinkStyle
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-class StoryArcPlacementMode(enum.StrEnum):
-    COPY = "copy"
-    HARDLINK = "hardlink"
-    SYMLINK = "symlink"
-    REFERENCE_ONLY = "reference_only"
-
-
-class StoryArcSymlinkStyle(enum.StrEnum):
-    ABSOLUTE = "absolute"
-    RELATIVE = "relative"
 
 
 class StoryArcPlacementPreviewState(enum.StrEnum):

@@ -676,6 +676,60 @@ class TestMetadataGrouping:
         assert len(results) == 2
         assert all(result.raw_series_name != "Axis" for result in results)
         assert all(result.diagnostics["mixed_bucket"] is True for result in results)
+        discovered_files = [item for result in results for item in result.files]
+        assert {item.source_folder_cohort_key for item in discovered_files} == {"Axis"}
+        assert sorted(item.source_ordinal for item in discovered_files) == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_folder_cohort_ordinals_are_global_and_path_stable(self, tmp_path: Path) -> None:
+        _make_series_dir(tmp_path, "Zulu", files=["Zulu 001.cbz"])
+        _make_series_dir(tmp_path, "Alpha", files=["Alpha 001.cbz", "Alpha 002.cbz"])
+
+        scanner = CollectionScanner()
+        first = await _scan_all(scanner, tmp_path)
+        second = await _scan_all(scanner, tmp_path)
+
+        def evidence(results: list[DiscoveredSeries]) -> list[tuple[str, str | None, int | None]]:
+            return sorted(
+                (
+                    item.file_name,
+                    item.source_folder_cohort_key,
+                    item.source_ordinal,
+                )
+                for result in results
+                for item in result.files
+            )
+
+        assert (
+            evidence(first)
+            == evidence(second)
+            == [
+                ("Alpha 001.cbz", "Alpha", 1),
+                ("Alpha 002.cbz", "Alpha", 2),
+                ("Zulu 001.cbz", "Zulu", 3),
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_focused_scan_keeps_same_named_parent_cohorts_distinct(
+        self, tmp_path: Path
+    ) -> None:
+        first = tmp_path / "one" / "Series" / "Series 001.cbz"
+        second = tmp_path / "two" / "Series" / "Series 002.cbz"
+        _touch(first)
+        _touch(second)
+
+        results = await CollectionScanner().scan_files([str(second), str(first)])
+        discovered_files = [item for result in results for item in result.files]
+
+        assert len(discovered_files) == 2
+        assert len({item.source_folder_cohort_key for item in discovered_files}) == 2
+        assert sorted(item.source_ordinal for item in discovered_files) == [1, 2]
+        assert all(
+            item.source_folder_cohort_key is not None
+            and str(tmp_path) not in item.source_folder_cohort_key
+            for item in discovered_files
+        )
 
     @pytest.mark.asyncio
     async def test_issue_title_files_in_generic_staging_folder_stay_split(

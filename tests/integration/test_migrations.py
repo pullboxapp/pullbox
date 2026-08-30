@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import MetaData, Table, create_engine, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -27,6 +28,8 @@ _DIRECT_ACQUISITION_PARENT_REVISION = "d9f0a1b2c345"
 _AIRDCPP_FOUNDATION_PARENT_REVISION = "q2r3s4t5u678"
 _AIRDCPP_SETTINGS_PARENT_REVISION = "r3s4t5u6v789"
 _ISSUE_NUMBER_TEXT_PARENT_REVISION = "y0z1a2b3c456"
+_STORY_ARC_DOMAIN_PARENT_REVISION = "z1a2b3c4d567"
+_STORY_ARC_DOMAIN_REVISION = "a2b3c4d5e678"
 
 
 @pytest.fixture
@@ -121,6 +124,23 @@ def _insert_download_history_issue(conn) -> None:
     conn.execute(
         text("INSERT INTO issues (id, series_id, issue_number, status) VALUES (1, 1, 1, 'UNKNOWN')")
     )
+
+
+def _seed_minimal_import_job(conn: Connection, *, source_path: str) -> int:
+    """Seed an import job that is valid at the story-arc parent revision."""
+    conn.execute(
+        text(
+            "INSERT INTO import_jobs ("
+            "source_path, source_type, status, scan_total_files, scan_total_dirs, "
+            "series_found, series_duplicate, series_matched, series_no_match, series_new, "
+            "series_imported, series_failed, search_on_add, cv_match_threshold, "
+            "auto_accept_high_confidence, skip_no_match) VALUES ("
+            ":source_path, 'filesystem', 'review', 0, 0, 0, 0, 0, 0, 0, 0, 0, "
+            "0, 0.7, 0, 0)"
+        ),
+        {"source_path": source_path},
+    )
+    return int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
 
 
 class TestMigrationChain:
@@ -270,6 +290,365 @@ class TestMigrationChain:
             command.downgrade(cfg, _ISSUE_NUMBER_TEXT_PARENT_REVISION)
 
         assert "issue_number_text" in _get_columns(sync_url, "issues")
+
+    def test_story_arc_domain_migration_preserves_legacy_graph_and_round_trips(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Legacy arcs gain reviewable identity without rebuilding parent tables."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, _STORY_ARC_DOMAIN_PARENT_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                issue_ids = [
+                    _seed_reader_state_owner(conn, slug=slug)[1]
+                    for slug in ("million", "duplicate-order", "missing-order")
+                ]
+                for issue_id, number, exact_text in (
+                    (issue_ids[0], 1_000_000.0, "1000000"),
+                    (issue_ids[1], 2.0, "2"),
+                    (issue_ids[2], 3.0, "3"),
+                ):
+                    conn.execute(
+                        text(
+                            "UPDATE issues SET issue_number = :number, "
+                            "issue_number_text = :exact_text WHERE id = :issue_id"
+                        ),
+                        {"number": number, "exact_text": exact_text, "issue_id": issue_id},
+                    )
+
+                conn.execute(
+                    text(
+                        "INSERT INTO story_arcs (comicvine_id, name, description) "
+                        "VALUES (7001, '  Legacy   Event  ', 'Preserved')"
+                    )
+                )
+                first_arc_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+                conn.execute(text("INSERT INTO story_arcs (name) VALUES ('Second Arc')"))
+                second_arc_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+                conn.execute(
+                    text(
+                        "INSERT INTO issue_story_arcs "
+                        "(issue_id, story_arc_id, sequence_number) VALUES "
+                        "(:issue_one, :first_arc, 10), "
+                        "(:issue_two, :first_arc, 10), "
+                        "(:issue_three, :first_arc, NULL), "
+                        "(:issue_one, :second_arc, 4)"
+                    ),
+                    {
+                        "issue_one": issue_ids[0],
+                        "issue_two": issue_ids[1],
+                        "issue_three": issue_ids[2],
+                        "first_arc": first_arc_id,
+                        "second_arc": second_arc_id,
+                    },
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO download_history "
+                        "(issue_id, title, download_url, download_client, protocol, state) "
+                        "VALUES (:issue_id, 'Story arc child row', "
+                        "'https://example.test/story-arc-child', 'SABNZBD', "
+                        "'usenet', 'QUEUED')"
+                    ),
+                    {"issue_id": issue_ids[0]},
+                )
+                history_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+
+                import_job_id = _seed_minimal_import_job(
+                    conn,
+                    source_path="/fixture/library",
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO import_series "
+                        "(import_job_id, status, raw_series_name, file_count, has_files) "
+                        "VALUES (:job_id, 'pending', 'Legacy Series', 1, 1)"
+                    ),
+                    {"job_id": import_job_id},
+                )
+                imported_series_id = int(
+                    conn.execute(text("SELECT last_insert_rowid()")).scalar_one()
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO import_files "
+                        "(import_job_id, import_series_id, file_path, file_name, file_size, "
+                        "file_format, has_comicinfo, status, is_preferred) VALUES "
+                        "(:job_id, :series_id, '/fixture/library/issue.cbz', 'issue.cbz', "
+                        "100, 'cbz', 0, 'pending', 0)"
+                    ),
+                    {"job_id": import_job_id, "series_id": imported_series_id},
+                )
+                imported_file_id = int(
+                    conn.execute(text("SELECT last_insert_rowid()")).scalar_one()
+                )
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            assert {
+                "story_arc_external_identities",
+                "import_story_arcs",
+                "import_story_arc_entries",
+                "story_arc_placements",
+            }.issubset(inspector.get_table_names())
+            assert {
+                "normalized_name",
+                "source_kind",
+                "lifecycle",
+                "policy_schema_version",
+                "policy_snapshot",
+                "source_import_job_id",
+                "revision",
+                "diagnostics",
+            }.issubset(_get_columns(sync_url, "story_arcs"))
+            assert {
+                "id",
+                "source_ordinal",
+                "legacy_sequence_was_null",
+                "resolution_state",
+                "source_issue_number_text",
+            }.issubset(_get_columns(sync_url, "issue_story_arcs"))
+            assert {
+                "source_folder_cohort_key",
+                "source_ordinal",
+            }.issubset(_get_columns(sync_url, "import_files"))
+
+            indexes = _get_indexes(sync_url, "issue_story_arcs")
+            assert indexes["ix_issue_story_arcs_order"] == [
+                "story_arc_id",
+                "sequence_number",
+                "source_ordinal",
+                "id",
+            ]
+            assert _get_indexes(sync_url, "import_files")["ix_import_files_job_cohort_order"] == [
+                "import_job_id",
+                "source_folder_cohort_key",
+                "source_ordinal",
+                "id",
+            ]
+
+            with engine.connect() as conn:
+                arc_row = conn.execute(
+                    text(
+                        "SELECT normalized_name, source_kind, lifecycle, monitored, "
+                        "search_missing, include_upcoming, sync_enabled, revision "
+                        "FROM story_arcs WHERE id = :arc_id"
+                    ),
+                    {"arc_id": first_arc_id},
+                ).one()
+                membership_rows = conn.execute(
+                    text(
+                        "SELECT issue_id, story_arc_id, sequence_number, source_ordinal, "
+                        "legacy_sequence_was_null, resolution_state, "
+                        "source_issue_number_text FROM issue_story_arcs "
+                        "ORDER BY story_arc_id, issue_id"
+                    )
+                ).fetchall()
+                external_identity = conn.execute(
+                    text(
+                        "SELECT source, namespace, external_id "
+                        "FROM story_arc_external_identities WHERE story_arc_id = :arc_id"
+                    ),
+                    {"arc_id": first_arc_id},
+                ).one()
+                preserved_history_issue_id = conn.execute(
+                    text("SELECT issue_id FROM download_history WHERE id = :history_id"),
+                    {"history_id": history_id},
+                ).scalar_one()
+                cohort_values = conn.execute(
+                    text(
+                        "SELECT source_folder_cohort_key, source_ordinal "
+                        "FROM import_files WHERE id = :file_id"
+                    ),
+                    {"file_id": imported_file_id},
+                ).one()
+
+            assert tuple(arc_row) == ("legacy event", "legacy", "active", 0, 0, 0, 0, 1)
+            assert [tuple(row) for row in membership_rows] == [
+                (issue_ids[0], first_arc_id, 10, 1, 0, "resolved", "1000000"),
+                (issue_ids[1], first_arc_id, 10, 2, 0, "resolved", "2"),
+                (issue_ids[2], first_arc_id, 11, 3, 1, "resolved", "3"),
+                (issue_ids[0], second_arc_id, 4, 1, 0, "resolved", "1000000"),
+            ]
+            assert tuple(external_identity) == ("comicvine", "story_arc", "7001")
+            assert preserved_history_issue_id == issue_ids[0]
+            assert tuple(cohort_values) == (None, None)
+
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO import_story_arcs "
+                        "(import_job_id, source_kind, source_key, source_arc_id, "
+                        "source_ordinal, name, normalized_name, status) VALUES "
+                        "(:job_id, 'mylar3', 'mylar3:arc:42', '42', 0, "
+                        "'Imported Event', 'imported event', 'detected')"
+                    ),
+                    {"job_id": import_job_id},
+                )
+                staged_arc_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+                conn.execute(
+                    text(
+                        "INSERT INTO import_story_arc_entries "
+                        "(imported_story_arc_id, import_file_id, matched_issue_id, "
+                        "source_ordinal, reading_order, resolution_state, source_kind, "
+                        "source_issue_number_text) VALUES "
+                        "(:arc_id, :file_id, :issue_id, 0, 1, 'resolved', "
+                        "'mylar3', '1000000')"
+                    ),
+                    {
+                        "arc_id": staged_arc_id,
+                        "file_id": imported_file_id,
+                        "issue_id": issue_ids[0],
+                    },
+                )
+                assert conn.execute(text("SELECT COUNT(*) FROM story_arcs")).scalar_one() == 2
+                assert conn.execute(text("SELECT COUNT(*) FROM issue_story_arcs")).scalar_one() == 4
+                membership_id = int(
+                    conn.execute(
+                        text(
+                            "SELECT id FROM issue_story_arcs "
+                            "WHERE story_arc_id = :arc_id AND issue_id = :issue_id"
+                        ),
+                        {"arc_id": first_arc_id, "issue_id": issue_ids[0]},
+                    ).scalar_one()
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO story_arc_placements "
+                        "(issue_story_arc_id, placement_path, mode, "
+                        "ownership, source_kind, state) VALUES "
+                        "(:membership_id, '/fixture/arcs/legacy-event/001.cbz', "
+                        "'reference_only', 'referenced', 'mylar3', 'current')"
+                    ),
+                    {"membership_id": membership_id},
+                )
+
+            with (
+                pytest.raises(IntegrityError),
+                engine.begin() as conn,
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO story_arc_external_identities "
+                        "(story_arc_id, source, namespace, external_id) VALUES "
+                        "(:arc_id, 'comicvine', 'story_arc', '7001')"
+                    ),
+                    {"arc_id": second_arc_id},
+                )
+
+            with (
+                pytest.raises(IntegrityError),
+                engine.begin() as conn,
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO story_arc_placements "
+                        "(issue_story_arc_id, placement_path, mode, "
+                        "ownership, source_kind, state) VALUES "
+                        "(:membership_id, '/fixture/arcs/legacy-event/managed.cbz', "
+                        "'copy', 'managed', 'pullbox', 'current')"
+                    ),
+                    {"membership_id": membership_id},
+                )
+
+            with (
+                pytest.raises(IntegrityError),
+                engine.begin() as conn,
+            ):
+                conn.execute(
+                    text("UPDATE story_arcs SET lifecycle = 'ACTIVE' WHERE id = :arc_id"),
+                    {"arc_id": first_arc_id},
+                )
+
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM story_arc_placements"))
+                conn.execute(text("DELETE FROM import_story_arc_entries"))
+                conn.execute(text("DELETE FROM import_story_arcs"))
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _STORY_ARC_DOMAIN_PARENT_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            assert "story_arc_external_identities" not in inspector.get_table_names()
+            assert set(_get_columns(sync_url, "issue_story_arcs")) == {
+                "issue_id",
+                "story_arc_id",
+                "sequence_number",
+            }
+            with engine.connect() as conn:
+                restored_memberships = conn.execute(
+                    text(
+                        "SELECT issue_id, story_arc_id, sequence_number "
+                        "FROM issue_story_arcs ORDER BY story_arc_id, issue_id"
+                    )
+                ).fetchall()
+                assert (
+                    conn.execute(
+                        text("SELECT issue_id FROM download_history WHERE id = :history_id"),
+                        {"history_id": history_id},
+                    ).scalar_one()
+                    == issue_ids[0]
+                )
+            assert [tuple(row) for row in restored_memberships] == [
+                (issue_ids[0], first_arc_id, 10),
+                (issue_ids[1], first_arc_id, 10),
+                (issue_ids[2], first_arc_id, None),
+                (issue_ids[0], second_arc_id, 4),
+            ]
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+        assert "story_arc_placements" in inspect(create_engine(sync_url)).get_table_names()
+
+    def test_story_arc_domain_downgrade_blocks_unresolved_memberships(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Downgrade refuses to erase missing-entry and exact review evidence."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("INSERT INTO story_arcs (name) VALUES ('Unresolved Arc')"))
+                arc_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+                conn.execute(
+                    text(
+                        "INSERT INTO issue_story_arcs "
+                        "(story_arc_id, issue_id, sequence_number, source_ordinal, "
+                        "legacy_sequence_was_null, resolution_state, source_kind, "
+                        "source_issue_number_text) VALUES "
+                        "(:arc_id, NULL, 1, 1, 0, 'missing', 'legacy', '1AU')"
+                    ),
+                    {"arc_id": arc_id},
+                )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="legacy story-arc schema"):
+            command.downgrade(cfg, _STORY_ARC_DOMAIN_PARENT_REVISION)
+
+        assert "resolution_state" in _get_columns(sync_url, "issue_story_arcs")
+
+    def test_story_arc_domain_revision_is_the_single_head(self, alembic_cfg) -> None:
+        """The story-arc schema extends the exact-number head without branching."""
+        cfg, _ = alembic_cfg
+        script = ScriptDirectory.from_config(cfg)
+
+        assert script.get_heads() == [_STORY_ARC_DOMAIN_REVISION]
 
     def test_airdcpp_foundation_backfills_populated_history_and_source_order(
         self,

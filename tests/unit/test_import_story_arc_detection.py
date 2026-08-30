@@ -109,3 +109,22 @@ def test_duplicate_comicinfo_orders_remain_reviewable() -> None:
 
     assert result.classification == FolderArcClassification.NEEDS_REVIEW
     assert result.reason == "duplicate_arc_order"
+
+
+def test_incomplete_mixed_arc_evidence_remains_reviewable() -> None:
+    result = detect_folder_story_arc(
+        folder_label="Court of Owls",
+        files=(
+            _file("001 - Batman.cbz", "Batman", arc="Court of Owls", order="1"),
+            FolderArcFileEvidence(
+                relative_path="002 - Nightwing.cbz",
+                series="Nightwing",
+                issue_number="1",
+                story_arc_number="002",
+                evidence_complete=False,
+            ),
+        ),
+    )
+
+    assert result.classification == FolderArcClassification.NEEDS_REVIEW
+    assert result.reason == "incomplete_arc_evidence"

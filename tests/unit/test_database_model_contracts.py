@@ -19,7 +19,6 @@ MIGRATION_DIR = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 IDENTITY_EXCEPTIONS = {
     "IssueCreator",  # association table with composite primary key
-    "IssueStoryArc",  # association table with composite primary key
     "ScheduledTaskStat",  # keyed by stable scheduler task id
     "SystemConfig",  # keyed by configuration key
     "UtilityJob",  # string id generated before enqueue persistence
@@ -31,7 +30,6 @@ TIMESTAMP_EXCEPTIONS = {
     "HealthCheckResult",  # health sample time is stored in checked_at
     "ImportJobLog",  # log event time is stored in logged_at
     "IssueCreator",  # association table
-    "IssueStoryArc",  # association table
     "SystemConfig",  # key-value config tracks updated_at only
     "UtilityJob",  # utility schema stores lifecycle timestamps as TEXT
     "UtilityJobItem",  # utility schema stores item lifecycle timestamps as TEXT
