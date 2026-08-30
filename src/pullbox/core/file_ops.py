@@ -36,6 +36,7 @@ from pullbox.core.library_comicinfo import (
 from pullbox.core.library_file_ownership import (
     build_file_identity_signature,
     resolve_referenced_library_root,
+    validate_file_identity_signature,
 )
 from pullbox.core.library_leave_in_place import handle_leave_in_place as _handle_leave_in_place
 from pullbox.core.library_materialization import (
@@ -220,6 +221,7 @@ async def register_library_file(
     *,
     move_to_library: bool = True,
     storage_mode: LibraryFileStorageMode | None = None,
+    expected_source_signature: dict[str, object] | None = None,
     rename: bool | None = None,
     library_root_id: int | None = None,
     transfer_method: str | None = None,
@@ -249,6 +251,7 @@ async def register_library_file(
         confidence,
         move_to_library=move_to_library,
         storage_mode=storage_mode,
+        expected_source_signature=expected_source_signature,
         rename=rename,
         library_root_id=library_root_id,
         transfer_method=transfer_method,
@@ -281,6 +284,7 @@ async def register_library_file_with_metadata(
     *,
     move_to_library: bool = True,
     storage_mode: LibraryFileStorageMode | None = None,
+    expected_source_signature: dict[str, object] | None = None,
     rename: bool | None = None,
     library_root_id: int | None = None,
     transfer_method: str | None = None,
@@ -431,6 +435,11 @@ async def register_library_file_with_metadata(
                     source_path,
                     library_root_id,
                 )
+                if expected_source_signature is not None:
+                    validate_file_identity_signature(
+                        expected_source_signature,
+                        referenced_signature,
+                    )
                 prepared_source = source_path
             else:
                 root = await _resolve_library_root(

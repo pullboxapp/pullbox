@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
@@ -63,6 +65,10 @@ from pullbox.api.v1.import_job_streams import (
     load_initial_import_progress_sse as _load_initial_import_progress_sse,
 )
 from pullbox.core.exceptions import ValidationError
+from pullbox.core.library_file_ownership import (
+    ReferencedFileValidationError,
+    resolve_referenced_source_root,
+)
 from pullbox.core.sqlite_lock import (
     SQLITE_LOCK_RETRY_ATTEMPTS,
     is_sqlite_locked_error,
@@ -202,6 +208,7 @@ async def create_import_job(
 @router.post("/layout-preview", response_model=LayoutAnalysisResponse)
 async def preview_import_layout(
     _user: AuthenticatedUser,
+    session: DbSession,
     body: LayoutPreviewRequest,
 ) -> LayoutAnalysisResponse:
     """Analyze a source layout without creating a job or mutating files."""
@@ -215,6 +222,17 @@ async def preview_import_layout(
         raise ValidationError(
             "The layout preview source is no longer available or readable."
         ) from exc
+    try:
+        await resolve_referenced_source_root(session, Path(body.source_path), None)
+    except ReferencedFileValidationError:
+        warnings = list(result.warnings)
+        if "source_outside_library_root" not in warnings:
+            warnings.append("source_outside_library_root")
+        result = replace(
+            result,
+            can_keep_in_place=False,
+            warnings=warnings,
+        )
     return LayoutAnalysisResponse.model_validate(result)
 
 

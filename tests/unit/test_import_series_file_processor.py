@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pullbox.models.library import MatchConfidence
+from pullbox.models.library import LibraryFileStorageMode, MatchConfidence
 from pullbox.services.import_series_file_processor import process_series_files_for_import
 
 if TYPE_CHECKING:
@@ -54,6 +54,8 @@ async def test_process_series_files_for_import_wires_job_scoped_callbacks() -> N
             issue,
             MatchConfidence.HIGH,
             move_to_library=True,
+            storage_mode=LibraryFileStorageMode.MANAGED,
+            expected_source_signature=None,
             library_root_id=5,
             transfer_method="copy",
             normalize_to_cbz=True,

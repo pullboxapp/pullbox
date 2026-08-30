@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from pullbox.models.issue import Issue
-from pullbox.models.library import LibraryFile, LibraryRoot
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.models.series import Series
 
 if TYPE_CHECKING:
@@ -32,6 +32,8 @@ class SeriesDeleteTarget:
 
     folder_paths: tuple[Path, ...]
     linked_file_count: int
+    managed_file_count: int
+    referenced_file_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,8 @@ class SeriesDeleteContext:
 
     series_count: int
     linked_file_count: int
+    managed_file_count: int
+    referenced_file_count: int
 
 
 def is_relative_to(path: Path, other: Path) -> bool:
@@ -224,6 +228,34 @@ async def count_linked_existing_files(
     return count
 
 
+async def count_linked_existing_files_by_storage(
+    session: AsyncSession,
+    *,
+    series_id: int,
+    folder_paths: tuple[Path, ...],
+) -> tuple[int, int]:
+    """Count existing managed and referenced files included in a delete target."""
+    issue_ids_subq = select(Issue.id).where(Issue.series_id == series_id)
+    result = await session.execute(
+        select(LibraryFile.file_path, LibraryFile.storage_mode).where(
+            LibraryFile.issue_id.in_(issue_ids_subq)
+        )
+    )
+    managed_count = 0
+    referenced_count = 0
+    for file_path_value, storage_mode in result.all():
+        file_path = Path(file_path_value).expanduser()
+        if not file_path.is_file():
+            continue
+        if folder_paths and not any(is_relative_to(file_path, folder) for folder in folder_paths):
+            continue
+        if storage_mode == LibraryFileStorageMode.REFERENCED:
+            referenced_count += 1
+        else:
+            managed_count += 1
+    return managed_count, referenced_count
+
+
 async def build_series_delete_target(
     session: AsyncSession,
     series: Series,
@@ -252,9 +284,16 @@ async def build_series_delete_target(
         series_id=series.id,
         folder_paths=folder_paths,
     )
+    managed_file_count, referenced_file_count = await count_linked_existing_files_by_storage(
+        session,
+        series_id=series.id,
+        folder_paths=folder_paths,
+    )
     return SeriesDeleteTarget(
         folder_paths=folder_paths,
         linked_file_count=linked_file_count,
+        managed_file_count=managed_file_count,
+        referenced_file_count=referenced_file_count,
     )
 
 
@@ -266,6 +305,8 @@ async def build_series_delete_context(
 ) -> SeriesDeleteContext:
     """Build delete-modal UI state for one or more series."""
     linked_file_count = 0
+    managed_file_count = 0
+    referenced_file_count = 0
     loaded_count = 0
 
     for series_id in dict.fromkeys(series_ids):
@@ -274,9 +315,13 @@ async def build_series_delete_context(
             continue
         target = await target_builder(session, series)
         linked_file_count += target.linked_file_count
+        managed_file_count += target.managed_file_count
+        referenced_file_count += target.referenced_file_count
         loaded_count += 1
 
     return SeriesDeleteContext(
         series_count=loaded_count,
         linked_file_count=linked_file_count,
+        managed_file_count=managed_file_count,
+        referenced_file_count=referenced_file_count,
     )

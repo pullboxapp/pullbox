@@ -46,6 +46,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
     ImportSourceType,
 )
+from pullbox.models.library import LibraryRoot
 from pullbox.models.series import Series
 from pullbox.models.user import APIKey, User
 from pullbox.schemas.import_job import (
@@ -545,6 +546,8 @@ class TestImportLayoutPreview:
         assert data["files_considered"] == 1
         assert data["files_fitting"] == 1
         assert data["archive_probes"] == 0
+        assert data["can_keep_in_place"] is False
+        assert "source_outside_library_root" in data["warnings"]
         assert data["clusters"][0]["examples"][0]["relative_path"] == (
             "DC Comics/Batman (2011)/Issue 001.cbz"
         )
@@ -554,6 +557,34 @@ class TestImportLayoutPreview:
 
         async with _db_factory() as session:
             assert await session.scalar(select(func.count(ImportJob.id))) == 0
+
+    @pytest.mark.asyncio
+    async def test_preview_allows_in_place_only_inside_enabled_library_root(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        library_path = tmp_path / "library"
+        source_path = library_path / "Existing Layout"
+        source_path.mkdir(parents=True)
+        (source_path / "Issue 001.cbz").write_bytes(b"fixture")
+        async with _db_factory() as session:
+            session.add(LibraryRoot(name="Library", path=str(library_path), enabled=True))
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/layout-preview",
+            json={
+                "source_path": str(source_path),
+                "source_type": "filesystem",
+                "layout": {"mode": "auto"},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["can_keep_in_place"] is True
+        assert "source_outside_library_root" not in response.json()["warnings"]
 
     @pytest.mark.asyncio
     async def test_preview_rejects_invalid_custom_template(
@@ -744,10 +775,44 @@ class TestCreateImportJob:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
+    async def test_create_job_accepts_in_place_source_inside_enabled_root(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        library_path = tmp_path / "library"
+        source_path = library_path / "Existing Layout"
+        source_path.mkdir(parents=True)
+        async with _db_factory() as session:
+            root = LibraryRoot(name="Library", path=str(library_path), enabled=True)
+            session.add(root)
+            await session.commit()
+            root_id = root.id
+
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            resp = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(source_path),
+                    "source_type": "filesystem",
+                    "file_handling_mode": "in_place",
+                },
+            )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["file_handling_mode"] == "in_place"
+        assert data["target_library_root_id"] == root_id
+        assert data["move_to_library"] is False
+        assert data["convert_to_preferred_format"] is False
+        assert data["update_embedded_comicinfo_from_match"] is False
+        mock_trigger.assert_called_once_with(data["id"])
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("overrides", "message"),
         [
-            ({"file_handling_mode": "in_place"}, "In-place import is not available yet"),
             (
                 {
                     "future_layout_requested": True,

@@ -23,10 +23,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import structlog
+from sqlalchemy import select
 
 from pullbox.core.file_safety import has_archive_member_path_traversal
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
 from pullbox.core.rar_backend import RarBackendUnavailableError, configure_rarfile_backend
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.utilities.base_executor import ExecutionMode, ItemResult, JobExecutor, ProcessedItem
 from pullbox.utilities.settings import (
     move_file_to_utility_trash,
@@ -547,6 +549,7 @@ def build_convert_preview(
     file_paths: list[str] | None = None,
     *,
     allowed_roots: Sequence[str | Path] | None = None,
+    excluded_paths: frozenset[str] = frozenset(),
 ) -> Any:
     """Build a preview of files that would be converted.
 
@@ -579,6 +582,8 @@ def build_convert_preview(
             except (OSError, RuntimeError, ValueError):
                 continue
             if not path.is_file():
+                continue
+            if str(path) in excluded_paths:
                 continue
             size = path.stat().st_size
             total_size += size
@@ -615,6 +620,25 @@ class FileConverterExecutor(JobExecutor):
     """
 
     execution_mode = ExecutionMode.PROCESS
+
+    async def build_job_context(
+        self,
+        session: Any,
+        job_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        _ = job_config
+        referenced_paths = list(
+            (
+                await session.execute(
+                    select(LibraryFile.file_path).where(
+                        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {"referenced_paths": referenced_paths}
 
     def validate_config(self, job_config: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -682,6 +706,27 @@ class FileConverterExecutor(JobExecutor):
         source = Path(file_path)
 
         try:
+            referenced_paths = (job_context or {}).get("referenced_paths", [])
+            resolved_source = source.expanduser().resolve(strict=False)
+            if isinstance(referenced_paths, list) and any(
+                Path(str(referenced_path)).expanduser().resolve(strict=False) == resolved_source
+                for referenced_path in referenced_paths
+            ):
+                return ProcessedItem(
+                    item_id=item_id,
+                    result=ItemResult.SKIPPED,
+                    before_state={"path": str(source)},
+                    after_state={"path": str(source), "reason": "referenced_file"},
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    warning_message="Referenced library files cannot be converted.",
+                    log_entries=[
+                        (
+                            "WARNING",
+                            f"Skipped referenced library file: {source.name}",
+                            {"reason": "referenced_file"},
+                        )
+                    ],
+                )
             if not source.exists():
                 raise FileNotFoundError(f"Source file not found: {source}")
 

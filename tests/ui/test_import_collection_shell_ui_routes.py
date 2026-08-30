@@ -789,6 +789,12 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-collection-source-browse"' in response.text
         assert "Collection imports preserve source files." in response.text
         assert "Files and folders in the selected source stay untouched" in response.text
+        assert 'data-testid="import-file-handling-section"' in response.text
+        assert 'data-testid="import-file-handling-managed"' in response.text
+        assert 'data-testid="import-file-handling-in-place"' in response.text
+        assert "Copy into Pullbox library" in response.text
+        assert "Keep files in place" in response.text
+        assert "rename, convert, rewrite metadata, or change permissions on them." in response.text
         assert 'data-testid="import-collection-layout-section"' in response.text
         assert 'data-testid="import-layout-auto"' in response.text
         assert 'data-testid="import-layout-series-folders"' in response.text
@@ -816,6 +822,10 @@ class TestImportShellRouteContracts:
         assert "layoutFallbackToAuto: true" in source_controller
         assert "fallback_to_auto: this.layoutFallbackToAuto" in source_controller
         assert "source_layout: this.sourceLayoutPayload()" in source_controller
+        assert 'fileHandlingMode: "managed_copy"' in source_controller
+        assert "file_handling_mode: this.fileHandlingMode" in source_controller
+        assert 'this.fileHandlingMode === "in_place"' in source_controller
+        assert "this.layoutPreview.can_keep_in_place" in source_controller
 
     async def test_import_collection_exposes_stable_step_mounts(
         self,

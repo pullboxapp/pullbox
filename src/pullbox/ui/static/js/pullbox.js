@@ -2927,6 +2927,7 @@ function importSourceData(config) {
     minFilesPerSeries: 1,
     fileFormats: "cbz, cbr, cb7, cbt, pdf, epub",
     cvMatchThreshold: 70,
+    fileHandlingMode: "managed_copy",
     layoutChoice: "auto",
     layoutFallbackToAuto: true,
     customSeriesPathTemplate: "{Publisher}/{Series} ({Year})",
@@ -2940,8 +2941,19 @@ function importSourceData(config) {
 
     selectSourceType: function (sourceType) {
       this.sourceType = sourceType;
+      if (sourceType !== "filesystem") {
+        this.fileHandlingMode = "managed_copy";
+      }
       this.clearLayoutPreview();
       if (sourceType === "filesystem") {
+        this.scheduleLayoutPreview();
+      }
+    },
+
+    setFileHandlingMode: function (mode) {
+      this.fileHandlingMode = mode === "in_place" ? "in_place" : "managed_copy";
+      this.scanError = "";
+      if (this.fileHandlingMode === "in_place") {
         this.scheduleLayoutPreview();
       }
     },
@@ -2993,6 +3005,14 @@ function importSourceData(config) {
 
     canStartScan: function () {
       if (!this.sourcePath.trim() || this.scanning) {
+        return false;
+      }
+      if (
+        this.fileHandlingMode === "in_place" &&
+        (this.sourceType !== "filesystem" ||
+          !this.layoutPreview ||
+          !this.layoutPreview.can_keep_in_place)
+      ) {
         return false;
       }
       return this.layoutChoice !== "custom" || !!this.customSeriesPathTemplate.trim();
@@ -3148,6 +3168,7 @@ function importSourceData(config) {
             cv_match_threshold: this.cvMatchThreshold / 100,
             min_files_per_series: this.minFilesPerSeries,
             file_formats: this.fileFormats.trim() || null,
+            file_handling_mode: this.fileHandlingMode,
             source_layout: this.sourceLayoutPayload(),
           }),
         });
@@ -8981,6 +9002,8 @@ function libraryBrowserPage(config) {
           linked_file_count: 0,
           tracked_file_count: 0,
           tracked_series_count: 0,
+          managed_file_count: 0,
+          referenced_file_count: 0,
           has_linked_issue: false,
           issue_status_after_delete: null,
           issue_status_reason: null,
@@ -9049,6 +9072,9 @@ function libraryBrowserPage(config) {
     },
 
     deleteSubmitLabel: function () {
+      if (this.deleteReferencedFileCount() > 0 && this.deleteManagedFileCount() === 0) {
+        return "Remove from Pullbox";
+      }
       if (this.deleteMode() === "series") return "Delete Series";
       if (this.deleteMode() === "folder") return "Delete Folder";
       return "Delete File";
@@ -9071,6 +9097,9 @@ function libraryBrowserPage(config) {
         (this.modalEntry && this.modalEntry.name) ||
         "this series";
       var base = "This folder is associated with the series " + title + " in Pullbox.";
+      if (this.deleteReferencedFileCount() > 0) {
+        return base + " Referenced files will stay on disk and be detached from Pullbox. Any folder containing them will also stay in place.";
+      }
       if (this.deleteUsesTrash()) {
         return base + " Deleting it will move the folder into the configured trash folder and remove the series and all issue records from the database.";
       }
@@ -9078,12 +9107,18 @@ function libraryBrowserPage(config) {
     },
 
     deleteSeriesDispositionLabel: function () {
+      if (this.deleteReferencedFileCount() > 0) {
+        return "Detach referenced files; remove managed files only";
+      }
       return this.deleteUsesTrash()
         ? "Move folder to trash and delete series"
         : "Permanent folder delete and series removal";
     },
 
     deleteFolderMessage: function () {
+      if (this.deleteReferencedFileCount() > 0) {
+        return "Referenced files and any folder containing them will stay in place. Pullbox will detach their records and remove only managed files in this folder.";
+      }
       if (this.deleteUsesTrash()) {
         return "This will move the selected folder and everything inside it into the configured trash folder.";
       }
@@ -9091,6 +9126,9 @@ function libraryBrowserPage(config) {
     },
 
     deleteFileMessage: function () {
+      if (this.deleteReferencedFileCount() > 0) {
+        return "This referenced file will stay exactly where it is. Pullbox will remove only its tracked record and update the linked issue state.";
+      }
       var disposition = this.deleteUsesTrash()
         ? "move the selected file into the configured trash folder"
         : "permanently delete the selected file";
@@ -9117,6 +9155,9 @@ function libraryBrowserPage(config) {
     },
 
     deleteDispositionLabel: function () {
+      if (this.deleteReferencedFileCount() > 0 && this.deleteManagedFileCount() === 0) {
+        return "Detach from Pullbox";
+      }
       return this.deleteUsesTrash() ? "Move to trash" : "Permanent delete";
     },
 
@@ -9183,6 +9224,24 @@ function libraryBrowserPage(config) {
         (this.modalEntry &&
           this.modalEntry.deleteContext &&
           this.modalEntry.deleteContext.tracked_file_count) ||
+        0
+      );
+    },
+
+    deleteManagedFileCount: function () {
+      return (
+        (this.modalEntry &&
+          this.modalEntry.deleteContext &&
+          this.modalEntry.deleteContext.managed_file_count) ||
+        0
+      );
+    },
+
+    deleteReferencedFileCount: function () {
+      return (
+        (this.modalEntry &&
+          this.modalEntry.deleteContext &&
+          this.modalEntry.deleteContext.referenced_file_count) ||
         0
       );
     },

@@ -68,6 +68,26 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-collection-source-path']").first
 
     @property
+    def file_handling_managed(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-managed']").first
+
+    @property
+    def file_handling_in_place(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place']").first
+
+    @property
+    def file_handling_in_place_ready(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place-ready']").first
+
+    @property
+    def file_handling_in_place_blocked(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place-blocked']").first
+
+    @property
+    def start_scan_button(self) -> Locator:
+        return self.page.locator("[data-testid='import-start-scan']").first
+
+    @property
     def source_layout_series_folders(self) -> Locator:
         return self.page.locator("[data-testid='import-layout-series-folders']").first
 

@@ -335,6 +335,8 @@ async def build_series_delete_context(
     return SeriesDeleteContextResponse(
         series_count=context.series_count,
         linked_file_count=context.linked_file_count,
+        managed_file_count=context.managed_file_count,
+        referenced_file_count=context.referenced_file_count,
     )
 
 

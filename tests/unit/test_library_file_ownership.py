@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from pullbox.core.exceptions import ConfigurationError
-from pullbox.core.library_file_ownership import resolve_referenced_library_root
+from pullbox.core.library_file_ownership import (
+    ReferencedFileValidationError,
+    build_file_identity_signature,
+    resolve_referenced_library_root,
+    validate_file_identity_signature,
+)
 from pullbox.models.library import LibraryRoot
 
 if TYPE_CHECKING:
@@ -129,3 +134,33 @@ async def test_referenced_root_rejects_parent_components(
             library_path / "unused" / ".." / source.name,
             None,
         )
+
+
+def test_file_identity_signature_accepts_unchanged_file(tmp_path: Path) -> None:
+    source = tmp_path / "Issue 001.cbz"
+    source.write_bytes(b"comic")
+    expected = build_file_identity_signature(source)
+
+    validate_file_identity_signature(expected, build_file_identity_signature(source))
+
+
+def test_file_identity_signature_classifies_changed_file(tmp_path: Path) -> None:
+    source = tmp_path / "Issue 001.cbz"
+    source.write_bytes(b"comic")
+    expected = build_file_identity_signature(source)
+    source.write_bytes(b"replacement comic")
+
+    with pytest.raises(ReferencedFileValidationError) as exc_info:
+        validate_file_identity_signature(expected, build_file_identity_signature(source))
+
+    assert exc_info.value.reason == "source_changed"
+
+
+def test_file_identity_signature_rejects_missing_scan_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "Issue 001.cbz"
+    source.write_bytes(b"comic")
+
+    with pytest.raises(ReferencedFileValidationError) as exc_info:
+        validate_file_identity_signature({}, build_file_identity_signature(source))
+
+    assert exc_info.value.reason == "source_signature_missing"

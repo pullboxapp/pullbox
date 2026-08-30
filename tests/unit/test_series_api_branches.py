@@ -208,7 +208,12 @@ async def test_bulk_delete_and_delete_context_branches(
         _session: AsyncSession,
         series_ids: list[int],
     ) -> SimpleNamespace:
-        return SimpleNamespace(series_count=len(series_ids), linked_file_count=4)
+        return SimpleNamespace(
+            series_count=len(series_ids),
+            linked_file_count=4,
+            managed_file_count=3,
+            referenced_file_count=1,
+        )
 
     monkeypatch.setattr(series_api.SeriesService, "delete", fake_delete)
     monkeypatch.setattr(
@@ -232,6 +237,8 @@ async def test_bulk_delete_and_delete_context_branches(
     )
     assert context.series_count == 2
     assert context.linked_file_count == 4
+    assert context.managed_file_count == 3
+    assert context.referenced_file_count == 1
 
 
 @pytest.mark.asyncio

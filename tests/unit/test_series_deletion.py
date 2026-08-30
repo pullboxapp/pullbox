@@ -37,7 +37,13 @@ from pullbox.models.download import (
     DownloadState,
 )
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.series import Series
 from pullbox.services.series_service import SeriesService
 
@@ -135,6 +141,7 @@ async def _seed_library_file(
     library_root_id: int,
     *,
     file_path: str = "/comics/Batman (2020)/Batman 001.cbz",
+    storage_mode: LibraryFileStorageMode = LibraryFileStorageMode.MANAGED,
 ) -> LibraryFile:
     """Create a LibraryFile record linked to an issue."""
     lf = LibraryFile(
@@ -146,6 +153,7 @@ async def _seed_library_file(
         issue_id=issue_id,
         library_root_id=library_root_id,
         file_modified_at=datetime.now(tz=UTC),
+        storage_mode=storage_mode,
     )
     session.add(lf)
     await session.flush()
@@ -294,6 +302,29 @@ class TestFileDeletion:
         await session.flush()
 
         assert not comic_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_delete_files_detaches_referenced_file_without_unlinking_it(
+        self, session: AsyncSession, library_root: LibraryRoot, tmp_path: Path
+    ) -> None:
+        comic_file = tmp_path / "Referenced Batman 001.cbz"
+        original = b"user-owned comic"
+        comic_file.write_bytes(original)
+        series = await _seed_series(session, path=str(tmp_path))
+        issue = await _seed_issue(session, series.id)
+        library_file = await _seed_library_file(
+            session,
+            issue.id,
+            library_root.id,
+            file_path=str(comic_file),
+            storage_mode=LibraryFileStorageMode.REFERENCED,
+        )
+
+        await SeriesService.delete(session, series.id, delete_files=True)
+        await session.flush()
+
+        assert comic_file.read_bytes() == original
+        assert await session.get(LibraryFile, library_file.id) is None
 
     @pytest.mark.asyncio
     async def test_delete_files_handles_missing_file(
@@ -487,6 +518,41 @@ class TestFolderDeletion:
         await session.flush()
 
         assert not folder.exists()
+        assert await session.get(Series, series.id) is None
+
+    @pytest.mark.asyncio
+    async def test_delete_folder_preserves_folder_containing_referenced_file(
+        self, session: AsyncSession, library_root: LibraryRoot, tmp_path: Path
+    ) -> None:
+        folder = tmp_path / "Referenced Batman"
+        folder.mkdir()
+        referenced = folder / "Batman 001.cbz"
+        managed = folder / "Batman 002.cbz"
+        referenced.write_bytes(b"reference")
+        managed.write_bytes(b"managed")
+        series = await _seed_series(session, path=str(folder))
+        first_issue = await _seed_issue(session, series.id)
+        second_issue = await _seed_issue(session, series.id, issue_number=2.0)
+        await _seed_library_file(
+            session,
+            first_issue.id,
+            library_root.id,
+            file_path=str(referenced),
+            storage_mode=LibraryFileStorageMode.REFERENCED,
+        )
+        await _seed_library_file(
+            session,
+            second_issue.id,
+            library_root.id,
+            file_path=str(managed),
+        )
+
+        await SeriesService.delete(session, series.id, delete_folder=True)
+        await session.flush()
+
+        assert folder.is_dir()
+        assert referenced.read_bytes() == b"reference"
+        assert not managed.exists()
         assert await session.get(Series, series.id) is None
 
     @pytest.mark.asyncio

@@ -14,11 +14,14 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSourceType,
 )
+from pullbox.models.library import LibraryRoot
 from pullbox.schemas.import_job import FutureRootPolicyPayload, ImportJobCreate, ImportJobRead
 from pullbox.schemas.import_layout import SourceLayoutSpecPayload
 from pullbox.services.import_job_creation import create_job
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -134,10 +137,6 @@ async def test_create_job_rejects_existing_active_import(
     ("request_overrides", "message"),
     [
         (
-            {"file_handling_mode": ImportFileHandlingMode.IN_PLACE},
-            "In-place import is not available yet",
-        ),
-        (
             {
                 "future_layout_requested": True,
                 "future_root_policy": FutureRootPolicyPayload(
@@ -168,6 +167,62 @@ async def test_create_job_rejects_not_yet_safe_execution_modes(
 
     with pytest.raises(ValidationError, match=message):
         await create_job(db_session, request, log_event=_log_event)
+
+
+async def test_create_job_accepts_in_place_source_inside_enabled_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "library" / "Existing Layout"
+    source_path.mkdir(parents=True)
+    root = LibraryRoot(
+        name="Existing Library",
+        path=str(tmp_path / "library"),
+        enabled=True,
+    )
+    db_session.add(root)
+    await db_session.flush()
+
+    job = await create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source_path),
+            source_type=ImportSourceType.FILESYSTEM,
+            file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        ),
+        log_event=_log_event,
+    )
+
+    assert job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+    assert job.target_library_root_id == root.id
+    assert job.move_to_library is False
+    assert job.effective_transfer_method == "leave_in_place"
+    assert job.source_preserved is True
+    assert job.convert_to_preferred_format is False
+    assert job.update_embedded_comicinfo_from_match is False
+
+
+async def test_create_job_rejects_in_place_source_outside_enabled_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    library_path = tmp_path / "library"
+    library_path.mkdir()
+    source_path = tmp_path / "imports"
+    source_path.mkdir()
+    db_session.add(LibraryRoot(name="Library", path=str(library_path), enabled=True))
+    await db_session.flush()
+
+    with pytest.raises(ValidationError, match="inside an enabled library root"):
+        await create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(source_path),
+                source_type=ImportSourceType.FILESYSTEM,
+                file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+            ),
+            log_event=_log_event,
+        )
 
 
 async def test_create_job_freezes_normalized_selected_layout(

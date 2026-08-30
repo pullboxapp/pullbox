@@ -18,7 +18,7 @@ from pullbox.core.naming import format_series_folder
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.import_job import ImportJob, ImportSourceType
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import LibraryFile, LibraryRoot
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.models.series import (
     IssueCatalogState,
     Series,
@@ -839,6 +839,16 @@ class SeriesService:
             select(LibraryFile).where(LibraryFile.issue_id.in_(issue_ids_subq))
         )
         linked_files = list(file_result.scalars().all())
+        managed_files = [
+            library_file
+            for library_file in linked_files
+            if library_file.storage_mode == LibraryFileStorageMode.MANAGED
+        ]
+        referenced_files = [
+            library_file
+            for library_file in linked_files
+            if library_file.storage_mode == LibraryFileStorageMode.REFERENCED
+        ]
 
         delete_target = await SeriesService.build_delete_target(session, series)
         folder_paths = (
@@ -849,6 +859,17 @@ class SeriesService:
         moved_folder_keys: set[str] = set()
         if delete_folder:
             for folder_path in folder_paths:
+                folder_contains_reference = any(
+                    is_relative_to(Path(library_file.file_path), folder_path)
+                    for library_file in referenced_files
+                )
+                if folder_contains_reference:
+                    logger.info(
+                        "referenced_folder_preserved",
+                        series_id=series_id,
+                        path=str(folder_path),
+                    )
+                    continue
                 if trash_dir is not None:
                     try:
                         move_path_to_utility_trash(
@@ -872,6 +893,15 @@ class SeriesService:
         if effective_delete_files:
             for lf in linked_files:
                 file_path = Path(lf.file_path)
+                if lf.storage_mode == LibraryFileStorageMode.REFERENCED:
+                    await session.delete(lf)
+                    logger.info(
+                        "referenced_file_detached",
+                        series_id=series_id,
+                        library_file_id=lf.id,
+                        path=str(file_path),
+                    )
+                    continue
                 if moved_folder_keys and any(
                     path_key(folder_path) in moved_folder_keys
                     and is_relative_to(file_path, folder_path)
@@ -892,6 +922,15 @@ class SeriesService:
                     except OSError:
                         logger.exception("file_delete_failed", path=str(file_path))
                 await session.delete(lf)
+        else:
+            for lf in referenced_files:
+                await session.delete(lf)
+                logger.info(
+                    "referenced_file_detached",
+                    series_id=series_id,
+                    library_file_id=lf.id,
+                    path=lf.file_path,
+                )
 
         # ── 3. Delete series record (cascades to issues) ────────────
         await purge_series_cover_cache(session, series_id)
@@ -903,6 +942,8 @@ class SeriesService:
             files_deleted=delete_files,
             folder_deleted=delete_folder,
             trashed=trash_dir is not None,
+            managed_files_deleted=len(managed_files) if effective_delete_files else 0,
+            referenced_files_detached=len(referenced_files),
         )
 
     async def _apply_monitoring_on(

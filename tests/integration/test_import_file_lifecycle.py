@@ -27,7 +27,9 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
+    ImportJobAction,
     ImportJobStatus,
     ImportSeriesStatus,
     ImportSourceType,
@@ -1202,6 +1204,130 @@ class TestImportLeaveInPlace:
         source_files = list((source / "Batman (2016)").glob("*.cbz"))
         assert len(source_files) == 1
         assert source_files[0].exists()
+
+    async def test_rc_wizard_in_place_import_registers_without_mutation(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+    ) -> None:
+        comics_dir = tmp_path / "library"
+        root = await _setup_comics_directory(db_session, comics_dir)
+        db_session.add_all(
+            [
+                SystemConfig(key="rename_on_import", value="true", value_type="bool"),
+                SystemConfig(
+                    key="convert_to_preferred_format_on_import",
+                    value="true",
+                    value_type="bool",
+                ),
+                SystemConfig(
+                    key="update_embedded_comicinfo_from_match_on_import",
+                    value="true",
+                    value_type="bool",
+                ),
+                SystemConfig(key="library_permissions_enabled", value="true", value_type="bool"),
+            ]
+        )
+        await db_session.flush()
+        source = comics_dir / "Existing Layout"
+        _make_comic_dirs(
+            source,
+            [("Batman (2016)", ["original issue name 001.cbz"])],
+        )
+        series_folder = source / "Batman (2016)"
+        sidecar = series_folder / "series.json"
+        sidecar.write_text(json.dumps({"comicid": 97508}), encoding="utf-8")
+        source_file = series_folder / "original issue name 001.cbz"
+        before_bytes = source_file.read_bytes()
+        before_stat = source_file.stat()
+        before_tree = sorted(str(path.relative_to(source)) for path in source.rglob("*"))
+
+        mock_provider = _mock_cv_provider(
+            search_map={
+                "Batman": [_cv_search_result(provider_id="97508", title="Batman", year=2016)]
+            },
+            issues_map={"97508": [_issue_summary(provider_id="100001", issue_number=1.0)]},
+        )
+        mock_metadata = AsyncMock()
+        mock_metadata._provider = mock_provider
+        cv_to_series: dict[int, object] = {}
+        mock_series_svc = _mock_series_service(cv_to_series)
+        svc = _make_service(series_service=mock_series_svc, metadata_service=mock_metadata)
+
+        job = await svc.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(source),
+                source_type=ImportSourceType.FILESYSTEM,
+                file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+            ),
+        )
+        await svc.start_scan(db_session, job.id)
+        await db_session.refresh(job)
+        imported_series = list(
+            (
+                await db_session.execute(
+                    sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        await svc.confirm_import(
+            db_session,
+            job.id,
+            ConfirmImportRequest(series_ids=[item.id for item in imported_series]),
+        )
+        cv_to_series[97508] = (
+            await _create_series_with_issues(
+                db_session,
+                "Batman",
+                2016,
+                97508,
+                [(1.0, 100001)],
+            )
+        )[0]
+
+        await svc.run_import(db_session, job.id)
+        await db_session.refresh(job)
+
+        library_file = (
+            (
+                await db_session.execute(
+                    sa_select(LibraryFile).where(LibraryFile.issue_id.is_not(None))
+                )
+            )
+            .scalars()
+            .one()
+        )
+        action = (
+            (
+                await db_session.execute(
+                    sa_select(ImportJobAction).where(
+                        ImportJobAction.import_job_id == job.id,
+                        ImportJobAction.action_type == "library_file_registered",
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+        after_stat = source_file.stat()
+
+        assert job.status == ImportJobStatus.COMPLETED
+        assert job.target_library_root_id == root.id
+        assert job.move_to_library is False
+        assert job.effective_transfer_method == "leave_in_place"
+        assert job.convert_to_preferred_format is False
+        assert job.update_embedded_comicinfo_from_match is False
+        assert library_file.file_path == str(source_file.resolve())
+        assert library_file.storage_mode == LibraryFileStorageMode.REFERENCED
+        assert action.payload["storage_mode"] == "referenced"
+        assert action.payload["transfer_method"] == "leave_in_place"
+        assert source_file.read_bytes() == before_bytes
+        assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
+        assert after_stat.st_mode == before_stat.st_mode
+        assert sorted(str(path.relative_to(source)) for path in source.rglob("*")) == before_tree
 
 
 # ── Scenario R-D: Import with Rename ─────────────────────────────────

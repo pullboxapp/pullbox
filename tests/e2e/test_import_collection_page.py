@@ -2490,3 +2490,69 @@ class TestImportCollectionTab:
 
         import_page.source_layout_custom.click()
         import_page.source_layout_custom_fields.wait_for(state="visible", timeout=5000)
+
+    def test_import_collection_submits_validated_in_place_mode(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "auto",
+                            "preset": None,
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "series_folders",
+                        "clusters": [],
+                        "directories_considered": 1,
+                        "files_considered": 1,
+                        "files_fitting": 1,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": True,
+                        "can_apply_future_policy": False,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 321, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/comics/Existing Layout")
+        import_page.file_handling_in_place.click()
+        import_page.source_layout_analyze_button.click()
+        import_page.file_handling_in_place_ready.wait_for(state="visible", timeout=5000)
+
+        assert import_page.start_scan_button.is_enabled()
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        assert created_requests[-1]["file_handling_mode"] == "in_place"
+        assert created_requests[-1]["source_path"] == "/comics/Existing Layout"

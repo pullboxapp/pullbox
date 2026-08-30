@@ -18,9 +18,15 @@ from sqlalchemy.orm import joinedload
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
 from pullbox.core.file_ops import LibraryFileRegistrationOutcome
 from pullbox.core.file_safety import classify_resource_safety_exception
-from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportJobAction
+from pullbox.core.library_file_ownership import ReferencedFileValidationError
+from pullbox.models.import_job import (
+    ImportedFile,
+    ImportedFileStatus,
+    ImportFileHandlingMode,
+    ImportJobAction,
+)
 from pullbox.models.issue import Issue, IssueStatus, IssueType
-from pullbox.models.library import LibraryFile, MatchConfidence
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, MatchConfidence
 from pullbox.models.series import Series
 from pullbox.services.import_file_match_targets import (
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND,
@@ -487,8 +493,12 @@ async def process_import_series_files(
         raise ValueError("Resolved series id is required before importing files")
     item_id = item.id
     job_id = job.id
-    move_to_library = bool(job.move_to_library)
-    transfer_method = job.effective_transfer_method or job.transfer_method
+    in_place = job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+    move_to_library = not in_place
+    transfer_method = (
+        "leave_in_place" if in_place else job.effective_transfer_method or job.transfer_method
+    )
+    storage_mode = LibraryFileStorageMode.REFERENCED if in_place else LibraryFileStorageMode.MANAGED
     target_library_root_id = job.target_library_root_id
     update_embedded_comicinfo_from_match = bool(job.update_embedded_comicinfo_from_match)
     ingest_policy = await load_ingest_policy(session, job)
@@ -864,6 +874,10 @@ async def process_import_series_files(
                     resolved_issue,
                     confidence,
                     move_to_library=move_to_library,
+                    storage_mode=storage_mode,
+                    expected_source_signature=(
+                        dict(imp_file.source_signature) if in_place else None
+                    ),
                     library_root_id=target_library_root_id,
                     transfer_method=transfer_method,
                     normalize_to_cbz=False,
@@ -1119,6 +1133,29 @@ async def process_import_series_files(
                 file_path=imp_file_path,
                 error=str(exc),
             )
+            if isinstance(exc, ReferencedFileValidationError):
+                diagnostics = dict(imp_file.diagnostics or {})
+                diagnostics["source_revalidation"] = {
+                    "reason": exc.reason,
+                    "retryable": True,
+                }
+                imp_file.status = ImportedFileStatus.FAILED
+                imp_file.include_in_import = False
+                imp_file.error_message = str(exc)
+                imp_file.diagnostics = diagnostics
+                files_failed += 1
+                await log_event(
+                    session,
+                    job_id,
+                    "WARNING",
+                    "import_file_source_revalidation_failed",
+                    message=f"Source changed after scan; rescan before retry: {imp_file_name}",
+                    source_path=imp_file_path,
+                    reason=exc.reason,
+                )
+                await session.commit()
+                continue
+
             resource_block = classify_resource_safety_exception(exc)
             if resource_block is not None:
                 diagnostics = dict(imp_file.diagnostics or {})

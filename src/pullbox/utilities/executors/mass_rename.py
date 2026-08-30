@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from sqlalchemy import select
 
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.services.library_rename_service import _sync_file_record, _sync_folder_records
 from pullbox.utilities.base_executor import (
     ApplyResult,
@@ -44,10 +46,44 @@ def _sanitize_name(name: str) -> str:
     return sanitized
 
 
+def _path_would_mutate_reference(
+    path: Path,
+    job_context: dict[str, Any] | None,
+) -> bool:
+    referenced_paths = (job_context or {}).get("referenced_paths", [])
+    if not isinstance(referenced_paths, list):
+        return False
+    resolved_path = path.expanduser().resolve(strict=False)
+    for referenced_value in referenced_paths:
+        referenced = Path(str(referenced_value)).expanduser().resolve(strict=False)
+        if referenced == resolved_path or referenced.is_relative_to(resolved_path):
+            return True
+    return False
+
+
 class MassRenameExecutor(JobExecutor):
     """Executor for batch folder/file renames using naming templates."""
 
     execution_mode = ExecutionMode.THREAD
+
+    async def build_job_context(
+        self,
+        session: Any,
+        job_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        _ = job_config
+        referenced_paths = list(
+            (
+                await session.execute(
+                    select(LibraryFile.file_path).where(
+                        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {"referenced_paths": referenced_paths}
 
     def validate_config(self, job_config: dict[str, Any]) -> list[str]:
         errors: list[str] = []
@@ -114,6 +150,22 @@ class MassRenameExecutor(JobExecutor):
         source = Path(file_path)
 
         try:
+            if _path_would_mutate_reference(source, job_context):
+                return ProcessedItem(
+                    item_id=item_id,
+                    result=ItemResult.SKIPPED,
+                    before_state={"path": str(source)},
+                    after_state={"path": str(source), "reason": "referenced_file"},
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    warning_message="Referenced library files cannot be renamed.",
+                    log_entries=[
+                        (
+                            "WARNING",
+                            f"Skipped referenced library path: {source}",
+                            {"reason": "referenced_file"},
+                        )
+                    ],
+                )
             # Validate source exists
             if not source.exists():
                 raise FileNotFoundError(f"Source not found: {source}")

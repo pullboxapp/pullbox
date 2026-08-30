@@ -132,7 +132,10 @@ async def test_mass_convert_preview_manual_scope_filters_and_dedupes_candidates(
     trashed_file = trash_dir / "Batman 004.cbr"
     for file_path in (cbr_file, cb7_file, pdf_file, unsupported_file, trashed_file):
         file_path.write_bytes(file_path.name.encode())
-    session = _FakeSession(_FakeResult(rows=[(str(library_root),)]))
+    session = _FakeSession(
+        _FakeResult(rows=[(str(library_root),)]),
+        _FakeResult(scalars=[]),
+    )
 
     preview = await build_mass_convert_preview(
         MassConvertPreviewRequest(
@@ -178,7 +181,10 @@ async def test_mass_convert_preview_folder_scope_scans_supported_files(
     trashed_file = trash_dir / "Batman 003.cbr"
     for file_path in (cbr_file, cbz_file, ignored_file, trashed_file):
         file_path.write_bytes(file_path.name.encode())
-    session = _FakeSession(_FakeResult(rows=[(str(library_root),)]))
+    session = _FakeSession(
+        _FakeResult(rows=[(str(library_root),)]),
+        _FakeResult(scalars=[]),
+    )
 
     preview = await build_mass_convert_preview(
         MassConvertPreviewRequest(
@@ -275,7 +281,10 @@ async def test_library_permissions_preview_surfaces_executor_config_errors(
             return ["bad permissions config"]
 
     monkeypatch.setattr(library_permissions, "LibraryPermissionsExecutor", FakeExecutor)
-    session = _FakeSession(_FakeResult(rows=[(1, str(tmp_path))]))
+    session = _FakeSession(
+        _FakeResult(rows=[(1, str(tmp_path))]),
+        _FakeResult(scalars=[]),
+    )
 
     with pytest.raises(ValidationError, match="bad permissions config"):
         await build_library_permissions_preview(
@@ -303,7 +312,10 @@ async def test_library_permissions_preview_wraps_executor_generation_errors(
             raise ValueError("selected path is unsafe")
 
     monkeypatch.setattr(library_permissions, "LibraryPermissionsExecutor", FakeExecutor)
-    session = _FakeSession(_FakeResult(rows=[(1, str(tmp_path))]))
+    session = _FakeSession(
+        _FakeResult(rows=[(1, str(tmp_path))]),
+        _FakeResult(scalars=[]),
+    )
 
     with pytest.raises(ValidationError, match="selected path is unsafe"):
         await build_library_permissions_preview(
@@ -338,7 +350,10 @@ async def test_library_permissions_preview_counts_generated_file_folder_and_syml
             _config: dict[str, object],
             context: dict[str, object],
         ) -> list[dict[str, str]]:
-            assert context == {"library_roots": [{"id": 1, "path": str(root)}]}
+            assert context == {
+                "library_roots": [{"id": 1, "path": str(root)}],
+                "referenced_paths": [],
+            }
             return [
                 {"file_path": str(folder)},
                 {"file_path": str(file_path)},
@@ -346,7 +361,10 @@ async def test_library_permissions_preview_counts_generated_file_folder_and_syml
             ]
 
     monkeypatch.setattr(library_permissions, "LibraryPermissionsExecutor", FakeExecutor)
-    session = _FakeSession(_FakeResult(rows=[(1, str(root))]))
+    session = _FakeSession(
+        _FakeResult(rows=[(1, str(root))]),
+        _FakeResult(scalars=[]),
+    )
 
     preview = await build_library_permissions_preview(
         LibraryPermissionsPreviewRequest(
@@ -392,7 +410,10 @@ async def test_library_permissions_preview_rejects_generated_paths_outside_roots
             return [{"file_path": str(outside_file)}]
 
     monkeypatch.setattr(library_permissions, "LibraryPermissionsExecutor", FakeExecutor)
-    session = _FakeSession(_FakeResult(rows=[(1, str(root))]))
+    session = _FakeSession(
+        _FakeResult(rows=[(1, str(root))]),
+        _FakeResult(scalars=[]),
+    )
 
     with pytest.raises(ValidationError, match="outside enabled library roots"):
         await build_library_permissions_preview(

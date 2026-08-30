@@ -12,6 +12,7 @@ import structlog
 from sqlalchemy import or_, select
 
 from pullbox.core.exceptions import ValidationError
+from pullbox.core.library_file_ownership import require_mutable_library_target
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 
@@ -101,6 +102,12 @@ async def rename_library_entry(
     renamed = False
 
     try:
+        await require_mutable_library_target(
+            session,
+            source,
+            include_descendants=kind == "folder",
+            operation="renamed",
+        )
         _rename_path(source, target)
         renamed = True
 

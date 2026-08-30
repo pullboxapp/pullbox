@@ -9,6 +9,7 @@ from pullbox.core.library_policy import (
     load_library_ingest_policy,
     load_search_on_add_default,
 )
+from pullbox.models.import_job import ImportFileHandlingMode
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
 
 if TYPE_CHECKING:
@@ -31,9 +32,12 @@ async def apply_confirm_import_policy(
 
     ingest_policy = await load_library_ingest_policy(session)
     search_on_add = await load_search_on_add_default(session)
+    handling_mode = job.file_handling_mode or ImportFileHandlingMode.MANAGED_COPY
     if request.search_on_add is not None and request.search_on_add != search_on_add:
         raise ValidationError("Search on add is now controlled by the global import policy.")
-    if request.move_to_library is False:
+    if handling_mode == ImportFileHandlingMode.IN_PLACE and request.move_to_library is True:
+        raise ValidationError("move_to_library=true conflicts with the selected in-place mode.")
+    if handling_mode == ImportFileHandlingMode.MANAGED_COPY and request.move_to_library is False:
         raise ValidationError(
             "Collection import now always creates library artifacts. "
             "The deprecated move_to_library=false override is no longer supported."

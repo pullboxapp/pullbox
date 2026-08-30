@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import select as sa_select
 
 from pullbox.core.exceptions import ValidationError
+from pullbox.core.library_file_ownership import (
+    ReferencedFileValidationError,
+    resolve_referenced_source_root,
+)
 from pullbox.core.library_layout import ImportLayoutMode, resolve_source_layout_spec
 from pullbox.core.library_policy import load_library_ingest_policy, load_search_on_add_default
 from pullbox.models.import_job import (
@@ -51,8 +56,19 @@ async def create_job(
     log_event: ImportEventLogger,
 ) -> ImportJob:
     """Create an import job record without starting scan execution."""
+    resolved_target_library_root_id = request.target_library_root_id
     if request.file_handling_mode == ImportFileHandlingMode.IN_PLACE:
-        raise ValidationError("In-place import is not available yet.")
+        if request.source_type != ImportSourceType.FILESYSTEM:
+            raise ValidationError("In-place import currently requires a filesystem library source.")
+        try:
+            root, _ = await resolve_referenced_source_root(
+                session,
+                Path(request.source_path),
+                request.target_library_root_id,
+            )
+        except ReferencedFileValidationError as exc:
+            raise ValidationError(exc.message) from exc
+        resolved_target_library_root_id = root.id
     if (
         request.source_type != ImportSourceType.FILESYSTEM
         and request.source_layout.mode != ImportLayoutMode.AUTO
@@ -88,7 +104,7 @@ async def create_job(
         status=ImportJobStatus.PENDING,
         monitored=monitored,
         search_on_add=search_on_add,
-        target_library_root_id=request.target_library_root_id,
+        target_library_root_id=resolved_target_library_root_id,
         mylar3_path_map=request.mylar3_path_map,
         cv_match_threshold=request.cv_match_threshold,
         min_files_per_series=request.min_files_per_series,

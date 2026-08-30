@@ -1165,6 +1165,39 @@ class TestLeaveInPlace:
         assert src.exists()
         assert src.name == "loose-name.cbz"
 
+    @pytest.mark.asyncio
+    async def test_leave_in_place_rejects_source_changed_since_scan(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+        from pullbox.core.library_file_ownership import (
+            ReferencedFileValidationError,
+            build_file_identity_signature,
+        )
+
+        src = comics_dir_config / "existing" / "Batman 017.cbz"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"original comic")
+        scan_signature = build_file_identity_signature(src)
+        src.write_bytes(b"replacement comic")
+
+        with pytest.raises(ReferencedFileValidationError) as exc_info:
+            await register_library_file(
+                session,
+                src,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+                rename=False,
+                expected_source_signature=scan_signature,
+            )
+
+        assert exc_info.value.reason == "source_changed"
+        assert src.read_bytes() == b"replacement comic"
+
 
 class TestLibraryFileRecord:
     """LibraryFile record is created with correct fields."""

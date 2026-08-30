@@ -81,14 +81,93 @@
           </span>
           <div class="min-w-0">
             <p class="font-semibold text-pb-text">Collection imports preserve source files.</p>
-            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+            <p
+              x-show="fileHandlingMode === 'managed_copy' || sourceType !== 'filesystem'"
+              class="mt-1 text-xs leading-5 text-pb-text-sec"
+            >
               Pullbox copies, renames, converts, and writes ComicInfo.xml only in the library
               destination. Files and folders in the selected source stay untouched so existing
               Mylar, Kapowarr, NAS, or shared-folder setups remain safe.
             </p>
+            <p
+              x-show="fileHandlingMode === 'in_place' && sourceType === 'filesystem'"
+              class="mt-1 text-xs leading-5 text-pb-text-sec"
+            >
+              Pullbox registers the files at their current paths. It will not create a second
+              comic file or change the existing file or folder layout.
+            </p>
           </div>
         </div>
       </div>
+
+      <section
+        x-show="sourceType === 'filesystem'"
+        x-cloak
+        class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
+        data-testid="import-file-handling-section"
+      >
+        <div>
+          <p class="downloads-section-label">What should Pullbox do with existing files?</p>
+          <p class="mt-2 text-xs leading-5 text-pb-text-sec">
+            Both choices preserve the selected source. The difference is whether Pullbox creates
+            and manages a library copy or references your current file.
+          </p>
+        </div>
+
+        <div class="grid gap-3 md:grid-cols-2">
+          <button
+            type="button"
+            @click="setFileHandlingMode('managed_copy')"
+            class="selection-card cursor-pointer text-left"
+            :class="fileHandlingMode === 'managed_copy' ? 'selection-card-active' : ''"
+            :aria-pressed="fileHandlingMode === 'managed_copy'"
+            data-testid="import-file-handling-managed"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Copy into Pullbox library</h3>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Recommended. Pullbox creates a managed copy and may apply your naming, format,
+              metadata, and permission settings to that copy.
+            </p>
+          </button>
+
+          <button
+            type="button"
+            @click="setFileHandlingMode('in_place')"
+            class="selection-card cursor-pointer text-left"
+            :class="fileHandlingMode === 'in_place' ? 'selection-card-active' : ''"
+            :aria-pressed="fileHandlingMode === 'in_place'"
+            data-testid="import-file-handling-in-place"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Keep files in place</h3>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Reference files already inside an enabled Pullbox library root. Pullbox will not
+              rename, convert, rewrite metadata, or change permissions on them.
+            </p>
+          </button>
+        </div>
+
+        <div
+          x-show="fileHandlingMode === 'in_place' && !layoutPreview"
+          class="inline-alert inline-alert-info"
+        >
+          Analyze the folder layout to verify that every sampled file can stay in place safely.
+        </div>
+        <div
+          x-show="fileHandlingMode === 'in_place' && layoutPreview && layoutPreview.can_keep_in_place"
+          class="inline-alert inline-alert-success"
+          data-testid="import-file-handling-in-place-ready"
+        >
+          This sample is inside a configured library root and can be registered in place.
+        </div>
+        <div
+          x-show="fileHandlingMode === 'in_place' && layoutPreview && !layoutPreview.can_keep_in_place"
+          class="inline-alert inline-alert-warning"
+          data-testid="import-file-handling-in-place-blocked"
+        >
+          This source cannot be kept in place yet. Review the layout warnings or choose a managed
+          copy.
+        </div>
+      </section>
 
       <section
         x-show="sourceType === 'filesystem'"
@@ -377,6 +456,7 @@
           @click="startScan()"
           :disabled="!canStartScan()"
           class="btn-primary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
+          data-testid="import-start-scan"
         >
           <svg x-show="scanning" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>

@@ -30,7 +30,7 @@ from pullbox.core.file_safety import classify_resource_safety_exception
 from pullbox.core.filesystem_scan import iter_supported_files
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.issue import Issue
-from pullbox.models.library import FileFormat, LibraryFile
+from pullbox.models.library import FileFormat, LibraryFile, LibraryFileStorageMode
 from pullbox.models.series import Series
 from pullbox.services.library_convert_service import _sync_converted_file_record
 from pullbox.utilities.base_executor import (
@@ -139,6 +139,17 @@ def _relative_trash_path(source: Path, relative_to: Path | None) -> str:
         return source.name
 
 
+def _path_is_referenced(path: Path, job_context: dict[str, Any] | None) -> bool:
+    referenced_paths = (job_context or {}).get("referenced_paths", [])
+    if not isinstance(referenced_paths, list):
+        return False
+    resolved_path = path.expanduser().resolve(strict=False)
+    return any(
+        Path(str(referenced_path)).expanduser().resolve(strict=False) == resolved_path
+        for referenced_path in referenced_paths
+    )
+
+
 class MassConvertPipelineExecutor(JobExecutor):
     """Multi-step pipeline: convert → metadata → rename → verify."""
 
@@ -224,6 +235,7 @@ class MassConvertPipelineExecutor(JobExecutor):
             tracked = tracked_files.get(str(path))
             if tracked is not None:
                 item["library_file_id"] = tracked.id
+                item["storage_mode"] = tracked.storage_mode.value
                 metadata = _build_comicinfo_metadata(tracked)
                 if metadata:
                     item["metadata"] = metadata
@@ -237,6 +249,17 @@ class MassConvertPipelineExecutor(JobExecutor):
         job_config: dict[str, Any],
     ) -> dict[str, Any]:
         scope = str(job_config.get("scope", "manual")).strip().lower()
+        referenced_paths = list(
+            (
+                await session.execute(
+                    select(LibraryFile.file_path).where(
+                        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
         try:
             trash_dir = _resolve_effective_trash_directory(job_config.get("trash_folder"))
         except Exception:
@@ -293,6 +316,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     "file_path": str(path),
                     "operation": "pipeline",
                     "library_file_id": library_file.id,
+                    "storage_mode": library_file.storage_mode.value,
                     "trash_relative_path": _relative_trash_path(
                         path,
                         Path(library_file.library_root.path)
@@ -305,7 +329,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     item["metadata"] = metadata
                     item["metadata_source"] = "library"
                 items.append(item)
-            return {"items": items}
+            return {"items": items, "referenced_paths": referenced_paths}
 
         deduped_paths = list(dict.fromkeys(candidate_paths))
         try:
@@ -330,7 +354,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                 Path(item["file_path"]),
                 relative_to,
             )
-        return {"items": items}
+        return {"items": items, "referenced_paths": referenced_paths}
 
     async def generate_items(
         self,
@@ -360,6 +384,26 @@ class MassConvertPipelineExecutor(JobExecutor):
         created_paths: list[Path] = []
 
         try:
+            if item_data.get(
+                "storage_mode"
+            ) == LibraryFileStorageMode.REFERENCED.value or _path_is_referenced(
+                source, job_context
+            ):
+                return ProcessedItem(
+                    item_id=item_id,
+                    result=ItemResult.SKIPPED,
+                    before_state={"path": str(source)},
+                    after_state={"path": str(source), "reason": "referenced_file"},
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    warning_message="Referenced library files cannot be converted.",
+                    log_entries=[
+                        (
+                            "WARNING",
+                            f"Skipped referenced library file: {source.name}",
+                            {"reason": "referenced_file"},
+                        )
+                    ],
+                )
             if not source.exists():
                 raise FileNotFoundError(f"Source file not found: {source}")
             if 1 not in steps:
