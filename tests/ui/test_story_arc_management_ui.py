@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
+from pullbox.services.story_arc_managed_reorder import StoryArcManagedReorderService
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicyInput,
     StoryArcPlacementPolicyMode,
@@ -961,9 +963,48 @@ class TestStoryArcManagementUI:
             arc = await session.get(StoryArc, ids["arc"])
             assert arc is not None
             revision = arc.revision
-        moved = await authenticated_client.post(
+        previewed = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/memberships/{ids['million_membership']}/move",
             data={"direction": "down", "expected_revision": revision},
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+        assert previewed.status_code == 200
+        assert 'data-testid="story-arc-reorder-preview"' in previewed.text
+        assert "No reading order" in previewed.text
+        assert "Logical order only" in previewed.text
+        token_match = re.search(
+            r'name="preview_token" value="([^"]+)"',
+            previewed.text,
+        )
+        assert token_match is not None
+        preview_token = token_match.group(1)
+
+        async with sec_db() as session:
+            arc = await session.get(StoryArc, ids["arc"])
+            assert arc is not None and arc.revision == revision
+
+        not_confirmed = await authenticated_client.post(
+            f"/story-arcs/{ids['arc']}/memberships/{ids['million_membership']}/move",
+            data={
+                "direction": "down",
+                "expected_revision": revision,
+                "preview_token": preview_token,
+            },
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+        assert not_confirmed.status_code == 303
+        assert not_confirmed.headers["location"].endswith("?error=reorder")
+
+        moved = await authenticated_client.post(
+            f"/story-arcs/{ids['arc']}/memberships/{ids['million_membership']}/move",
+            data={
+                "direction": "down",
+                "expected_revision": revision,
+                "preview_token": preview_token,
+                "confirm_reorder": "true",
+            },
             headers=_csrf_header_for(authenticated_client),
             follow_redirects=False,
         )
@@ -1029,3 +1070,172 @@ class TestStoryArcManagementUI:
             )
             assert library_file is not None
             assert library_file.file_path == "/tmp/story-arc-ui/DC One Million 1000000.cbz"
+
+    async def test_managed_move_requires_preview_then_renames_only_arc_placements(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ids = await _seed_placement_arc(sec_db, tmp_path)
+        second_canonical = tmp_path / "library" / "DC One Million 2.cbz"
+        second_canonical.write_bytes(b"second canonical story arc issue")
+        async with sec_db() as session:
+            root = await session.get(LibraryRoot, int(ids["root"]))
+            series = await session.scalar(select(Series).limit(1))
+            assert root is not None and series is not None
+            second_issue = Issue(
+                series=series,
+                issue_number=2,
+                issue_number_text="2",
+                title="The Second Hour",
+                status=IssueStatus.OWNED,
+            )
+            session.add(
+                LibraryFile(
+                    issue=second_issue,
+                    library_root=root,
+                    file_path=str(second_canonical),
+                    file_name=second_canonical.name,
+                    file_size=second_canonical.stat().st_size,
+                    file_format=FileFormat.CBZ,
+                    file_modified_at=datetime.now(UTC),
+                    match_confidence=MatchConfidence.MANUAL,
+                )
+            )
+            await session.flush()
+            second_membership = await StoryArcService().add_membership(
+                session,
+                int(ids["arc"]),
+                issue_id=second_issue.id,
+                sequence_number=2,
+                source_issue_number_text="2",
+            )
+            await session.commit()
+            arc = await session.get(StoryArc, int(ids["arc"]))
+            assert arc is not None
+            policy_revision = arc.revision
+
+        placement_service = StoryArcPlacementSyncService()
+        async with sec_db() as session:
+            policy = await placement_service.update_policy(
+                session,
+                int(ids["arc"]),
+                expected_revision=policy_revision,
+                proposal=StoryArcPlacementPolicyInput(
+                    mode=StoryArcPlacementPolicyMode.COPY,
+                    target_library_root_id=int(ids["root"]),
+                    destination_root=str(ids["destination"]),
+                    folder_template="{StoryArc}",
+                    file_template="{ReadingOrder:03d} - {Series} {IssueNumber}",
+                    synchronize=True,
+                ),
+            )
+            first_sync = await placement_service.sync_membership(
+                session,
+                int(ids["arc"]),
+                int(ids["membership"]),
+            )
+            second_sync = await placement_service.sync_membership(
+                session,
+                int(ids["arc"]),
+                second_membership.id,
+            )
+        assert first_sync.placement is not None
+        assert second_sync.placement is not None
+        old_targets = (
+            Path(first_sync.placement.placement_path),
+            Path(second_sync.placement.placement_path),
+        )
+
+        previewed = await authenticated_client.post(
+            f"/story-arcs/{ids['arc']}/memberships/{ids['membership']}/move",
+            data={"direction": "down", "expected_revision": policy.revision},
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+        assert previewed.status_code == 200
+        assert "Managed renames" in previewed.text
+        assert ">2</dd>" in previewed.text
+        assert "Durable recovery checkpoint path" in previewed.text
+        assert "canonical file" in previewed.text
+        token_match = re.search(
+            r'name="preview_token" value="([^"]+)"',
+            previewed.text,
+        )
+        assert token_match is not None
+        preview_token = token_match.group(1)
+        preview = StoryArcManagedReorderService().inspect_preview_token(
+            story_arc_id=int(ids["arc"]),
+            membership_id=int(ids["membership"]),
+            direction="down",
+            expected_revision=policy.revision,
+            preview_token=preview_token,
+        )
+        new_targets = tuple(
+            Path(str(item.new_path)) for item in preview.items if item.action == "rename"
+        )
+        assert len(new_targets) == 2
+        assert [path.read_bytes() for path in old_targets] == [
+            b"canonical story arc issue",
+            b"second canonical story arc issue",
+        ]
+
+        # Simulate request/process loss immediately after the durable prepare
+        # commit.  A normal fresh detail GET must rediscover the operation and
+        # mint a usable recovery confirmation without the browser-held token.
+        preparing_service = StoryArcManagedReorderService()
+        async with sec_db() as session:
+            await preparing_service._verify_and_prepare(
+                session,
+                preparing_service._decode_plan(preview_token),
+            )
+        recovered_page = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
+        assert recovered_page.status_code == 200
+        assert "Reorder recovery" in recovered_page.text
+        assert "interrupted request" in recovered_page.text
+        assert "Retry recovery" in recovered_page.text
+        recovered_token_match = re.search(
+            r'name="preview_token" value="([^"]+)"',
+            recovered_page.text,
+        )
+        assert recovered_token_match is not None
+        preview_token = recovered_token_match.group(1)
+
+        confirmed = await authenticated_client.post(
+            f"/story-arcs/{ids['arc']}/memberships/{ids['membership']}/move",
+            data={
+                "direction": "down",
+                "expected_revision": policy.revision,
+                "preview_token": preview_token,
+                "confirm_reorder": "true",
+            },
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+        assert confirmed.status_code == 303
+        assert confirmed.headers["location"].endswith("?notice=moved-down")
+        assert [path.read_bytes() for path in new_targets] == [
+            b"canonical story arc issue",
+            b"second canonical story arc issue",
+        ]
+        assert not any(path.exists() for path in old_targets)
+        assert Path(str(ids["canonical"])).read_bytes() == b"canonical story arc issue"
+        assert second_canonical.read_bytes() == b"second canonical story arc issue"
+        assert not list(Path(str(ids["destination"])).rglob(".pullbox-story-arc-reorder-*"))
+
+        async with sec_db() as session:
+            ordered_ids = list(
+                await session.scalars(
+                    select(IssueStoryArc.id)
+                    .where(IssueStoryArc.story_arc_id == int(ids["arc"]))
+                    .order_by(
+                        IssueStoryArc.sequence_number,
+                        IssueStoryArc.source_ordinal,
+                        IssueStoryArc.id,
+                    )
+                )
+            )
+            assert ordered_ids == [second_membership.id, int(ids["membership"])]
+            placements = list((await session.scalars(select(StoryArcPlacement))).all())
+            assert {row.placement_path for row in placements} == {str(path) for path in new_targets}

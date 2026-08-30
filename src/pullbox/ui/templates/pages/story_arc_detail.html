@@ -25,6 +25,128 @@
     {% endif %}
   </div>
 
+  {% if reorder_preview %}
+    <section
+      aria-labelledby="story-arc-reorder-preview-heading"
+      data-testid="story-arc-reorder-preview"
+      class="space-y-4 rounded-lg border border-pb-interactive/40 bg-pb-card p-5"
+    >
+      <div>
+        <h2 id="story-arc-reorder-preview-heading" class="text-lg font-semibold text-pb-text">
+          {{ 'Reorder recovery' if reorder_preview.recovery_pending else 'Reorder preview' }}
+        </h2>
+        <p class="mt-1 text-sm text-pb-text-sec">
+          {% if reorder_preview.recovery_pending %}
+            Pullbox found a durable prepared operation from an interrupted request. The paths
+            below show the persisted old, checkpoint, and intended states; canonical and
+            referenced files remain protected.
+          {% else %}
+            No reading order, managed file, canonical file, or referenced file has changed yet.
+          {% endif %}
+        </p>
+      </div>
+
+      <dl class="grid gap-3 sm:grid-cols-3">
+        <div class="rounded-md border border-pb-border bg-pb-bg px-3 py-2">
+          <dt class="text-xs text-pb-text-dim">Managed renames</dt>
+          <dd class="font-semibold text-pb-text">{{ reorder_preview.managed_rename_count }}</dd>
+        </div>
+        <div class="rounded-md border border-pb-border bg-pb-bg px-3 py-2">
+          <dt class="text-xs text-pb-text-dim">Referenced files preserved</dt>
+          <dd class="font-semibold text-pb-text">{{ reorder_preview.referenced_preserved_count }}</dd>
+        </div>
+        <div class="rounded-md border border-pb-border bg-pb-bg px-3 py-2">
+          <dt class="text-xs text-pb-text-dim">Referenced path drift</dt>
+          <dd class="font-semibold text-pb-text">{{ reorder_preview.referenced_drift_count }}</dd>
+        </div>
+      </dl>
+
+      {% if reorder_preview.recovery_pending %}
+        <div role="alert" class="rounded-md border border-pb-warning/50 bg-pb-warning/10 px-3 py-2 text-sm text-pb-text">
+          Recovery is pending. Confirm this same signed preview again so Pullbox can inspect the
+          durable checkpoint and finish or safely report the remaining recovery state.
+        </div>
+      {% else %}
+        <p class="text-sm text-pb-text-sec">
+          Recovery status: no operation has started. Pullbox will checkpoint the complete plan
+          before moving any managed artifact.
+        </p>
+      {% endif %}
+
+      <ol class="space-y-3" aria-label="Complete reorder path preview">
+        {% for item in reorder_preview.items %}
+          <li class="rounded-md border border-pb-border bg-pb-bg p-3 text-sm">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-semibold text-pb-text">
+                Reading order {{ item.old_reading_order }} → {{ item.new_reading_order }}
+              </span>
+              <span class="pill pill-neutral">{{ item.ownership|replace('_', ' ')|title }}</span>
+              <span class="pill pill-info">{{ item.action|replace('_', ' ')|title }}</span>
+            </div>
+            {% if item.old_path %}
+              <dl class="mt-2 grid gap-2 text-xs text-pb-text-sec">
+                <div>
+                  <dt class="font-medium text-pb-text">Current path</dt>
+                  <dd class="break-all font-mono">{{ item.old_path }}</dd>
+                </div>
+                <div>
+                  <dt class="font-medium text-pb-text">
+                    {{ 'Preserved path' if item.ownership == 'referenced' else 'New path' }}
+                  </dt>
+                  <dd class="break-all font-mono">{{ item.new_path }}</dd>
+                </div>
+                {% if item.action == 'referenced_drift' %}
+                  <div>
+                    <dt class="font-medium text-pb-text">Rendered managed-policy path</dt>
+                    <dd class="break-all font-mono">{{ item.rendered_path_after }}</dd>
+                  </div>
+                {% endif %}
+                {% if item.temporary_path %}
+                  <div>
+                    <dt class="font-medium text-pb-text">Durable recovery checkpoint path</dt>
+                    <dd class="break-all font-mono">{{ item.temporary_path }}</dd>
+                  </div>
+                {% endif %}
+              </dl>
+            {% else %}
+              <p class="mt-2 text-xs text-pb-text-sec">
+                Logical order only; this membership has no placement artifact to rename.
+              </p>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+
+      <div class="flex flex-wrap items-center gap-3">
+        <form
+          action="/story-arcs/{{ reorder_preview.story_arc_id }}/memberships/{{ reorder_preview.membership_id }}/move"
+          method="post"
+        >
+          <input type="hidden" name="direction" value="{{ reorder_preview.direction }}">
+          <input type="hidden" name="expected_revision" value="{{ reorder_preview.expected_revision }}">
+          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+          <input type="hidden" name="preview_token" value="{{ reorder_preview.preview_token }}">
+          <button
+            type="submit"
+            name="confirm_reorder"
+            value="true"
+            class="btn-primary"
+            data-testid="confirm-story-arc-reorder"
+          >
+            {{ 'Retry recovery' if reorder_preview.recovery_pending else 'Confirm reorder' }}
+          </button>
+        </form>
+        <a
+          href="/story-arcs/{{ story_arc.id }}?page={{ story_arc.page }}&amp;per_page={{ story_arc.per_page }}"
+          class="btn-secondary"
+        >
+          Cancel
+        </a>
+      </div>
+    </section>
+  {% endif %}
+
   <header class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
     <div>
       <div class="flex flex-wrap items-center gap-2">
@@ -111,15 +233,13 @@
                       <form
                         action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move"
                         method="post"
-                        hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move"
-                        hx-swap="none"
                       >
                         <input type="hidden" name="direction" value="up">
                         <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
                         <input type="hidden" name="return_page" value="{{ story_arc.page }}">
                         <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
                         <button type="submit" class="btn-secondary btn-sm" aria-label="Move issue {{ membership.exact_issue_number }} up">
-                          Move up
+                          Preview move up
                         </button>
                       </form>
                     {% endif %}
@@ -127,15 +247,13 @@
                       <form
                         action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move"
                         method="post"
-                        hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move"
-                        hx-swap="none"
                       >
                         <input type="hidden" name="direction" value="down">
                         <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
                         <input type="hidden" name="return_page" value="{{ story_arc.page }}">
                         <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
                         <button type="submit" class="btn-secondary btn-sm" aria-label="Move issue {{ membership.exact_issue_number }} down">
-                          Move down
+                          Preview move down
                         </button>
                       </form>
                     {% endif %}

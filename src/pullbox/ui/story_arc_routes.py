@@ -25,6 +25,11 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcSourceKind,
 )
+from pullbox.services.story_arc_managed_reorder import (
+    StoryArcManagedReorderError,
+    StoryArcManagedReorderService,
+    StoryArcReorderPreview,
+)
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementIntegrationError,
     StoryArcPlacementPolicyInput,
@@ -54,6 +59,7 @@ _get_templates: _GetTemplates | None = None
 _build_context: _BuildContext | None = None
 _story_arc_service = StoryArcService()
 _placement_service = StoryArcPlacementSyncService()
+_managed_reorder_service = StoryArcManagedReorderService()
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +96,11 @@ _ERROR_MESSAGES = {
     "not-found": "That story arc entry is no longer available.",
     "validation": "That change could not be saved. Review the fields and try again.",
     "placement": "Placement failed. Review the policy and placement state.",
+    "reorder": "That reorder could not be completed. Review the placement state and try again.",
+    "reorder-recovery": (
+        "This reorder has unfinished managed-file work. Use the same preview below to retry "
+        "recovery; canonical and referenced files remain protected."
+    ),
 }
 
 
@@ -226,7 +237,18 @@ async def _render_story_arc_detail(
     error_message: str = "",
     placement_proposal: StoryArcPlacementPolicyInput | None = None,
     placement_message: str = "",
+    reorder_preview: StoryArcReorderPreview | None = None,
 ) -> Response:
+    if reorder_preview is None:
+        try:
+            reorder_preview = await _managed_reorder_service.load_pending_preview(
+                session,
+                story_arc_id,
+            )
+        except StoryArcManagedReorderError:
+            # A malformed/incomplete journal is still important recovery truth
+            # even when it cannot safely mint a confirmation form.
+            error_message = error_message or _ERROR_MESSAGES["reorder-recovery"]
     detail = await load_story_arc_detail(
         session,
         story_arc_id=story_arc_id,
@@ -253,6 +275,7 @@ async def _render_story_arc_detail(
         notice_message=notice_message,
         error_message=error_message,
         placement_message=placement_message,
+        reorder_preview=reorder_preview,
     )
     return _templates().TemplateResponse(request, "pages/story_arc_detail.html", context)
 
@@ -662,64 +685,122 @@ async def story_arc_move_membership(
     story_arc_id: int,
     membership_id: int,
     request: Request,
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
     session: DbSession,
     direction: Annotated[Literal["up", "down"], Form()],
     expected_revision: Annotated[int, Form(ge=1)],
     return_page: Annotated[int | None, Form(ge=1)] = None,
     return_per_page: Annotated[int | None, Form(ge=1, le=100)] = None,
+    preview_token: Annotated[str, Form(max_length=200_000)] = "",
+    confirm_reorder: bool = Form(False),
 ) -> Response:
-    """Move one entry by one keyboard-accessible reading-order step."""
+    """Preview, then confirm, one keyboard-accessible reading-order step."""
     try:
-        memberships, index = await _nested_memberships(
-            session,
-            story_arc_id=story_arc_id,
-            membership_id=membership_id,
-        )
-        target_index = index - 1 if direction == "up" else index + 1
-        if target_index < 0 or target_index >= len(memberships):
-            edge_notice = "already-first" if direction == "up" else "already-last"
+        if preview_token:
+            if not confirm_reorder:
+                raise StoryArcManagedReorderError(
+                    "confirmation_required",
+                    "Review and explicitly confirm the reorder preview",
+                )
+            await _managed_reorder_service.confirm_adjacent_move(
+                session,
+                story_arc_id=story_arc_id,
+                membership_id=membership_id,
+                direction=direction,
+                expected_revision=expected_revision,
+                preview_token=preview_token,
+            )
             return _redirect(
                 request,
                 _detail_url(
                     story_arc_id,
-                    notice=edge_notice,
+                    notice=f"moved-{direction}",
                     page=return_page,
                     per_page=return_per_page,
                 ),
             )
-        ordered_ids = [membership.id for membership in memberships]
-        ordered_ids[index], ordered_ids[target_index] = (
-            ordered_ids[target_index],
-            ordered_ids[index],
-        )
-        await _story_arc_service.reorder_memberships(
+        preview = await _managed_reorder_service.preview_adjacent_move(
             session,
             story_arc_id,
-            ordered_membership_ids=ordered_ids,
+            membership_id,
+            direction=direction,
             expected_revision=expected_revision,
         )
-        await session.commit()
-    except (StoryArcServiceError, IntegrityError) as exc:
+        return await _render_story_arc_detail(
+            story_arc_id=story_arc_id,
+            request=request,
+            username=user.username,
+            session=session,
+            page=return_page or 1,
+            per_page=return_per_page or 25,
+            placement_page=1,
+            reorder_preview=preview,
+        )
+    except StoryArcManagedReorderError as exc:
+        await session.rollback()
+        if exc.code in {"already_first", "already_last"}:
+            return _redirect(
+                request,
+                _detail_url(
+                    story_arc_id,
+                    notice=exc.code.replace("_", "-"),
+                    page=return_page,
+                    per_page=return_per_page,
+                ),
+            )
+        if exc.category == "recovery" and preview_token:
+            try:
+                recovery_preview = _managed_reorder_service.inspect_preview_token(
+                    story_arc_id=story_arc_id,
+                    membership_id=membership_id,
+                    direction=direction,
+                    expected_revision=expected_revision,
+                    preview_token=preview_token,
+                    recovery_pending=True,
+                )
+            except StoryArcManagedReorderError:
+                recovery_preview = None
+            if recovery_preview is not None:
+                return await _render_story_arc_detail(
+                    story_arc_id=story_arc_id,
+                    request=request,
+                    username=user.username,
+                    session=session,
+                    page=return_page or 1,
+                    per_page=return_per_page or 25,
+                    placement_page=1,
+                    error_message=_ERROR_MESSAGES["reorder-recovery"],
+                    reorder_preview=recovery_preview,
+                )
+        error_code = (
+            "conflict"
+            if exc.category == "conflict"
+            else "not-found"
+            if exc.category == "not_found"
+            else "reorder-recovery"
+            if exc.category == "recovery"
+            else "reorder"
+        )
+        return _redirect(
+            request,
+            _detail_url(
+                story_arc_id,
+                error=error_code,
+                page=return_page,
+                per_page=return_per_page,
+            ),
+        )
+    except IntegrityError:
         await session.rollback()
         return _redirect(
             request,
             _detail_url(
                 story_arc_id,
-                error=_error_code(exc),
+                error="conflict",
                 page=return_page,
                 per_page=return_per_page,
             ),
         )
-    return _redirect(
-        request,
-        _detail_url(
-            story_arc_id,
-            notice=f"moved-{direction}",
-            page=return_page,
-            per_page=return_per_page,
-        ),
-    )
 
 
 @router.post(
