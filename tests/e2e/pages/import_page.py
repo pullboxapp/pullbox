@@ -64,6 +64,34 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-collection-source-browse']").first
 
     @property
+    def source_path_input(self) -> Locator:
+        return self.page.locator("[data-testid='import-collection-source-path']").first
+
+    @property
+    def source_layout_series_folders(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-series-folders']").first
+
+    @property
+    def source_layout_publisher_series(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-publisher-series']").first
+
+    @property
+    def source_layout_custom(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-custom']").first
+
+    @property
+    def source_layout_custom_fields(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-custom-fields']").first
+
+    @property
+    def source_layout_analyze_button(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-analyze']").first
+
+    @property
+    def source_layout_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-preview']").first
+
+    @property
     def file_browser_modal(self) -> Locator:
         return self.page.locator("[data-testid='file-browser-modal']").first
 

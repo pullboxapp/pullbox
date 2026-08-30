@@ -789,8 +789,30 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-collection-source-browse"' in response.text
         assert "Collection imports preserve source files." in response.text
         assert "Files and folders in the selected source stay untouched" in response.text
+        assert 'data-testid="import-collection-layout-section"' in response.text
+        assert 'data-testid="import-layout-auto"' in response.text
+        assert 'data-testid="import-layout-series-folders"' in response.text
+        assert 'data-testid="import-layout-publisher-series"' in response.text
+        assert 'data-testid="import-layout-custom"' in response.text
+        assert 'data-testid="import-layout-analyze"' in response.text
+        assert 'data-testid="import-layout-preview"' in response.text
+        assert "How is this library organized?" in response.text
+        assert "Automatic fallback stays enabled" in response.text
         assert 'data-testid="file-browser-modal"' in response.text
         assert 'data-testid="import-collection-modal-host"' in response.text
+
+    async def test_import_source_controller_previews_and_submits_frozen_layout(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = script.index("function importSourceData")
+        end = script.index("function importJobLogViewerData", start)
+        source_controller = script[start:end]
+
+        assert 'fetch("/api/v1/import/layout-preview"' in source_controller
+        assert "new AbortController()" in source_controller
+        assert "layoutPreviewRequestId" in source_controller
+        assert "sourceLayoutPayload: function" in source_controller
+        assert "fallback_to_auto: true" in source_controller
+        assert "source_layout: this.sourceLayoutPayload()" in source_controller
 
     async def test_import_collection_exposes_stable_step_mounts(
         self,

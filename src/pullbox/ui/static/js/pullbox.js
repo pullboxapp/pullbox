@@ -2927,9 +2927,207 @@ function importSourceData(config) {
     minFilesPerSeries: 1,
     fileFormats: "cbz, cbr, cb7, cbt, pdf, epub",
     cvMatchThreshold: 70,
+    layoutChoice: "auto",
+    customSeriesPathTemplate: "{Publisher}/{Series} ({Year})",
+    customIssueFilenameTemplate: "{Series} {IssueTitle} Issue {Issue:03d}",
+    layoutPreview: null,
+    layoutPreviewLoading: false,
+    layoutPreviewError: "",
+    layoutPreviewTimer: null,
+    layoutPreviewController: null,
+    layoutPreviewRequestId: 0,
+
+    selectSourceType: function (sourceType) {
+      this.sourceType = sourceType;
+      this.clearLayoutPreview();
+      if (sourceType === "filesystem") {
+        this.scheduleLayoutPreview();
+      }
+    },
+
+    setLayoutChoice: function (choice) {
+      this.layoutChoice = choice;
+      this.scheduleLayoutPreview();
+    },
+
+    sourceLayoutPayload: function () {
+      if (this.layoutChoice === "series_folders") {
+        return {
+          schema_version: 1,
+          mode: "preset",
+          preset: "series_folders",
+          fallback_to_auto: true,
+        };
+      }
+      if (this.layoutChoice === "publisher_series") {
+        return {
+          schema_version: 1,
+          mode: "preset",
+          preset: "publisher_series",
+          fallback_to_auto: true,
+        };
+      }
+      if (this.layoutChoice === "custom") {
+        return {
+          schema_version: 1,
+          mode: "custom",
+          series_path_template: this.customSeriesPathTemplate.trim(),
+          issue_filename_template: this.customIssueFilenameTemplate.trim() || null,
+          fallback_to_auto: true,
+        };
+      }
+      return {
+        schema_version: 1,
+        mode: "auto",
+        fallback_to_auto: true,
+      };
+    },
+
+    canAnalyzeLayout: function () {
+      if (this.sourceType !== "filesystem" || !this.sourcePath.trim()) {
+        return false;
+      }
+      return this.layoutChoice !== "custom" || !!this.customSeriesPathTemplate.trim();
+    },
+
+    canStartScan: function () {
+      if (!this.sourcePath.trim() || this.scanning) {
+        return false;
+      }
+      return this.layoutChoice !== "custom" || !!this.customSeriesPathTemplate.trim();
+    },
+
+    clearLayoutPreview: function () {
+      if (this.layoutPreviewTimer) {
+        clearTimeout(this.layoutPreviewTimer);
+        this.layoutPreviewTimer = null;
+      }
+      if (this.layoutPreviewController) {
+        this.layoutPreviewController.abort();
+        this.layoutPreviewController = null;
+      }
+      this.layoutPreviewRequestId += 1;
+      this.layoutPreview = null;
+      this.layoutPreviewLoading = false;
+      this.layoutPreviewError = "";
+    },
+
+    scheduleLayoutPreview: function () {
+      if (this.layoutPreviewTimer) {
+        clearTimeout(this.layoutPreviewTimer);
+        this.layoutPreviewTimer = null;
+      }
+      if (this.layoutPreviewController) {
+        this.layoutPreviewController.abort();
+        this.layoutPreviewController = null;
+      }
+      this.layoutPreviewRequestId += 1;
+      this.layoutPreview = null;
+      this.layoutPreviewLoading = false;
+      this.layoutPreviewError = "";
+      if (!this.canAnalyzeLayout()) {
+        return;
+      }
+      var self = this;
+      this.layoutPreviewTimer = setTimeout(function () {
+        self.layoutPreviewTimer = null;
+        self.previewLayout();
+      }, 500);
+    },
+
+    previewLayout: async function () {
+      if (!this.canAnalyzeLayout()) {
+        return;
+      }
+      if (this.layoutPreviewTimer) {
+        clearTimeout(this.layoutPreviewTimer);
+        this.layoutPreviewTimer = null;
+      }
+      if (this.layoutPreviewController) {
+        this.layoutPreviewController.abort();
+      }
+
+      var requestId = ++this.layoutPreviewRequestId;
+      var controller = new AbortController();
+      this.layoutPreviewController = controller;
+      this.layoutPreviewLoading = true;
+      this.layoutPreviewError = "";
+
+      try {
+        var response = await fetch("/api/v1/import/layout-preview", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": this.csrfToken(),
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            source_path: this.sourcePath.trim(),
+            source_type: "filesystem",
+            layout: this.sourceLayoutPayload(),
+          }),
+        });
+        var payload = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          var detail = payload.detail;
+          if (Array.isArray(detail)) {
+            detail = detail
+              .map(function (item) {
+                return item && item.msg ? item.msg : "";
+              })
+              .filter(Boolean)
+              .join(" ");
+          }
+          var message =
+            detail ||
+            (payload.error && payload.error.message) ||
+            "Pullbox could not analyze this folder layout.";
+          throw new Error(message);
+        }
+        if (requestId !== this.layoutPreviewRequestId) {
+          return;
+        }
+        this.layoutPreview = payload;
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          return;
+        }
+        if (requestId === this.layoutPreviewRequestId) {
+          this.layoutPreviewError =
+            err && err.message ? err.message : "Pullbox could not analyze this folder layout.";
+        }
+      } finally {
+        if (requestId === this.layoutPreviewRequestId) {
+          this.layoutPreviewLoading = false;
+          this.layoutPreviewController = null;
+        }
+      }
+    },
+
+    layoutClassificationLabel: function (value) {
+      return String(value || "needs_review")
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, function (letter) {
+          return letter.toUpperCase();
+        });
+    },
+
+    layoutPreviewSummary: function () {
+      if (!this.layoutPreview) {
+        return "";
+      }
+      return (
+        String(this.layoutPreview.files_fitting || 0) +
+        " of " +
+        String(this.layoutPreview.files_considered || 0) +
+        " sampled files fit this interpretation"
+      );
+    },
 
     startScan: async function () {
-      if (!this.sourcePath.trim()) {
+      if (!this.canStartScan()) {
         return;
       }
 
@@ -2949,6 +3147,7 @@ function importSourceData(config) {
             cv_match_threshold: this.cvMatchThreshold / 100,
             min_files_per_series: this.minFilesPerSeries,
             file_formats: this.fileFormats.trim() || null,
+            source_layout: this.sourceLayoutPayload(),
           }),
         });
 

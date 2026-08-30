@@ -6,7 +6,7 @@
         <div class="mt-4 grid gap-3 md:grid-cols-2">
           <button
             type="button"
-            @click="sourceType = 'filesystem'"
+            @click="selectSourceType('filesystem')"
             class="selection-card cursor-pointer text-left"
             :class="sourceType === 'filesystem' ? 'selection-card-active' : ''"
             :aria-pressed="sourceType === 'filesystem'"
@@ -27,7 +27,7 @@
 
           <button
             type="button"
-            @click="sourceType = 'mylar3'"
+            @click="selectSourceType('mylar3')"
             class="selection-card cursor-pointer text-left"
             :class="sourceType === 'mylar3' ? 'selection-card-active' : ''"
             :aria-pressed="sourceType === 'mylar3'"
@@ -57,8 +57,10 @@
           <input
             type="text"
             x-model="sourcePath"
+            @input.debounce.600ms="scheduleLayoutPreview()"
             :placeholder="sourceType === 'filesystem' ? '/imports' : '/imports/mylar.db'"
             class="input-pb flex-1 font-mono"
+            data-testid="import-collection-source-path"
           >
           <button
             type="button"
@@ -87,6 +89,202 @@
           </div>
         </div>
       </div>
+
+      <section
+        x-show="sourceType === 'filesystem'"
+        x-cloak
+        class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
+        data-testid="import-collection-layout-section"
+      >
+        <div>
+          <p class="downloads-section-label">How is this library organized?</p>
+          <p class="mt-2 text-xs leading-5 text-pb-text-sec">
+            Choose how Pullbox should read series folders and issue filenames. Previewing only
+            inspects a bounded sample; it does not create an import or change files.
+          </p>
+        </div>
+
+        <div class="grid gap-3 md:grid-cols-2">
+          <button
+            type="button"
+            @click="setLayoutChoice('auto')"
+            class="selection-card cursor-pointer text-left"
+            :class="layoutChoice === 'auto' ? 'selection-card-active' : ''"
+            :aria-pressed="layoutChoice === 'auto'"
+            data-testid="import-layout-auto"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Automatic detection</h3>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Best for mixed libraries or when you are not sure. Recommended.
+            </p>
+          </button>
+
+          <button
+            type="button"
+            @click="setLayoutChoice('series_folders')"
+            class="selection-card cursor-pointer text-left"
+            :class="layoutChoice === 'series_folders' ? 'selection-card-active' : ''"
+            :aria-pressed="layoutChoice === 'series_folders'"
+            data-testid="import-layout-series-folders"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Series folders</h3>
+            <p class="mt-1 font-mono text-xs text-pb-text-sec">&#123;Series&#125;/issue.cbz</p>
+          </button>
+
+          <button
+            type="button"
+            @click="setLayoutChoice('publisher_series')"
+            class="selection-card cursor-pointer text-left"
+            :class="layoutChoice === 'publisher_series' ? 'selection-card-active' : ''"
+            :aria-pressed="layoutChoice === 'publisher_series'"
+            data-testid="import-layout-publisher-series"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Publisher and series folders</h3>
+            <p class="mt-1 font-mono text-xs text-pb-text-sec">
+              &#123;Publisher&#125;/&#123;Series&#125;/issue.cbz
+            </p>
+          </button>
+
+          <button
+            type="button"
+            @click="setLayoutChoice('custom')"
+            class="selection-card cursor-pointer text-left"
+            :class="layoutChoice === 'custom' ? 'selection-card-active' : ''"
+            :aria-pressed="layoutChoice === 'custom'"
+            data-testid="import-layout-custom"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Custom templates</h3>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Describe an existing folder and issue naming pattern.
+            </p>
+          </button>
+        </div>
+
+        <div
+          x-show="layoutChoice === 'custom'"
+          x-cloak
+          class="grid gap-4 rounded-xl border border-pb-border bg-pb-bg/40 p-4 md:grid-cols-2"
+          data-testid="import-layout-custom-fields"
+        >
+          <div>
+            <label for="import-source-series-template" class="block text-xs font-medium text-pb-text-sec">
+              Series folder structure
+            </label>
+            <input
+              id="import-source-series-template"
+              type="text"
+              x-model="customSeriesPathTemplate"
+              @input.debounce.600ms="scheduleLayoutPreview()"
+              class="input-pb mt-2 w-full font-mono"
+              autocomplete="off"
+            >
+            <p class="mt-1 text-[11px] leading-5 text-pb-text-dim">
+              Example: &#123;Publisher&#125;/&#123;Series&#125; (&#123;Year&#125;)
+            </p>
+          </div>
+          <div>
+            <label for="import-source-issue-template" class="block text-xs font-medium text-pb-text-sec">
+              Issue filename structure <span class="font-normal">(optional)</span>
+            </label>
+            <input
+              id="import-source-issue-template"
+              type="text"
+              x-model="customIssueFilenameTemplate"
+              @input.debounce.600ms="scheduleLayoutPreview()"
+              class="input-pb mt-2 w-full font-mono"
+              autocomplete="off"
+            >
+            <p class="mt-1 text-[11px] leading-5 text-pb-text-dim">
+              Example: &#123;Series&#125; &#123;IssueTitle&#125; Issue &#123;Issue:03d&#125;
+            </p>
+          </div>
+        </div>
+
+        <div class="inline-alert inline-alert-info">
+          <span class="inline-alert-icon" aria-hidden="true">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m0 3.75h.008v.008H12v-.008zM11.25 3.75h1.5a8.25 8.25 0 110 16.5h-1.5a8.25 8.25 0 010-16.5z"/>
+            </svg>
+          </span>
+          <div class="min-w-0 text-xs leading-5 text-pb-text-sec">
+            Automatic fallback stays enabled so files that do not fit the selected pattern remain
+            visible and use Pullbox's existing safe detection.
+          </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            @click="previewLayout()"
+            :disabled="!canAnalyzeLayout() || layoutPreviewLoading"
+            class="btn-secondary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
+            data-testid="import-layout-analyze"
+          >
+            <svg x-show="layoutPreviewLoading" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            <span x-text="layoutPreviewLoading ? 'Analyzing...' : 'Analyze folder layout'"></span>
+          </button>
+          <span class="text-[11px] text-pb-text-dim">Uses a server-bounded sample.</span>
+        </div>
+
+        <div x-show="layoutPreviewError" x-cloak class="inline-alert inline-alert-danger" role="alert">
+          <span x-text="layoutPreviewError"></span>
+        </div>
+
+        <div
+          x-show="layoutPreview"
+          x-cloak
+          class="space-y-4 rounded-xl border border-pb-border bg-pb-bg/50 p-4"
+          data-testid="import-layout-preview"
+          aria-live="polite"
+        >
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p class="text-sm font-semibold text-pb-text" x-text="layoutClassificationLabel(layoutPreview && layoutPreview.classification)"></p>
+              <p class="mt-1 text-xs text-pb-text-sec" x-text="layoutPreviewSummary()"></p>
+            </div>
+            <span
+              x-show="layoutPreview && layoutPreview.partial"
+              class="pill pill-warning self-start"
+            >Partial sample</span>
+          </div>
+
+          <template x-if="layoutPreview && layoutPreview.files_ambiguous">
+            <div class="inline-alert inline-alert-warning">
+              <span x-text="layoutPreview.files_ambiguous + ' sampled file(s) need another interpretation.'"></span>
+            </div>
+          </template>
+
+          <template x-for="warning in ((layoutPreview && layoutPreview.warnings) || [])" :key="warning">
+            <p class="text-xs leading-5 text-pb-warning" x-text="warning"></p>
+          </template>
+
+          <div class="space-y-3">
+            <template x-for="cluster in ((layoutPreview && layoutPreview.clusters) || [])" :key="cluster.cluster_id">
+              <article class="rounded-lg border border-pb-border bg-pb-surface/50 p-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <strong class="text-xs text-pb-text" x-text="layoutClassificationLabel(cluster.classification)"></strong>
+                  <span class="text-[11px] text-pb-text-dim" x-text="cluster.file_count + ' file(s) · ' + cluster.confidence + ' confidence'"></span>
+                </div>
+                <div class="mt-3 space-y-2">
+                  <template x-for="example in cluster.examples" :key="example.relative_path">
+                    <div class="rounded-md border border-pb-border/70 bg-pb-bg/60 p-3">
+                      <code class="block break-all text-[11px] text-pb-text" x-text="example.relative_path"></code>
+                      <p class="mt-1 text-[11px] text-pb-text-sec">
+                        <span x-text="example.series || 'Series needs review'"></span>
+                        <span x-show="example.issue_number" x-text="' · Issue ' + example.issue_number"></span>
+                        <span x-show="example.issue_title" x-text="' · ' + example.issue_title"></span>
+                      </p>
+                    </div>
+                  </template>
+                </div>
+              </article>
+            </template>
+          </div>
+        </div>
+      </section>
 
       <div x-show="sourceType" x-cloak class="space-y-3">
         <button
@@ -156,7 +354,7 @@
         <button
           type="button"
           @click="startScan()"
-          :disabled="!sourcePath.trim() || scanning"
+          :disabled="!canStartScan()"
           class="btn-primary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
         >
           <svg x-show="scanning" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">

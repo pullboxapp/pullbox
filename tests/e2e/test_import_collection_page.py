@@ -2387,3 +2387,96 @@ class TestImportCollectionTab:
         import_page.source_browse_button.click()
         import_page.file_browser_modal.wait_for(state="visible", timeout=5000)
         assert import_page.file_browser_title.text_content() == "Browse Files"
+
+    def test_import_collection_source_step_previews_selected_layout(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "preset",
+                            "preset": "publisher_series",
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "publisher_series",
+                        "clusters": [
+                            {
+                                "cluster_id": "publisher-series",
+                                "classification": "publisher_series",
+                                "file_count": 2,
+                                "directory_count": 2,
+                                "confidence": "high",
+                                "proposed_series_path_template": "{Publisher}/{Series}",
+                                "proposed_issue_filename_template": None,
+                                "examples": [
+                                    {
+                                        "relative_path": "DC Comics/Batman (2011)/Issue 001.cbz",
+                                        "publisher": "DC Comics",
+                                        "series": "Batman",
+                                        "year": 2011,
+                                        "issue_number": "1",
+                                        "issue_title": None,
+                                        "evidence": ["source_layout"],
+                                        "warnings": [],
+                                    }
+                                ],
+                            }
+                        ],
+                        "directories_considered": 2,
+                        "files_considered": 2,
+                        "files_fitting": 2,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": False,
+                        "can_apply_future_policy": False,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/imports")
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+
+        assert requests[-1] == {
+            "source_path": "/imports",
+            "source_type": "filesystem",
+            "layout": {
+                "schema_version": 1,
+                "mode": "preset",
+                "preset": "publisher_series",
+                "fallback_to_auto": True,
+            },
+        }
+        assert "Publisher Series" in (import_page.source_layout_preview.text_content() or "")
+        assert "2 of 2 sampled files fit" in (
+            import_page.source_layout_preview.text_content() or ""
+        )
+        assert "DC Comics/Batman (2011)/Issue 001.cbz" in (
+            import_page.source_layout_preview.text_content() or ""
+        )
+
+        import_page.source_layout_custom.click()
+        import_page.source_layout_custom_fields.wait_for(state="visible", timeout=5000)
