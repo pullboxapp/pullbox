@@ -495,7 +495,7 @@ class FileConflictGroup(BaseModel):
     series_id: int | None = None
     issue_title: str | None = None
     diagnostics: dict[str, object] = Field(default_factory=dict)
-    files: list[ImportedFileRead]
+    files: list[ImportedFileRead] = Field(min_length=1)
 
 
 class ImportJobRead(BaseModel):

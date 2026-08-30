@@ -595,14 +595,17 @@ class Mylar3Reader:
                 key_where = "WHERE group_kind > ? OR (group_kind = ? AND group_value > ?)"
                 key_params.extend([after_group[0], after_group[0], after_group[1]])
             key_params.append(page_size)
-            key_cursor = conn.execute(
+            key_query = (
                 "SELECT group_kind, group_value FROM ("
                 f"SELECT {group_kind} AS group_kind, {group_value} AS group_value "
                 "FROM storyarcs"
                 ") AS normalized "
                 f"{key_where} "
                 "GROUP BY group_kind, group_value "
-                "ORDER BY group_kind, group_value LIMIT ?",
+                "ORDER BY group_kind, group_value LIMIT ?"
+            )
+            key_cursor = conn.execute(
+                key_query,
                 tuple(key_params),
             )
             group_rows = list(key_cursor)
@@ -622,12 +625,12 @@ class Mylar3Reader:
                 f"({group_kind} = ? AND {group_value} = ?)" for _key in group_keys
             )
             row_params = tuple(value for key in group_keys for value in key)
-            row_cursor = conn.execute(
+            row_query = (
                 f"SELECT {', '.join(expressions)}, rowid AS __source_rowid "
                 f"FROM storyarcs WHERE {predicates} "
-                f"ORDER BY {group_kind}, {group_value}, rowid",
-                row_params,
+                f"ORDER BY {group_kind}, {group_value}, rowid"
             )
+            row_cursor = conn.execute(row_query, row_params)
             rows = list(row_cursor)
             page = self._convert_story_arc_rows(rows)
             next_group = group_keys[-1]
@@ -717,41 +720,42 @@ class Mylar3Reader:
                     "count_value"
                 ]
             )
+            identified_arcs_query = (
+                "SELECT COUNT(*) AS count_value FROM ("
+                "SELECT 1 FROM storyarcs WHERE "
+                f"{identity_predicate} GROUP BY {group_kind}, {group_value})"
+            )
             identified_arcs_count = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS count_value FROM ("
-                    "SELECT 1 FROM storyarcs WHERE "
-                    f"{identity_predicate} GROUP BY {group_kind}, {group_value})"
-                ).fetchone()["count_value"]
+                conn.execute(identified_arcs_query).fetchone()["count_value"]
+            )
+            unidentified_arcs_query = (
+                f"SELECT COUNT(*) AS count_value FROM storyarcs WHERE NOT {identity_predicate}"
             )
             unidentified_arcs_count = int(
-                conn.execute(
-                    f"SELECT COUNT(*) AS count_value FROM storyarcs WHERE NOT {identity_predicate}"
-                ).fetchone()["count_value"]
+                conn.execute(unidentified_arcs_query).fetchone()["count_value"]
             )
             arcs_count = identified_arcs_count + unidentified_arcs_count
-            missing_count = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS count_value FROM storyarcs WHERE "
-                    f"LOWER(TRIM(COALESCE(CAST({status} AS TEXT), ''))) IN ('missing', 'wanted')"
-                ).fetchone()["count_value"]
+            missing_query = (
+                "SELECT COUNT(*) AS count_value FROM storyarcs WHERE "
+                f"LOWER(TRIM(COALESCE(CAST({status} AS TEXT), ''))) IN ('missing', 'wanted')"
+            )
+            missing_count = int(conn.execute(missing_query).fetchone()["count_value"])
+            existing_location_query = (
+                "SELECT COUNT(*) AS count_value FROM storyarcs WHERE "
+                f"TRIM(COALESCE(CAST({location} AS TEXT), '')) <> ''"
             )
             existing_location_count = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS count_value FROM storyarcs WHERE "
-                    f"TRIM(COALESCE(CAST({location} AS TEXT), '')) <> ''"
-                ).fetchone()["count_value"]
+                conn.execute(existing_location_query).fetchone()["count_value"]
             )
-            duplicate_count = int(
-                conn.execute(
-                    "SELECT COALESCE(SUM(group_count - 1), 0) AS count_value FROM ("
-                    "SELECT COUNT(*) AS group_count FROM storyarcs WHERE "
-                    f"{identity_predicate} AND "
-                    f"TRIM(COALESCE(CAST({reading_order} AS TEXT), '')) <> '' "
-                    f"GROUP BY {group_kind}, {group_value}, {reading_order} "
-                    "HAVING COUNT(*) > 1)"
-                ).fetchone()["count_value"]
+            duplicate_query = (
+                "SELECT COALESCE(SUM(group_count - 1), 0) AS count_value FROM ("
+                "SELECT COUNT(*) AS group_count FROM storyarcs WHERE "
+                f"{identity_predicate} AND "
+                f"TRIM(COALESCE(CAST({reading_order} AS TEXT), '')) <> '' "
+                f"GROUP BY {group_kind}, {group_value}, {reading_order} "
+                "HAVING COUNT(*) > 1)"
             )
+            duplicate_count = int(conn.execute(duplicate_query).fetchone()["count_value"])
 
             selected = {
                 "story_arc": story_arc_name,
@@ -762,11 +766,11 @@ class Mylar3Reader:
                 "status": status,
             }
             select_list = ", ".join(f'{column} AS "{alias}"' for alias, column in selected.items())
-            rows = conn.execute(
+            examples_query = (
                 f"SELECT {select_list} FROM storyarcs "
-                f"ORDER BY {story_arc_name}, {reading_order} LIMIT ?",
-                (max_examples,),
-            ).fetchall()
+                f"ORDER BY {story_arc_name}, {reading_order} LIMIT ?"
+            )
+            rows = conn.execute(examples_query, (max_examples,)).fetchall()
             examples = tuple(
                 Mylar3StoryArcPreflightExample(
                     story_arc=self._bounded_preflight_text(row["story_arc"]),
@@ -1524,9 +1528,10 @@ class Mylar3Reader:
         if not comic_ids:
             return set()
         where_clause, params = self._comic_id_filter(comic_ids)
+        query = f"SELECT ComicID FROM comics{where_clause}"
         return {
             parsed
-            for row in conn.execute(f"SELECT ComicID FROM comics{where_clause}", params)
+            for row in conn.execute(query, params)
             if (parsed := self._parse_cv_id(row["ComicID"])) is not None
         }
 
@@ -1562,8 +1567,9 @@ class Mylar3Reader:
             release_comic_ids,
             column_name="ReleaseComicID",
         )
+        query = f"{base_query}{where_clause}"
         records: list[tuple[int, _MylarIssueRecord]] = []
-        for row in conn.execute(f"{base_query}{where_clause}", params):
+        for row in conn.execute(query, params):
             parsed = self._annual_record_from_row(row)
             if parsed is None or parsed[0] == parsed[1].series_cv_id:
                 continue
@@ -1579,11 +1585,11 @@ class Mylar3Reader:
             return {}
         where_clause, params = self._comic_id_filter(comic_ids)
         rows: dict[int, sqlite3.Row] = {}
-        cursor = conn.execute(
+        query = (
             "SELECT ComicID, ComicName, ComicYear, ComicPublisher, ComicLocation, "
-            f"Status, Total FROM comics{where_clause} ORDER BY rowid",
-            params,
+            f"Status, Total FROM comics{where_clause} ORDER BY rowid"
         )
+        cursor = conn.execute(query, params)
         for row in cursor:
             comic_id = self._parse_cv_id(row["ComicID"])
             if comic_id is not None:
@@ -1717,7 +1723,8 @@ class Mylar3Reader:
         where_clause, params = (
             self._comic_id_filter(comic_ids) if comic_ids is not None else ("", ())
         )
-        for row in conn.execute(f"{base_query}{where_clause}", params):
+        query = f"{base_query}{where_clause}"
+        for row in conn.execute(query, params):
             parsed = self._annual_record_from_row(row)
             if parsed is None:
                 continue
