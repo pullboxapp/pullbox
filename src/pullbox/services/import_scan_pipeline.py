@@ -301,6 +301,7 @@ async def run_import_scan_pipeline(
             )
 
         scan_materialized_incrementally = False
+        discovered_list: list[DiscoveredSeries] = []
 
         scan_phase_started_at = time.monotonic()
         if job.source_type == ImportSourceType.MYLAR3:
@@ -319,8 +320,9 @@ async def run_import_scan_pipeline(
                 message=f"Loaded {len(discovered_list)} series from Mylar3.",
                 progress=SCAN_PROGRESS_MATERIALIZE_END,
             )
+            discovered_count = len(discovered_list)
         else:
-            discovered_list = await _scan_collection_discovered_series(
+            discovered_count = await _scan_collection_discovered_series(
                 session,
                 job,
                 scanner_cls=scanner_cls,
@@ -330,6 +332,7 @@ async def run_import_scan_pipeline(
                 validate_discovered_files_safety=validate_discovered_files_safety,
                 materialize_discovered_scan_results=materialize_discovered_scan_results,
                 log_event=log_event,
+                raise_if_cancelled=raise_if_cancelled,
             )
             scan_materialized_incrementally = True
 
@@ -337,7 +340,7 @@ async def run_import_scan_pipeline(
             await emit_scan_progress(
                 status=ImportJobStatus.SCANNING,
                 phase="scanning",
-                message=f"Scan complete: {len(discovered_list)} series ready for analysis.",
+                message=f"Scan complete: {discovered_count} series ready for analysis.",
                 progress=SCAN_PROGRESS_MATERIALIZE_END,
             )
 
@@ -372,8 +375,8 @@ async def run_import_scan_pipeline(
             job_id,
             "INFO",
             "import_scan_completed",
-            message=f"Scan complete: {len(discovered_list)} series found",
-            series_found=len(discovered_list),
+            message=f"Scan complete: {discovered_count} series found",
+            series_found=discovered_count,
             duration_ms=round((time.monotonic() - scan_phase_started_at) * 1000),
         )
         scan_duration_ms = round((time.monotonic() - scan_phase_started_at) * 1000)
@@ -737,10 +740,11 @@ async def _scan_collection_discovered_series(
     validate_discovered_files_safety: ValidateDiscoveredFilesFunc | None = None,
     materialize_discovered_scan_results: MaterializeScanResultsFunc | None = None,
     log_event: LogEventFunc | None = None,
-) -> list[DiscoveredSeries]:
+    raise_if_cancelled: RaiseIfCancelledFunc | None = None,
+) -> int:
     custom_exts = await resolve_import_file_extensions(session, job.file_formats)
-    checked_paths: set[str] = set()
     batch: list[DiscoveredSeries] = []
+    series_found = 0
     last_batch_flush_at = time.monotonic()
 
     async def forward_live_scan_progress(
@@ -775,6 +779,10 @@ async def _scan_collection_discovered_series(
     async def capture_scan_totals(files_found: int, directories_visited: int) -> None:
         job.scan_total_dirs = directories_visited
         job.scan_total_files = files_found
+
+    async def check_scan_cancellation() -> None:
+        if raise_if_cancelled is not None:
+            await raise_if_cancelled(session, job.id)
 
     materialized_files = 0
     last_materialized_emit = 0.0
@@ -819,15 +827,18 @@ async def _scan_collection_discovered_series(
 
         if validate_discovered_files_safety is not None:
             batch_for_validation: list[DiscoveredSeries] = []
+            batch_checked_paths: set[str] = set()
             for discovered in batch_to_flush:
                 pending_files = [
                     discovered_file
                     for discovered_file in discovered.files
-                    if discovered_file.file_path not in checked_paths
+                    if discovered_file.file_path not in batch_checked_paths
                 ]
                 if not pending_files:
                     continue
-                checked_paths.update(discovered_file.file_path for discovered_file in pending_files)
+                batch_checked_paths.update(
+                    discovered_file.file_path for discovered_file in pending_files
+                )
                 batch_for_validation.append(
                     discovered.__class__(
                         raw_series_name=discovered.raw_series_name,
@@ -858,11 +869,9 @@ async def _scan_collection_discovered_series(
                 job.id,
                 "DEBUG",
                 "import_scan_batch_discovered",
-                message=(
-                    f"Discovered {len(batch_to_flush)} series ({len(discovered_list)} total so far)"
-                ),
+                message=f"Discovered {len(batch_to_flush)} series ({series_found} total so far)",
                 series_found_in_batch=len(batch_to_flush),
-                total_series_found=len(discovered_list),
+                total_series_found=series_found,
                 sample_series=[item.raw_series_name for item in batch_to_flush[:5]],
             )
 
@@ -878,7 +887,7 @@ async def _scan_collection_discovered_series(
                 max(job.scan_total_files, materialized_files, 1),
             ),
             message=(
-                f"Discovered {len(discovered_list)} series · "
+                f"Discovered {series_found} series · "
                 f"{materialized_files}/{max(job.scan_total_files, 1)} files processed."
             ),
             current_series_name=batch_to_flush[-1].raw_series_name if batch_to_flush else None,
@@ -890,39 +899,39 @@ async def _scan_collection_discovered_series(
         progress_callback=capture_scan_totals,
         file_progress_callback=capture_materialized_file,
         inventory_progress_callback=capture_inventory_progress,
+        cancellation_check=check_scan_cancellation if raise_if_cancelled is not None else None,
         extensions=custom_exts,
         source_layout=SourceLayoutSpec.from_dict(dict(job.source_layout_snapshot or {})),
     )
-    discovered_list: list[DiscoveredSeries] = []
-
     file_paths_mode = list(job.selected_file_paths or [])
 
     if file_paths_mode:
-        discovered_list = await scanner.scan_files(
+        selected_discovered = await scanner.scan_files(
             file_paths_mode,
             root_path=job.source_path,
         )
-        job.scan_total_files = sum(series.file_count for series in discovered_list)
-        job.scan_total_dirs = len({series.source_folder for series in discovered_list})
-        job.series_found = len(discovered_list)
-        batch.extend(discovered_list)
+        series_found = len(selected_discovered)
+        job.scan_total_files = sum(series.file_count for series in selected_discovered)
+        job.scan_total_dirs = len({series.source_folder for series in selected_discovered})
+        job.series_found = series_found
+        batch.extend(selected_discovered)
         await flush_scan_batch(force=True)
         await forward_live_scan_progress(
             phase="scanning",
-            message=f"Prepared {len(discovered_list)} series from the selected files.",
+            message=f"Prepared {series_found} series from the selected files.",
             progress=SCAN_PROGRESS_MATERIALIZE_END,
         )
-        return discovered_list
+        return series_found
 
     async for series in scanner.scan(job.source_path):
-        discovered_list.append(series)
+        series_found += 1
         batch.append(series)
-        job.series_found = len(discovered_list)
+        job.series_found = series_found
         await flush_scan_batch()
         await forward_live_scan_progress(
             phase="scanning",
             message=(
-                f"Discovered {len(discovered_list)} series · "
+                f"Discovered {series_found} series · "
                 f"{materialized_files}/"
                 f"{max(job.scan_total_files, 1)} files processed."
             ),
@@ -937,4 +946,4 @@ async def _scan_collection_discovered_series(
 
     await flush_scan_batch(force=True)
 
-    return discovered_list
+    return series_found

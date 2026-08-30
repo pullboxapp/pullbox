@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import zipfile
 from itertools import pairwise
@@ -82,6 +83,41 @@ class TestInventoryProgress:
             later[0] >= earlier[0] and later[1] >= earlier[1]
             for earlier, later in pairwise(updates)
         )
+
+    @pytest.mark.asyncio
+    async def test_scan_stops_filesystem_walk_when_cancellation_is_observed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class ScanCancelledError(Exception):
+            pass
+
+        cancellation_checks = 0
+        directories_visited = 0
+
+        async def cancel_scan() -> None:
+            nonlocal cancellation_checks
+            cancellation_checks += 1
+            raise ScanCancelledError
+
+        def slow_walk(self, top_down=True, on_error=None, follow_symlinks=False):
+            nonlocal directories_visited
+            del self, top_down, on_error, follow_symlinks
+            for index in range(500):
+                directories_visited += 1
+                time.sleep(0.002)
+                directory = tmp_path / f"Series {index:04d}"
+                yield directory, [], ["Issue 001.cbz"]
+
+        monkeypatch.setattr(Path, "walk", slow_walk)
+        scanner = CollectionScanner(cancellation_check=cancel_scan)
+
+        with pytest.raises(ScanCancelledError):
+            _ = [candidate async for candidate in scanner.scan(tmp_path)]
+
+        assert cancellation_checks == 1
+        assert directories_visited < 100
 
 
 class TestTwoLevelWithYear:
@@ -1407,6 +1443,107 @@ class TestEdgeCases:
 
         assert len(results) == 1
         assert results[0].raw_publisher is None
+
+
+class TestSeriesDirectoryClassification:
+    """Series-root classification must stay correct without all-pairs work."""
+
+    def test_nested_directories_keep_only_deepest_comic_directory(self, tmp_path: Path) -> None:
+        scanner = CollectionScanner()
+        publisher = tmp_path / "Publisher"
+        series = publisher / "Series"
+        volume = series / "Volume 2"
+        dir_files = {
+            publisher: [publisher / "Special.cbz"],
+            series: [series / "Issue 001.cbz"],
+            volume: [volume / "Issue 002.cbz"],
+            tmp_path / "Sibling": [tmp_path / "Sibling" / "Issue 001.cbz"],
+        }
+
+        result = scanner._identify_series_dirs(dir_files)
+
+        assert set(result) == {volume, tmp_path / "Sibling"}
+
+    def test_wide_tree_avoids_pairwise_descendant_checks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from pullbox.core import collection_scanner as scanner_module
+
+        scanner = CollectionScanner()
+        series_dirs = [tmp_path / "Publisher" / f"Series {index:04d}" for index in range(500)]
+        dir_files = {directory: [directory / "Issue 001.cbz"] for directory in series_dirs}
+        descendant_checks = 0
+        original_is_descendant = scanner_module._is_descendant
+
+        def count_descendant_check(child: Path, parent: Path) -> bool:
+            nonlocal descendant_checks
+            descendant_checks += 1
+            return original_is_descendant(child, parent)
+
+        monkeypatch.setattr(scanner_module, "_is_descendant", count_descendant_check)
+
+        result = scanner._identify_series_dirs(dir_files)
+
+        assert set(result) == set(series_dirs)
+        assert descendant_checks <= len(series_dirs) * 4
+
+    @pytest.mark.asyncio
+    async def test_scan_bounds_pending_series_tasks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from pullbox.core import collection_scanner as scanner_module
+
+        scanner = CollectionScanner()
+        directory_count = 250
+        dir_files = {
+            tmp_path / f"Series {index:04d}": [tmp_path / f"Series {index:04d}" / "Issue 001.cbz"]
+            for index in range(directory_count)
+        }
+
+        def fake_walk_tree(
+            root: Path,
+            progress_callback,
+            cancellation_event,
+        ) -> tuple[dict[Path, list[Path]], int, int]:
+            del root, progress_callback, cancellation_event
+            return dir_files, directory_count, directory_count
+
+        async def fake_build_discovered_files(*args, **kwargs):
+            del args, kwargs
+            await asyncio.sleep(0)
+            return []
+
+        monkeypatch.setattr(scanner, "_walk_tree_with_counts", fake_walk_tree)
+        monkeypatch.setattr(scanner, "_build_discovered_files", fake_build_discovered_files)
+        monkeypatch.setattr(scanner, "_build_series_candidates", lambda **kwargs: [])
+
+        real_create_task = asyncio.create_task
+        pending_count = 0
+        peak_pending_count = 0
+
+        def track_create_task(coro):
+            nonlocal pending_count, peak_pending_count
+            task = real_create_task(coro)
+            pending_count += 1
+            peak_pending_count = max(peak_pending_count, pending_count)
+
+            def mark_done(_task: asyncio.Task[object]) -> None:
+                nonlocal pending_count
+                pending_count -= 1
+
+            task.add_done_callback(mark_done)
+            return task
+
+        monkeypatch.setattr(scanner_module.asyncio, "create_task", track_create_task)
+
+        results = [candidate async for candidate in scanner.scan(tmp_path)]
+
+        assert results == []
+        assert peak_pending_count <= scanner_module.SERIES_SCAN_WORKERS + 1
 
 
 class TestWalkTreeHardening:

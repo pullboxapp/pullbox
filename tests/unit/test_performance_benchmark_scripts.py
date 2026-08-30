@@ -64,6 +64,33 @@ def test_import_scan_benchmark_exits_cleanly() -> None:
     assert report["provider_issue_number_calls"] == 0
 
 
+def test_import_directory_classification_benchmark_is_metadata_only() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/benchmark_import_directory_classification.py",
+            "--series-count",
+            "1000",
+            "--publisher-count",
+            "25",
+        ],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["profile"] == "directory_classification_only"
+    assert report["filesystem_scan_count"] == 0
+    assert report["input_comic_directory_count"] == 1025
+    assert report["series_directory_count"] == 1000
+    assert report["series_count"] == 1000
+    assert float(report["classification_seconds"]) >= 0
+
+
 def test_import_scan_benchmark_uses_stable_provider_ids_for_multi_series() -> None:
     report = _run_benchmark(
         _repo_root(),

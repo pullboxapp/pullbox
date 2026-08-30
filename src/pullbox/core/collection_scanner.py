@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterable
+    from typing import Any
 
 import structlog
 
@@ -173,6 +175,7 @@ class CollectionScanner:
         progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
         file_progress_callback: Callable[[int], Awaitable[None]] | None = None,
         inventory_progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
+        cancellation_check: Callable[[], Awaitable[None]] | None = None,
         extensions: frozenset[str] | None = None,
         source_layout: SourceLayoutSpec | None = None,
     ) -> None:
@@ -181,6 +184,7 @@ class CollectionScanner:
         self._progress_callback = progress_callback
         self._file_progress_callback = file_progress_callback
         self._inventory_progress_callback = inventory_progress_callback
+        self._cancellation_check = cancellation_check
         self._extensions = extensions or COMIC_EXTENSIONS
         self._source_layout = resolve_source_layout_spec(source_layout or SourceLayoutSpec())
         self._compiled_source_layout = (
@@ -196,24 +200,31 @@ class CollectionScanner:
             msg = f"Scan root is not a directory: {root}"
             raise ValueError(msg)
 
-        if self._inventory_progress_callback is None:
+        if self._inventory_progress_callback is None and self._cancellation_check is None:
             directory_count, file_count = await asyncio.to_thread(self._inventory_tree, root)
             return ScanInventory(directory_count=directory_count, file_count=file_count)
 
         loop = asyncio.get_running_loop()
         progress_queue: asyncio.Queue[tuple[int, int] | None] = asyncio.Queue()
+        cancellation_event = threading.Event()
 
         async def drain_inventory_progress() -> None:
-            last_emitted: tuple[int, int] | None = None
-            while True:
-                counts = await progress_queue.get()
-                if counts is None:
-                    break
-                if counts is not None and counts != last_emitted:
-                    last_emitted = counts
-                    progress_callback = self._inventory_progress_callback
-                    if progress_callback is not None:
-                        await progress_callback(*counts)
+            try:
+                last_emitted: tuple[int, int] | None = None
+                while True:
+                    counts = await progress_queue.get()
+                    if counts is None:
+                        break
+                    if self._cancellation_check is not None:
+                        await self._cancellation_check()
+                    if counts != last_emitted:
+                        last_emitted = counts
+                        progress_callback = self._inventory_progress_callback
+                        if progress_callback is not None:
+                            await progress_callback(*counts)
+            except BaseException:
+                cancellation_event.set()
+                raise
 
         def report_inventory_progress(directory_count: int, file_count: int) -> None:
             loop.call_soon_threadsafe(
@@ -227,6 +238,7 @@ class CollectionScanner:
                 self._inventory_tree,
                 root,
                 report_inventory_progress,
+                cancellation_event,
             )
         finally:
             loop.call_soon_threadsafe(progress_queue.put_nowait, None)
@@ -255,20 +267,27 @@ class CollectionScanner:
 
         walk_progress_queue: asyncio.Queue[tuple[int, int] | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        cancellation_event = threading.Event()
 
         async def drain_walk_progress() -> None:
-            last_emitted: tuple[int, int] | None = None
-            while True:
-                counts = await walk_progress_queue.get()
-                if counts is None:
-                    break
-                if counts is not None and counts != last_emitted:
-                    last_emitted = counts
-                    file_count, dir_count = counts[1], counts[0]
-                    if self._progress_callback:
-                        await self._progress_callback(file_count, dir_count)
-                    if self._inventory_progress_callback:
-                        await self._inventory_progress_callback(dir_count, file_count)
+            try:
+                last_emitted: tuple[int, int] | None = None
+                while True:
+                    counts = await walk_progress_queue.get()
+                    if counts is None:
+                        break
+                    if self._cancellation_check is not None:
+                        await self._cancellation_check()
+                    if counts != last_emitted:
+                        last_emitted = counts
+                        file_count, dir_count = counts[1], counts[0]
+                        if self._progress_callback:
+                            await self._progress_callback(file_count, dir_count)
+                        if self._inventory_progress_callback:
+                            await self._inventory_progress_callback(dir_count, file_count)
+            except BaseException:
+                cancellation_event.set()
+                raise
 
         def report_walk_progress(directory_count: int, file_count: int) -> None:
             loop.call_soon_threadsafe(
@@ -283,6 +302,7 @@ class CollectionScanner:
                 self._walk_tree_with_counts,
                 root,
                 report_walk_progress,
+                cancellation_event,
             )
         finally:
             loop.call_soon_threadsafe(walk_progress_queue.put_nowait, None)
@@ -334,49 +354,75 @@ class CollectionScanner:
                     allow_weak_file_identity=allow_weak_file_identity,
                 )
 
-        tasks: list[asyncio.Task[list[DiscoveredSeries]]] = []
-        for series_dir in sorted(series_dirs):
-            comic_files = dir_files[series_dir]
-            if len(comic_files) < self._min_file_count:
-                continue
-
-            name, year, folder_cv_id = self._extract_folder_identity(series_dir.name)
-            publisher = self._infer_publisher_from_hierarchy(series_dir, root)
-            tasks.append(
-                asyncio.create_task(
-                    process_bucket(
-                        series_dir,
-                        comic_files,
-                        folder_name=name,
-                        folder_year=year,
-                        folder_publisher=publisher,
-                        folder_cv_id=folder_cv_id,
-                        allow_weak_file_identity=series_dir == root,
-                    )
-                )
-            )
-
         # Handle loose files in non-leaf directories (e.g. root folder).
         loose_dirs = set(dir_files.keys()) - set(series_dirs)
         loose_series_count = 0
-        for loose_dir in sorted(loose_dirs):
-            loose_files = dir_files[loose_dir]
-            tasks.append(
-                asyncio.create_task(
-                    process_bucket(
-                        loose_dir,
-                        loose_files,
-                        folder_name=loose_dir.name if loose_dir.name else "(root)",
-                        folder_year=None,
-                        folder_publisher=None,
-                        folder_cv_id=None,
-                        allow_weak_file_identity=loose_dir == root,
-                    )
-                )
-            )
 
-        for task in asyncio.as_completed(tasks):
-            candidates = await task
+        def iter_bucket_work() -> Iterable[Coroutine[Any, Any, list[DiscoveredSeries]]]:
+            for series_dir in sorted(series_dirs):
+                comic_files = dir_files[series_dir]
+                if len(comic_files) < self._min_file_count:
+                    continue
+
+                name, year, folder_cv_id = self._extract_folder_identity(series_dir.name)
+                publisher = self._infer_publisher_from_hierarchy(series_dir, root)
+                yield process_bucket(
+                    series_dir,
+                    comic_files,
+                    folder_name=name,
+                    folder_year=year,
+                    folder_publisher=publisher,
+                    folder_cv_id=folder_cv_id,
+                    allow_weak_file_identity=series_dir == root,
+                )
+
+            for loose_dir in sorted(loose_dirs):
+                loose_files = dir_files[loose_dir]
+                yield process_bucket(
+                    loose_dir,
+                    loose_files,
+                    folder_name=loose_dir.name if loose_dir.name else "(root)",
+                    folder_year=None,
+                    folder_publisher=None,
+                    folder_cv_id=None,
+                    allow_weak_file_identity=loose_dir == root,
+                )
+
+        async def iter_bounded_results(
+            work: Iterable[Coroutine[Any, Any, list[DiscoveredSeries]]],
+        ) -> AsyncGenerator[list[DiscoveredSeries], None]:
+            iterator = iter(work)
+            pending: set[asyncio.Task[list[DiscoveredSeries]]] = set()
+
+            def start_next() -> bool:
+                try:
+                    awaitable = next(iterator)
+                except StopIteration:
+                    return False
+                pending.add(asyncio.create_task(awaitable))
+                return True
+
+            for _ in range(SERIES_SCAN_WORKERS):
+                if not start_next():
+                    break
+
+            try:
+                while pending:
+                    done, pending = await asyncio.wait(
+                        pending,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in done:
+                        candidates = task.result()
+                        start_next()
+                        yield candidates
+            finally:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+
+        async for candidates in iter_bounded_results(iter_bucket_work()):
             for candidate in candidates:
                 if len(candidate.files) < self._min_file_count:
                     continue
@@ -953,6 +999,7 @@ class CollectionScanner:
         self,
         root: Path,
         progress_callback: Callable[[int, int], None] | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> tuple[int, int]:
         """Walk the tree and count visited directories plus supported comic files."""
         directory_count = 0
@@ -963,15 +1010,23 @@ class CollectionScanner:
             logger.warning("import_scan_walk_error", path=str(root), error=str(exc))
 
         for dirpath, dirnames, filenames in root.walk(on_error=_on_error):
+            if cancellation_event is not None and cancellation_event.is_set():
+                break
             dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")]
             dirnames.sort()
             filenames.sort()
             directory_count += 1
-            file_count += sum(
-                1
-                for fname in filenames
-                if _is_scan_candidate_file(dirpath / fname, self._extensions)
-            )
+            for index, fname in enumerate(filenames):
+                if (
+                    index % 128 == 0
+                    and cancellation_event is not None
+                    and cancellation_event.is_set()
+                ):
+                    break
+                if _is_scan_candidate_file(dirpath / fname, self._extensions):
+                    file_count += 1
+            if cancellation_event is not None and cancellation_event.is_set():
+                break
             if progress_callback is not None:
                 now = time.monotonic()
                 if (
@@ -999,6 +1054,7 @@ class CollectionScanner:
         self,
         root: Path,
         progress_callback: Callable[[int, int], None] | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> tuple[dict[Path, list[Path]], int, int]:
         """Walk the directory tree once and return comic files plus live totals."""
         dir_files: dict[Path, list[Path]] = {}
@@ -1010,6 +1066,8 @@ class CollectionScanner:
             logger.warning("import_scan_walk_error", path=str(root), error=str(exc))
 
         for dirpath, dirnames, filenames in root.walk(on_error=_on_error):
+            if cancellation_event is not None and cancellation_event.is_set():
+                break
             # Prune ignored directories
             dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")]
             dirnames.sort()
@@ -1017,10 +1075,18 @@ class CollectionScanner:
             directory_count += 1
 
             comics: list[Path] = []
-            for fname in filenames:
+            for index, fname in enumerate(filenames):
+                if (
+                    index % 128 == 0
+                    and cancellation_event is not None
+                    and cancellation_event.is_set()
+                ):
+                    break
                 fpath = dirpath / fname
                 if _is_scan_candidate_file(fpath, self._extensions):
                     comics.append(fpath)
+            if cancellation_event is not None and cancellation_event.is_set():
+                break
             file_count += len(comics)
 
             if comics:
@@ -1048,17 +1114,22 @@ class CollectionScanner:
         of its subdirectories also contain comic files.
         """
         all_dirs = set(dir_files.keys())
-        series_dirs: list[Path] = []
+        dirs_with_comic_descendants: set[Path] = set()
 
-        for d in all_dirs:
-            # Check if any child directory also has comics
-            has_child_with_comics = any(
-                other != d and _is_descendant(other, d) for other in all_dirs
-            )
-            if not has_child_with_comics:
-                series_dirs.append(d)
+        # Walk each comic directory's ancestry once instead of comparing every
+        # directory with every other directory. Path depth is bounded by the
+        # source tree, so classification grows with D * depth rather than D^2.
+        for directory in all_dirs:
+            ancestor = directory.parent
+            while True:
+                if ancestor in all_dirs:
+                    dirs_with_comic_descendants.add(ancestor)
+                parent = ancestor.parent
+                if parent == ancestor:
+                    break
+                ancestor = parent
 
-        return series_dirs
+        return [directory for directory in all_dirs if directory not in dirs_with_comic_descendants]
 
     def _extract_from_folder_name(self, folder_name: str) -> tuple[str, int | None]:
         """Extract (series_name, year) from a folder name.

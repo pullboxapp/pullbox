@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING
 
+from sqlalchemy import and_, func, or_
 from sqlalchemy import select as sa_select
 
 from pullbox.core.exceptions import NotFoundError
@@ -52,6 +54,65 @@ EmitProgress = Callable[
 ]
 EstimateRemainingSeconds = Callable[["datetime | None", int], int | None]
 JobStats = Callable[[ImportJob], dict[str, int]]
+
+ROLLBACK_ACTION_PAGE_SIZE = 500
+ROLLBACK_PROGRESS_MIN_INTERVAL_SECONDS = 1.0
+
+
+async def _count_completed_rollback_actions(session: AsyncSession, job_id: int) -> int:
+    count = await session.scalar(
+        sa_select(func.count(ImportJobAction.id)).where(
+            ImportJobAction.import_job_id == job_id,
+            ImportJobAction.status == ImportJobActionStatus.COMPLETED,
+        )
+    )
+    return int(count or 0)
+
+
+async def _iter_completed_rollback_actions(
+    session: AsyncSession,
+    job_id: int,
+) -> AsyncIterator[RollbackActionPlan]:
+    """Yield bounded reverse-order journal pages with a stable keyset cursor."""
+    cursor: tuple[int, int] | None = None
+    while True:
+        statement = sa_select(ImportJobAction).where(
+            ImportJobAction.import_job_id == job_id,
+            ImportJobAction.status == ImportJobActionStatus.COMPLETED,
+        )
+        if cursor is not None:
+            sequence_no, action_id = cursor
+            statement = statement.where(
+                or_(
+                    ImportJobAction.sequence_no < sequence_no,
+                    and_(
+                        ImportJobAction.sequence_no == sequence_no,
+                        ImportJobAction.id < action_id,
+                    ),
+                )
+            )
+        result = await session.execute(
+            statement.order_by(
+                ImportJobAction.sequence_no.desc(),
+                ImportJobAction.id.desc(),
+            ).limit(ROLLBACK_ACTION_PAGE_SIZE)
+        )
+        page = [
+            RollbackActionPlan(
+                action_id=action.id,
+                sequence_no=action.sequence_no,
+                action_type=action.action_type,
+                payload=dict(action.payload or {}),
+            )
+            for action in result.scalars().all()
+        ]
+        if not page:
+            return
+        cursor = (page[-1].sequence_no, page[-1].action_id)
+        for action in page:
+            yield action
+        if len(page) < ROLLBACK_ACTION_PAGE_SIZE:
+            return
 
 
 async def rollback_import_job(
@@ -104,25 +165,7 @@ async def _rollback_import_job_while_enrichment_fenced(
     if job is None:
         raise NotFoundError("ImportJob", job_id)
 
-    actions_result = await session.execute(
-        sa_select(ImportJobAction)
-        .where(
-            ImportJobAction.import_job_id == job_id,
-            ImportJobAction.status == ImportJobActionStatus.COMPLETED,
-        )
-        .order_by(ImportJobAction.sequence_no.desc())
-    )
-    actions = [
-        RollbackActionPlan(
-            action_id=action.id,
-            sequence_no=action.sequence_no,
-            action_type=action.action_type,
-            payload=dict(action.payload or {}),
-        )
-        for action in actions_result.scalars().all()
-    ]
-
-    total = len(actions)
+    total = await _count_completed_rollback_actions(session, job_id)
     await log_event(
         session,
         job_id,
@@ -131,7 +174,9 @@ async def _rollback_import_job_while_enrichment_fenced(
         message=f"Rolling back {total} recorded import actions.",
         action_count=total,
     )
-    for idx, action in enumerate(actions):
+    idx = 0
+    last_progress_emit_at = monotonic()
+    async for action in _iter_completed_rollback_actions(session, job_id):
         await log_event(
             session,
             job_id,
@@ -175,6 +220,7 @@ async def _rollback_import_job_while_enrichment_fenced(
                 sequence_no=action.sequence_no,
                 sync_work_id=exc.work_id,
             )
+            await session.commit()
             return False
         except Exception as exc:
             await log_event(
@@ -203,8 +249,17 @@ async def _rollback_import_job_while_enrichment_fenced(
             action_type=action.action_type,
             sequence_no=action.sequence_no,
         )
-        if progress_callback:
-            progress = int(((idx + 1) / max(total, 1)) * 100)
+        idx += 1
+        page_checkpoint = idx % ROLLBACK_ACTION_PAGE_SIZE == 0 or idx == total
+        if not page_checkpoint:
+            continue
+        now = monotonic()
+        should_emit_progress = progress_callback is not None and (
+            idx == total or now - last_progress_emit_at >= ROLLBACK_PROGRESS_MIN_INTERVAL_SECONDS
+        )
+        if should_emit_progress:
+            assert progress_callback is not None
+            progress = int((idx / max(total, 1)) * 100)
             await emit_progress(
                 session,
                 job,
@@ -213,7 +268,7 @@ async def _rollback_import_job_while_enrichment_fenced(
                     status=ImportJobStatus.ROLLING_BACK,
                     phase="rollback",
                     progress=progress,
-                    message=f"Rolling back {idx + 1}/{total} actions...",
+                    message=f"Rolling back {idx}/{total} actions...",
                     estimated_seconds_remaining=estimate_remaining_seconds(
                         job.import_started_at,
                         progress,
@@ -222,6 +277,9 @@ async def _rollback_import_job_while_enrichment_fenced(
                 ),
                 progress_callback,
             )
+            last_progress_emit_at = now
+        else:
+            await session.commit()
 
     await restore_review_state(session, job_id)
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import weakref
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select
@@ -89,7 +91,7 @@ async def test_scan_collection_discovered_series_emits_live_inventory_progress(
 
     inventory_events = [event for event in progress_events if event["phase"] == "inventory"]
 
-    assert len(discovered) == 120
+    assert discovered == 120
     assert inventory_events
     assert any("directories visited" in str(event["message"]) for event in inventory_events)
     assert max(int(event["progress"]) for event in inventory_events) > 0
@@ -162,7 +164,7 @@ async def test_scan_collection_discovered_series_skips_inventory_prepass(
         phase_progress=phase_progress,
     )
 
-    assert len(discovered) == 1
+    assert discovered == 1
     assert job.scan_total_files == 3
     assert job.scan_total_dirs == 1
 
@@ -210,8 +212,109 @@ async def test_scan_collection_discovered_series_passes_frozen_layout_to_scanner
         phase_progress=phase_progress,
     )
 
-    assert discovered == []
+    assert discovered == 0
     assert captured_layouts == [expected_layout]
+
+
+async def test_filesystem_scan_passes_job_cancellation_into_inventory_walk(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    job = ImportJob(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.SCANNING,
+        min_files_per_series=1,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    cancellation_calls: list[int] = []
+
+    async def resolve_import_file_extensions(_session, _formats):
+        return COMIC_EXTENSIONS
+
+    async def emit_scan_progress(**_kwargs) -> None:
+        return None
+
+    async def raise_if_cancelled(_session, job_id: int) -> None:
+        cancellation_calls.append(job_id)
+
+    class ScannerDouble:
+        def __init__(self, *args, cancellation_check=None, **kwargs) -> None:
+            del args, kwargs
+            self._cancellation_check = cancellation_check
+
+        async def scan(self, _root):
+            assert self._cancellation_check is not None
+            await self._cancellation_check()
+            if False:
+                yield None
+
+    discovered = await _scan_collection_discovered_series(
+        db_session,
+        job,
+        scanner_cls=ScannerDouble,
+        resolve_import_file_extensions=resolve_import_file_extensions,
+        emit_scan_progress=emit_scan_progress,
+        phase_progress=phase_progress,
+        raise_if_cancelled=raise_if_cancelled,
+    )
+
+    assert discovered == 0
+    assert cancellation_calls == [job.id]
+
+
+async def test_filesystem_scan_returns_count_without_retaining_materialized_series(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    job = ImportJob(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.SCANNING,
+        min_files_per_series=1,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    discovered_refs: list[weakref.ReferenceType[DiscoveredSeries]] = []
+
+    async def resolve_import_file_extensions(_session, _formats):
+        return COMIC_EXTENSIONS
+
+    async def emit_scan_progress(**_kwargs) -> None:
+        return None
+
+    class ScannerDouble:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        async def scan(self, _root):
+            for index in range(75):
+                discovered = DiscoveredSeries(
+                    raw_series_name=f"Series {index:03d}",
+                    raw_year=2026,
+                    raw_publisher="Example",
+                    file_count=0,
+                    sample_paths=[],
+                    source_folder=str(tmp_path / f"Series {index:03d}"),
+                    source_folder_relative=f"Series {index:03d}",
+                    files=[],
+                )
+                discovered_refs.append(weakref.ref(discovered))
+                yield discovered
+
+    series_count = await _scan_collection_discovered_series(
+        db_session,
+        job,
+        scanner_cls=ScannerDouble,
+        resolve_import_file_extensions=resolve_import_file_extensions,
+        emit_scan_progress=emit_scan_progress,
+        phase_progress=phase_progress,
+    )
+    gc.collect()
+
+    assert series_count == 75
+    assert all(reference() is None for reference in discovered_refs)
 
 
 async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
