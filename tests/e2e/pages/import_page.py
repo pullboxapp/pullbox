@@ -92,6 +92,10 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-layout-series-folders']").first
 
     @property
+    def source_layout_section(self) -> Locator:
+        return self.page.locator("[data-testid='import-collection-layout-section']").first
+
+    @property
     def source_layout_publisher_series(self) -> Locator:
         return self.page.locator("[data-testid='import-layout-publisher-series']").first
 

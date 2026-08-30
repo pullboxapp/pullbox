@@ -174,16 +174,21 @@
       </section>
 
       <section
-        x-show="sourceType === 'filesystem'"
+        x-show="sourceType === 'filesystem' || sourceType === 'mylar3'"
         x-cloak
         class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
         data-testid="import-collection-layout-section"
       >
         <div>
           <p class="downloads-section-label">How is this library organized?</p>
-          <p class="mt-2 text-xs leading-5 text-pb-text-sec">
+          <p x-show="sourceType === 'filesystem'" class="mt-2 text-xs leading-5 text-pb-text-sec">
             Choose how Pullbox should read series folders and issue filenames. Previewing only
             inspects a bounded sample; it does not create an import or change files.
+          </p>
+          <p x-show="sourceType === 'mylar3'" class="mt-2 text-xs leading-5 text-pb-text-sec">
+            Choose how Pullbox should read the series folders and issue filenames referenced by
+            Mylar. Pullbox applies this after path mapping while keeping trusted Mylar IDs
+            authoritative.
           </p>
         </div>
 
@@ -316,7 +321,7 @@
           </label>
         </div>
 
-        <div class="flex flex-wrap items-center gap-3">
+        <div x-show="sourceType === 'filesystem'" class="flex flex-wrap items-center gap-3">
           <button
             type="button"
             @click="previewLayout()"
@@ -333,12 +338,17 @@
           <span class="text-[11px] text-pb-text-dim">Uses a server-bounded sample.</span>
         </div>
 
-        <div x-show="layoutPreviewError" x-cloak class="inline-alert inline-alert-danger" role="alert">
+        <div x-show="sourceType === 'mylar3'" class="inline-alert inline-alert-info">
+          Pullbox will validate this layout against resolved Mylar paths during the scan. Files
+          that do not fit remain visible for review according to the fallback choice above.
+        </div>
+
+        <div x-show="sourceType === 'filesystem' && layoutPreviewError" x-cloak class="inline-alert inline-alert-danger" role="alert">
           <span x-text="layoutPreviewError"></span>
         </div>
 
         <div
-          x-show="layoutPreview"
+          x-show="sourceType === 'filesystem' && layoutPreview"
           x-cloak
           class="space-y-4 rounded-xl border border-pb-border bg-pb-bg/50 p-4"
           data-testid="import-layout-preview"

@@ -2492,6 +2492,58 @@ class TestImportCollectionTab:
         import_page.source_layout_custom.click()
         import_page.source_layout_custom_fields.wait_for(state="visible", timeout=5000)
 
+    def test_import_collection_submits_selected_layout_for_mylar_without_folder_preview(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        layout_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            layout_preview_requests.append(route.request.post_data_json)
+            route.fulfill(status=500, content_type="application/json", body="{}")
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 322, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.source_layout_section.wait_for(state="visible", timeout=5000)
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_fallback_checkbox.uncheck()
+
+        assert import_page.source_layout_analyze_button.is_hidden()
+        assert import_page.start_scan_button.is_enabled()
+        assert_no_axe_violations(
+            authed_page,
+            name="Mylar source layout controls",
+            include=["[data-testid='import-collection-layout-section']"],
+        )
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert layout_preview_requests == []
+        assert created_requests
+        assert created_requests[-1]["source_type"] == "mylar3"
+        assert created_requests[-1]["source_layout"] == {
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "fallback_to_auto": False,
+        }
+
     def test_import_collection_submits_validated_in_place_mode(
         self,
         authed_page,
