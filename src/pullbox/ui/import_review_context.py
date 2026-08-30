@@ -222,6 +222,22 @@ def _build_safety_block_context_by_file_id(
     return result
 
 
+def _build_safety_file_display_name_by_file_id(
+    files_by_series_id: Mapping[int, list[ImportedFile]],
+) -> dict[int, str]:
+    """Return bounded basename-only labels for safety review rows."""
+    result: dict[int, str] = {}
+    for files in files_by_series_id.values():
+        for imp_file in files:
+            normalized = str(imp_file.file_name).replace("\\", "/").rstrip("/")
+            leaf = normalized.rsplit("/", maxsplit=1)[-1]
+            safe_leaf = "".join(
+                character for character in leaf if character >= " " and character != "\x7f"
+            )
+            result[imp_file.id] = (safe_leaf or "File")[:200]
+    return result
+
+
 async def load_import_review_context(
     session: AsyncSession,
     job: ImportJob,
@@ -385,6 +401,9 @@ async def load_import_review_context(
         ),
         "safety_blocked_files_by_series_id": safety_blocked_files_by_series_id,
         "safety_block_context_by_file_id": _build_safety_block_context_by_file_id(
+            safety_blocked_files_by_series_id
+        ),
+        "safety_file_display_name_by_file_id": _build_safety_file_display_name_by_file_id(
             safety_blocked_files_by_series_id
         ),
         "safety_rematch_pending": safety_rematch_pending,

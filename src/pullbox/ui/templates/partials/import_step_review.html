@@ -594,6 +594,9 @@
         {% if active_review_view == 'safety_blocked' and safety_failure_summary %}
         <div data-testid="import-review-safety-category-summary" class="grid gap-3 border-b border-pb-border p-4 lg:grid-cols-2">
           {% for safety_category in safety_failure_summary %}
+          {% set bulk_preview_for_category = safety_bulk_preview if safety_bulk_preview is defined and safety_bulk_preview and safety_bulk_preview.category.value == safety_category.category else none %}
+          {% set bulk_error_for_category = safety_bulk_error if safety_bulk_error is defined and safety_bulk_error_category is defined and safety_bulk_error_category == safety_category.category else '' %}
+          {% set bulk_overrideable_count = safety_category.bulk_overrideable_count|default(0)|int %}
           <div class="rounded-lg border border-pb-border bg-pb-card-hover/40 p-3">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <p class="text-sm font-semibold text-pb-text">{{ safety_category.label }}</p>
@@ -602,12 +605,120 @@
             <p class="mt-1 text-xs leading-5 text-pb-text-sec">{{ safety_category.reason }}</p>
             <p class="mt-1 text-[11px] text-pb-text-dim">
               {{ 'Retry may help after remediation' if safety_category.retryable else 'Retry alone will not help' }}
-              · {{ 'Trusted override available' if safety_category.overrideable else 'Override not allowed' }}
+              ·
+              {% if safety_category.overrideable %}
+                Trusted override available
+              {% elif safety_category.bulk_overrideable %}
+                Trusted override available for eligible files
+              {% else %}
+                Override not allowed
+              {% endif %}
             </p>
             {% if safety_category.examples %}
             <p class="mt-2 break-words font-mono text-[11px] text-pb-text-dim">
               Examples: {{ safety_category.examples|join(', ') }}
             </p>
+            {% endif %}
+            {% if bulk_preview_for_category %}
+            <section
+              data-testid="import-review-safety-bulk-confirmation"
+              class="mt-3 rounded-lg border border-pb-warning/35 bg-pb-warning-dim/45 p-3"
+              aria-labelledby="safety-bulk-confirmation-title-{{ safety_category.category }}"
+            >
+              <h3 id="safety-bulk-confirmation-title-{{ safety_category.category }}" class="text-sm font-semibold text-pb-text">
+                Review this one-time exception
+              </h3>
+              <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+                {{ bulk_preview_for_category.affected_count }} of {{ bulk_preview_for_category.matching_count }} file{{ '' if bulk_preview_for_category.matching_count == 1 else 's' }} will be allowed once.
+                {% if bulk_preview_for_category.skipped_count %}
+                {{ bulk_preview_for_category.skipped_count }} file{{ '' if bulk_preview_for_category.skipped_count == 1 else 's' }} will stay blocked.
+                {% endif %}
+              </p>
+              {% if bulk_preview_for_category.examples %}
+              <div class="mt-2">
+                <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-pb-text-dim">Category examples</p>
+                <ul class="mt-1 space-y-1" aria-label="Sanitized category file examples">
+                  {% for example in bulk_preview_for_category.examples %}
+                  <li class="break-words font-mono text-[11px] text-pb-text-sec">{{ example }}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+              <form
+                method="post"
+                action="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/allow-once?status=safety_blocked&sort={{ sort }}&page={{ page }}"
+                hx-post="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/allow-once?status=safety_blocked&sort={{ sort }}&page={{ page }}"
+                hx-target="#import-step-review-shell"
+                hx-swap="outerHTML"
+                hx-sync="#import-step-review-shell:replace"
+                class="mt-3"
+              >
+                <input type="hidden" name="preview_token" value="{{ bulk_preview_for_category.preview_token }}">
+                <label for="safety-bulk-confirmation-{{ safety_category.category }}" class="block text-xs font-semibold text-pb-text">
+                  Type <span class="font-mono">ALLOW ONCE</span> to confirm
+                </label>
+                <p id="safety-bulk-confirmation-help-{{ safety_category.category }}" class="mt-1 text-[11px] leading-5 text-pb-text-sec">
+                  This exception applies only to the exact file set in this preview. Pullbox will recheck their matches afterward.
+                </p>
+                {% if bulk_error_for_category %}
+                <p role="alert" class="mt-2 text-xs font-semibold text-pb-error">{{ bulk_error_for_category }}</p>
+                {% endif %}
+                <div class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <input
+                    id="safety-bulk-confirmation-{{ safety_category.category }}"
+                    name="confirmation"
+                    type="text"
+                    required
+                    pattern="ALLOW ONCE"
+                    autocomplete="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    aria-describedby="safety-bulk-confirmation-help-{{ safety_category.category }}"
+                    class="input-pb min-w-0 flex-1 font-mono"
+                  >
+                  <div class="flex flex-wrap gap-2">
+                    <button type="submit" class="btn-primary btn-sm">Allow once</button>
+                    <a
+                      href="/import/{{ job.id }}/review-partial?status=safety_blocked&sort={{ sort }}&page={{ page }}"
+                      hx-get="/import/{{ job.id }}/review-partial?status=safety_blocked&sort={{ sort }}&page={{ page }}"
+                      hx-target="#import-step-review-shell"
+                      hx-swap="outerHTML"
+                      class="btn-ghost btn-sm"
+                    >Cancel</a>
+                  </div>
+                </div>
+              </form>
+            </section>
+            {% elif safety_category.bulk_overrideable|default(false) %}
+            {% if bulk_error_for_category %}
+            <p role="alert" class="mt-2 text-xs font-semibold text-pb-error">{{ bulk_error_for_category }}</p>
+            {% endif %}
+            <p class="mt-2 text-xs font-medium text-pb-text-sec">
+              {{ bulk_overrideable_count }} of {{ safety_category.count }} file{{ '' if safety_category.count == 1 else 's' }} can be allowed once.
+            </p>
+            <form
+              method="get"
+              action="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/preview"
+              hx-get="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/preview"
+              hx-target="#import-step-review-shell"
+              hx-swap="outerHTML"
+              hx-sync="#import-step-review-shell:replace"
+              class="mt-2"
+            >
+              <input type="hidden" name="status" value="safety_blocked">
+              <input type="hidden" name="sort" value="{{ sort }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <button
+                type="submit"
+                class="btn-secondary btn-sm w-full sm:w-auto"
+                data-testid="import-review-safety-bulk-preview-{{ safety_category.category }}"
+                aria-label="Preview one-time exception for {{ safety_category.label }}"
+              >
+                Review one-time exception
+              </button>
+            </form>
+            {% elif bulk_error_for_category %}
+            <p role="alert" class="mt-2 text-xs font-semibold text-pb-error">{{ bulk_error_for_category }}</p>
             {% endif %}
           </div>
           {% endfor %}
@@ -728,7 +839,7 @@
                 <div class="font-medium text-pb-text{% if item.status.value == 'no_match' %} text-pb-warning{% endif %}">{{ item.raw_series_name }}</div>
                 <div class="mt-0.5 text-[11px] text-pb-text-sec">
                   {% if item.raw_publisher %}{{ item.raw_publisher }} · {% endif %}
-                  {% if item.source_folder %}<span class="font-mono">{{ item.source_folder }}</span>{% endif %}
+                  {% if item.source_folder and active_review_view != 'safety_blocked' %}<span class="font-mono">{{ item.source_folder }}</span>{% endif %}
                 </div>
               </td>
               <td class="text-pb-text-sec">{{ item.raw_year or '?' }}</td>
@@ -1093,7 +1204,7 @@
                     <div class="rounded-lg border border-pb-border bg-pb-card/70 p-3">
                       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                         <div class="min-w-0">
-                          <p class="break-words font-mono text-xs text-pb-text">{{ blocked_file.file_name }}</p>
+                          <p class="break-words font-mono text-xs text-pb-text">{{ safety_file_display_name_by_file_id.get(blocked_file.id, 'File') }}</p>
                           <p class="mt-1 break-words text-xs text-pb-text-sec">
                             {% if safety_approved %}
                             Safety exception approved. Preparing this file for matching before it can be selected.

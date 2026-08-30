@@ -1,15 +1,17 @@
 """Import workspace UI routes and loaders."""
 
 from collections.abc import Callable, Mapping
+from typing import Annotated
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
-from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser
+from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.models.import_job import (
     ImportJob,
     ImportJobLog,
@@ -17,7 +19,17 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.library import LibraryRoot
+from pullbox.services.audit_service import source_ip_from_request
+from pullbox.services.import_safety_bulk_review import (
+    IMPORT_SAFETY_BULK_CONFIRMATION,
+    ImportSafetyBulkInterruptedError,
+    ImportSafetyBulkPreview,
+    allow_import_safety_category_once,
+    preview_import_safety_category,
+)
+from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
 from pullbox.services.import_workflow_state import ACTIVE_IMPORT_JOB_STATUSES
+from pullbox.tasks.import_task import trigger_import_safety_bulk_rematch
 from pullbox.ui import import_orphaned_routes
 from pullbox.ui.comicvine_series_search import (
     COMICVINE_SERIES_SEARCH_LIMIT,
@@ -479,7 +491,36 @@ async def import_review_partial(
     arc_entry_page: int = Query(1, ge=1),
 ) -> Response:
     """Render the review table partial for an import job."""
-    from pullbox.core.exceptions import NotFoundError
+
+    return await _render_import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+        story_arc_id=story_arc_id,
+        arc_entry_state=arc_entry_state,
+        arc_entry_page=arc_entry_page,
+    )
+
+
+async def _render_import_review_partial(
+    job_id: int,
+    request: Request,
+    user: object,
+    session: AsyncSession,
+    *,
+    status: str | None,
+    page: int,
+    sort: str | None,
+    story_arc_id: int | None = None,
+    arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
+    arc_entry_page: int = 1,
+    extra_context: Mapping[str, object] | None = None,
+) -> Response:
+    """Render the canonical review partial with optional route-local state."""
 
     job = await session.get(ImportJob, job_id)
     if job is None:
@@ -495,6 +536,8 @@ async def import_review_partial(
         arc_entry_state=arc_entry_state,
         arc_entry_page=arc_entry_page,
     )
+    if extra_context:
+        template_ctx.update(extra_context)
 
     return _templates().TemplateResponse(
         request,
@@ -504,6 +547,160 @@ async def import_review_partial(
             user,
             **template_ctx,
         ),
+    )
+
+
+async def _load_import_safety_bulk_preview(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    category: ImportSafetyCategory,
+    actor_id: int,
+) -> ImportSafetyBulkPreview:
+    """Load an authoritative signed preview or hide unavailable actions."""
+    try:
+        preview = await preview_import_safety_category(
+            session,
+            job_id,
+            category,
+            actor_id=actor_id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    if not preview.overrideable or preview.preview_token is None:
+        raise HTTPException(status_code=404, detail="Bulk safety action not available.")
+    return preview
+
+
+@router.get(
+    "/import/{job_id}/safety/categories/{category}/preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_preview_safety_category(
+    job_id: int,
+    category: ImportSafetyCategory,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    """Render a signed, exact, read-only category preview for Step 3."""
+    preview = await _load_import_safety_bulk_preview(
+        session,
+        job_id=job_id,
+        category=category,
+        actor_id=user.id,
+    )
+    return await _render_import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+        extra_context={"safety_bulk_preview": preview},
+    )
+
+
+@router.post(
+    "/import/{job_id}/safety/categories/{category}/allow-once",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_allow_safety_category_once(
+    job_id: int,
+    category: ImportSafetyCategory,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+    confirmation: Annotated[str, Form(max_length=64)] = "",
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    """Apply one exact signed category preview, then refresh Step 3."""
+    if category is not ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT:
+        raise HTTPException(status_code=404, detail="Bulk safety action not available.")
+    if confirmation != IMPORT_SAFETY_BULK_CONFIRMATION:
+        preview = await _load_import_safety_bulk_preview(
+            session,
+            job_id=job_id,
+            category=category,
+            actor_id=user.id,
+        )
+        return await _render_import_review_partial(
+            job_id,
+            request,
+            user,
+            session,
+            status=status,
+            page=page,
+            sort=sort,
+            extra_context={
+                "safety_bulk_preview": preview,
+                "safety_bulk_error": "Type ALLOW ONCE exactly to confirm this action.",
+                "safety_bulk_error_category": category.value,
+            },
+        )
+
+    try:
+        await allow_import_safety_category_once(
+            session,
+            job_id,
+            category,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except ImportSafetyBulkInterruptedError:
+        trigger_import_safety_bulk_rematch(job_id)
+        return await _render_import_review_partial(
+            job_id,
+            request,
+            user,
+            session,
+            status=status,
+            page=page,
+            sort=sort,
+            extra_context={
+                "safety_bulk_error": (
+                    "The bulk action stopped because the import job changed. "
+                    "The review below shows the latest state."
+                ),
+                "safety_bulk_error_category": category.value,
+            },
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        return await _render_import_review_partial(
+            job_id,
+            request,
+            user,
+            session,
+            status=status,
+            page=page,
+            sort=sort,
+            extra_context={
+                "safety_bulk_error": exc.message,
+                "safety_bulk_error_category": category.value,
+            },
+        )
+
+    trigger_import_safety_bulk_rematch(job_id)
+    return await import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
     )
 
 
