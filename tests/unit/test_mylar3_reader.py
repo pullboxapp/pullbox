@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from pullbox.core.exceptions import MylarReadError
+from pullbox.core.library_layout import ImportLayoutMode, SourceLayoutSpec
 from pullbox.core.mylar3_reader import Mylar3Reader
 from pullbox.models.issue import IssueType
 from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
@@ -29,6 +30,77 @@ def _create_mylar_db(
         issues=issues,
         annuals=annuals,
     )
+
+
+@pytest.mark.asyncio
+async def test_selected_layout_applies_to_mapped_mylar_paths_without_overriding_identity(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    comics_root = tmp_path / "mounted-comics"
+    issue_path = (
+        comics_root
+        / "DC Comics"
+        / "Batman (2011)"
+        / "Batman The Court of Owls, Part One Issue 001.cbz"
+    )
+    create_minimal_cbz(issue_path)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": "/comics/DC Comics/Batman (2011)",
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "ComicName": "Batman",
+                "IssueName": "The Court of Owls, Part One",
+                "Issue_Number": "1",
+                "Location": issue_path.name,
+                "IssueDate": "2011-09-21",
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(comics_root)},
+        source_layout=SourceLayoutSpec(
+            mode=ImportLayoutMode.PRESET,
+            preset="publisher_series",
+            fallback_to_auto=False,
+        ),
+    ).read_series()
+
+    assert len(results) == 1
+    series = results[0]
+    assert series.mylar3_cv_id == 42721
+    assert series.raw_series_name == "Batman"
+    assert series.raw_year == 2011
+    assert series.raw_publisher == "DC Comics"
+    assert len(series.files) == 1
+    discovered_file = series.files[0]
+    assert discovered_file.comicvine_issue_id == 340001
+    assert discovered_file.comicvine_series_id == 42721
+    assert discovered_file.parsed_series == "Batman"
+    assert discovered_file.parsed_issue_number == 1.0
+    assert discovered_file.metadata_signals["series_name"] == "mylar3"
+    assert discovered_file.metadata_signals["issue_number"] == "mylar3"
+    assert discovered_file.metadata_diagnostics["source_layout"] == {
+        "fit": True,
+        "fallback_used": False,
+        "relative_path": (
+            "DC Comics/Batman (2011)/Batman The Court of Owls, Part One Issue 001.cbz"
+        ),
+    }
 
 
 @pytest.mark.asyncio

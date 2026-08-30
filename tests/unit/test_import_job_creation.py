@@ -358,7 +358,7 @@ async def test_create_job_freezes_selected_layout_without_automatic_fallback(
     assert job.source_layout_snapshot["fallback_to_auto"] is False
 
 
-async def test_create_job_rejects_selected_layout_for_mylar_source(
+async def test_create_job_freezes_selected_layout_for_mylar_source(
     db_session: AsyncSession,
     tmp_path: object,
 ) -> None:
@@ -371,5 +371,14 @@ async def test_create_job_rejects_selected_layout_for_mylar_source(
         ),
     )
 
-    with pytest.raises(ValidationError, match="filesystem import"):
-        await create_job(db_session, request, log_event=_log_event)
+    job = await create_job(db_session, request, log_event=_log_event)
+
+    assert job.source_layout_snapshot == {
+        "schema_version": 1,
+        "mode": "preset",
+        "preset": "publisher_series",
+        "series_path_template": "{Publisher}/{Series}",
+        "issue_filename_template": None,
+        "selected_cluster_id": None,
+        "fallback_to_auto": True,
+    }

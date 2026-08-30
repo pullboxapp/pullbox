@@ -10,6 +10,7 @@ from pullbox.core.collection_scanner import COMIC_EXTENSIONS, CollectionScanner,
 from pullbox.core.library_layout import ImportLayoutMode, SourceLayoutSpec
 from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 from pullbox.services.import_scan_pipeline import (
+    _load_mylar3_discovered_series,
     _scan_collection_discovered_series,
     _scan_failure_message,
 )
@@ -191,6 +192,51 @@ async def test_scan_collection_discovered_series_passes_frozen_layout_to_scanner
         resolve_import_file_extensions=resolve_import_file_extensions,
         emit_scan_progress=emit_scan_progress,
         phase_progress=phase_progress,
+    )
+
+    assert discovered == []
+    assert captured_layouts == [expected_layout]
+
+
+async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    db_path.touch()
+    expected_layout = SourceLayoutSpec(
+        mode=ImportLayoutMode.PRESET,
+        preset="publisher_series",
+        series_path_template="{Publisher}/{Series}",
+        fallback_to_auto=False,
+    )
+    job = ImportJob(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+        source_layout_snapshot=expected_layout.to_dict(),
+    )
+    db_session.add(job)
+    await db_session.flush()
+    captured_layouts: list[SourceLayoutSpec] = []
+
+    class ReaderDouble:
+        def __init__(self, *, db_path, path_map, source_layout) -> None:
+            captured_layouts.append(source_layout)
+
+        async def read_series(self) -> list[DiscoveredSeries]:
+            return []
+
+    async def log_event(*_args, **_kwargs) -> None:
+        return None
+
+    discovered = await _load_mylar3_discovered_series(
+        db_session,
+        job,
+        job_id=job.id,
+        mylar3_reader_cls=ReaderDouble,
+        auto_detect_mylar3_path_map=lambda _path: None,
+        log_event=log_event,
     )
 
     assert discovered == []

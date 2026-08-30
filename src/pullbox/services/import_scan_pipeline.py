@@ -538,6 +538,7 @@ async def _load_mylar3_discovered_series(
     reader = mylar3_reader_cls(
         db_path=db_path,
         path_map=path_map or None,
+        source_layout=SourceLayoutSpec.from_dict(dict(job.source_layout_snapshot or {})),
     )
     discovered_list = await reader.read_series()
     job.scan_total_files = sum(series.file_count for series in discovered_list)

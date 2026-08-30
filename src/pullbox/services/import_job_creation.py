@@ -12,7 +12,7 @@ from pullbox.core.library_file_ownership import (
     ReferencedFileValidationError,
     resolve_referenced_source_root,
 )
-from pullbox.core.library_layout import ImportLayoutMode, resolve_source_layout_spec
+from pullbox.core.library_layout import resolve_source_layout_spec
 from pullbox.core.library_policy import (
     load_effective_library_ingest_policy,
     load_library_ingest_policy,
@@ -77,11 +77,6 @@ async def create_job(
         except ReferencedFileValidationError as exc:
             raise ValidationError(exc.message) from exc
         resolved_target_library_root_id = root.id
-    if (
-        request.source_type != ImportSourceType.FILESYSTEM
-        and request.source_layout.mode != ImportLayoutMode.AUTO
-    ):
-        raise ValidationError("Selected source layouts currently require a filesystem import.")
     if request.future_layout_requested and resolved_target_library_root_id is None:
         raise ValidationError("Future library layout requires a target library root.")
 

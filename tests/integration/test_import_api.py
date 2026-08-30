@@ -34,6 +34,7 @@ from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series, SeriesStatus
 from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
 from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate, RecoverOrphanRequest
+from pullbox.schemas.import_layout import SourceLayoutSpecPayload
 from pullbox.services.import_service import ImportService
 from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
 
@@ -1021,6 +1022,11 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                source_layout=SourceLayoutSpecPayload(
+                    mode="preset",
+                    preset="series_folders",
+                    fallback_to_auto=False,
+                ),
             ),
         )
 
@@ -1046,6 +1052,7 @@ class TestMylar3Import:
         by_name = {item.file_name: item for item in imported_files}
         assert by_name[regular_path.name].matched_issue_cv_id == 900001
         assert by_name[annual_path.name].matched_issue_cv_id == 950001
+        assert job.source_layout_snapshot["preset"] == "series_folders"
 
     @pytest.mark.parametrize(
         ("series_name", "series_year", "file_name", "issue_number", "series_cv_id", "issue_cv_id"),

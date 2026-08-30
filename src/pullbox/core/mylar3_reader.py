@@ -11,14 +11,24 @@ import asyncio
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import structlog
 
 from pullbox.core.collection_scanner import COMIC_EXTENSIONS, DiscoveredFile, DiscoveredSeries
 from pullbox.core.exceptions import MylarReadError
 from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.library_layout import (
+    ImportLayoutMode,
+    SourceLayoutMatch,
+    SourceLayoutSpec,
+    compile_source_layout,
+    resolve_source_layout_spec,
+)
 from pullbox.core.naming import parse_filename
+from pullbox.core.naming_type_detection import detect_issue_type
 from pullbox.core.release_parser import normalize_issue_number
+from pullbox.core.source_metadata import MetadataSignal
 from pullbox.models.issue import IssueType
 
 logger = structlog.get_logger(__name__)
@@ -70,9 +80,16 @@ class Mylar3Reader:
         self,
         db_path: str | Path,
         path_map: dict[str, str] | None = None,
+        source_layout: SourceLayoutSpec | None = None,
     ) -> None:
         self._db_path = Path(db_path)
         self._path_map = path_map or {}
+        self._source_layout = resolve_source_layout_spec(source_layout or SourceLayoutSpec())
+        self._compiled_source_layout = (
+            None
+            if self._source_layout.mode == ImportLayoutMode.AUTO
+            else compile_source_layout(self._source_layout)
+        )
 
     async def read_series(self) -> list[DiscoveredSeries]:
         """Read all series from the Mylar3 database.
@@ -166,6 +183,10 @@ class Mylar3Reader:
                     sample_paths = [str(f) for f in comic_paths[:5]]
                     discovered_files = self._build_files(
                         comic_paths,
+                        source_location=location,
+                        series_name=row["ComicName"] or "Unknown",
+                        series_year=year,
+                        series_publisher=row["ComicPublisher"],
                         issue_records=series_issue_records,
                         issue_count_hint=issue_count_hint,
                         series_status=series_status,
@@ -328,17 +349,31 @@ class Mylar3Reader:
         """Apply path map translation to a ComicLocation string."""
         if not location:
             return None
-        resolved = location
-        for container_prefix, host_prefix in self._path_map.items():
-            if resolved.startswith(container_prefix):
-                resolved = host_prefix + resolved[len(container_prefix) :]
-                break
-        return resolved
+        location_path = Path(location)
+        for container_prefix, host_prefix in self._ordered_path_map_items():
+            try:
+                relative = location_path.relative_to(Path(container_prefix))
+            except ValueError:
+                continue
+            return str(Path(host_prefix) / relative)
+        return location
+
+    def _ordered_path_map_items(self) -> list[tuple[str, str]]:
+        """Return path mappings with the most-specific container prefix first."""
+        return sorted(
+            self._path_map.items(),
+            key=lambda item: len(Path(item[0]).parts),
+            reverse=True,
+        )
 
     def _build_files(
         self,
         comic_paths: list[Path],
         *,
+        source_location: str | None,
+        series_name: str,
+        series_year: int | None,
+        series_publisher: str | None,
         issue_records: list[_MylarIssueRecord],
         issue_count_hint: int | None,
         series_status: str | None,
@@ -356,34 +391,49 @@ class Mylar3Reader:
                 file_size = 0
 
             parsed = parse_filename(file_name)
-            parsed_series: str | None = None
+            parsed_series: str | None = series_name
             parsed_issue_number: float | None = None
-            parsed_year: int | None = None
+            parsed_year: int | None = series_year
+            parsed_publisher: str | None = series_publisher
             issue_type = IssueType.ISSUE
             issue_number_raw: str | None = None
+            metadata_signals: dict[str, str] = {
+                "series_name": MetadataSignal.MYLAR3.value,
+            }
+            if series_year is not None:
+                metadata_signals["year"] = MetadataSignal.MYLAR3.value
+            if series_publisher is not None:
+                metadata_signals["publisher"] = MetadataSignal.MYLAR3.value
             if parsed:
-                parsed_series = parsed.series
                 parsed_issue_number = parsed.issue_number
-                parsed_year = parsed.year
                 try:
                     issue_type = IssueType(parsed.issue_type)
                 except ValueError:
                     issue_type = IssueType.ISSUE
                 issue_number_raw = format_issue_number(parsed.issue_number)
+                if parsed_issue_number is not None:
+                    metadata_signals["issue_number"] = MetadataSignal.RELEASE_TITLE.value
+                if parsed.issue_type != IssueType.ISSUE.value:
+                    metadata_signals["issue_type"] = MetadataSignal.RELEASE_TITLE.value
 
             if issue_record is not None and issue_record.issue_number:
                 issue_number_raw = issue_record.issue_number
                 normalized_issue_number = normalize_issue_number(issue_record.issue_number)
                 if normalized_issue_number is not None:
                     parsed_issue_number = normalized_issue_number
+                    metadata_signals["issue_number"] = MetadataSignal.MYLAR3.value
 
-            metadata_signals: dict[str, str] = {}
             metadata_diagnostics: dict[str, object] = {}
             comicvine_issue_id: int | None = None
             comicvine_series_id: int | None = None
             if issue_record is not None:
                 if issue_record.issue_type != IssueType.ISSUE:
                     issue_type = issue_record.issue_type
+                    metadata_signals["issue_type"] = MetadataSignal.MYLAR3.value
+                if issue_record.series_name:
+                    parsed_series = issue_record.series_name
+                if issue_record.issue_type == IssueType.ANNUAL:
+                    parsed_year = self._release_year(issue_record.release_date, parsed_year)
                 comicvine_issue_id = issue_record.issue_id
                 comicvine_series_id = issue_record.series_cv_id
                 metadata_signals["comicvine_issue_id"] = "mylar3"
@@ -395,6 +445,49 @@ class Mylar3Reader:
                     "release_date": issue_record.release_date,
                 }
 
+            layout_match, relative_path = self._match_selected_layout(
+                fpath,
+                source_location=source_location,
+            )
+            if self._compiled_source_layout is not None and relative_path is not None:
+                layout_diagnostics: dict[str, object] = {
+                    "fit": layout_match is not None,
+                    "fallback_used": (
+                        layout_match is None and self._source_layout.fallback_to_auto
+                    ),
+                    "relative_path": relative_path,
+                }
+                if layout_match is None and not self._source_layout.fallback_to_auto:
+                    layout_diagnostics.update(
+                        {
+                            "review_required": True,
+                            "review_reason": "selected_layout_no_match",
+                        }
+                    )
+                if layout_match is not None and layout_match.issue_title is not None:
+                    layout_diagnostics["issue_title"] = layout_match.issue_title
+                metadata_diagnostics["source_layout"] = layout_diagnostics
+
+            if layout_match is not None:
+                (
+                    parsed_series,
+                    parsed_year,
+                    parsed_publisher,
+                    parsed_issue_number,
+                    issue_number_raw,
+                    issue_type,
+                ) = self._apply_layout_match(
+                    layout_match,
+                    parsed_series=parsed_series,
+                    parsed_year=parsed_year,
+                    parsed_publisher=parsed_publisher,
+                    parsed_issue_number=parsed_issue_number,
+                    issue_number_raw=issue_number_raw,
+                    issue_type=issue_type,
+                    metadata_signals=metadata_signals,
+                    metadata_diagnostics=metadata_diagnostics,
+                )
+
             results.append(
                 DiscoveredFile(
                     file_path=str(fpath),
@@ -404,7 +497,7 @@ class Mylar3Reader:
                     parsed_series=parsed_series,
                     parsed_issue_number=parsed_issue_number,
                     parsed_year=parsed_year,
-                    parsed_publisher=None,
+                    parsed_publisher=parsed_publisher,
                     has_comicinfo=False,
                     comicvine_issue_id=comicvine_issue_id,
                     issue_number_raw=issue_number_raw,
@@ -417,6 +510,118 @@ class Mylar3Reader:
                 )
             )
         return results
+
+    def _match_selected_layout(
+        self,
+        path: Path,
+        *,
+        source_location: str | None,
+    ) -> tuple[SourceLayoutMatch | None, str | None]:
+        """Match one resolved Mylar file against the frozen source layout."""
+        compiled = self._compiled_source_layout
+        if compiled is None:
+            return None, None
+        root = self._mapped_source_root(source_location)
+        if root is None:
+            resolved_location = self._resolve_location(source_location)
+            if resolved_location is None:
+                return None, None
+            root = Path(resolved_location)
+            for _segment in compiled.path_segments:
+                root = root.parent
+        try:
+            relative_path = path.relative_to(root).as_posix()
+        except ValueError:
+            return None, None
+        return compiled.match(relative_path), relative_path
+
+    def _mapped_source_root(self, source_location: str | None) -> Path | None:
+        """Return the mapped host root that contains one Mylar series path."""
+        if not source_location:
+            return None
+        location_path = Path(source_location)
+        for container_prefix, host_prefix in self._ordered_path_map_items():
+            try:
+                location_path.relative_to(Path(container_prefix))
+            except ValueError:
+                continue
+            return Path(host_prefix)
+        return None
+
+    def _apply_layout_match(
+        self,
+        layout_match: SourceLayoutMatch,
+        *,
+        parsed_series: str | None,
+        parsed_year: int | None,
+        parsed_publisher: str | None,
+        parsed_issue_number: float | None,
+        issue_number_raw: str | None,
+        issue_type: IssueType,
+        metadata_signals: dict[str, str],
+        metadata_diagnostics: dict[str, object],
+    ) -> tuple[str | None, int | None, str | None, float | None, str | None, IssueType]:
+        """Apply lower-precedence layout evidence without replacing Mylar identity."""
+        conflicts: dict[str, dict[str, object]] = {}
+
+        def selected_value(field_name: str, current: object, selected: object | None) -> object:
+            if selected is None:
+                return current
+            current_signal = metadata_signals.get(field_name)
+            if current is not None and current_signal == MetadataSignal.MYLAR3.value:
+                if str(current).casefold() != str(selected).casefold():
+                    conflicts[field_name] = {
+                        "selected": selected,
+                        "preserved_signal": MetadataSignal.MYLAR3.value,
+                    }
+                return current
+            metadata_signals[field_name] = MetadataSignal.SOURCE_LAYOUT.value
+            return selected
+
+        parsed_series = cast(
+            "str | None",
+            selected_value("series_name", parsed_series, layout_match.series),
+        )
+        parsed_year = cast(
+            "int | None",
+            selected_value("year", parsed_year, layout_match.year),
+        )
+        parsed_publisher = cast(
+            "str | None",
+            selected_value(
+                "publisher",
+                parsed_publisher,
+                layout_match.publisher,
+            ),
+        )
+        if layout_match.issue_number is not None:
+            normalized = normalize_issue_number(layout_match.issue_number)
+            parsed_issue_number = cast(
+                "float | None",
+                selected_value(
+                    "issue_number",
+                    parsed_issue_number,
+                    normalized,
+                ),
+            )
+            if metadata_signals.get("issue_number") == MetadataSignal.SOURCE_LAYOUT.value:
+                issue_number_raw = layout_match.issue_number
+        if layout_match.issue_type is not None:
+            selected_issue_type = IssueType(detect_issue_type(layout_match.issue_type))
+            issue_type = cast(
+                "IssueType",
+                selected_value("issue_type", issue_type, selected_issue_type),
+            )
+        if conflicts:
+            metadata_diagnostics["source_layout_conflicts"] = conflicts
+        return (
+            parsed_series,
+            parsed_year,
+            parsed_publisher,
+            parsed_issue_number,
+            issue_number_raw,
+            issue_type,
+        )
 
     def _issue_records_by_file_name(
         self,
