@@ -450,6 +450,7 @@ jobs:
         id: scan
         with:
           image: ${{ env.LOCAL_IMAGE }}
+          grype-version: v0.110.0
           fail-build: true
           severity-cutoff: high
           output-format: sarif

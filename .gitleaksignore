@@ -7,3 +7,8 @@ tests/unit/test_import_scan_pipeline.py:generic-api-key:887
 tests/unit/test_import_story_arc_staging.py:generic-api-key:456
 tests/unit/test_import_story_arc_staging.py:generic-api-key:468
 tests/unit/test_import_story_arc_staging.py:generic-api-key:480
+# Historical synthetic folder cohort IDs, not credentials. Keep commit/path/line scope.
+ecd22c27eb7607e072ddb98d921738fb213896e4:tests/unit/test_import_scan_pipeline.py:generic-api-key:502
+ecd22c27eb7607e072ddb98d921738fb213896e4:tests/unit/test_import_story_arc_staging.py:generic-api-key:443
+ecd22c27eb7607e072ddb98d921738fb213896e4:tests/unit/test_import_story_arc_staging.py:generic-api-key:455
+ecd22c27eb7607e072ddb98d921738fb213896e4:tests/unit/test_import_story_arc_staging.py:generic-api-key:467

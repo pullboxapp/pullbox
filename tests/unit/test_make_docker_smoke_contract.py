@@ -44,7 +44,7 @@ def _run_smoke(
         "-f",
         str(ROOT / "Makefile"),
         "-o",
-        "docker-build-check",
+        "docker-security-check",
         "docker-smoke",
         f"VENV={tmp_path}",
     ]

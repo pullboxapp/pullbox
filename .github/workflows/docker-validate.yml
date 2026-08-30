@@ -171,6 +171,7 @@ jobs:
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: pullbox:validate
+          grype-version: v0.110.0
           fail-build: true
           severity-cutoff: high
           output-format: table

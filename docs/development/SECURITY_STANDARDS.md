@@ -747,6 +747,10 @@ default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; 
   at least 2.8.1 before accepting the image.
 - `.grype.yaml` limits reviewed container exceptions to exact package versions;
   the Grype High-severity gate remains blocking.
+- Local `make ci-full` scans both current files and the PR commit range with
+  Gitleaks, then runs the container runtime and blocking Grype checks before
+  Docker smoke tests. Grype is version-pinned in both local installation and
+  Docker workflows; exceptions are shared, not separate local bypasses.
 - GitHub Actions are SHA-pinned with version comments.
 - Workflows define explicit default permissions and per-job permissions.
 - `.github/dependabot.yml` covers `pip`, `github-actions`, `docker`, and `npm`.
