@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-owned arc references.
 - Added category-scoped bulk import safety review with bounded previews and
   audit evidence.
+- Added Comic Vine Story Arc discovery, reviewed member ordering, canonical
+  series/issue reuse, provider-change review, and arc-scoped missing-issue search.
+- Added Mylar in-place adoption and original-filename arc copies with optional
+  leading reading-order numbers. Initial copies can run independently of future
+  synchronization and expose resumable progress and explicit retries.
+- Added a guarded, manually published signed development-image channel for
+  isolated testing without a general-availability release.
 
 ### Fixed
 
@@ -27,8 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   titles embedded in filenames without treating the title as a new series.
 - Preserved exact issue-number identity for large and special issue numbers
   instead of allowing floating-point or scientific-notation drift.
-- Preserved Mylar, ComicInfo, MetronInfo, and series sidecar evidence through
+- Preserved Mylar, ComicInfo, and supported series sidecar evidence through
   import review and matching without silently overriding stronger identities.
+- Rechecked arc search eligibility after provider waits so newly skipped or
+  removed members cannot be queued from stale search results.
 
 ### Performance
 

@@ -103,6 +103,9 @@ async def validate_discovered_files_safety(
     files_by_path: dict[str, list[DiscoveredFile]] = {}
     for discovered in discovered_list:
         for discovered_file in discovered.files:
+            # Source containment/signature failures are never archive overrides.
+            if isinstance(discovered_file.metadata_diagnostics.get("file_safety"), dict):
+                continue
             files_by_path.setdefault(discovered_file.file_path, []).append(discovered_file)
 
     for file_path, discovered_files in files_by_path.items():

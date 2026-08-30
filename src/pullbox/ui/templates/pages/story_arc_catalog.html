@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Find Story Arcs — {{ instance_name() }}{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 py-5{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-5xl space-y-6">
+  <a href="/story-arcs" class="text-sm text-pb-interactive hover:underline">Back to Story Arcs</a>
+  <h1 class="text-2xl font-bold text-pb-text">Find Story Arcs</h1>
+  {% set catalog_query = query %}
+  {% include "partials/story_arc_catalog_search.html" %}
+</main>
+{% endblock %}

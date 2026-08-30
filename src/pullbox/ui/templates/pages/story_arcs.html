@@ -60,6 +60,7 @@
             <span>Include upcoming issues</span>
           </label>
         </fieldset>
+        {% include "partials/story_arc_create_storage.html" %}
         <button type="submit" class="btn-primary">Create empty Story Arc</button>
       </form>
     </details>
@@ -70,6 +71,8 @@
       {{ error_message }}
     </div>
   {% endif %}
+
+  {% include "partials/story_arc_catalog_search.html" %}
 
   <section aria-labelledby="story-arc-results-heading" class="space-y-4">
     <form

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from pullbox.core.naming import sanitize_for_filesystem
 
 DEFAULT_STORY_ARC_FOLDER_TEMPLATE = "{StoryArc}"
 DEFAULT_STORY_ARC_FILE_TEMPLATE = "{ReadingOrder:03d} - {Series} {IssueNumber}{IssueTitleOptional}"
+# Explicit opt-in templates leave existing saved/default metadata policies unchanged.
+ORIGINAL_STORY_ARC_FILE_TEMPLATE = "{OriginalFilename}"
+ORDERED_ORIGINAL_STORY_ARC_FILE_TEMPLATE = "{ReadingOrder:02d} - {OriginalFilename}"
 
 _MAX_TEMPLATE_BYTES = 1024
 _TOKEN_RE = re.compile(r"\{(?P<name>[A-Za-z][A-Za-z0-9]*)(?::(?P<format>[^{}]+))?\}")
@@ -24,9 +27,13 @@ _FILE_TOKENS = frozenset(
         "IssueTitleOptional",
         "Year",
         "Extension",
+        "OriginalFilename",
     }
 )
 _READING_ORDER_FORMAT_RE = re.compile(r"0?[2-6]d")
+_WINDOWS_DEVICE_NAME_RE = re.compile(
+    r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +50,11 @@ class StoryArcNamingValues:
     start_year: int | None = None
     end_year: int | None = None
     publisher: str | None = None
+    original_filename: str | None = None
+
+
+class StoryArcOriginalFilenameError(ValueError):
+    """A canonical basename cannot be preserved safely at the destination."""
 
 
 def validate_story_arc_folder_template(template: str) -> None:
@@ -53,6 +65,14 @@ def validate_story_arc_folder_template(template: str) -> None:
 def validate_story_arc_file_template(template: str) -> None:
     """Reject path-producing or unbounded story-arc file templates."""
     tokens = _validate_template(template, allowed_tokens=_FILE_TOKENS, kind="file")
+    names = [name for name, _format_spec in tokens]
+    if "OriginalFilename" in names and (
+        names.count("OriginalFilename") != 1
+        or "Extension" in names
+        or not template.endswith("{OriginalFilename}")
+    ):
+        msg = "OriginalFilename must appear once at the end, without an Extension token"
+        raise ValueError(msg)
     for name, format_spec in tokens:
         if name == "ReadingOrder":
             if format_spec is not None and not _READING_ORDER_FORMAT_RE.fullmatch(format_spec):
@@ -119,16 +139,49 @@ def render_story_arc_relative_path(
     }
 
     folder = _render_template(folder_template, folder_values, values.reading_order)
-    rendered_file = _render_template(file_template, file_values, values.reading_order)
-    if "{Extension}" not in file_template:
-        rendered_file = f"{rendered_file}.{extension}"
-
     safe_folder = safe(folder)
-    safe_file = safe(rendered_file)
+    if "{OriginalFilename}" in file_template:
+        original = _validated_original_filename(values.original_filename, extension)
+        prefix = _render_template(
+            file_template.removesuffix("{OriginalFilename}"), file_values, values.reading_order
+        )
+        # Sanitize template-produced prefix text, not the preserved basename.
+        # The sentinel retains an intentional trailing space in e.g. "01 - ".
+        safe_prefix = safe(prefix + "x")[:-1]
+        safe_file = _validated_original_filename(safe_prefix + original, extension)
+    else:
+        rendered_file = _render_template(file_template, file_values, values.reading_order)
+        if "{Extension}" not in file_template:
+            rendered_file = f"{rendered_file}.{extension}"
+        safe_file = safe(rendered_file)
     if safe_folder in {"", ".", ".."} or safe_file in {"", ".", ".."}:
         msg = "Story-arc template rendered an unsafe path"
         raise ValueError(msg)
     return Path(safe_folder, safe_file)
+
+
+def _validated_original_filename(filename: str | None, extension: str) -> str:
+    """Preserve safe spelling, spacing and extension case; never silently rename."""
+    if not filename:
+        raise StoryArcOriginalFilenameError("Original filename requires a canonical file")
+    try:
+        encoded = filename.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise StoryArcOriginalFilenameError("Original filename is not valid UTF-8") from exc
+    normalized_spaces = " ".join(filename.split())
+    if (
+        len(encoded) > 240
+        or PureWindowsPath(filename).name != filename
+        or re.search(r"[\x00-\x1f\x7f-\x9f]", filename)
+        or filename.endswith((".", " "))
+        or _WINDOWS_DEVICE_NAME_RE.fullmatch(filename.split(".", 1)[0].rstrip(" "))
+        or sanitize_for_filesystem(normalized_spaces) != normalized_spaces
+        or Path(filename).suffix.casefold() != f".{extension}"
+    ):
+        raise StoryArcOriginalFilenameError(
+            "Original filename cannot be preserved safely with the canonical extension"
+        )
+    return filename
 
 
 def _validate_template(

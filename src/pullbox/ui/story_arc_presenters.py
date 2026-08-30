@@ -88,6 +88,17 @@ class StoryArcMembershipView:
 
 
 @dataclass(frozen=True, slots=True)
+class StoryArcInitialPlacementView:
+    """Aggregate initial-file progress without exposing internal path snapshots."""
+
+    state: str
+    total: int
+    completed: int
+    failed: int
+    pending: int
+
+
+@dataclass(frozen=True, slots=True)
 class StoryArcDetailView:
     """Story Arc metadata and one bounded ordered membership page."""
 
@@ -110,6 +121,10 @@ class StoryArcDetailView:
     per_page: int
     total_pages: int
     next_sequence_number: int
+    comicvine_id: int | None = None
+    catalog_removed_count: int = 0
+    catalog_added_review_count: int = 0
+    initial_placements: StoryArcInitialPlacementView | None = None
 
     @property
     def active(self) -> bool:
@@ -529,7 +544,33 @@ async def load_story_arc_detail(
         per_page=per_page,
         total_pages=total_pages,
         next_sequence_number=membership_total + 1,
+        comicvine_id=arc.comicvine_id,
+        catalog_removed_count=_catalog_diagnostic_count(arc, "removed_issue_provider_ids"),
+        catalog_added_review_count=_catalog_diagnostic_count(arc, "pending_membership_ids"),
+        initial_placements=_initial_placement_view(arc),
     )
+
+
+def _catalog_diagnostic_count(arc: StoryArc, key: str) -> int:
+    catalog = (arc.diagnostics or {}).get("provider_catalog")
+    if not isinstance(catalog, dict):
+        return 0
+    values = catalog.get(key)
+    return len(values) if isinstance(values, list) else 0
+
+
+def _initial_placement_view(arc: StoryArc) -> StoryArcInitialPlacementView | None:
+    marker = (arc.diagnostics or {}).get("catalog_initial_placements")
+    if not isinstance(marker, dict):
+        return None
+    state = str(marker.get("state", "pending"))
+    if state not in {"pending", "running", "failed", "complete", "blocked"}:
+        state = "blocked"
+    counts = {
+        key: value if type(value := marker.get(key)) is int and value >= 0 else 0
+        for key in ("total", "completed", "failed", "pending")
+    }
+    return StoryArcInitialPlacementView(state=state, **counts)
 
 
 def _placement_mode_label(mode: str) -> str:
@@ -638,7 +679,7 @@ def _placement_state_view(item: StoryArcPlacementView) -> StoryArcPlacementState
     )
 
 
-async def _load_placement_roots(
+async def load_story_arc_placement_roots(
     session: AsyncSession,
     *,
     selected_root_id: int | None,
@@ -750,7 +791,7 @@ async def load_story_arc_placement_context(
             limit=_PLACEMENT_UI_PAGE_SIZE,
             offset=offset,
         )
-    roots, roots_truncated = await _load_placement_roots(
+    roots, roots_truncated = await load_story_arc_placement_roots(
         session,
         selected_root_id=policy.target_library_root_id,
     )

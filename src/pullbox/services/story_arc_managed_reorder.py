@@ -25,6 +25,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy import update as sa_update
 
 from pullbox.core.config_resolver import get_application_secret
+from pullbox.core.story_arc_naming import StoryArcOriginalFilenameError
 from pullbox.models.library import LibraryFile
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -562,22 +563,6 @@ class StoryArcManagedReorderService:
         plans: list[_PlacementPlan] = []
         for membership in membership_plans:
             context = contexts[membership.membership_id]
-            old_rendered = (
-                _rendered_target_path(context, policy)
-                if policy_mode is not StoryArcPlacementPolicyMode.LOGICAL
-                and destination_root is not None
-                else None
-            )
-            new_context = replace(
-                context,
-                sequence_number=membership.new_sequence_number,
-            )
-            new_rendered = (
-                _rendered_target_path(new_context, policy)
-                if policy_mode is not StoryArcPlacementPolicyMode.LOGICAL
-                and destination_root is not None
-                else None
-            )
             placement_rows = by_membership[membership.membership_id]
             if not placement_rows:
                 plans.append(
@@ -601,6 +586,27 @@ class StoryArcManagedReorderService:
                     )
                 )
                 continue
+            try:
+                old_rendered = (
+                    _rendered_target_path(context, policy)
+                    if policy_mode is not StoryArcPlacementPolicyMode.LOGICAL
+                    and destination_root is not None
+                    else None
+                )
+                new_context = replace(
+                    context,
+                    sequence_number=membership.new_sequence_number,
+                )
+                new_rendered = (
+                    _rendered_target_path(new_context, policy)
+                    if policy_mode is not StoryArcPlacementPolicyMode.LOGICAL
+                    and destination_root is not None
+                    else None
+                )
+            except StoryArcOriginalFilenameError as exc:
+                raise StoryArcManagedReorderError(
+                    "original_filename_unsafe", str(exc), category="safety"
+                ) from exc
             for row in placement_rows:
                 plans.append(
                     _placement_plan_from_row(

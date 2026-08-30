@@ -2724,6 +2724,65 @@ class TestImportCollectionTab:
             "fallback_to_auto": False,
         }
 
+    def test_mylar_in_place_requires_library_root_without_folder_preview(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        layout_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            layout_preview_requests.append(route.request.post_data_json)
+            route.fulfill(status=500, content_type="application/json", body="{}")
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 323, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.file_handling_in_place.wait_for(state="visible", timeout=5000)
+        import_page.file_handling_in_place.click()
+
+        root_selector = authed_page.get_by_test_id("import-in-place-library-root")
+        root_selector.wait_for(state="visible", timeout=5000)
+        root_value = root_selector.locator("option[value]:not([value=''])").first.get_attribute(
+            "value"
+        )
+        assert root_value
+        root_selector.select_option("")
+        assert import_page.start_scan_button.is_disabled()
+        root_selector.select_option(root_value)
+        assert import_page.start_scan_button.is_enabled()
+        assert import_page.source_layout_analyze_button.is_hidden()
+        assert "after path mapping" in (
+            authed_page.get_by_test_id("import-mylar-in-place-review").text_content() or ""
+        )
+        assert_no_axe_violations(
+            authed_page,
+            name="Mylar in-place controls",
+            include=["[data-testid='import-file-handling-section']"],
+        )
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert layout_preview_requests == []
+        assert created_requests
+        assert created_requests[-1]["source_type"] == "mylar3"
+        assert created_requests[-1]["file_handling_mode"] == "in_place"
+        assert created_requests[-1]["target_library_root_id"] == int(root_value)
+        assert created_requests[-1]["future_layout_requested"] is False
+
     def test_import_collection_shows_story_arc_evidence_and_submits_independent_choices(
         self,
         authed_page,

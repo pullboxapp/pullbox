@@ -71,6 +71,25 @@ def test_reference_only_is_logical_and_has_no_target_path(tmp_path: Path) -> Non
     assert preview.required_bytes == 0
 
 
+def test_original_filename_preview_uses_the_actual_canonical_basename(tmp_path: Path) -> None:
+    source = tmp_path / "Batman  1000000 [Digital].CBZ"
+    source.write_bytes(b"canonical")
+    root = tmp_path / "arcs"
+    root.mkdir()
+
+    preview = preview_story_arc_placement(
+        canonical_path=source,
+        destination_root=root,
+        values=_values(),
+        mode=StoryArcPlacementMode.COPY,
+        file_template="{ReadingOrder:02d} - {OriginalFilename}",
+    )
+
+    assert preview.state is StoryArcPlacementPreviewState.READY
+    assert preview.target_path == root / "Court of Owls" / f"01 - {source.name}"
+    assert not preview.target_path.exists()
+
+
 def test_move_is_not_a_supported_arc_placement_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unsupported story-arc placement mode"):
         preview_story_arc_placement(

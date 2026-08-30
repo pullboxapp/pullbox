@@ -22,6 +22,7 @@ from pullbox.core.mylar3_reader import (
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
 from pullbox.models.import_job import (
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
@@ -29,6 +30,10 @@ from pullbox.models.import_job import (
 )
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_progress_runtime import current_item_payload
+from pullbox.services.import_referenced_sources import (
+    load_mylar_in_place_root,
+    validate_mylar_in_place_files,
+)
 from pullbox.services.import_story_arc_resolution import (
     StoryArcResolutionResult,
     resolve_staged_story_arc_entries,
@@ -651,10 +656,20 @@ async def _load_mylar3_discovered_series(
                 message="No Mylar3 path mapping auto-detected",
                 db_path=str(db_path),
             )
+    in_place_root = (
+        await load_mylar_in_place_root(session, job.target_library_root_id)
+        if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+        else None
+    )
+    in_place_root_path = Path(in_place_root.path) if in_place_root is not None else None
+    reader_options: dict[str, object] = {}
+    if in_place_root_path is not None:
+        reader_options["include_missing_files"] = True
     reader = mylar3_reader_cls(
         db_path=db_path,
         path_map=path_map or None,
         source_layout=SourceLayoutSpec.from_dict(dict(job.source_layout_snapshot or {})),
+        **reader_options,
     )
     if raise_if_cancelled is not None:
         await raise_if_cancelled(session, job_id)
@@ -765,6 +780,8 @@ async def _load_mylar3_discovered_series(
         page = cast("list[DiscoveredSeries]", list(raw_page))
         if not page:
             return
+        if in_place_root_path is not None:
+            await asyncio.to_thread(validate_mylar_in_place_files, page, in_place_root_path)
         if validate_discovered_files_safety is not None:
             await validate_discovered_files_safety(session, page)
         if materialize_discovered_scan_results is not None:

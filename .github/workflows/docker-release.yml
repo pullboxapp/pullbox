@@ -5,8 +5,8 @@
 # registries with Cosign, and verifies the published release.
 #
 # Security: All actions pinned to full SHA. Release tags or explicit manual
-# dispatches are the only publishing triggers. Runnable tags are created only
-# after the candidate image passes Grype and smoke validation.
+# develop dispatches are the only publishing triggers. Development tags are
+# promoted only after exact-commit validation and both registry signatures pass.
 
 name: Docker Release
 
@@ -15,11 +15,6 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      tag_override:
-        description: "Custom image tag (default: edge)"
-        required: false
-        default: "edge"
 
 permissions:
   contents: read
@@ -41,8 +36,12 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
+      checks: read
     outputs:
       image-tags: ${{ steps.meta.outputs.tags }}
+      candidate-tags: ${{ steps.release-metadata.outputs.candidate_tags }}
+      development-tag: ${{ steps.release-metadata.outputs.development_tag }}
       image-labels: ${{ steps.meta.outputs.labels }}
       image-annotations: ${{ steps.meta.outputs.annotations }}
       image-version: ${{ steps.version.outputs.version }}
@@ -52,6 +51,17 @@ jobs:
       is-release: ${{ steps.resolve-tag.outputs.is_release }}
       is-prerelease: ${{ steps.resolve-tag.outputs.is_prerelease }}
     steps:
+      - name: Validate publishing trigger
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" = "refs/heads/develop" ]; then
+            exit 0
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            exit 0
+          fi
+          echo "::error::Manual image publication is restricted to develop; releases require a version-tag push."
+          exit 1
+
       - name: Resolve correct SHA
         id: resolve-sha
         run: |
@@ -68,6 +78,12 @@ jobs:
           ref: ${{ steps.resolve-sha.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Require validated development commit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/validate-development-image.py
 
       - name: Resolve tag from trigger
         id: resolve-tag
@@ -94,11 +110,23 @@ jobs:
             echo "::error::Unable to extract Pullbox version from src/pullbox/__init__.py"
             exit 1
           fi
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [[ "${VERSION}" != *-dev ]]; then
+            echo "::error::Development images require a -dev application version."
+            exit 1
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Capture release metadata
         id: release-metadata
-        run: echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "development_tag=sha-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "candidate_tags<<EOF"
+            echo "${GHCR_IMAGE}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "${DOCKERHUB_IMAGE}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
         id: meta
@@ -112,8 +140,9 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ steps.resolve-tag.outputs.tag }},enable=${{ steps.resolve-tag.outputs.is_release }}
             type=raw,value=latest,enable=${{ steps.resolve-tag.outputs.is_release == 'true' && steps.resolve-tag.outputs.is_prerelease != 'true' }}
-            type=raw,value=${{ inputs.tag_override || 'edge' }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=sha,format=short,prefix=sha-
+            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=sha-${{ github.sha }}-run-${{ github.run_id }}-${{ github.run_attempt }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,format=short,prefix=sha-,enable=${{ github.event_name != 'workflow_dispatch' }}
           labels: |
             org.opencontainers.image.title=Pullbox
             org.opencontainers.image.description=Modern comic book management and acquisition platform
@@ -139,6 +168,16 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
+      - name: Validate development build attempt
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BUILD_TAG: ${{ needs.build.outputs.development-tag }}
+        run: |
+          if [ "${BUILD_TAG}" != "sha-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]; then
+            echo "::error::Development reruns require Re-run all jobs so preparation uses this build attempt."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -244,6 +283,16 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
+      - name: Validate development build attempt
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BUILD_TAG: ${{ needs.build.outputs.development-tag }}
+        run: |
+          if [ "${BUILD_TAG}" != "sha-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]; then
+            echo "::error::Development reruns require Re-run all jobs so preparation uses this build attempt."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -499,7 +548,7 @@ jobs:
           docker rm -f "${SMOKE_CONTAINER}" || true
           docker image rm "${LOCAL_IMAGE}" || true
 
-  # Assemble and tag the already-built platform digests only after validation.
+  # Development manifests receive staging tags only. Edge is promoted by sign.
   push:
     name: Publish Multi-Arch Manifests
     runs-on: ubuntu-latest
@@ -557,7 +606,7 @@ jobs:
 
       - name: Publish GHCR multi-platform manifest
         env:
-          TAGS: ${{ needs.build.outputs.image-tags }}
+          TAGS: ${{ github.event_name == 'workflow_dispatch' && needs.build.outputs.candidate-tags || needs.build.outputs.image-tags }}
         working-directory: ${{ runner.temp }}/digests
         run: |
           sources=()
@@ -587,7 +636,7 @@ jobs:
 
       - name: Publish Docker Hub multi-platform manifest
         env:
-          TAGS: ${{ needs.build.outputs.image-tags }}
+          TAGS: ${{ github.event_name == 'workflow_dispatch' && needs.build.outputs.candidate-tags || needs.build.outputs.image-tags }}
         working-directory: ${{ runner.temp }}/digests
         run: |
           sources=()
@@ -614,7 +663,7 @@ jobs:
       - name: Validate pushed image metadata
         id: inspect
         env:
-          TAGS: ${{ needs.build.outputs.image-tags }}
+          TAGS: ${{ github.event_name == 'workflow_dispatch' && needs.build.outputs.candidate-tags || needs.build.outputs.image-tags }}
         run: |
           GHCR_TAG=$(printf '%s\n' "${TAGS}" | awk -v prefix="${GHCR_IMAGE}:" 'index($0, prefix) == 1 { print; exit }')
           if [ -z "${GHCR_TAG}" ]; then
@@ -701,6 +750,8 @@ jobs:
           done
 
       - name: Summary
+        env:
+          TAGS: ${{ github.event_name == 'workflow_dispatch' && needs.build.outputs.candidate-tags || needs.build.outputs.image-tags }}
         run: |
           {
             echo "## Docker Images Published"
@@ -709,7 +760,7 @@ jobs:
             echo ""
             echo "**Tags:**"
             echo '```'
-            echo "${{ needs.build.outputs.image-tags }}"
+            echo "${TAGS}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -721,9 +772,21 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: read
+      checks: read
       id-token: write
       packages: write
     steps:
+      - name: Checkout
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.build-sha }}
+
+      - name: Set up Docker Buildx
+        if: github.event_name == 'workflow_dispatch'
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -764,7 +827,7 @@ jobs:
       - name: Verify published image signatures
         env:
           DIGEST: ${{ needs.push.outputs.image-digest }}
-          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/docker-release\.yml@refs/(tags/v.*|heads/.*)$
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
           CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
           verify_image_signature() {
@@ -775,7 +838,7 @@ jobs:
 
             for attempt in $(seq 1 "${max_attempts}"); do
               if cosign verify \
-                --certificate-identity-regexp "${CERTIFICATE_IDENTITY_REGEXP}" \
+                --certificate-identity "${CERTIFICATE_IDENTITY}" \
                 --certificate-oidc-issuer "${CERTIFICATE_OIDC_ISSUER}" \
                 "${image_ref}"; then
                 return 0
@@ -791,6 +854,55 @@ jobs:
 
           verify_image_signature "${GHCR_IMAGE}@${DIGEST}" "GHCR"
           verify_image_signature "${DOCKERHUB_IMAGE}@${DIGEST}" "Docker Hub"
+
+      - name: Recheck development validation before promotion
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/validate-development-image.py
+
+      - name: Promote verified development image
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DIGEST: ${{ needs.push.outputs.image-digest }}
+          TAGS: ${{ needs.build.outputs.image-tags }}
+          BUILD_TAG: ${{ needs.build.outputs.development-tag }}
+        run: |
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Cannot promote an invalid image digest."
+            exit 1
+          fi
+          if [ "${BUILD_TAG}" != "sha-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]; then
+            echo "::error::Development reruns require Re-run all jobs; retained preparation outputs cannot be promoted."
+            exit 1
+          fi
+          for registry in "${GHCR_IMAGE}" "${DOCKERHUB_IMAGE}"; do
+            tag_args=()
+            while IFS= read -r tag; do
+              if [[ "${tag}" == "${registry}:"* ]]; then
+                suffix=${tag#${registry}:}
+                if [ "${suffix}" != "edge" ] && [ "${suffix}" != "${BUILD_TAG}" ]; then
+                  echo "::error::Unexpected development image tag."
+                  exit 1
+                fi
+                tag_args+=(--tag "${tag}")
+              fi
+            done <<< "${TAGS}"
+            if [ "${#tag_args[@]}" -ne 4 ]; then
+              echo "::error::Expected edge and a run-specific SHA tag for each registry."
+              exit 1
+            fi
+            # A single index source with no annotations is a carbon copy: its
+            # digest, SBOM/provenance, and the verified signature remain intact.
+            docker buildx imagetools create "${tag_args[@]}" "${registry}@${DIGEST}"
+            for tag in "${registry}:edge" "${registry}:${BUILD_TAG}"; do
+              published=$(docker buildx imagetools inspect "${tag}" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+              if [ "${published}" != "${DIGEST}" ]; then
+                echo "::error::Promoted development tag does not match the signed digest."
+                exit 1
+              fi
+            done
+          done
 
       - name: Write release image digest artifact
         env:
@@ -818,11 +930,20 @@ jobs:
           retention-days: 30
 
       - name: Summary
+        env:
+          TAGS: ${{ needs.build.outputs.image-tags }}
+          BUILD_SHA: ${{ needs.build.outputs.build-sha }}
         run: |
           {
             echo "## Docker Images Signed"
             echo ""
             echo "**Digest:** \`${{ needs.push.outputs.image-digest }}\`"
+            echo "**Source commit:** \`${BUILD_SHA}\`"
             echo ""
             echo "**Signing:** Keyless Sigstore/Cosign signatures verified for GHCR and Docker Hub."
+            echo ""
+            echo "**Published tags:**"
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

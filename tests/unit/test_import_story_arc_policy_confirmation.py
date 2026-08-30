@@ -120,6 +120,17 @@ def test_policy_review_redacts_source_paths_and_renders_a_data_only_example() ->
     assert "/private/" not in repr(review)
 
 
+def test_policy_review_example_supports_original_filename_without_an_extra_extension() -> None:
+    draft = _draft()
+    policy = draft["placement_policy"]
+    assert isinstance(policy, dict)
+    policy["file_template"] = "{ReadingOrder:02d} - {OriginalFilename}"
+
+    review = build_import_story_arc_policy_review(draft, {})
+
+    assert review.example_relative_path == "Example Arc/01 - Example Series 001.cbz"
+
+
 @pytest.mark.asyncio
 async def test_logical_policy_confirmation_persists_only_the_canonical_envelope(
     db_session: AsyncSession,

@@ -51,6 +51,7 @@ from pullbox.schemas.import_job import (
     ImportJobCreate,
 )
 from pullbox.services.import_service import ImportService
+from scripts.mylar3_import_fixture import create_mylar3_db
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-r10")
 
@@ -1205,10 +1206,20 @@ class TestImportLeaveInPlace:
         assert len(source_files) == 1
         assert source_files[0].exists()
 
+    @pytest.mark.parametrize(
+        ("source_type", "source_changed"),
+        [
+            (ImportSourceType.FILESYSTEM, False),
+            (ImportSourceType.MYLAR3, False),
+            (ImportSourceType.MYLAR3, True),
+        ],
+    )
     async def test_rc_wizard_in_place_import_registers_without_mutation(
         self,
         db_session: AsyncSession,
         tmp_path: Path,
+        source_type: ImportSourceType,
+        source_changed: bool,
     ) -> None:
         comics_dir = tmp_path / "library"
         root = await _setup_comics_directory(db_session, comics_dir)
@@ -1241,6 +1252,36 @@ class TestImportLeaveInPlace:
         before_bytes = source_file.read_bytes()
         before_stat = source_file.stat()
         before_tree = sorted(str(path.relative_to(source)) for path in source.rglob("*"))
+        before_sidecar = sidecar.read_bytes(), sidecar.stat().st_mtime_ns, sidecar.stat().st_mode
+        database = tmp_path / "mylar.db"
+        database_before: tuple[bytes, int, int] | None = None
+        if source_type == ImportSourceType.MYLAR3:
+            create_mylar3_db(
+                database,
+                series=[
+                    {
+                        "ComicID": "CV-97508",
+                        "ComicName": "Batman",
+                        "ComicYear": "2016",
+                        "ComicPublisher": "DC Comics",
+                        "ComicLocation": "/comics/Batman (2016)",
+                        "Total": 1,
+                    }
+                ],
+                issues=[
+                    {
+                        "IssueID": "100001",
+                        "ComicID": "97508",
+                        "Issue_Number": "1",
+                        "Location": source_file.name,
+                    }
+                ],
+            )
+            database_before = (
+                database.read_bytes(),
+                database.stat().st_mtime_ns,
+                database.stat().st_mode,
+            )
 
         mock_provider = _mock_cv_provider(
             search_map={
@@ -1257,9 +1298,11 @@ class TestImportLeaveInPlace:
         job = await svc.create_job(
             db_session,
             ImportJobCreate(
-                source_path=str(source),
-                source_type=ImportSourceType.FILESYSTEM,
+                source_path=str(database if source_type == ImportSourceType.MYLAR3 else source),
+                source_type=source_type,
                 file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+                target_library_root_id=root.id,
+                mylar3_path_map={"/comics": str(source)},
             ),
         )
         await svc.start_scan(db_session, job.id)
@@ -1288,8 +1331,23 @@ class TestImportLeaveInPlace:
             )
         )[0]
 
+        if source_changed:
+            source_file.write_bytes(before_bytes + b"changed after scan")
         await svc.run_import(db_session, job.id)
         await db_session.refresh(job)
+
+        if source_changed:
+            file_row = (
+                await db_session.scalars(
+                    sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+                )
+            ).one()
+            assert file_row.status == ImportedFileStatus.FAILED
+            assert file_row.include_in_import is False
+            assert file_row.diagnostics["source_revalidation"]["code"] == "source_changed"
+            assert await db_session.scalar(sa_select(LibraryFile.id)) is None
+            assert source_file.read_bytes() == before_bytes + b"changed after scan"
+            return
 
         library_file = (
             (
@@ -1328,6 +1386,43 @@ class TestImportLeaveInPlace:
         assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
         assert after_stat.st_mode == before_stat.st_mode
         assert sorted(str(path.relative_to(source)) for path in source.rglob("*")) == before_tree
+        assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns, sidecar.stat().st_mode) == (
+            before_sidecar
+        )
+        if source_type == ImportSourceType.MYLAR3:
+            mock_provider.search_series.assert_not_awaited()
+            mock_provider.get_series.assert_not_awaited()
+            mock_provider.get_issues_for_series.assert_not_awaited()
+            assert (
+                database.read_bytes(),
+                database.stat().st_mtime_ns,
+                database.stat().st_mode,
+            ) == database_before
+            await svc.rollback_import(db_session, job.id)
+            assert await db_session.get(LibraryFile, library_file.id) is None
+            assert source_file.read_bytes() == before_bytes
+            assert source_file.stat().st_mtime_ns == before_stat.st_mtime_ns
+            assert source_file.stat().st_mode == before_stat.st_mode
+            assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns, sidecar.stat().st_mode) == (
+                before_sidecar
+            )
+            assert (
+                sorted(str(path.relative_to(source)) for path in source.rglob("*")) == before_tree
+            )
+            frozen_policy = dict(job.ingest_policy_snapshot)
+            db_session.add(
+                SystemConfig(key="post_processing_method", value="hardlink", value_type="string")
+            )
+            await db_session.flush()
+            retry = await svc.retry_job(db_session, job.id)
+            assert retry.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+            assert retry.ingest_policy_snapshot == frozen_policy
+            assert retry.target_library_root_id == root.id
+            assert retry.mylar3_path_map == {"/comics": str(source)}
+            assert retry.effective_transfer_method == "leave_in_place"
+            assert retry.move_to_library is False
+            assert retry.convert_to_preferred_format is False
+            assert retry.update_embedded_comicinfo_from_match is False
 
 
 # ── Scenario R-D: Import with Rename ─────────────────────────────────

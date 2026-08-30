@@ -86,7 +86,7 @@
           <div class="min-w-0">
             <p class="font-semibold text-pb-text">Collection imports preserve source files.</p>
             <p
-              x-show="fileHandlingMode === 'managed_copy' || sourceType !== 'filesystem'"
+              x-show="fileHandlingMode === 'managed_copy'"
               class="mt-1 text-xs leading-5 text-pb-text-sec"
             >
               Pullbox copies, renames, converts, and writes ComicInfo.xml only in the library
@@ -94,7 +94,7 @@
               Mylar, Kapowarr, NAS, or shared-folder setups remain safe.
             </p>
             <p
-              x-show="fileHandlingMode === 'in_place' && sourceType === 'filesystem'"
+              x-show="fileHandlingMode === 'in_place'"
               class="mt-1 text-xs leading-5 text-pb-text-sec"
             >
               Pullbox registers the files at their current paths. It will not create a second
@@ -105,7 +105,7 @@
       </div>
 
       <section
-        x-show="sourceType === 'filesystem'"
+        x-show="sourceType === 'filesystem' || sourceType === 'mylar3'"
         x-cloak
         class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
         data-testid="import-file-handling-section"
@@ -151,25 +151,56 @@
         </div>
 
         <div
-          x-show="fileHandlingMode === 'in_place' && !layoutPreview"
+          x-show="sourceType === 'filesystem' && fileHandlingMode === 'in_place' && !layoutPreview"
           class="inline-alert inline-alert-info"
         >
           Analyze the folder layout to verify that every sampled file can stay in place safely.
         </div>
         <div
-          x-show="fileHandlingMode === 'in_place' && layoutPreview && layoutPreview.can_keep_in_place"
+          x-show="sourceType === 'filesystem' && fileHandlingMode === 'in_place' && layoutPreview && layoutPreview.can_keep_in_place"
           class="inline-alert inline-alert-success"
           data-testid="import-file-handling-in-place-ready"
         >
           This sample is inside a configured library root and can be registered in place.
         </div>
         <div
-          x-show="fileHandlingMode === 'in_place' && layoutPreview && !layoutPreview.can_keep_in_place"
+          x-show="sourceType === 'filesystem' && fileHandlingMode === 'in_place' && layoutPreview && !layoutPreview.can_keep_in_place"
           class="inline-alert inline-alert-warning"
           data-testid="import-file-handling-in-place-blocked"
         >
           This source cannot be kept in place yet. Review the layout warnings or choose a managed
           copy.
+        </div>
+        <div x-show="sourceType === 'mylar3' && fileHandlingMode === 'in_place'" class="space-y-3">
+          <div class="space-y-2">
+            <label for="import-in-place-library-root" class="block text-xs font-medium text-pb-text-sec">
+              Existing library root
+            </label>
+            <select
+              id="import-in-place-library-root"
+              x-model.number="targetLibraryRootId"
+              class="input-pb w-full"
+              aria-describedby="import-mylar-in-place-help"
+              data-testid="import-in-place-library-root"
+            >
+              <option value="">Choose a library root</option>
+              <template x-for="root in libraryRoots" :key="root.id">
+                <option :value="root.id" x-text="root.name + ' — ' + root.path"></option>
+              </template>
+            </select>
+          </div>
+          <div
+            id="import-mylar-in-place-help"
+            class="inline-alert inline-alert-info"
+            data-testid="import-mylar-in-place-review"
+          >
+            Pullbox checks comic files after path mapping during the scan. Files outside this
+            root or missing on disk need review. Your Mylar database can be elsewhere;
+            the database and source files stay unchanged.
+          </div>
+          <div x-show="!libraryRoots.length" class="inline-alert inline-alert-warning">
+            Configure an enabled library root before importing Mylar files in place.
+          </div>
         </div>
       </section>
 

@@ -46,9 +46,19 @@ async def db_factory(tmp_path: Path) -> AsyncGenerator[async_sessionmaker[AsyncS
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "file_template,expected_name",
+    [
+        ("{ReadingOrder:03d} - {Series} {IssueNumber}", "001 - Batman 1.cbz"),
+        ("{ReadingOrder:02d} - {OriginalFilename}", "01 - Batman 001.cbz"),
+        ("{OriginalFilename}", "Batman 001.cbz"),
+    ],
+)
 async def test_later_acquisition_registers_once_and_populates_active_arc(
     db_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    file_template: str,
+    expected_name: str,
 ) -> None:
     comics = tmp_path / "comics"
     comics.mkdir()
@@ -100,7 +110,7 @@ async def test_later_acquisition_registers_once_and_populates_active_arc(
                 target_library_root_id=root_id,
                 destination_root=str(arcs),
                 folder_template="{StoryArc}",
-                file_template="{ReadingOrder:03d} - {Series} {IssueNumber}",
+                file_template=file_template,
                 synchronize=True,
             ),
         )
@@ -151,6 +161,7 @@ async def test_later_acquisition_registers_once_and_populates_active_arc(
     assert library_file_count == 1
     assert placement is not None
     assert placement.state is StoryArcPlacementState.CURRENT
+    assert Path(placement.placement_path).name == expected_name
     assert work is not None
     assert work.state is StoryArcSyncWorkState.COMPLETED
     assert placement.library_file_id == work.library_file_id

@@ -3001,7 +3001,7 @@ function importSourceData(config) {
 
     selectSourceType: function (sourceType) {
       this.sourceType = sourceType;
-      if (sourceType !== "filesystem") {
+      if (sourceType !== "filesystem" && sourceType !== "mylar3") {
         this.fileHandlingMode = "managed_copy";
       }
       this.clearFuturePolicy();
@@ -3286,13 +3286,21 @@ function importSourceData(config) {
       if (!this.sourcePath.trim() || this.scanning) {
         return false;
       }
-      if (
-        this.fileHandlingMode === "in_place" &&
-        (this.sourceType !== "filesystem" ||
+      if (this.fileHandlingMode === "in_place") {
+        if (this.sourceType === "mylar3") {
+          var selectedRootId = Number(this.targetLibraryRootId);
+          if (!this.libraryRoots.some(function (root) {
+            return Number(root.id) === selectedRootId && selectedRootId > 0;
+          })) {
+            return false;
+          }
+        } else if (
+          this.sourceType !== "filesystem" ||
           !this.layoutPreview ||
-          !this.layoutPreview.can_keep_in_place)
-      ) {
-        return false;
+          !this.layoutPreview.can_keep_in_place
+        ) {
+          return false;
+        }
       }
       if (
         this.futureLayoutRequested &&
@@ -3586,7 +3594,8 @@ function importSourceData(config) {
             file_formats: this.fileFormats.trim() || null,
             file_handling_mode: this.fileHandlingMode,
             source_layout: this.sourceLayoutPayload(),
-            target_library_root_id: this.futureLayoutRequested
+            target_library_root_id: this.futureLayoutRequested ||
+              (this.sourceType === "mylar3" && this.fileHandlingMode === "in_place")
               ? Number(this.targetLibraryRootId)
               : null,
             future_layout_requested: this.futureLayoutRequested,

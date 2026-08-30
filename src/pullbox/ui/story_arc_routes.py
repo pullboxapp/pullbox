@@ -18,6 +18,7 @@ from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
+    ORIGINAL_STORY_ARC_FILE_TEMPLATE,
 )
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -35,6 +36,7 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicyInput,
     StoryArcPlacementPolicyMode,
     StoryArcPlacementSyncService,
+    validate_story_arc_placement_policy_input,
 )
 from pullbox.services.story_arc_service import (
     StoryArcConflictError,
@@ -43,14 +45,17 @@ from pullbox.services.story_arc_service import (
     StoryArcServiceError,
     StoryArcValidationError,
 )
+from pullbox.ui import story_arc_catalog_routes
 from pullbox.ui.story_arc_local_issue_search import search_story_arc_local_issues
 from pullbox.ui.story_arc_presenters import (
     load_story_arc_detail,
     load_story_arc_list_page,
     load_story_arc_placement_context,
+    load_story_arc_placement_roots,
 )
 
 router = APIRouter()
+router.include_router(story_arc_catalog_routes.router)
 
 _GetTemplates = Callable[[], Jinja2Templates]
 _BuildContext = Callable[..., dict[str, object]]
@@ -70,6 +75,21 @@ class _StoryArcTemplateUser:
 
 
 _NOTICE_MESSAGES = {
+    "catalog-added": (
+        "Story arc added with your reviewed reading order. "
+        "Canonical files stay in their series folders."
+    ),
+    "catalog-refreshed": (
+        "Provider changes saved. New members need review; existing order, memberships, "
+        "and files were preserved."
+    ),
+    "search-started": (
+        "Missing-issue search started. Check each issue for results and download status."
+    ),
+    "search-running": "A missing-issue search is already running for this arc.",
+    "catalog-placements-started": (
+        "Initial arc-file work queued. Refresh to check progress; canonical files stay unchanged."
+    ),
     "created": "Story arc created. Add issues when you are ready.",
     "updated": "Story arc settings saved.",
     "membership-added": "Issue added to the story arc.",
@@ -113,6 +133,9 @@ def configure_story_arc_routes(
     global _get_templates, _build_context
     _get_templates = get_templates
     _build_context = build_context
+    story_arc_catalog_routes.configure_story_arc_catalog_routes(
+        get_templates=get_templates, build_context=build_context
+    )
 
 
 def _templates() -> Jinja2Templates:
@@ -163,11 +186,15 @@ def _list_url(*, error: str | None = None) -> str:
     return f"/story-arcs?{urlencode({'error': error})}" if error is not None else "/story-arcs"
 
 
-def _error_code(exc: StoryArcServiceError | IntegrityError) -> str:
+def _error_code(
+    exc: StoryArcServiceError | StoryArcPlacementIntegrationError | IntegrityError,
+) -> str:
     if isinstance(exc, (StoryArcConflictError, IntegrityError)):
         return "conflict"
     if isinstance(exc, StoryArcNotFoundError):
         return "not-found"
+    if isinstance(exc, StoryArcPlacementIntegrationError):
+        return "placement"
     return "validation"
 
 
@@ -340,6 +367,9 @@ async def story_arc_list(
         base_params.append(("lifecycle", lifecycle.value))
     if monitored is not None:
         base_params.append(("monitored", str(monitored).lower()))
+    placement_roots, placement_roots_truncated = await load_story_arc_placement_roots(
+        session, selected_root_id=None
+    )
     context = _ctx(
         request,
         user,
@@ -349,6 +379,8 @@ async def story_arc_list(
         monitored_filter=(str(monitored).lower() if monitored is not None else ""),
         pagination_base_url=f"/story-arcs?{urlencode(base_params)}",
         error_message=_ERROR_MESSAGES.get(error or "", ""),
+        placement_roots=placement_roots,
+        placement_roots_truncated=placement_roots_truncated,
     )
     return _templates().TemplateResponse(request, "pages/story_arcs.html", context)
 
@@ -363,9 +395,34 @@ async def story_arc_create(
     monitored: bool = Form(False),
     search_missing: bool = Form(False),
     include_upcoming: bool = Form(False),
+    mode: Annotated[str, Form(max_length=50)] = "logical",
+    target_library_root_id: str = Form(""),
+    destination_root: Annotated[str, Form(max_length=1000)] = "",
+    folder_template: Annotated[str, Form(max_length=1024)] = DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
+    filename_style: Literal["original", "custom"] = Form("original"),
+    prefix_reading_order: bool = Form(False),
+    reading_order_width: Annotated[int, Form(ge=2, le=6)] = 2,
+    file_template: Annotated[str, Form(max_length=1024)] = DEFAULT_STORY_ARC_FILE_TEMPLATE,
+    symlink_style: Annotated[str, Form(max_length=50)] = "",
+    synchronize: bool = Form(False),
 ) -> Response:
-    """Create and commit one empty Pullbox-owned Story Arc."""
+    """Create an empty arc with an optional validated, source-preserving storage policy."""
     try:
+        if filename_style == "original":
+            file_template = ORIGINAL_STORY_ARC_FILE_TEMPLATE
+            if prefix_reading_order:
+                file_template = f"{{ReadingOrder:0{reading_order_width}d}} - {file_template}"
+        proposal = _placement_policy_input(
+            mode=mode,
+            target_library_root_id=target_library_root_id,
+            destination_root=destination_root,
+            folder_template=folder_template,
+            file_template=file_template,
+            symlink_style=symlink_style,
+            synchronize=synchronize,
+        )
+        # Validate before creating anything, so an invalid destination cannot leave an arc behind.
+        await validate_story_arc_placement_policy_input(session, proposal, revision=1)
         arc = await _story_arc_service.create(
             session,
             name=name,
@@ -376,8 +433,12 @@ async def story_arc_create(
             source_kind=StoryArcSourceKind.PULLBOX,
         )
         story_arc_id = arc.id
+        if proposal.mode is not StoryArcPlacementPolicyMode.LOGICAL:
+            await _placement_service.update_policy(
+                session, story_arc_id, expected_revision=arc.revision, proposal=proposal
+            )
         await session.commit()
-    except (StoryArcServiceError, IntegrityError) as exc:
+    except (StoryArcServiceError, StoryArcPlacementIntegrationError, IntegrityError) as exc:
         await session.rollback()
         return _redirect(request, _list_url(error=_error_code(exc)))
     return _redirect(request, _detail_url(story_arc_id, notice="created"))
@@ -646,6 +707,23 @@ async def story_arc_edit(
             _detail_url(story_arc_id, error=_error_code(exc)),
         )
     return _redirect(request, _detail_url(story_arc_id, notice="updated"))
+
+
+@router.post("/story-arcs/{story_arc_id}/search", include_in_schema=False)
+async def story_arc_search(
+    story_arc_id: int, request: Request, _user: AuthenticatedUser, session: DbSession
+) -> Response:
+    """Use the shared acquisition flow, scoped to this arc's eligible canonical issues."""
+    from pullbox.tasks.story_arc_search_task import schedule_story_arc_search
+
+    arc = await session.get(StoryArc, story_arc_id)
+    if arc is None or arc.lifecycle is not StoryArcLifecycle.ACTIVE:
+        raise HTTPException(status_code=404, detail="Active story arc not found")
+    await session.commit()
+    started = schedule_story_arc_search(story_arc_id)
+    return _redirect(
+        request, _detail_url(story_arc_id, notice="search-started" if started else "search-running")
+    )
 
 
 @router.post("/story-arcs/{story_arc_id}/memberships", include_in_schema=False)

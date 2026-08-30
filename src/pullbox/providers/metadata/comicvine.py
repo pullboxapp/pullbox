@@ -14,7 +14,7 @@ import asyncio
 import html
 import re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -28,6 +28,11 @@ from pullbox.providers.base import (
     SeriesMetadata,
     SeriesSearchResult,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from pullbox.providers.story_arcs import StoryArcMetadata, StoryArcSearchResult
 
 logger = structlog.get_logger(__name__)
 
@@ -350,6 +355,35 @@ class ComicVineProvider:
 
         log.debug("comicvine_response_ok", total_results=data.get("number_of_total_results"))
         return data
+
+    # -- Optional StoryArcMetadataProvider capability -----------------------
+
+    async def search_story_arcs(
+        self, query: str, *, limit: int = 20, offset: int = 0
+    ) -> list[StoryArcSearchResult]:
+        """Search a bounded page of Comic Vine story arcs by name."""
+        results, _ = await self.search_story_arcs_page(query, limit=limit, offset=offset)
+        return results
+
+    async def search_story_arcs_page(
+        self, query: str, *, limit: int = 20, offset: int = 0
+    ) -> tuple[list[StoryArcSearchResult], int]:
+        """Return arc-name search results and the provider's arc result count."""
+        from pullbox.providers.metadata.comicvine_story_arcs import search_story_arcs_page
+
+        return await search_story_arcs_page(self._request, query, limit=limit, offset=offset)
+
+    async def get_story_arc(self, provider_id: str) -> StoryArcMetadata:
+        """Read explicit membership without claiming a curated reading order."""
+        from pullbox.providers.metadata.comicvine_story_arcs import get_story_arc
+
+        return await get_story_arc(self._request, provider_id)
+
+    async def get_story_arc_issues(self, issue_provider_ids: Sequence[str]) -> list[IssueMetadata]:
+        """Hydrate the exact unique issue set in requested order."""
+        from pullbox.providers.metadata.comicvine_story_arcs import get_story_arc_issues
+
+        return await get_story_arc_issues(self._request, issue_provider_ids)
 
     # -- MetadataProvider implementation ------------------------------------
 

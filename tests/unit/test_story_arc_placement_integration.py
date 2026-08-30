@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -158,6 +159,112 @@ async def test_policy_freezes_complete_snapshot_and_rejects_stale_revision(
                 proposal=_copy_policy(root_id, arc_root),
             )
     assert stale.value.code == "revision_conflict"
+
+
+@pytest.mark.parametrize(
+    "template,prefix",
+    [("{OriginalFilename}", ""), ("{ReadingOrder:02d} - {OriginalFilename}", "01 - ")],
+)
+async def test_original_filename_preview_and_copy_preserve_canonical_file(
+    db_factory: async_sessionmaker[AsyncSession], tmp_path: Path, template: str, prefix: str
+) -> None:
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    renamed = canonical.with_name("Batman  1000000 (Digital) [Team].CBZ")
+    canonical.rename(renamed)
+    before = renamed.stat()
+    async with db_factory() as session:
+        library_file = await session.scalar(select(LibraryFile))
+        assert library_file is not None
+        library_file.file_path = str(renamed)
+        # Deliberately stale display metadata must not choose the copied name.
+        library_file.file_name = "stale-name.cbz"
+        await session.commit()
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=replace(_copy_policy(root_id, arc_root), file_template=template),
+        )
+    async with db_factory() as session:
+        preview = await service.preview_arc(session, arc_id, limit=10, offset=0)
+    target = arc_root / "Court of Owls" / (prefix + renamed.name)
+    assert preview.items[0].target_path == str(target)
+    assert preview.items[0].issue_number_text == "1000000"
+    assert not target.exists()
+    async with db_factory() as session:
+        result = await service.sync_membership(session, arc_id, membership_id)
+    assert result.placement is not None
+    assert result.placement.placement_path == str(target)
+    assert target.read_bytes() == renamed.read_bytes() == b"canonical archive"
+    assert target.stat().st_ino != renamed.stat().st_ino
+    assert (renamed.stat().st_ino, renamed.stat().st_mtime_ns, renamed.stat().st_mode) == (
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_mode,
+    )
+
+
+async def test_original_filename_preview_waits_for_missing_canonical_file(
+    db_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    arc_id, _membership_id, root_id, _canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    async with db_factory() as session:
+        library_file = await session.scalar(select(LibraryFile))
+        assert library_file is not None
+        await session.delete(library_file)
+        await session.commit()
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=replace(_copy_policy(root_id, arc_root), file_template="{OriginalFilename}"),
+        )
+    async with db_factory() as session:
+        preview = await service.preview_arc(session, arc_id, limit=10, offset=0)
+    assert preview.items[0].state == "blocked"
+    assert preview.items[0].target_path is None
+    assert preview.items[0].inspection_code == "source_unavailable"
+
+
+async def test_original_filename_format_mismatch_is_blocked_without_changing_files(
+    db_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    arc_id, membership_id, root_id, canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    async with db_factory() as session:
+        library_file = await session.scalar(select(LibraryFile))
+        assert library_file is not None
+        library_file.file_format = FileFormat.CBR
+        await session.commit()
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=replace(_copy_policy(root_id, arc_root), file_template="{OriginalFilename}"),
+        )
+    async with db_factory() as session:
+        preview = await service.preview_arc(session, arc_id, limit=10, offset=0)
+    assert preview.items[0].state == "blocked"
+    assert preview.items[0].target_path is None
+    assert preview.items[0].inspection_code == "source_unavailable"
+    async with db_factory() as session:
+        with pytest.raises(StoryArcPlacementIntegrationError) as blocked:
+            await service.sync_membership(session, arc_id, membership_id)
+    assert blocked.value.code == "original_filename_unsafe"
+    assert str(tmp_path) not in str(blocked.value)
+    assert canonical.read_bytes() == b"canonical archive"
+    assert not list(arc_root.iterdir())
 
 
 async def test_publisher_folder_token_uses_canonical_series_publisher(

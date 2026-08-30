@@ -382,6 +382,7 @@ def _policy_example(folder_template: str, file_template: str) -> str | None:
                 start_year=2025,
                 end_year=2026,
                 extension="cbz",
+                original_filename="Example Series 001.cbz",
             ),
             folder_template=folder_template,
             file_template=file_template,

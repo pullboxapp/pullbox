@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Review Story Arc — {{ instance_name() }}{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 py-5{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-5xl space-y-6" data-testid="story-arc-catalog-preview">
+  <a href="/story-arcs" class="text-sm text-pb-interactive hover:underline">Back to Story Arcs</a>
+  <header>
+    <h1 class="text-2xl font-bold text-pb-text">{{ preview.metadata.title if preview else 'Review Story Arc' }}</h1>
+    {% if preview and preview.metadata.description %}<p class="mt-2 text-sm text-pb-text-sec">{{ preview.metadata.description|striptags }}</p>{% endif %}
+  </header>
+  {% if error_message %}<p role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 p-4 text-sm text-pb-text">{{ error_message }}</p>{% endif %}
+  {% if preview %}
+    <p class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 p-4 text-sm text-pb-text" id="story-arc-order-warning">Comic Vine response order — reading order unverified. Set the order you want below; publication dates and issue numbers don't define it.</p>
+    {% if preview.membership_complete and members %}
+      <p class="text-sm text-pb-text-sec">Complete received member list: {{ members|length }} issues. This confirms all returned members loaded, not that Comic Vine's bibliography is exhaustive.</p>
+      <form action="/story-arcs/catalog/{{ provider_id }}" method="post" data-testid="story-arc-catalog-add-form" class="space-y-6">
+        <input type="hidden" name="fingerprint" value="{{ preview.fingerprint }}">
+        <section aria-labelledby="catalog-order-heading" class="space-y-3">
+          <h2 id="catalog-order-heading" class="text-lg font-semibold text-pb-text">Review reading order</h2>
+          <p class="text-sm text-pb-text-sec">Give every issue a different positive position. Skip applies only to this arc, not the canonical issue.</p>
+          <ol class="space-y-3">
+            {% for member in members %}
+              <li data-provider-issue-id="{{ member.provider_id }}" class="flex flex-col gap-3 rounded-lg border border-pb-border bg-pb-card p-4 sm:flex-row sm:items-center">
+                <div class="min-w-0 flex-1">
+                  <p class="font-medium text-pb-text">{{ member.series_name }} #{{ member.issue_number }}</p>
+                  <p class="text-sm text-pb-text-sec">{{ member.title }}</p>
+                </div>
+                <input type="hidden" name="issue_provider_ids" value="{{ member.provider_id }}">
+                <div>
+                  <label for="catalog-order-{{ member.provider_id }}" class="mb-1 block text-sm text-pb-text-sec">Order for #{{ member.issue_number }}</label>
+                  <input id="catalog-order-{{ member.provider_id }}" name="reading_orders" type="number" min="1" max="1000000" required value="{{ loop.index }}" class="input-pb w-28">
+                </div>
+                <label class="flex items-center gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="skipped_issue_provider_ids" value="{{ member.provider_id }}">Skip #{{ member.issue_number }} in this arc</label>
+              </li>
+            {% endfor %}
+          </ol>
+          <label class="flex items-start gap-2 text-sm font-medium text-pb-text"><input type="checkbox" name="order_reviewed" value="true" required aria-describedby="story-arc-order-warning" class="mt-0.5">I reviewed the reading order</label>
+        </section>
+        <section aria-labelledby="catalog-options-heading" class="space-y-4 rounded-lg border border-pb-border bg-pb-card p-5">
+          <h2 id="catalog-options-heading" class="text-lg font-semibold text-pb-text">Library and monitoring</h2>
+          <div>
+            <label for="catalog-library-root" class="mb-1 block text-sm font-medium text-pb-text">Library root for new series</label>
+            <select id="catalog-library-root" name="library_root_id" required class="input-pb w-full">
+              <option value="">Choose a library root</option>
+              {% for root in placement_roots %}<option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>{% endfor %}
+            </select>
+            <p class="mt-1 text-sm text-pb-text-sec">New series and downloads use their normal series folders here, even with no separate arc folder. Existing series paths and monitoring don't change.</p>
+          </div>
+          {% if not placement_roots %}<p role="status" class="text-sm text-pb-text-sec">Configure an enabled library root in Settings before adding.</p>{% endif %}
+          <fieldset class="space-y-2">
+            <legend class="mb-2 text-sm font-medium text-pb-text">Independent arc monitoring</legend>
+            <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="monitored" value="true" class="mt-0.5">Monitor this story arc</label>
+            <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="search_missing" value="true" class="mt-0.5">Search for missing resolved issues</label>
+            <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="include_upcoming" value="true" class="mt-0.5">Include upcoming known members</label>
+            <p class="text-xs text-pb-text-sec">Automatic search also follows your global search-on-add setting. Refresh and review provider changes to discover new members.</p>
+          </fieldset>
+          {% set arc_creation_has_members = true %}
+          {% include "partials/story_arc_create_storage.html" %}
+        </section>
+        <div class="flex flex-wrap gap-3">
+          <button type="submit" class="btn-primary"{% if not placement_roots %} disabled{% endif %}>Add reviewed Story Arc</button>
+          <a href="/story-arcs" class="btn-secondary">Cancel</a>
+        </div>
+      </form>
+    {% elif preview.membership_complete %}
+      <p role="status" class="text-sm text-pb-text-sec">No members available. Retry later, or create an empty Story Arc yourself from the Story Arcs page.</p>
+    {% else %}
+      <p role="alert" class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 p-4 text-sm text-pb-text">Incomplete member list. Comic Vine reported {{ preview.metadata.declared_issue_count if preview.metadata.declared_issue_count is not none else 'an unknown number of' }} members but returned {{ preview.metadata.issue_provider_ids|length }}. Nothing can be added until all members load.</p>
+    {% endif %}
+  {% endif %}
+  <a href="/story-arcs/catalog/{{ provider_id }}" class="btn-secondary">Retry preview</a>
+</main>
+{% endblock %}

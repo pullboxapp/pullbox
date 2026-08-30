@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import enum
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
     StoryArcNamingValues,
+    StoryArcOriginalFilenameError,
     render_story_arc_relative_path,
 )
 from pullbox.models.story_arc import StoryArcPlacementMode, StoryArcSymlinkStyle
@@ -147,13 +148,18 @@ def preview_story_arc_placement(
             "Story-arc destination root is not readable and writable",
         )
 
-    relative_path = render_story_arc_relative_path(
-        values,
-        folder_template=(
-            DEFAULT_STORY_ARC_FOLDER_TEMPLATE if folder_template is None else folder_template
-        ),
-        file_template=(DEFAULT_STORY_ARC_FILE_TEMPLATE if file_template is None else file_template),
-    )
+    try:
+        relative_path = render_story_arc_relative_path(
+            replace(values, original_filename=canonical_path.name),
+            folder_template=(
+                DEFAULT_STORY_ARC_FOLDER_TEMPLATE if folder_template is None else folder_template
+            ),
+            file_template=(
+                DEFAULT_STORY_ARC_FILE_TEMPLATE if file_template is None else file_template
+            ),
+        )
+    except StoryArcOriginalFilenameError as exc:
+        return _blocked(effective_mode, None, StoryArcCollisionKind.SOURCE_UNAVAILABLE, str(exc))
     target_path = destination_root / relative_path
     resolved_root = destination_root.resolve(strict=True)
     parent_collision = _existing_parent_collision(

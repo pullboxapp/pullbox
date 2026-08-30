@@ -254,6 +254,42 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "update_pull_list_monitoring",
         ),
         ("/reading", ("GET",), "reading_workspace", "reading_workspace"),
+        (
+            "/story-arcs/catalog",
+            ("GET",),
+            "story_arc_catalog_search",
+            "story_arc_catalog_search",
+        ),
+        (
+            "/story-arcs/catalog/{provider_id}",
+            ("GET",),
+            "story_arc_catalog_preview",
+            "story_arc_catalog_preview",
+        ),
+        (
+            "/story-arcs/catalog/{provider_id}",
+            ("POST",),
+            "story_arc_catalog_add",
+            "story_arc_catalog_add",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/initial-placements/retry",
+            ("POST",),
+            "story_arc_catalog_initial_placements_retry",
+            "story_arc_catalog_initial_placements_retry",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/catalog-refresh",
+            ("GET",),
+            "story_arc_catalog_refresh_preview",
+            "story_arc_catalog_refresh_preview",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/catalog-refresh",
+            ("POST",),
+            "story_arc_catalog_refresh",
+            "story_arc_catalog_refresh",
+        ),
         ("/story-arcs", ("GET",), "story_arc_list", "story_arc_list"),
         ("/story-arcs", ("POST",), "story_arc_create", "story_arc_create"),
         (
@@ -303,6 +339,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             ("POST",),
             "story_arc_edit",
             "story_arc_edit",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/search",
+            ("POST",),
+            "story_arc_search",
+            "story_arc_search",
         ),
         (
             "/story-arcs/{story_arc_id}/memberships",

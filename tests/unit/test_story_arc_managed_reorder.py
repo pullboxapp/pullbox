@@ -166,6 +166,132 @@ def test_pending_coordinator_query_compiles_for_sqlite_and_postgresql() -> None:
     assert "LIMIT" in postgres_sql.upper()
 
 
+async def test_original_filename_reorder_changes_only_the_leading_order(
+    reorder_db: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    arc_id, membership_ids, canonicals, original_targets = await _seed_reorder_arc(
+        reorder_db, tmp_path, file_template="{ReadingOrder:02d} - {OriginalFilename}"
+    )
+    before = [
+        (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino) for path in canonicals
+    ]
+    service = StoryArcManagedReorderService()
+    async with reorder_db() as session:
+        arc = await session.get(StoryArc, arc_id)
+        assert arc is not None
+        preview = await service.preview_adjacent_move(
+            session, arc_id, membership_ids[0], direction="down", expected_revision=arc.revision
+        )
+    async with reorder_db() as session:
+        await service.confirm_adjacent_move(
+            session,
+            story_arc_id=arc_id,
+            membership_id=membership_ids[0],
+            direction="down",
+            expected_revision=preview.expected_revision,
+            preview_token=preview.preview_token,
+        )
+
+    assert original_targets[0].name == f"01 - {canonicals[0].name}"
+    assert original_targets[1].name == f"02 - {canonicals[1].name}"
+    assert original_targets[0].with_name(f"02 - {canonicals[0].name}").read_bytes() == before[0][0]
+    assert original_targets[1].with_name(f"01 - {canonicals[1].name}").read_bytes() == before[1][0]
+    assert not original_targets[0].exists()
+    assert not original_targets[1].exists()
+    assert [
+        (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino) for path in canonicals
+    ] == before
+
+
+async def test_original_filename_reorder_does_not_require_unacquired_member_files(
+    reorder_db: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    async with reorder_db() as session:
+        root = LibraryRoot(name="Comics", path=str(tmp_path), enabled=True)
+        arc = StoryArc(name="Future Arc", source_kind=StoryArcSourceKind.PULLBOX)
+        first = IssueStoryArc(
+            story_arc=arc,
+            sequence_number=1,
+            source_ordinal=1,
+            source_issue_number_text="1",
+            resolution_state=StoryArcResolutionState.MISSING,
+        )
+        second = IssueStoryArc(
+            story_arc=arc,
+            sequence_number=2,
+            source_ordinal=2,
+            source_issue_number_text="2",
+            resolution_state=StoryArcResolutionState.MISSING,
+        )
+        session.add_all([root, first, second])
+        await session.commit()
+        arc_id, first_id, second_id, root_id = arc.id, first.id, second.id, root.id
+    async with reorder_db() as session:
+        policy = await StoryArcPlacementSyncService().update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=StoryArcPlacementPolicyInput(
+                mode=StoryArcPlacementPolicyMode.COPY,
+                target_library_root_id=root_id,
+                destination_root=str(tmp_path),
+                file_template="{ReadingOrder:02d} - {OriginalFilename}",
+                synchronize=True,
+            ),
+        )
+    service = StoryArcManagedReorderService()
+    async with reorder_db() as session:
+        preview = await service.preview_adjacent_move(
+            session, arc_id, first_id, direction="down", expected_revision=policy.revision
+        )
+    async with reorder_db() as session:
+        await service.confirm_adjacent_move(
+            session,
+            story_arc_id=arc_id,
+            membership_id=first_id,
+            direction="down",
+            expected_revision=preview.expected_revision,
+            preview_token=preview.preview_token,
+        )
+    async with reorder_db() as session:
+        ordered_ids = list(
+            await session.scalars(
+                select(IssueStoryArc.id)
+                .where(IssueStoryArc.story_arc_id == arc_id)
+                .order_by(IssueStoryArc.sequence_number)
+            )
+        )
+    assert ordered_ids == [second_id, first_id]
+
+
+async def test_original_filename_reorder_reports_changed_canonical_format_safely(
+    reorder_db: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    arc_id, membership_ids, canonicals, original_targets = await _seed_reorder_arc(
+        reorder_db, tmp_path, file_template="{ReadingOrder:02d} - {OriginalFilename}"
+    )
+    before = [
+        (path, path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (*canonicals, *original_targets)
+    ]
+    async with reorder_db() as session:
+        library_file = await session.scalar(select(LibraryFile).order_by(LibraryFile.id))
+        assert library_file is not None
+        library_file.file_format = FileFormat.CBR
+        await session.commit()
+        arc = await session.get(StoryArc, arc_id)
+        assert arc is not None
+        with pytest.raises(StoryArcManagedReorderError) as blocked:
+            await StoryArcManagedReorderService().preview_adjacent_move(
+                session, arc_id, membership_ids[0], direction="down", expected_revision=arc.revision
+            )
+    assert blocked.value.code == "original_filename_unsafe"
+    assert str(tmp_path) not in str(blocked.value)
+    assert [
+        (path, path.read_bytes(), path.stat().st_mtime_ns) for path, _bytes, _mtime in before
+    ] == before
+
+
 async def test_preview_then_confirm_excludes_unrelated_reference_from_result(
     reorder_db: async_sessionmaker[AsyncSession],
     tmp_path: Path,

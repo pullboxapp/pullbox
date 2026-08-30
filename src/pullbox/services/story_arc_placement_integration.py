@@ -26,6 +26,7 @@ from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
     StoryArcNamingValues,
+    StoryArcOriginalFilenameError,
     render_story_arc_relative_path,
     validate_story_arc_file_template,
     validate_story_arc_folder_template,
@@ -302,6 +303,7 @@ class _PlacementContext:
             start_year=self.series_start_year,
             end_year=self.series_end_year,
             extension=self.extension,
+            original_filename=Path(self.canonical_path).name if self.canonical_path else None,
         )
 
 
@@ -578,14 +580,19 @@ class StoryArcPlacementSyncService:
     ) -> StoryArcPlacementSyncResult:
         lock_key = (story_arc_id, membership_id)
         async with _membership_sync_lock(lock_key):
-            return await self._sync_membership_locked(
-                session,
-                story_arc_id,
-                membership_id,
-                adopt_identical_existing=adopt_identical_existing,
-                cancellation_requested=cancellation_requested,
-                import_provenance=import_provenance,
-            )
+            try:
+                return await self._sync_membership_locked(
+                    session,
+                    story_arc_id,
+                    membership_id,
+                    adopt_identical_existing=adopt_identical_existing,
+                    cancellation_requested=cancellation_requested,
+                    import_provenance=import_provenance,
+                )
+            except StoryArcOriginalFilenameError as exc:
+                raise StoryArcPlacementIntegrationError(
+                    "original_filename_unsafe", str(exc), category="safety"
+                ) from exc
 
     async def retry_placement(
         self,
@@ -1836,7 +1843,23 @@ def _rendered_target_paths(
     """Render only the targets represented by the already-bounded context page."""
     if policy.mode is StoryArcPlacementPolicyMode.LOGICAL or policy.destination_root is None:
         return {}
-    return {context.membership_id: _rendered_target_path(context, policy) for context in contexts}
+    return {
+        context.membership_id: target
+        for context in contexts
+        if (target := _rendered_preview_target_path(context, policy)) is not None
+    }
+
+
+def _rendered_preview_target_path(
+    context: _PlacementContext,
+    policy: StoryArcPlacementPolicy,
+) -> str | None:
+    try:
+        return _rendered_target_path(context, policy)
+    except StoryArcOriginalFilenameError:
+        # The filesystem inspection reports missing/unsafe canonical names as
+        # blocked rows, without guessing a filename before acquisition.
+        return None
 
 
 def _rendered_target_path(
@@ -1937,7 +1960,7 @@ def _preview_contexts(
             folder_template=policy.folder_template,
             file_template=policy.file_template,
         )
-        rendered_target = _rendered_target_path(context, policy)
+        rendered_target = _rendered_preview_target_path(context, policy)
         evidence = evidence_by_path.get(rendered_target) if rendered_target else None
         if evidence is not None and evidence.issue_story_arc_id != context.membership_id:
             items.append(_preview_destination_conflict(context, policy, evidence))

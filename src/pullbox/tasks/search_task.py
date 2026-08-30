@@ -70,6 +70,7 @@ from pullbox.services.search_service import (
     load_wanted_issue_search_targets,
 )
 from pullbox.services.search_source_selection import select_search_source
+from pullbox.services.story_arc_search_targets import load_story_arc_missing_search_targets
 from pullbox.services.wanted_search_sweep import (
     WantedSearchSweepState,
     checkpoint_wanted_search_items,
@@ -230,6 +231,7 @@ async def _ensure_pending_series_search_logs(
     *,
     series_id: int,
     existing_log_ids_by_issue: dict[int, int],
+    story_arc_id: int | None = None,
 ) -> dict[int, int]:
     """Expose missing bulk-search rows before a series search starts."""
 
@@ -250,8 +252,17 @@ async def _ensure_pending_series_search_logs(
             details={
                 "run_state": "running",
                 "action_status": "searching",
-                "task_id": f"search_series_{series_id}",
+                "task_id": (
+                    f"search_story_arc_{story_arc_id}"
+                    if story_arc_id is not None
+                    else f"search_series_{series_id}"
+                ),
                 "trigger_type": "automated",
+                **(
+                    {"story_arc_id": story_arc_id, "search_scope": "story_arc"}
+                    if story_arc_id is not None
+                    else {}
+                ),
             },
         )
         session.add(search_log)
@@ -402,6 +413,7 @@ async def _persist_series_search_outcome(
     runtime: SearchRuntime,
     download_svc: DownloadService,
     intervention_svc: InterventionService,
+    story_arc_id: int | None = None,
 ) -> tuple[int, int, int]:
     """Route and persist one completed series-search outcome."""
 
@@ -411,6 +423,21 @@ async def _persist_series_search_outcome(
         validator_kwargs=runtime.validator_kwargs,
     )
     target = primary_outcome.target
+
+    async def arc_eligible() -> bool:
+        assert story_arc_id is not None
+        return bool(
+            await load_story_arc_missing_search_targets(
+                session, story_arc_id, series_id=target.series_id, issue_ids=[target.issue_id]
+            )
+        )
+
+    if story_arc_id is not None and not await arc_eligible():
+        if pending_log_id is not None:
+            await _complete_pending_bulk_search_logs(
+                session, {target.issue_id: pending_log_id}, action_status="no_longer_eligible"
+            )
+        return 0, 0, 0
     issue_log = log.bind(issue_id=target.issue_id, issue_number=target.issue_number)
     issue_log.info(
         "search_series_issue_results",
@@ -479,6 +506,7 @@ async def _persist_series_search_outcome(
             runner=(get_direct_acquisition_runner() if runtime.direct_providers else None),
             source_priority=runtime.source_priority,
             planner=plan_direct_acquisition,
+            eligibility_check=arc_eligible if story_arc_id is not None else None,
         )
         issue_grabbed = routed.grabbed
         issue_queued = routed.queued
@@ -916,16 +944,22 @@ async def search_series_issues(
     series_id: int,
     *,
     pending_log_ids_by_issue: dict[int, int] | None = None,
+    story_arc_id: int | None = None,
+    issue_ids: list[int] | None = None,
 ) -> dict[str, int]:
-    """Search indexers for all wanted issues of a single series.
+    """Search wanted series issues, or an explicit bounded arc-member batch.
 
     Obtains its own DB session so it can be called from event subscribers
     and background tasks without sharing caller state.
+    An arc scope never widens to the rest of its parent series, and eligibility
+    is checked again after provider work before routing a download.
 
     Returns:
         Dict with ``wanted``, ``sent``, and ``queued`` counts.
     """
-    log = logger.bind(series_id=series_id)
+    if (story_arc_id is None) != (issue_ids is None):
+        raise ValueError("Arc-scoped searches require both the arc and its issue-ID batch")
+    log = logger.bind(series_id=series_id, story_arc_id=story_arc_id)
     log.info("search_series_issues_start")
     remaining_pending_log_ids = dict(pending_log_ids_by_issue or {})
 
@@ -958,7 +992,13 @@ async def search_series_issues(
                 log.warning("search_series_issues_not_found")
                 return {"wanted": 0, "sent": 0, "queued": 0}
 
-            targets = await load_series_wanted_search_targets(session, series_id)
+            targets = (
+                await load_series_wanted_search_targets(session, series_id)
+                if story_arc_id is None
+                else await load_story_arc_missing_search_targets(
+                    session, story_arc_id, series_id=series_id, issue_ids=issue_ids
+                )
+            )
             if not targets:
                 if remaining_pending_log_ids:
                     await _complete_pending_bulk_search_logs(
@@ -974,6 +1014,7 @@ async def search_series_issues(
                 targets,
                 series_id=series_id,
                 existing_log_ids_by_issue=remaining_pending_log_ids,
+                story_arc_id=story_arc_id,
             )
             preload_ms = int((time.monotonic() - preload_started_at) * 1000)
             log.info(
@@ -1013,6 +1054,20 @@ async def search_series_issues(
                 routing_started_at = time.monotonic()
                 # Preserve provider health even if downstream routing rolls back.
                 await session.commit()
+                if story_arc_id is not None:
+                    current = await load_story_arc_missing_search_targets(
+                        session, story_arc_id, series_id=series_id, issue_ids=[issue_id]
+                    )
+                    if not current:
+                        pending_id = remaining_pending_log_ids.pop(issue_id, None)
+                        if pending_id is not None:
+                            await _complete_pending_bulk_search_logs(
+                                session,
+                                {issue_id: pending_id},
+                                action_status="no_longer_eligible",
+                            )
+                        processed_issue_ids.add(issue_id)
+                        return
                 issue_sent, issue_queued, issue_failed = await _persist_series_search_outcome(
                     session,
                     log=log,
@@ -1022,6 +1077,7 @@ async def search_series_issues(
                     runtime=runtime,
                     download_svc=download_svc,
                     intervention_svc=intervention_svc,
+                    story_arc_id=story_arc_id,
                 )
                 sent += issue_sent
                 queued += issue_queued

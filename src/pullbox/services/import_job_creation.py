@@ -26,6 +26,7 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
+from pullbox.services.import_referenced_sources import load_mylar_in_place_root
 from pullbox.services.import_root_policy_activation import (
     apply_future_root_policy_to_ingest_policy,
     build_future_root_policy_snapshot,
@@ -66,14 +67,15 @@ async def create_job(
     """Create an import job record without starting scan execution."""
     resolved_target_library_root_id = request.target_library_root_id
     if request.file_handling_mode == ImportFileHandlingMode.IN_PLACE:
-        if request.source_type != ImportSourceType.FILESYSTEM:
-            raise ValidationError("In-place import currently requires a filesystem library source.")
         try:
-            root, _ = await resolve_referenced_source_root(
-                session,
-                Path(request.source_path),
-                request.target_library_root_id,
-            )
+            if request.source_type == ImportSourceType.MYLAR3:
+                root = await load_mylar_in_place_root(session, request.target_library_root_id)
+            else:
+                root, _ = await resolve_referenced_source_root(
+                    session,
+                    Path(request.source_path),
+                    request.target_library_root_id,
+                )
         except ReferencedFileValidationError as exc:
             raise ValidationError(exc.message) from exc
         resolved_target_library_root_id = root.id

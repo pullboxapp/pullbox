@@ -313,6 +313,96 @@ class TestStoryArcManagementUI:
         oversized = await authenticated_client.get("/story-arcs?per_page=101")
         assert oversized.status_code == 422
 
+    @pytest.mark.parametrize(
+        ("prefix", "expected_template"),
+        [(False, "{OriginalFilename}"), (True, "{ReadingOrder:02d} - {OriginalFilename}")],
+    )
+    async def test_create_arc_selects_source_preserving_copy_policy(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        prefix: bool,
+        expected_template: str,
+    ) -> None:
+        async with sec_db() as session:
+            root = LibraryRoot(name="Arc library", path=str(tmp_path), enabled=True)
+            session.add(root)
+            await session.commit()
+            root_id = root.id
+        destination = tmp_path / "Story Arcs"
+        destination.mkdir()
+        form = {
+            "name": "New copy arc",
+            "mode": "copy",
+            "target_library_root_id": str(root_id),
+            "destination_root": str(destination),
+            "filename_style": "original",
+            "reading_order_width": "2",
+            "synchronize": "true",
+        }
+        if prefix:
+            form["prefix_reading_order"] = "true"
+        response = await authenticated_client.post(
+            "/story-arcs",
+            data=form,
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        async with sec_db() as session:
+            arc = (
+                await session.scalars(select(StoryArc).where(StoryArc.name == form["name"]))
+            ).one()
+            assert arc.target_library_root_id == root_id
+            assert arc.policy_snapshot["mode"] == "copy"
+            assert arc.policy_snapshot["file_template"] == expected_template
+            assert arc.policy_snapshot["destination_root"] == str(destination)
+            assert arc.sync_enabled is True
+            assert (await session.scalars(select(StoryArcPlacement))).all() == []
+        assert list(destination.iterdir()) == []
+
+        page = await authenticated_client.get("/story-arcs")
+        assert 'data-testid="story-arc-create-storage"' in page.text
+        assert 'name="prefix_reading_order"' in page.text
+        assert 'name="filename_style"' in page.text
+        assert "Original files stay in their series folders" in page.text
+
+    async def test_invalid_create_copy_destination_does_not_leave_an_arc(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        root_path = tmp_path / "library"
+        root_path.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        async with sec_db() as session:
+            root = LibraryRoot(name="Arc library", path=str(root_path), enabled=True)
+            session.add(root)
+            await session.commit()
+            root_id = root.id
+        response = await authenticated_client.post(
+            "/story-arcs",
+            data={
+                "name": "Invalid copy arc",
+                "mode": "copy",
+                "target_library_root_id": str(root_id),
+                "destination_root": str(outside),
+            },
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "error=" in response.headers["location"]
+        async with sec_db() as session:
+            assert (
+                await session.scalar(select(StoryArc.id).where(StoryArc.name == "Invalid copy arc"))
+                is None
+            )
+        assert list(outside.iterdir()) == []
+
     async def test_create_empty_arc_commits_and_redirects_to_detail(
         self,
         authenticated_client: AsyncClient,

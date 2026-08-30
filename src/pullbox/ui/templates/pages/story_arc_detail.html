@@ -183,6 +183,34 @@
     </dl>
   </header>
 
+  {% if story_arc.active %}
+    <section class="space-y-3" aria-label="Story Arc acquisition and provider changes">
+      <div class="flex flex-wrap gap-3">
+        <form action="/story-arcs/{{ story_arc.id }}/search" method="post" hx-post="/story-arcs/{{ story_arc.id }}/search" hx-swap="none">
+          <button type="submit" class="btn-primary">Search missing issues</button>
+        </form>
+        {% if story_arc.comicvine_id %}<a href="/story-arcs/{{ story_arc.id }}/catalog-refresh" class="btn-secondary">Review provider changes</a>{% endif %}
+      </div>
+      <p class="text-sm text-pb-text-sec">Search uses resolved canonical issues in this arc, respects explicit skips, and doesn't change series monitoring. Open an issue to choose a release manually.</p>
+      {% if story_arc.catalog_removed_count or story_arc.catalog_added_review_count %}
+        <p role="status" class="text-sm text-pb-text-sec">At last provider refresh: {{ story_arc.catalog_added_review_count }} new members added for review; {{ story_arc.catalog_removed_count }} no longer listed by Comic Vine but preserved here. Review pending members below before synchronization.</p>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  {% if story_arc.initial_placements %}
+    <section data-testid="story-arc-initial-placements" aria-labelledby="initial-placements-heading" class="space-y-3 rounded-lg border border-pb-border bg-pb-card p-4">
+      <h2 id="initial-placements-heading" class="text-lg font-semibold text-pb-text">Initial arc files</h2>
+      <p role="status" class="text-sm text-pb-text-sec">{{ story_arc.initial_placements.state|title }}: {{ story_arc.initial_placements.completed }} completed · {{ story_arc.initial_placements.failed }} failed · {{ story_arc.initial_placements.pending }} pending ({{ story_arc.initial_placements.total }} total)</p>
+      <p class="text-sm text-pb-text-sec">This is the storage chosen when adding the arc, independent of future synchronization. Canonical originals stay unchanged. Refresh this page for current counts.</p>
+      {% if story_arc.active and (story_arc.initial_placements.pending or story_arc.initial_placements.failed) %}
+        <form action="/story-arcs/{{ story_arc.id }}/initial-placements/retry" method="post">
+          <button type="submit" class="btn-secondary">Retry initial arc files</button>
+        </form>
+      {% endif %}
+    </section>
+  {% endif %}
+
   <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
     <section aria-labelledby="story-arc-order-heading" class="space-y-4">
       <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
@@ -225,6 +253,7 @@
                   <p class="mt-1 text-sm text-pb-text-sec">
                     Canonical state: <span class="font-medium text-pb-text">{{ membership.canonical_state }}</span>
                   </p>
+                  {% if membership.issue_id %}<a href="/issues/{{ membership.issue_id }}" class="mt-2 inline-block text-sm text-pb-interactive hover:underline">Open issue / manual search</a>{% endif %}
                 </div>
 
                 {% if story_arc.active %}
@@ -265,6 +294,15 @@
                 <div class="mt-4 grid gap-3 border-t border-pb-border pt-4 lg:grid-cols-[minmax(0,1fr)_auto]">
                   {% if membership.can_resolve %}
                     <div class="space-y-3">
+                      {% if membership.issue_id and membership.resolution_state == 'pending' %}
+                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" class="space-y-2">
+                          <input type="hidden" name="issue_id" value="{{ membership.issue_id }}">
+                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                          <p class="text-sm text-pb-text-sec">Added by provider refresh; review its identity and reading order before enabling synchronization.</p>
+                          <button type="submit" class="btn-secondary">Confirm this member</button>
+                        </form>
+                      {% endif %}
                       <form
                         action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/local-issues"
                         method="get"

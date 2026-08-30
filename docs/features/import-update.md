@@ -4,6 +4,13 @@ This guide describes the v1.3 feature-branch testing candidate. It is not a
 production release announcement. Test with a separate Pullbox database and
 library, and keep a backup of the source library and any Mylar database.
 
+The earlier fully validated checkpoint is `09f306b`. The current candidate also
+includes Mylar in-place adoption, original-filename arc copies, and Comic Vine
+Story Arc discovery. Live provider, Python, browser, accessibility, static,
+security, and isolated Docker smoke checks passed for the completion work.
+Those checks support feature testing, not production release approval or formal
+large-library certification.
+
 ## Included behavior
 
 Import Step 1 separates three decisions:
@@ -20,18 +27,72 @@ Import Step 1 separates three decisions:
 
 Folder context can supply the series identity when a filename contains only an
 issue number. Issue titles in filenames and publisher/series nesting are also
-supported. Embedded ComicInfo or MetronInfo and supported series sidecars remain
+supported. Embedded ComicInfo and supported series sidecars remain
 matching evidence, with conflicts kept visible for review.
+
+MetronInfo parsing and matching are deferred to the metadata-provider release.
 
 Mylar imports include series, issues, Story Arc evidence, and
 existing arc-file references. Logical Story Arc import and optional separate
 arc-file materialization are independent choices. Step 3 remains the final
 review before anything is registered or created.
 
+Mylar in-place import requires selecting an existing enabled library root in
+Step 1. The Mylar database may be outside that root; mapped comic paths determine
+eligibility. Missing, unsafe, changed, or outside-root files stay visible for
+review instead of silently switching to a copy. Rollback detaches adopted files
+without deleting the originals, and trusted Mylar imports make no provider calls.
+
 Story Arcs use the same canonical issues as the library. They support ordered
 memberships, local issue selection, monitoring, and optional separate managed
 copies or links with reading-order filename prefixes. Existing user-owned arc
 files remain references. Canonical files are not moved into an arc directory.
+
+When creating an arc, choose its storage policy and an existing destination
+directory inside the selected library root. Copy mode creates independent extra
+files. New arc naming defaults to the canonical filename, with an optional
+two-digit leading order such as `01 - Batman 001.cbz`; padding and advanced
+templates remain configurable. Existing saved policies do not change.
+Synchronization applies the chosen policy to later acquisitions.
+
+## Discovering and adding Story Arcs
+
+On **Story Arcs**, use **Find a Story Arc on Comic Vine**. Results appear inline;
+already-added arcs link to the existing library entry. Preview the members,
+review their order, choose the library root for any new parent series, and set
+the arc's independent monitoring and optional storage choices before confirming.
+
+Comic Vine's returned list is **not a verified reading order**. Pullbox preserves
+the provider's original ordinal as evidence and lets you choose the actual
+sequence, including any leading filename numbers. Its often-zero issue counter
+is not treated as an empty arc: the explicit returned member list and exact
+issue hydration determine whether the preview can be added. Partial or
+inconsistent provider responses cannot create a partial arc.
+
+Existing canonical series and issues retain their paths, monitoring, metadata,
+and files. New parent series get their normal canonical folders in the selected
+root; only the required arc issues are seeded, not the entire parent catalog.
+Arc copies are additional files. Initial copies of available issues are separate
+from the future-synchronization choice; failures remain visible and can be
+retried without overwriting user-owned files.
+
+**Search missing issues** is scoped to resolved missing members of that arc.
+It respects explicit issue skips, existing files/downloads, pending intervention,
+and the upcoming option; it does not monitor the parent series. Individual
+members link to the canonical issue page for manual result selection. Automatic
+search-on-add also respects the global setting. Shared matching, download,
+cooldown, and post-processing behavior remains in use.
+
+**Review provider changes** previews refreshes before confirmation. Existing
+user metadata/order and storage policy remain unchanged. Newly returned members
+start pending review and cannot search or synchronize until resolved; provider
+removals are reported without deleting local members or files. Imported arcs
+without a saved canonical root require an explicit root choice for new series.
+This choice does not relocate existing series or arc files.
+
+The guarded signed development-image workflow and isolated tester instructions
+are described in [Signed development images](../development/DEVELOPMENT_IMAGES.md).
+Local workflow tests are not evidence that an image has been published.
 
 ## Scanner performance boundary
 
@@ -87,6 +148,17 @@ Start with a disposable representative sample before trying a complete library.
 - Create a Story Arc, add local issues, reorder them through the preview and
   confirmation flow, and check the optional reading-order filename prefixes.
   Canonical issue files and referenced arc files must remain untouched.
+- Search Comic Vine for an event, review/edit its returned order, and add it.
+  Confirm that existing parent series keep their monitoring and paths, and new
+  parent series use the selected canonical root. Repeat a provider search and
+  check that the arc is shown as already added.
+- Add an arc with copy mode and future synchronization disabled. Confirm that
+  available issues still receive initial copies and source hashes stay unchanged.
+  Test a destination collision: it must report a failure, not overwrite a file.
+- Review a provider refresh. New members must remain pending until approved;
+  existing order, manually skipped members, and provider-removed members stay
+  intact. Search missing issues and verify that unrelated parent-series issues
+  are not acquired.
 - Test a special or large issue number and confirm that the displayed and
   searched number does not change to scientific notation.
 - Cancel an import during discovery and during execution. Confirm that progress
