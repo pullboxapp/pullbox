@@ -6,10 +6,12 @@ shared across imports, downloader post-processing, and library utilities.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from pullbox.core.config_resolver import load_system_config_values, parse_bool
+from pullbox.core.exceptions import ConfigurationError
+from pullbox.models.library import LibraryRootPolicy, LibraryRootPolicySource
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -29,6 +31,14 @@ class LibraryNamingPolicy:
     single_non_standard_file_template: str
     replace_illegal_characters: bool
     colon_replacement: str
+    series_path_template: str = field(default="", kw_only=True)
+    policy_source: LibraryRootPolicySource = field(
+        default=LibraryRootPolicySource.GLOBAL_DEFAULT,
+        kw_only=True,
+    )
+    root_policy_id: int | None = field(default=None, kw_only=True)
+    policy_revision: int = field(default=0, kw_only=True)
+    source_import_job_id: int | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +101,20 @@ def library_ingest_policy_from_snapshot(
             ),
             replace_illegal_characters=parse_bool(snapshot["replace_illegal_characters"]),
             colon_replacement=_snapshot_text(snapshot, "colon_replacement"),
+            series_path_template=str(
+                snapshot["series_path_template"]
+                if "series_path_template" in snapshot
+                else snapshot["series_folder_template"]
+            ),
+            policy_source=LibraryRootPolicySource(
+                str(snapshot.get("policy_source", LibraryRootPolicySource.GLOBAL_DEFAULT))
+            ),
+            root_policy_id=_optional_snapshot_int(snapshot, "root_policy_id"),
+            policy_revision=int(snapshot.get("policy_revision", 0)),
+            source_import_job_id=_optional_snapshot_int(
+                snapshot,
+                "source_import_job_id",
+            ),
             post_processing_method=_snapshot_text(snapshot, "post_processing_method"),
             torrent_import_strategy=_snapshot_text(snapshot, "torrent_import_strategy"),
             normalize_imported_archives_to_cbz=parse_bool(
@@ -112,6 +136,11 @@ def _snapshot_text(snapshot: Mapping[str, Any], key: str) -> str:
     return str(value)
 
 
+def _optional_snapshot_int(snapshot: Mapping[str, Any], key: str) -> int | None:
+    value = snapshot.get(key)
+    return None if value is None else int(value)
+
+
 def _library_naming_policy_from_configs(configs: Mapping[str, str]) -> LibraryNamingPolicy:
     """Build the naming-policy portion from already-loaded config values."""
     return LibraryNamingPolicy(
@@ -123,6 +152,7 @@ def _library_naming_policy_from_configs(configs: Mapping[str, str]) -> LibraryNa
         single_non_standard_file_template=configs["single_non_standard_file_template"],
         replace_illegal_characters=parse_bool(configs["replace_illegal_characters"]),
         colon_replacement=configs["colon_replacement"],
+        series_path_template=configs["series_folder_template"],
     )
 
 
@@ -154,7 +184,66 @@ async def load_library_ingest_policy(session: AsyncSession) -> LibraryIngestPoli
         update_embedded_comicinfo_from_match=parse_bool(
             configs["update_embedded_comicinfo_from_match_on_import"]
         ),
+        series_path_template=naming.series_path_template,
     )
+
+
+async def load_effective_library_ingest_policy(
+    session: AsyncSession,
+    root: object,
+) -> LibraryIngestPolicy:
+    """Load one root's complete naming policy plus global ingest behavior."""
+    from sqlalchemy import select
+
+    root_id = getattr(root, "id", root)
+    if not isinstance(root_id, int) or root_id < 1:
+        raise ConfigurationError("A persisted library root is required to resolve naming policy.")
+
+    global_policy = await load_library_ingest_policy(session)
+    result = await session.execute(
+        select(LibraryRootPolicy).where(LibraryRootPolicy.library_root_id == root_id)
+    )
+    stored = result.scalar_one_or_none()
+    if stored is None:
+        return global_policy
+
+    _validate_stored_root_policy(stored)
+    return replace(
+        global_policy,
+        series_folder_template=stored.series_path_template,
+        comic_file_template=stored.comic_file_template,
+        annual_file_template=stored.annual_file_template,
+        non_standard_file_template=stored.non_standard_file_template,
+        single_non_standard_file_template=stored.single_non_standard_file_template,
+        replace_illegal_characters=stored.replace_illegal_characters,
+        colon_replacement=stored.colon_replacement,
+        series_path_template=stored.series_path_template,
+        policy_source=stored.source,
+        root_policy_id=stored.id,
+        policy_revision=stored.revision,
+        source_import_job_id=stored.source_import_job_id,
+    )
+
+
+def _validate_stored_root_policy(policy: LibraryRootPolicy) -> None:
+    """Reject incomplete or unsupported persisted policies on every read."""
+    if policy.schema_version != 1:
+        raise ConfigurationError(
+            f"Unsupported library root policy schema version: {policy.schema_version}"
+        )
+    templates = (
+        policy.series_path_template,
+        policy.comic_file_template,
+        policy.annual_file_template,
+        policy.non_standard_file_template,
+        policy.single_non_standard_file_template,
+    )
+    if any(not value.strip() for value in templates):
+        raise ConfigurationError("Library root policy templates must be complete.")
+    if policy.colon_replacement not in {"dash", "space", "empty", "smart"}:
+        raise ConfigurationError("Library root policy has an invalid colon replacement.")
+    if policy.revision < 1:
+        raise ConfigurationError("Library root policy revision must be positive.")
 
 
 async def load_search_on_add_default(session: AsyncSession) -> bool:

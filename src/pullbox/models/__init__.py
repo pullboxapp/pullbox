@@ -51,7 +51,14 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.indexer import IndexerConfig, IndexerSource, IndexerType
 from pullbox.models.issue import Issue, IssueStatus, IssueType
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryRoot,
+    LibraryRootPolicy,
+    LibraryRootPolicySource,
+    MatchConfidence,
+)
 from pullbox.models.matching_suggestion import MatchingSuggestion, SuggestionStatus
 from pullbox.models.operation_progress import (
     OperationProgress,
@@ -149,6 +156,8 @@ __all__ = [
     "JobType",
     "LibraryFile",
     "LibraryRoot",
+    "LibraryRootPolicy",
+    "LibraryRootPolicySource",
     "LogLevel",
     "MatchConfidence",
     "MatchingSuggestion",

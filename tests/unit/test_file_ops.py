@@ -28,6 +28,8 @@ from pullbox.models.library import (
     LibraryFile,
     LibraryFileStorageMode,
     LibraryRoot,
+    LibraryRootPolicy,
+    LibraryRootPolicySource,
     MatchConfidence,
 )
 from pullbox.models.publisher import Publisher
@@ -1705,6 +1707,60 @@ class TestSeriesFolderCreation:
         assert (
             lf.naming_snapshot["templates"]["comic_file_template"]
             == "{Series} ({Year}) #{Issue:03d}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_registration_uses_effective_root_policy_for_new_series(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        source_file: Path,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+
+        root = (
+            await session.execute(
+                select(LibraryRoot).where(LibraryRoot.path == str(comics_dir_config))
+            )
+        ).scalar_one()
+        root_policy = LibraryRootPolicy(
+            library_root_id=root.id,
+            schema_version=1,
+            series_path_template="{Publisher}/{Series} ({Year})",
+            comic_file_template="{Series} {IssueTitle} Issue {Issue:03d}",
+            annual_file_template="{Series} Annual Issue {Issue:03d}",
+            non_standard_file_template=("{Series} {Type} {Volume:02d} - {IssueTitle}"),
+            single_non_standard_file_template="{Series} {Type} - {IssueTitle}",
+            replace_illegal_characters=True,
+            colon_replacement="dash",
+            source=LibraryRootPolicySource.MANUAL,
+            revision=1,
+        )
+        session.add(root_policy)
+        await session.flush()
+
+        library_file = await register_library_file(
+            session,
+            source_file,
+            issue,
+            MatchConfidence.HIGH,
+            move_to_library=True,
+            rename=True,
+        )
+
+        final_path = Path(library_file.file_path)
+        assert final_path.parent == comics_dir_config / "DC Comics" / "Batman (2024)"
+        assert final_path.name == "Batman The Brave and the Bold Issue 017.cbz"
+        assert library_file.naming_snapshot["root_policy"] == {
+            "id": root_policy.id,
+            "source": "manual",
+            "revision": 1,
+            "source_import_job_id": None,
+        }
+        assert (
+            library_file.naming_snapshot["templates"]["series_path_template"]
+            == "{Publisher}/{Series} ({Year})"
         )
 
 

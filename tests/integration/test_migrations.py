@@ -823,6 +823,99 @@ class TestMigrationChain:
 
         assert "storage_mode" in _get_columns(sync_url, "library_files")
 
+    def test_library_root_policy_migration_is_unique_and_does_not_backfill(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Existing roots retain global fallback until an explicit policy is saved."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "x9y0z1a2b345")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO library_roots "
+                        "(name, path, enabled, created_at, updated_at) "
+                        "VALUES ('Existing', '/library/existing', 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    )
+                )
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            columns = {
+                column["name"]: column for column in inspector.get_columns("library_root_policies")
+            }
+            unique_constraints = inspector.get_unique_constraints("library_root_policies")
+            with engine.begin() as conn:
+                root_id = conn.execute(
+                    text("SELECT id FROM library_roots WHERE name = 'Existing'")
+                ).scalar_one()
+                assert (
+                    conn.execute(text("SELECT COUNT(*) FROM library_root_policies")).scalar_one()
+                    == 0
+                )
+                values = {
+                    "root_id": root_id,
+                    "series_path": "{Publisher}/{Series} ({Year})",
+                    "comic": "{Series} {IssueTitle} Issue {Issue:03d}",
+                    "annual": "{Series} Annual Issue {Issue:03d}",
+                    "non_standard": "{Series} {Type} {Volume:02d} - {IssueTitle}",
+                    "single": "{Series} {Type} - {IssueTitle}",
+                }
+                insert = text(
+                    "INSERT INTO library_root_policies ("
+                    "library_root_id, schema_version, series_path_template, "
+                    "comic_file_template, annual_file_template, "
+                    "non_standard_file_template, single_non_standard_file_template, "
+                    "replace_illegal_characters, colon_replacement, source, revision, "
+                    "created_at, updated_at) VALUES ("
+                    ":root_id, 1, :series_path, :comic, :annual, :non_standard, :single, "
+                    "1, 'dash', 'manual', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+                conn.execute(insert, values)
+                with pytest.raises(IntegrityError):
+                    conn.execute(insert, values)
+        finally:
+            engine.dispose()
+
+        assert set(columns) == {
+            "id",
+            "library_root_id",
+            "schema_version",
+            "series_path_template",
+            "comic_file_template",
+            "annual_file_template",
+            "non_standard_file_template",
+            "single_non_standard_file_template",
+            "replace_illegal_characters",
+            "colon_replacement",
+            "source",
+            "source_import_job_id",
+            "revision",
+            "created_at",
+            "updated_at",
+        }
+        assert columns["source_import_job_id"]["nullable"] is True
+        assert any(
+            constraint["column_names"] == ["library_root_id"] for constraint in unique_constraints
+        )
+
+        command.downgrade(cfg, "x9y0z1a2b345")
+        engine = create_engine(sync_url)
+        try:
+            assert "library_root_policies" not in inspect(engine).get_table_names()
+        finally:
+            engine.dispose()
+        command.upgrade(cfg, "head")
+
     def test_naming_snapshot_migration_backfills_series_path(self, alembic_cfg) -> None:
         """Existing library files materialize missing series folder paths."""
         cfg, sync_url = alembic_cfg

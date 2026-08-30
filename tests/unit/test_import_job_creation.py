@@ -14,7 +14,11 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSourceType,
 )
-from pullbox.models.library import LibraryRoot
+from pullbox.models.library import (
+    LibraryRoot,
+    LibraryRootPolicy,
+    LibraryRootPolicySource,
+)
 from pullbox.schemas.import_job import FutureRootPolicyPayload, ImportJobCreate, ImportJobRead
 from pullbox.schemas.import_layout import SourceLayoutSpecPayload
 from pullbox.services.import_job_creation import create_job
@@ -94,6 +98,48 @@ async def test_create_job_uses_global_search_on_add_and_logs_event(
             },
         )
     ]
+
+
+async def test_create_job_freezes_selected_root_policy(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "library"
+    root_path.mkdir()
+    root = LibraryRoot(name="Publisher layout", path=str(root_path), enabled=True)
+    root_policy = LibraryRootPolicy(
+        library_root=root,
+        schema_version=1,
+        series_path_template="{Publisher}/{Series} ({Year})",
+        comic_file_template="{Series} {IssueTitle} Issue {Issue:03d}",
+        annual_file_template="{Series} Annual Issue {Issue:03d}",
+        non_standard_file_template="{Series} {Type} {Volume:02d} - {IssueTitle}",
+        single_non_standard_file_template="{Series} {Type} - {IssueTitle}",
+        replace_illegal_characters=True,
+        colon_replacement="dash",
+        source=LibraryRootPolicySource.MANUAL,
+        revision=3,
+    )
+    db_session.add_all([root, root_policy])
+    await db_session.flush()
+
+    job = await create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(tmp_path),
+            source_type=ImportSourceType.FILESYSTEM,
+            target_library_root_id=root.id,
+        ),
+        log_event=_log_event,
+    )
+
+    assert job.ingest_policy_snapshot["series_path_template"] == ("{Publisher}/{Series} ({Year})")
+    assert job.ingest_policy_snapshot["comic_file_template"] == (
+        "{Series} {IssueTitle} Issue {Issue:03d}"
+    )
+    assert job.ingest_policy_snapshot["root_policy_id"] == root_policy.id
+    assert job.ingest_policy_snapshot["policy_source"] == "manual"
+    assert job.ingest_policy_snapshot["policy_revision"] == 3
 
 
 async def test_create_job_rejects_conflicting_compat_search_on_add(

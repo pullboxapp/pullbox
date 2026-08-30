@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     Float,
     ForeignKey,
     Index,
@@ -49,6 +50,14 @@ class LibraryFileStorageMode(enum.StrEnum):
 
     MANAGED = "managed"
     REFERENCED = "referenced"
+
+
+class LibraryRootPolicySource(enum.StrEnum):
+    """Origin of an explicit complete naming policy for one library root."""
+
+    GLOBAL_DEFAULT = "global_default"
+    IMPORT_ADOPTION = "import_adoption"
+    MANUAL = "manual"
 
 
 class LibraryFile(Base, IdentityMixin, TimestampMixin):
@@ -122,3 +131,44 @@ class LibraryRoot(Base, IdentityMixin, TimestampMixin):
         back_populates="library_root", cascade="all, delete-orphan"
     )
     series: Mapped[list[Series]] = relationship(back_populates="library_root")
+    naming_policy: Mapped[LibraryRootPolicy | None] = relationship(
+        back_populates="library_root",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class LibraryRootPolicy(Base, IdentityMixin, TimestampMixin):
+    """Complete explicit naming policy owned by exactly one library root."""
+
+    __tablename__ = "library_root_policies"
+
+    library_root_id: Mapped[int] = mapped_column(
+        ForeignKey("library_roots.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    series_path_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    comic_file_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    annual_file_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    non_standard_file_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    single_non_standard_file_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    replace_illegal_characters: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    colon_replacement: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[LibraryRootPolicySource] = mapped_column(
+        SQLAlchemyEnum(
+            LibraryRootPolicySource,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+            create_constraint=True,
+        ),
+        nullable=False,
+    )
+    source_import_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    library_root: Mapped[LibraryRoot] = relationship(back_populates="naming_policy")

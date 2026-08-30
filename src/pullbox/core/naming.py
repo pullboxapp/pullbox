@@ -590,7 +590,8 @@ def format_comic_file(
 
     Supported tokens:
         ``{Series}``, ``{Year}``, ``{Issue}``, ``{Issue:03d}``,
-        ``{Volume}``, ``{Volume:02d}``, ``{Type}``, ``{Title}``, ``{Publisher}``
+        ``{Volume}``, ``{Volume:02d}``, ``{Type}``, ``{IssueTitle}``,
+        ``{Title}``, ``{Publisher}``
 
     Args:
         series: Series title.
@@ -641,6 +642,7 @@ def format_comic_file(
     name = name.replace("{Series}", clean_series)
     name = name.replace("{Year}", year_str)
     name = name.replace("{Type}", type_display)
+    name = name.replace("{IssueTitle}", title_str)
     name = name.replace("{Title}", title_str)
     name = name.replace("{Publisher}", publisher_str)
     # Keep older saved templates from leaking the deprecated token literally.

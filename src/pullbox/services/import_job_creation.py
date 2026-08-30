@@ -13,7 +13,11 @@ from pullbox.core.library_file_ownership import (
     resolve_referenced_source_root,
 )
 from pullbox.core.library_layout import ImportLayoutMode, resolve_source_layout_spec
-from pullbox.core.library_policy import load_library_ingest_policy, load_search_on_add_default
+from pullbox.core.library_policy import (
+    load_effective_library_ingest_policy,
+    load_library_ingest_policy,
+    load_search_on_add_default,
+)
 from pullbox.models.import_job import (
     ImportControlRequest,
     ImportFileHandlingMode,
@@ -94,7 +98,14 @@ async def create_job(
         raise ValidationError("Search on add is now controlled by the global import policy.")
 
     monitored = request.monitored or search_on_add
-    ingest_policy = await load_library_ingest_policy(session)
+    ingest_policy = (
+        await load_effective_library_ingest_policy(
+            session,
+            resolved_target_library_root_id,
+        )
+        if resolved_target_library_root_id is not None
+        else await load_library_ingest_policy(session)
+    )
     source_layout_snapshot = resolve_source_layout_spec(request.source_layout.to_core()).to_dict()
 
     job = ImportJob(

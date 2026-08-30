@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, overload
 
 from sqlalchemy import func, select
@@ -17,6 +18,10 @@ from pullbox.core.naming import (
 )
 from pullbox.models.issue import Issue, IssueType, is_non_standard_issue_type
 from pullbox.models.series import Series
+
+_SERIES_PATH_TOKEN_RE = re.compile(r"\{(?P<name>[A-Za-z][A-Za-z0-9]*)\}")
+_SERIES_PATH_TOKENS = frozenset({"Publisher", "Series", "Year", "ComicVineId", "Type"})
+_MAX_SERIES_PATH_TEMPLATE_BYTES = 1024
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,6 +88,16 @@ def build_naming_snapshot(
             "id": root.id,
             "path": root.path,
         },
+        "root_policy": {
+            "id": getattr(naming_policy, "root_policy_id", None),
+            "source": str(getattr(naming_policy, "policy_source", "global_default")),
+            "revision": int(getattr(naming_policy, "policy_revision", 0)),
+            "source_import_job_id": getattr(
+                naming_policy,
+                "source_import_job_id",
+                None,
+            ),
+        },
         "series": series_payload,
         "issue": {
             "id": issue.id,
@@ -94,6 +109,20 @@ def build_naming_snapshot(
         },
         "template_key": template_key_for_issue_type(effective_issue_type),
         "templates": {
+            "series_path_template": policy_value(
+                naming_policy,
+                "series_path_template",
+                policy_value(
+                    naming_policy,
+                    "series_folder_template",
+                    "{Series} ({Year})",
+                ),
+            )
+            or policy_value(
+                naming_policy,
+                "series_folder_template",
+                "{Series} ({Year})",
+            ),
             "series_folder_template": policy_value(
                 naming_policy, "series_folder_template", "{Series} ({Year})"
             ),
@@ -184,6 +213,58 @@ def build_series_folder_name(
         replace_illegal=policy_bool(naming_policy, "replace_illegal_characters", True),
         colon_replacement=policy_value(naming_policy, "colon_replacement", "dash"),
     )
+
+
+def build_series_relative_path(
+    series: object,
+    naming_policy: LibraryIngestPolicy | dict[str, str],
+) -> Path:
+    """Render and sanitize every segment in a root-relative series path."""
+    from pathlib import Path
+
+    template = policy_value(
+        naming_policy,
+        "series_path_template",
+        policy_value(naming_policy, "series_folder_template", "{Series} ({Year})"),
+    ) or policy_value(naming_policy, "series_folder_template", "{Series} ({Year})")
+    if not template or len(template.encode("utf-8")) > _MAX_SERIES_PATH_TEMPLATE_BYTES:
+        raise ValueError("Series path template is empty or too long.")
+    if template.startswith(("/", "\\")) or "\\" in template:
+        raise ValueError("Series path template must be root-relative.")
+
+    raw_segments = template.split("/")
+    if any(segment in {"", ".", ".."} for segment in raw_segments):
+        raise ValueError("Series path template contains an unsafe segment.")
+
+    for matched in _SERIES_PATH_TOKEN_RE.finditer(template):
+        if matched.group("name") not in _SERIES_PATH_TOKENS:
+            raise ValueError(f"Unsupported series path token: {matched.group('name')}")
+    without_tokens = _SERIES_PATH_TOKEN_RE.sub("", template)
+    if "{" in without_tokens or "}" in without_tokens:
+        raise ValueError("Series path template contains an invalid token.")
+
+    rendered_segments = tuple(
+        build_series_folder_name(
+            series,
+            {
+                "series_folder_template": segment,
+                "replace_illegal_characters": str(
+                    policy_bool(naming_policy, "replace_illegal_characters", True)
+                ),
+                "colon_replacement": policy_value(
+                    naming_policy,
+                    "colon_replacement",
+                    "dash",
+                ),
+            },
+        )
+        for segment in raw_segments
+    )
+    if any("/" in segment or "\\" in segment for segment in rendered_segments):
+        raise ValueError("Series path token rendered an unsafe path separator.")
+    if any(segment in {"", ".", ".."} for segment in rendered_segments):
+        raise ValueError("Series path template rendered an unsafe segment.")
+    return Path(*rendered_segments)
 
 
 def compute_target_filename(

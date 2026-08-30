@@ -47,10 +47,8 @@ from pullbox.core.library_naming import (
     build_naming_snapshot as _build_naming_snapshot,
 )
 from pullbox.core.library_naming import (
-    build_series_folder_name as _build_series_folder_name,
-)
-from pullbox.core.library_naming import (
-    compute_target_filename as _compute_target_filename,
+    build_series_folder_name,
+    compute_target_filename,
 )
 from pullbox.core.library_naming import (
     resolve_naming_issue_type as _resolve_naming_issue_type,
@@ -58,7 +56,11 @@ from pullbox.core.library_naming import (
 from pullbox.core.library_permission_application import (
     apply_materialized_file_permissions as _apply_materialized_file_permissions,
 )
-from pullbox.core.library_policy import LibraryIngestPolicy, load_library_ingest_policy
+from pullbox.core.library_policy import (
+    LibraryIngestPolicy,
+    load_effective_library_ingest_policy,
+    load_library_ingest_policy,
+)
 from pullbox.core.library_root_resolution import materialize_series_path as _materialize_series_path
 from pullbox.core.library_root_resolution import path_is_inside_root as _path_is_inside_root
 from pullbox.core.library_root_resolution import resolve_library_root as _resolve_library_root
@@ -89,6 +91,9 @@ if TYPE_CHECKING:
     from pullbox.core.library_permission_engine import PermissionChangeResult
     from pullbox.core.library_permissions import LibraryPermissionPolicy
     from pullbox.models.download import DownloadClientType
+
+_build_series_folder_name = build_series_folder_name
+_compute_target_filename = compute_target_filename
 
 logger = structlog.get_logger(__name__)
 
@@ -180,9 +185,9 @@ async def resolve_library_destination(
     library_root_id: int | None = None,
 ) -> tuple[Path, LibraryRoot]:
     """Resolve the canonical library destination path for an issue/source pair."""
-    ingest_policy = await load_library_ingest_policy(session)
+    global_ingest_policy = await load_library_ingest_policy(session)
     if rename is None:
-        rename = ingest_policy.rename_on_import
+        rename = global_ingest_policy.rename_on_import
 
     loaded_issue = await _load_issue_with_series_and_publisher(session, issue)
     series = loaded_issue.series
@@ -193,24 +198,17 @@ async def resolve_library_destination(
         library_root_id,
         series=series,
     )
-    if isinstance(series, Series) and series.path:
-        series_folder = Path(series.path)
-    else:
-        series_folder = Path(root.path) / _build_series_folder_name(series, ingest_policy)
-
-    if rename:
-        effective_issue_type = await _resolve_naming_issue_type(session, loaded_issue)
-        target_name = _compute_target_filename(
-            loaded_issue,
-            series,
-            source_path,
-            ingest_policy,
-            issue_type_override=effective_issue_type,
-        )
-    else:
-        target_name = source_path.name
-
-    return series_folder / target_name, root
+    ingest_policy = await load_effective_library_ingest_policy(session, root)
+    target_path = await _predict_library_target_path(
+        session,
+        source_path,
+        loaded_issue,
+        series,
+        root,
+        ingest_policy,
+        bool(rename),
+    )
+    return target_path, root
 
 
 async def register_library_file(
@@ -448,6 +446,11 @@ async def register_library_file_with_metadata(
                     library_root_id,
                     series=series,
                 )
+                if ingest_policy is None:
+                    effective_ingest_policy = await load_effective_library_ingest_policy(
+                        session,
+                        root,
+                    )
             replace_existing_path = (
                 Path(effective_issue.library_file.file_path)
                 if replace_existing_library_file and effective_issue.library_file is not None

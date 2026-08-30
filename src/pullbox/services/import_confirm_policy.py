@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.core.library_policy import (
+    load_effective_library_ingest_policy,
     load_library_ingest_policy,
     load_search_on_add_default,
 )
@@ -30,7 +31,11 @@ async def apply_confirm_import_policy(
     if request.target_library_root_id is not None:
         job.target_library_root_id = request.target_library_root_id
 
-    ingest_policy = await load_library_ingest_policy(session)
+    ingest_policy = (
+        await load_effective_library_ingest_policy(session, job.target_library_root_id)
+        if job.target_library_root_id is not None
+        else await load_library_ingest_policy(session)
+    )
     search_on_add = await load_search_on_add_default(session)
     handling_mode = job.file_handling_mode or ImportFileHandlingMode.MANAGED_COPY
     if request.search_on_add is not None and request.search_on_add != search_on_add:
