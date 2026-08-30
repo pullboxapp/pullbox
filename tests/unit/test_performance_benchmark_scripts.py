@@ -138,11 +138,22 @@ def test_import_scan_benchmark_uses_trusted_folder_metadata_without_provider_cal
 
 
 def test_import_execute_benchmark_exits_cleanly() -> None:
-    report = _run_benchmark(_repo_root(), "scripts/benchmark_import_execute.py")
+    report = _run_benchmark(
+        _repo_root(),
+        "scripts/benchmark_import_execute.py",
+        "--report-sample-limit",
+        "1",
+        files_per_series=3,
+    )
 
     assert report["final_status"] == "completed"
     assert report["series_count"] == 1
-    assert report["files_per_series"] == 1
+    assert report["files_per_series"] == 3
+    assert report["library_file_count"] == 3
+    assert report["library_file_name_sample_limit"] == 1
+    assert len(cast("list[str]", report["library_file_name_samples"])) == 1
+    assert len(str(report["library_file_name_digest_sha256"])) == 64
+    assert "library_file_names" not in report
 
 
 def test_import_metadata_scale_benchmark_uses_no_archive_payloads_or_providers() -> None:
@@ -186,7 +197,7 @@ def test_import_execute_mixed_file_work_profile_uses_real_registration() -> None
     assert report["operation_progress_count"] == 1
     assert report["source_format_counts"] == {"cb7": 1, "cbr": 1, "cbz": 1}
     assert report["library_format_counts"] == {"cbz": 3}
-    library_file_names = cast("list[Any]", report["library_file_names"])
+    library_file_names = cast("list[Any]", report["library_file_name_samples"])
     assert all(str(name).endswith(".cbz") for name in library_file_names)
 
 
