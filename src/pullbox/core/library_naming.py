@@ -22,6 +22,23 @@ from pullbox.models.series import Series
 _SERIES_PATH_TOKEN_RE = re.compile(r"\{(?P<name>[A-Za-z][A-Za-z0-9]*)\}")
 _SERIES_PATH_TOKENS = frozenset({"Publisher", "Series", "Year", "ComicVineId", "Type"})
 _MAX_SERIES_PATH_TEMPLATE_BYTES = 1024
+_FILE_TEMPLATE_TOKEN_RE = re.compile(r"\{[^{}]+\}")
+_FILE_TEMPLATE_TOKENS = frozenset(
+    {
+        "{Series}",
+        "{Year}",
+        "{Issue}",
+        "{Issue:03d}",
+        "{Volume}",
+        "{Volume:02d}",
+        "{Type}",
+        "{IssueTitle}",
+        "{Title}",
+        "{Publisher}",
+        "{Edition}",
+    }
+)
+_MAX_FILE_TEMPLATE_BYTES = 1024
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -271,6 +288,21 @@ def validate_series_path_template(template: str) -> tuple[str, ...]:
     if "{" in without_tokens or "}" in without_tokens:
         raise ValueError("Series path template contains an invalid token.")
     return tuple(raw_segments)
+
+
+def validate_library_file_template(template: str) -> None:
+    """Reject unsupported or path-producing tokens in a file-name template."""
+    if not template or len(template.encode("utf-8")) > _MAX_FILE_TEMPLATE_BYTES:
+        raise ValueError("Library file template is empty or too long.")
+    if "/" in template or "\\" in template or any(ord(char) < 32 for char in template):
+        raise ValueError("Library file template must produce a single file name.")
+
+    for token in _FILE_TEMPLATE_TOKEN_RE.findall(template):
+        if token not in _FILE_TEMPLATE_TOKENS:
+            raise ValueError(f"Unsupported library file token: {token}")
+    without_tokens = _FILE_TEMPLATE_TOKEN_RE.sub("", template)
+    if "{" in without_tokens or "}" in without_tokens:
+        raise ValueError("Library file template contains an invalid token.")
 
 
 def compute_target_filename(

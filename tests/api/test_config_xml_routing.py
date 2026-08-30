@@ -8,16 +8,19 @@ from typing import TYPE_CHECKING
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.models import Base
 from pullbox.models.config import SystemConfig
+from pullbox.models.library import LibraryRoot, LibraryRootPolicy
 from pullbox.providers.base import ProviderRegistry
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from pullbox.services.search_runtime import build_search_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-config-routing")
 os.environ.setdefault("PULLBOX_DATA_DIR", tempfile.mkdtemp())
@@ -108,6 +111,151 @@ class TestGetConfig:
         resp = await client.get("/api/v1/config")
         keys = {c["key"] for c in resp.json()}
         assert "secret_key" not in keys
+
+
+def _root_policy_payload(*, expected_revision: int) -> dict[str, object]:
+    return {
+        "expected_revision": expected_revision,
+        "policy": {
+            "schema_version": 1,
+            "series_path_template": "{Publisher}/{Series} ({Year})",
+            "comic_file_template": "{Series} {IssueTitle} Issue {Issue:03d}",
+            "annual_file_template": "{Series} Annual Issue {Issue:03d}",
+            "non_standard_file_template": ("{Series} {Type} {Volume:02d} - {IssueTitle}"),
+            "single_non_standard_file_template": "{Series} {Type} - {IssueTitle}",
+            "replace_illegal_characters": True,
+            "colon_replacement": "dash",
+        },
+    }
+
+
+class TestLibraryRootPolicyConfig:
+    """Per-root naming policy API keeps global fallback and revisions explicit."""
+
+    @pytest.mark.asyncio
+    async def test_read_update_conflict_and_clear_root_policy(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        root_path = tmp_path / "library"
+        root_path.mkdir()
+        async with _db_factory() as session:
+            root = LibraryRoot(name="Comics", path=str(root_path), enabled=True)
+            session.add(root)
+            await session.commit()
+            root_id = root.id
+
+        url = f"/api/v1/config/library-roots/{root_id}/naming-policy"
+        fallback = await client.get(url)
+
+        assert fallback.status_code == 200
+        assert fallback.json()["scope"] == "global_default"
+        assert fallback.json()["revision"] == 0
+        assert fallback.json()["policy_id"] is None
+        assert (
+            fallback.json()["effective_policy"]["series_path_template"]
+            == (fallback.json()["effective_policy"]["series_folder_template"])
+        )
+
+        created = await client.put(
+            url,
+            json=_root_policy_payload(expected_revision=0),
+            headers=_csrf_header_for(client),
+        )
+
+        assert created.status_code == 200
+        assert created.json()["scope"] == "root_override"
+        assert created.json()["revision"] == 1
+        assert created.json()["effective_policy"]["series_path_template"] == (
+            "{Publisher}/{Series} ({Year})"
+        )
+        assert created.json()["effective_policy"]["source"] == "manual"
+
+        stale_payload = _root_policy_payload(expected_revision=0)
+        stale_payload["policy"]["series_path_template"] = "Stale/{Series}"  # type: ignore[index]
+        stale = await client.put(
+            url,
+            json=stale_payload,
+            headers=_csrf_header_for(client),
+        )
+
+        assert stale.status_code == 409
+        async with _db_factory() as session:
+            stored = await session.scalar(
+                select(LibraryRootPolicy).where(LibraryRootPolicy.library_root_id == root_id)
+            )
+            assert stored is not None
+            assert stored.series_path_template == "{Publisher}/{Series} ({Year})"
+
+        cleared = await client.request(
+            "DELETE",
+            url,
+            json={"expected_revision": 1},
+            headers=_csrf_header_for(client),
+        )
+
+        assert cleared.status_code == 200
+        assert cleared.json()["scope"] == "global_default"
+        assert cleared.json()["revision"] == 0
+
+    @pytest.mark.asyncio
+    async def test_root_policy_preview_is_write_free_and_segment_aware(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        root_path = tmp_path / "library-preview"
+        root_path.mkdir()
+        async with _db_factory() as session:
+            root = LibraryRoot(name="Preview", path=str(root_path), enabled=True)
+            session.add(root)
+            await session.commit()
+            root_id = root.id
+
+        response = await client.post(
+            f"/api/v1/config/library-roots/{root_id}/naming-policy/preview",
+            json={"policy": _root_policy_payload(expected_revision=0)["policy"]},
+            headers=_csrf_header_for(client),
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["current_scope"] == "global_default"
+        assert "DC Comics/Batman (2024)" in data["proposed_series_paths"]
+        assert any("The Brave and the Bold" in name for name in data["proposed_file_names"])
+        async with _db_factory() as session:
+            assert await session.scalar(select(func.count()).select_from(LibraryRootPolicy)) == 0
+
+    @pytest.mark.asyncio
+    async def test_root_policy_rejects_file_templates_that_can_create_paths(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        root_path = tmp_path / "library-invalid-template"
+        root_path.mkdir()
+        async with _db_factory() as session:
+            root = LibraryRoot(name="Invalid", path=str(root_path), enabled=True)
+            session.add(root)
+            await session.commit()
+            root_id = root.id
+
+        payload = _root_policy_payload(expected_revision=0)
+        payload["policy"]["comic_file_template"] = "{Series}/{Issue:03d}"  # type: ignore[index]
+        response = await client.put(
+            f"/api/v1/config/library-roots/{root_id}/naming-policy",
+            json=payload,
+            headers=_csrf_header_for(client),
+        )
+
+        assert response.status_code == 422
+        assert "single file name" in response.json()["error"]["message"]
+        async with _db_factory() as session:
+            assert await session.scalar(select(func.count()).select_from(LibraryRootPolicy)) == 0
 
 
 class TestPutIdentitySettings:

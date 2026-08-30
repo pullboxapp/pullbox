@@ -20,6 +20,7 @@ from pullbox.core.naming import (
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.config import SystemConfig
 from pullbox.models.indexer import IndexerConfig
+from pullbox.models.library import LibraryRoot
 
 page_router = APIRouter()
 htmx_router = APIRouter()
@@ -258,6 +259,12 @@ async def load_settings_tab(request: Request, session: DbSession, tab: str) -> d
         ctx["configs"] = configs
         runtime = runtime_snapshot_to_dict(get_runtime_status_snapshot())
         ctx["host_info"] = {"library_root": runtime["library_root"]["value"]}
+        roots = await session.scalars(
+            select(LibraryRoot).where(LibraryRoot.enabled.is_(True)).order_by(LibraryRoot.id)
+        )
+        ctx["library_roots"] = [
+            {"id": root.id, "name": root.name, "path": root.path} for root in roots.all()
+        ]
     elif tab == "metadata":
         result = await session.execute(select(SystemConfig).order_by(SystemConfig.key))
         ctx["configs"] = {c.key: c.value for c in result.scalars().all()}

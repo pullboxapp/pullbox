@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, cast
 from sqlalchemy import select
 
 from pullbox.core.exceptions import PullboxError, ValidationError
-from pullbox.core.library_naming import validate_series_path_template
+from pullbox.core.library_naming import (
+    validate_library_file_template,
+    validate_series_path_template,
+)
 from pullbox.models.import_job import (
     ImportJob,
     ImportJobAction,
@@ -52,7 +55,7 @@ def build_future_root_policy_snapshot(
     baseline: LibraryIngestPolicy,
 ) -> dict[str, object]:
     """Freeze a proposal together with its explicit-policy comparison baseline."""
-    normalized = _normalized_proposal(proposal)
+    normalized = normalize_root_policy_definition(proposal)
     normalized.update(
         {
             "expected_root_policy_id": baseline.root_policy_id,
@@ -70,7 +73,7 @@ def apply_future_root_policy_to_ingest_policy(
     source_import_job_id: int | None = None,
 ) -> LibraryIngestPolicy:
     """Use a frozen proposal for this job's managed placement before activation."""
-    proposal = _normalized_proposal(snapshot)
+    proposal = normalize_root_policy_definition(snapshot)
     expected_revision = _snapshot_int(
         snapshot.get("expected_root_policy_revision", baseline.policy_revision),
         field_name="expected_root_policy_revision",
@@ -120,7 +123,7 @@ async def activate_future_root_policy(
         raise ValidationError("Future library layout requires an enabled target library root.")
 
     snapshot = dict(job.future_root_policy_snapshot)
-    proposal = _normalized_proposal(snapshot)
+    proposal = normalize_root_policy_definition(snapshot)
     current = await session.scalar(
         select(LibraryRootPolicy)
         .where(LibraryRootPolicy.library_root_id == root.id)
@@ -316,7 +319,7 @@ def _restore_prior_policy(
     *,
     next_revision: int,
 ) -> None:
-    proposal = _normalized_proposal(prior)
+    proposal = normalize_root_policy_definition(prior)
     _assign_proposal(policy, proposal)
     policy.source = LibraryRootPolicySource(str(prior["source"]))
     source_job_id = prior.get("source_import_job_id")
@@ -328,7 +331,8 @@ def _restore_prior_policy(
     policy.revision = next_revision
 
 
-def _normalized_proposal(value: Mapping[str, object]) -> dict[str, object]:
+def normalize_root_policy_definition(value: Mapping[str, object]) -> dict[str, object]:
+    """Validate and normalize a complete persisted root naming policy."""
     if value.get("schema_version", 1) != 1:
         raise ValidationError("Unsupported future root policy schema version.")
     result: dict[str, object] = {"schema_version": 1}
@@ -347,6 +351,8 @@ def _normalized_proposal(value: Mapping[str, object]) -> dict[str, object]:
     result["colon_replacement"] = colon_replacement
     try:
         validate_series_path_template(str(result["series_path_template"]))
+        for key in _TEMPLATE_KEYS[1:]:
+            validate_library_file_template(str(result[key]))
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
     return result

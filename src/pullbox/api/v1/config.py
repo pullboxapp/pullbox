@@ -25,9 +25,20 @@ from pullbox.models.user import User
 from pullbox.schemas.config import (
     ConfigResponse,
     ConfigUpdate,
+    LibraryRootPolicyClear,
+    LibraryRootPolicyPreviewRequest,
+    LibraryRootPolicyPreviewResponse,
+    LibraryRootPolicyState,
+    LibraryRootPolicyUpdate,
     NamingPreview,
     NamingPreviewEntry,
     NamingPreviewGrouped,
+)
+from pullbox.services.library_root_policy_service import (
+    clear_library_root_policy,
+    get_library_root_policy_state,
+    preview_library_root_policy,
+    update_library_root_policy,
 )
 
 logger = structlog.get_logger(__name__)
@@ -679,6 +690,92 @@ async def save_comicvine_key(
         "message": "API key saved.",
         "obfuscated": obfuscate_api_key(api_key),
     }
+
+
+# ── Per-root Naming Policy ──────────────────────────────────────────
+
+
+@router.get(
+    "/library-roots/{library_root_id}/naming-policy",
+    response_model=LibraryRootPolicyState,
+)
+async def get_root_naming_policy(
+    library_root_id: int,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPolicyState:
+    """Return a library root's effective policy and inheritance scope."""
+    state = await get_library_root_policy_state(session, library_root_id)
+    return LibraryRootPolicyState.model_validate(state)
+
+
+@router.put(
+    "/library-roots/{library_root_id}/naming-policy",
+    response_model=LibraryRootPolicyState,
+)
+async def put_root_naming_policy(
+    library_root_id: int,
+    body: LibraryRootPolicyUpdate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPolicyState:
+    """Create or update one root's explicit policy with optimistic locking."""
+    state = await update_library_root_policy(
+        session,
+        library_root_id,
+        expected_revision=body.expected_revision,
+        definition=body.policy.model_dump(),
+    )
+    logger.info(
+        "library_root_policy_updated",
+        library_root_id=library_root_id,
+        revision=state["revision"],
+        source="manual",
+    )
+    return LibraryRootPolicyState.model_validate(state)
+
+
+@router.delete(
+    "/library-roots/{library_root_id}/naming-policy",
+    response_model=LibraryRootPolicyState,
+)
+async def delete_root_naming_policy(
+    library_root_id: int,
+    body: LibraryRootPolicyClear,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPolicyState:
+    """Clear an explicit policy so the root inherits global defaults again."""
+    state = await clear_library_root_policy(
+        session,
+        library_root_id,
+        expected_revision=body.expected_revision,
+    )
+    logger.info(
+        "library_root_policy_cleared",
+        library_root_id=library_root_id,
+        source="manual",
+    )
+    return LibraryRootPolicyState.model_validate(state)
+
+
+@router.post(
+    "/library-roots/{library_root_id}/naming-policy/preview",
+    response_model=LibraryRootPolicyPreviewResponse,
+)
+async def preview_root_naming_policy(
+    library_root_id: int,
+    body: LibraryRootPolicyPreviewRequest,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPolicyPreviewResponse:
+    """Preview a complete proposal without writing a root policy."""
+    preview = await preview_library_root_policy(
+        session,
+        library_root_id,
+        definition=body.policy.model_dump(),
+    )
+    return LibraryRootPolicyPreviewResponse.model_validate(preview)
 
 
 # ── Naming Preview ───────────────────────────────────────────────────

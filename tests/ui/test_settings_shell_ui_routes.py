@@ -23,6 +23,7 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.models.download import DownloadClientType
 from pullbox.models.indexer import IndexerConfig, IndexerType
+from pullbox.models.library import LibraryRoot
 from pullbox.utilities.settings import resolve_utility_directory
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -471,6 +472,29 @@ class TestSettingsRouteContracts:
         assert "lockNamingPreviewHeight(el)" in response.text
         assert "el.dataset.previewReady !==" in response.text
         assert "settings-media-preview-panel min-h-[2rem]" not in response.text
+
+    async def test_settings_media_exposes_per_library_naming_scope_controls(
+        self,
+        authenticated_client,
+        sec_db,
+        tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        root_path = tmp_path / "root-policy-ui"
+        root_path.mkdir()
+        async with sec_db() as session:
+            session.add(LibraryRoot(name="Primary Comics", path=str(root_path), enabled=True))
+            await session.commit()
+
+        response = await authenticated_client.get("/settings?tab=media")
+
+        assert response.status_code == 200
+        assert 'data-testid="settings-media-root-policy"' in response.text
+        assert 'data-testid="settings-media-root-policy-scope"' in response.text
+        assert "Primary Comics" in response.text
+        assert "Use global defaults" in response.text
+        assert "Save for this library" in response.text
+        assert "/naming-policy/preview" in response.text
+        assert 'method: "DELETE"' in response.text
 
     async def test_settings_renders_standardized_shell(
         self,
