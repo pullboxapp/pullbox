@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from sqlalchemy import event
 
 from pullbox.core.exceptions import NotFoundError
 from pullbox.models.import_job import (
@@ -19,23 +20,64 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series, SeriesStatus
+from pullbox.services.import_review_queries import ConflictGroupsPage
 from pullbox.ui import import_conflict_review
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 
 class _FakeConflictService:
     def __init__(self, groups: list[dict[str, object]]) -> None:
         self.groups = groups
+        self.page_calls: list[tuple[int, int, str]] = []
 
-    async def get_conflict_groups(
+    async def get_conflict_groups_page(
         self,
         session: AsyncSession,
         job_id: int,
-    ) -> list[dict[str, object]]:
+        *,
+        page: int,
+        page_size: int,
+        sort: str,
+    ) -> ConflictGroupsPage:
         _ = (session, job_id)
-        return self.groups
+        self.page_calls.append((page, page_size, sort))
+        total = len(self.groups)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        current_page = min(page, total_pages)
+        start = (current_page - 1) * page_size
+        items: list[dict[str, object]] = []
+        for original in self.groups[start : start + page_size]:
+            group = dict(original)
+            files = [item for item in group.get("files", []) if isinstance(item, ImportedFile)]
+            group.setdefault("file_count", len(files))
+            group.setdefault("files_truncated", False)
+            if group.get("series_id") is None and files:
+                group["series_id"] = files[0].import_series_id
+            items.append(group)
+        file_groups = [group for group in self.groups if group.get("kind") == "file_conflict"]
+        auto_resolved = sum(
+            1
+            for group in file_groups
+            if any(
+                item.is_preferred
+                for item in group.get("files", [])
+                if isinstance(item, ImportedFile)
+            )
+        )
+        return ConflictGroupsPage(
+            items=tuple(items),
+            total=total,
+            page=current_page,
+            page_size=page_size,
+            auto_resolved=auto_resolved,
+            needs_decision=len(file_groups) - auto_resolved,
+            series_candidate_conflicts=sum(
+                1 for group in self.groups if group.get("kind") == "series_conflict"
+            ),
+            file_conflict_groups=len(file_groups),
+        )
 
 
 async def _create_import_job(session: AsyncSession) -> ImportJob:
@@ -400,3 +442,61 @@ async def test_load_import_conflict_review_context_normalizes_sort_and_paginates
     assert len(context["conflict_groups"]) == 5
     assert context["needs_decision"] == 30
     assert context["auto_resolved"] == 0
+
+
+@pytest.mark.asyncio
+async def test_conflict_review_context_keeps_page_enrichment_query_constant(
+    db_session: AsyncSession,
+    async_engine: AsyncEngine,
+) -> None:
+    job = await _create_import_job(db_session)
+    for index in range(75):
+        imported_series = await _create_imported_series(
+            db_session,
+            job,
+            raw_series_name=f"Paged Conflict {index:03d}",
+            diagnostics={
+                "kind": "series_conflict",
+                "selected_candidate": {"title": f"Candidate {index:03d}"},
+            },
+        )
+        imported_series.status = ImportSeriesStatus.NO_MATCH
+        db_session.add(
+            _make_imported_file(
+                job,
+                imported_series,
+                file_name=f"Paged Conflict {index:03d} 001.cbz",
+                status=ImportedFileStatus.NO_MATCH,
+            )
+        )
+    await db_session.flush()
+
+    selects: list[str] = []
+
+    def record_select(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", record_select)
+    try:
+        context = await import_conflict_review._load_import_conflict_review_context(
+            job.id,
+            db_session,
+            page=2,
+            sort="series",
+        )
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", record_select)
+
+    assert context["total_groups"] == 75
+    assert context["series_candidate_conflicts"] == 75
+    assert context["page"] == 2
+    assert len(context["conflict_groups"]) == 25
+    assert len(selects) <= 7, f"paged conflict enrichment issued {len(selects)} SELECTs"

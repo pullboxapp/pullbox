@@ -42,9 +42,9 @@ def test_extracts_separate_contiguous_issue_files(tmp_path: Path) -> None:
         expected_series_titles=frozenset({"Alien - The Friendliest Facehugger"}),
     )
 
-    assert set(extracted) == {5.0, 6.0}
-    assert extracted[5.0].read_bytes() == b"nested comic"
-    assert extracted[6.0].read_bytes() == b"nested comic"
+    assert set(extracted) == {"5", "6"}
+    assert extracted["5"].read_bytes() == b"nested comic"
+    assert extracted["6"].read_bytes() == b"nested comic"
 
 
 def test_accepts_nested_files_using_a_configured_alternate_series_name(tmp_path: Path) -> None:
@@ -62,7 +62,27 @@ def test_accepts_nested_files_using_a_configured_alternate_series_name(tmp_path:
         expected_series_titles=frozenset({"Alien - The Friendliest Facehugger", "The Aliens"}),
     )
 
-    assert set(extracted) == {5.0, 6.0}
+    assert set(extracted) == {"5", "6"}
+
+
+def test_extracts_suffix_siblings_as_distinct_exact_issues(tmp_path: Path) -> None:
+    pack = tmp_path / "Suffix Siblings.cbz"
+    _write_nested_pack(
+        pack,
+        "Suffix Siblings #1AU.cbz",
+        "Suffix Siblings #1B.cbz",
+    )
+
+    extracted = extract_same_series_issue_files(
+        pack,
+        destination=tmp_path / "extracted",
+        expected_issue_numbers=frozenset({"1AU", "1B"}),
+        expected_series_titles=frozenset({"Suffix Siblings"}),
+    )
+
+    assert set(extracted) == {"1AU", "1B"}
+    assert extracted["1AU"].name == "issue-1AU.cbz"
+    assert extracted["1B"].name == "issue-1B.cbz"
 
 
 def test_rejects_a_combined_comic_with_only_page_images(tmp_path: Path) -> None:

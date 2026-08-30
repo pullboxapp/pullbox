@@ -37,6 +37,8 @@ def test_build_retry_import_request_copies_creation_fields(tmp_path) -> None:
         },
         future_layout_requested=False,
         future_root_policy_snapshot=None,
+        story_arc_import_requested=True,
+        story_arc_materialization_requested=True,
     )
 
     request = build_retry_import_request(original)
@@ -58,6 +60,8 @@ def test_build_retry_import_request_copies_creation_fields(tmp_path) -> None:
     )
     assert request.future_layout_requested is False
     assert request.future_root_policy is None
+    assert request.story_arc_import_requested is True
+    assert request.story_arc_materialization_requested is True
 
 
 def test_build_retry_import_request_omits_empty_selected_file_paths(tmp_path) -> None:
@@ -86,6 +90,8 @@ def test_build_retry_import_request_omits_empty_selected_file_paths(tmp_path) ->
 
     assert request.file_paths is None
     assert request.mylar3_path_map == {}
+    assert request.story_arc_import_requested is False
+    assert request.story_arc_materialization_requested is False
 
 
 def test_copy_retry_import_settings_clones_runtime_policy_fields() -> None:
@@ -107,6 +113,8 @@ def test_copy_retry_import_settings_clones_runtime_policy_fields() -> None:
         future_layout_requested=False,
         future_root_policy_snapshot={"schema_version": 1, "series_path_template": "{Series}"},
         future_root_policy_applied_at=None,
+        story_arc_import_requested=True,
+        story_arc_materialization_requested=False,
     )
     retry = SimpleNamespace()
 
@@ -133,3 +141,5 @@ def test_copy_retry_import_settings_clones_runtime_policy_fields() -> None:
     }
     assert retry.future_root_policy_snapshot is not original.future_root_policy_snapshot
     assert retry.future_root_policy_applied_at is None
+    assert retry.story_arc_import_requested is True
+    assert retry.story_arc_materialization_requested is False

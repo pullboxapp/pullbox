@@ -45,8 +45,12 @@ from pullbox.services.import_review_actions import (
 from pullbox.services.import_review_actions import (
     update_series_selection as update_import_series_selection,
 )
+from pullbox.services.import_review_queries import ConflictGroupsPage
 from pullbox.services.import_review_queries import (
     get_conflict_groups as get_import_conflict_groups,
+)
+from pullbox.services.import_review_queries import (
+    get_conflict_groups_page as get_import_conflict_groups_page,
 )
 from pullbox.services.import_review_queries import (
     get_files_for_series as get_import_files_for_series,
@@ -137,6 +141,24 @@ class ImportServiceReviewMixin:
     ) -> list[dict[str, Any]]:
         """Return all conflict groups for a job."""
         return await get_import_conflict_groups(session, job_id)
+
+    async def get_conflict_groups_page(
+        self,
+        session: AsyncSession,
+        job_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 25,
+        sort: str = "legacy",
+    ) -> ConflictGroupsPage:
+        """Return one bounded conflict-group page for request paths."""
+        return await get_import_conflict_groups_page(
+            session,
+            job_id,
+            page=page,
+            page_size=page_size,
+            sort=sort,
+        )
 
     async def override_file_match(
         self: ImportServiceReviewContext,

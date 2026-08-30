@@ -214,7 +214,7 @@ async def test_load_issue_lookup_for_series_indexes_by_cv_id_and_issue_number(
 ) -> None:
     series, issues = await _create_series_with_issues(db_session)
 
-    cv_id_to_issue, number_to_issue = await load_issue_lookup_for_series(
+    cv_id_to_issue, exact_number_to_issue, number_to_issue = await load_issue_lookup_for_series(
         db_session,
         series.id,
     )
@@ -229,6 +229,11 @@ async def test_load_issue_lookup_for_series_indexes_by_cv_id_and_issue_number(
         20.0: issues[1],
         21.0: issues[2],
     }
+    assert exact_number_to_issue == {
+        "19": issues[0],
+        "20": issues[1],
+        "21": issues[2],
+    }
 
 
 async def test_resolve_import_file_issue_uses_existing_issue_id_first(
@@ -241,12 +246,15 @@ async def test_resolve_import_file_issue_uses_existing_issue_id_first(
     imp_file.matched_issue_id = issues[0].id
     imp_file.matched_issue_cv_id = issues[1].comicvine_id
     await db_session.flush()
-    cv_id_to_issue, number_to_issue = await load_issue_lookup_for_series(db_session, series.id)
+    cv_id_to_issue, exact_number_to_issue, number_to_issue = await load_issue_lookup_for_series(
+        db_session, series.id
+    )
 
     resolved = await resolve_import_file_issue(
         db_session,
         imp_file,
         cv_id_to_issue=cv_id_to_issue,
+        exact_number_to_issue=exact_number_to_issue,
         number_to_issue=number_to_issue,
     )
 
@@ -265,13 +273,16 @@ async def test_resolve_import_file_issue_falls_back_through_cv_and_number(
     comicinfo_cv_file.comicvine_issue_id = issues[2].comicvine_id
     number_file = _make_file(job, item, status=ImportedFileStatus.MATCHED, issue_no=19)
     await db_session.flush()
-    cv_id_to_issue, number_to_issue = await load_issue_lookup_for_series(db_session, series.id)
+    cv_id_to_issue, exact_number_to_issue, number_to_issue = await load_issue_lookup_for_series(
+        db_session, series.id
+    )
 
     assert (
         await resolve_import_file_issue(
             db_session,
             matched_cv_file,
             cv_id_to_issue=cv_id_to_issue,
+            exact_number_to_issue=exact_number_to_issue,
             number_to_issue=number_to_issue,
         )
         == issues[1]
@@ -281,6 +292,7 @@ async def test_resolve_import_file_issue_falls_back_through_cv_and_number(
             db_session,
             comicinfo_cv_file,
             cv_id_to_issue=cv_id_to_issue,
+            exact_number_to_issue=exact_number_to_issue,
             number_to_issue=number_to_issue,
         )
         == issues[2]
@@ -290,6 +302,7 @@ async def test_resolve_import_file_issue_falls_back_through_cv_and_number(
             db_session,
             number_file,
             cv_id_to_issue=cv_id_to_issue,
+            exact_number_to_issue=exact_number_to_issue,
             number_to_issue=number_to_issue,
         )
         == issues[0]
@@ -303,13 +316,16 @@ async def test_resolve_import_file_issue_returns_none_when_no_match(
     series, _issues = await _create_series_with_issues(db_session)
     item = await _create_imported_series(db_session, job, series)
     imp_file = _make_file(job, item, status=ImportedFileStatus.MATCHED, issue_no=99)
-    cv_id_to_issue, number_to_issue = await load_issue_lookup_for_series(db_session, series.id)
+    cv_id_to_issue, exact_number_to_issue, number_to_issue = await load_issue_lookup_for_series(
+        db_session, series.id
+    )
 
     assert (
         await resolve_import_file_issue(
             db_session,
             imp_file,
             cv_id_to_issue=cv_id_to_issue,
+            exact_number_to_issue=exact_number_to_issue,
             number_to_issue=number_to_issue,
         )
         is None

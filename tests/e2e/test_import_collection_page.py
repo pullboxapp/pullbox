@@ -2724,6 +2724,121 @@ class TestImportCollectionTab:
             "fallback_to_auto": False,
         }
 
+    def test_import_collection_shows_story_arc_evidence_and_submits_independent_choices(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+
+        def fulfill_arc_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "source_type": "mylar3",
+                        "evidence_detected": True,
+                        "arcs_detected": 2,
+                        "entries_detected": 3,
+                        "resolution": {
+                            "resolved": 0,
+                            "pending": 2,
+                            "missing": 1,
+                            "ambiguous": 0,
+                            "conflicts": 0,
+                            "duplicates": 0,
+                        },
+                        "existing_arc_files_detected": True,
+                        "existing_arc_folders_detected": True,
+                        "pattern_summary": "Mylar Story Arc rows and saved ordering",
+                        "settings": [
+                            {"key": "STORYARCDIR", "value": True, "used_default": False},
+                            {
+                                "key": "STORYARC_LOCATION",
+                                "value": "Configured",
+                                "used_default": False,
+                            },
+                        ],
+                        "examples": [
+                            {
+                                "story_arc": "Knightfall",
+                                "series": "Batman",
+                                "issue_number": "497",
+                                "issue_title": "Broken Bat",
+                                "reading_order": "1",
+                                "status": "Downloaded",
+                                "relative_path": None,
+                            }
+                        ],
+                        "provider_calls_required": False,
+                        "provider_call_summary": (
+                            "No provider calls are needed for trusted Mylar data."
+                        ),
+                        "proposed_policy": {
+                            "mode": "copy",
+                            "destination_root_configured": True,
+                            "folder_template": "{StoryArc}",
+                            "file_template": (
+                                "{ReadingOrder:03d} - {Series} {IssueNumber}{IssueTitleOptional}"
+                            ),
+                            "reading_order_prefix": True,
+                            "synchronize": True,
+                            "requires_confirmation": True,
+                        },
+                        "readlist_present": True,
+                        "readlist_count": 4,
+                        "readlist_import_state": "deferred_v1.5.0",
+                        "archive_probes": 0,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 323, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/story-arc-preview", fulfill_arc_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.story_arc_section.wait_for(state="visible", timeout=5000)
+
+        preview_text = import_page.story_arc_preview.text_content() or ""
+        assert "2 arcs" in preview_text
+        assert "3 entries" in preview_text
+        assert "Knightfall" in preview_text
+        assert "No provider calls" in preview_text
+        assert "/private" not in preview_text
+        assert import_page.story_arc_import_toggle.is_checked() is False
+        assert import_page.story_arc_materialize_toggle.is_disabled()
+
+        import_page.story_arc_import_toggle.check()
+        assert import_page.story_arc_materialize_toggle.is_enabled()
+        import_page.story_arc_materialize_toggle.check()
+        assert_no_axe_violations(
+            authed_page,
+            name="Story Arc Step 1 controls",
+            include=["[data-testid='import-story-arc-section']"],
+        )
+
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        assert created_requests[-1]["story_arc_import_requested"] is True
+        assert created_requests[-1]["story_arc_materialization_requested"] is True
+
     def test_import_collection_submits_validated_in_place_mode(
         self,
         authed_page,

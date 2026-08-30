@@ -120,6 +120,22 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-layout-preview']").first
 
     @property
+    def story_arc_section(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-section']").first
+
+    @property
+    def story_arc_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-preview']").first
+
+    @property
+    def story_arc_import_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-import-toggle']").first
+
+    @property
+    def story_arc_materialize_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-materialize-toggle']").first
+
+    @property
     def future_layout_toggle(self) -> Locator:
         return self.page.locator("[data-testid='import-future-layout-toggle']").first
 

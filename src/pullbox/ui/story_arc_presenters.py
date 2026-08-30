@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import joinedload
@@ -80,6 +81,8 @@ class StoryArcMembershipView:
     canonical_state: str
     canonical_file_available: bool
     can_resolve: bool
+    local_search_query: str
+    metadata_add_url: str
     is_first: bool
     is_last: bool
 
@@ -384,6 +387,10 @@ def _present_membership(
     issue_title = membership.source_issue_title
     if issue_title is None and issue is not None:
         issue_title = issue.title
+    source_series_query = (membership.source_series_name or "").strip()
+    if not source_series_query and issue is not None:
+        source_series_query = issue.series.title
+    metadata_query = source_series_query
     return StoryArcMembershipView(
         id=membership.id,
         issue_id=membership.issue_id,
@@ -406,6 +413,10 @@ def _present_membership(
                 StoryArcResolutionState.AMBIGUOUS,
                 StoryArcResolutionState.CONFLICT,
             }
+        ),
+        local_search_query=source_series_query or exact_issue_number,
+        metadata_add_url=(
+            f"/series/add?{urlencode({'q': metadata_query})}" if metadata_query else "/series/add"
         ),
         is_first=position == 1,
         is_last=position == membership_total,

@@ -33,6 +33,8 @@ _STORY_ARC_DOMAIN_PARENT_REVISION = "z1a2b3c4d567"
 _STORY_ARC_DOMAIN_REVISION = "a2b3c4d5e678"
 _STORY_ARC_MANAGED_PLACEMENT_REVISION = "b3c4d5e6f789"
 _STORY_ARC_IMPORT_SYNC_REVISION = "c4d5e6f7a890"
+_STORY_ARC_IMPORT_INTENT_REVISION = "d5e6f7a8b901"
+_EXACT_ISSUE_IDENTITY_REVISION = "e6f7a8b9c012"
 
 
 @pytest.fixture
@@ -346,7 +348,7 @@ class TestMigrationChain:
 
         assert columns["issue_number_text"]["nullable"] is True
         assert columns["issue_number_text"]["type"].length == 320
-        assert unique_constraints["uq_series_issue"] == ["series_id", "issue_number"]
+        assert "uq_series_issue" not in unique_constraints
         assert indexes["uq_series_issue_number_text"]["column_names"] == [
             "series_id",
             "issue_number_text",
@@ -405,6 +407,144 @@ class TestMigrationChain:
             command.downgrade(cfg, _ISSUE_NUMBER_TEXT_PARENT_REVISION)
 
         assert "issue_number_text" in _get_columns(sync_url, "issues")
+
+    def test_exact_issue_identity_migration_allows_suffix_siblings_and_round_trips(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """M2 replaces float identity, preserves exact uniqueness, and fails closed."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, _STORY_ARC_IMPORT_INTENT_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                _, first_issue_id = _seed_reader_state_owner(conn, slug="suffix-sibling")
+                series_id = int(
+                    conn.execute(
+                        text("SELECT series_id FROM issues WHERE id = :issue_id"),
+                        {"issue_id": first_issue_id},
+                    ).scalar_one()
+                )
+                conn.execute(
+                    text("UPDATE issues SET issue_number_text = '1AU' WHERE id = :issue_id"),
+                    {"issue_id": first_issue_id},
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO download_history "
+                        "(issue_id, title, download_url, download_client, protocol, state) "
+                        "VALUES (:issue_id, 'Preserved sibling history', "
+                        "'https://example.test/sibling-history', 'SABNZBD', "
+                        "'usenet', 'QUEUED')"
+                    ),
+                    {"issue_id": first_issue_id},
+                )
+                history_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            unique_constraints = {
+                constraint["name"]: constraint["column_names"]
+                for constraint in inspector.get_unique_constraints("issues")
+            }
+            indexes = {index["name"]: index for index in inspector.get_indexes("issues")}
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO issues "
+                        "(series_id, issue_number, issue_number_text, status, issue_type, "
+                        "manual_skip, created_at, updated_at) VALUES "
+                        "(:series_id, 1.0, '1B', 'OWNED', 'ISSUE', 0, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {"series_id": series_id},
+                )
+                second_issue_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+
+            with pytest.raises(IntegrityError), engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO issues "
+                        "(series_id, issue_number, issue_number_text, status, issue_type, "
+                        "manual_skip, created_at, updated_at) VALUES "
+                        "(:series_id, 1.0, '1AU', 'OWNED', 'ISSUE', 0, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {"series_id": series_id},
+                )
+
+            with engine.connect() as conn:
+                exact_rows = conn.execute(
+                    text(
+                        "SELECT issue_number, issue_number_text FROM issues "
+                        "WHERE series_id = :series_id "
+                        "ORDER BY issue_number, issue_number_text, id"
+                    ),
+                    {"series_id": series_id},
+                ).fetchall()
+                preserved_history_issue_id = int(
+                    conn.execute(
+                        text("SELECT issue_id FROM download_history WHERE id = :history_id"),
+                        {"history_id": history_id},
+                    ).scalar_one()
+                )
+        finally:
+            engine.dispose()
+
+        assert "uq_series_issue" not in unique_constraints
+        assert indexes["uq_series_issue_number_text"]["column_names"] == [
+            "series_id",
+            "issue_number_text",
+        ]
+        assert bool(indexes["uq_series_issue_number_text"]["unique"]) is True
+        assert indexes["ix_issues_series_number_order"]["column_names"] == [
+            "series_id",
+            "issue_number",
+            "issue_number_text",
+            "id",
+        ]
+        assert [tuple(row) for row in exact_rows] == [(1.0, "1AU"), (1.0, "1B")]
+        assert preserved_history_issue_id == first_issue_id
+
+        with pytest.raises(RuntimeError, match="exact issue-number siblings"):
+            command.downgrade(cfg, _STORY_ARC_IMPORT_INTENT_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("DELETE FROM issues WHERE id = :issue_id"),
+                    {"issue_id": second_issue_id},
+                )
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _STORY_ARC_IMPORT_INTENT_REVISION)
+        engine = create_engine(sync_url)
+        try:
+            restored_constraints = {
+                constraint["name"]: constraint["column_names"]
+                for constraint in inspect(engine).get_unique_constraints("issues")
+            }
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        text("SELECT issue_id FROM download_history WHERE id = :history_id"),
+                        {"history_id": history_id},
+                    ).scalar_one()
+                    == first_issue_id
+                )
+        finally:
+            engine.dispose()
+        assert restored_constraints["uq_series_issue"] == ["series_id", "issue_number"]
+
+        command.upgrade(cfg, "head")
 
     def test_story_arc_domain_migration_preserves_legacy_graph_and_round_trips(
         self,
@@ -1377,12 +1517,50 @@ class TestMigrationChain:
         finally:
             engine.dispose()
 
-    def test_story_arc_domain_revision_is_the_single_head(self, alembic_cfg) -> None:
-        """Import-owned synchronization extends the story-arc head without branching."""
-        cfg, _ = alembic_cfg
+    def test_story_arc_import_intent_is_non_authorizing_and_the_single_head(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Step 1 intent is durable, defaults off, and extends one migration head."""
+        cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
 
-        assert script.get_heads() == [_STORY_ARC_IMPORT_SYNC_REVISION]
+        assert script.get_heads() == [_EXACT_ISSUE_IDENTITY_REVISION]
+
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            columns = {
+                column["name"]: column for column in inspect(engine).get_columns("import_jobs")
+            }
+            assert columns["story_arc_import_requested"]["nullable"] is False
+            assert columns["story_arc_materialization_requested"]["nullable"] is False
+            with engine.begin() as conn:
+                job_id = _seed_minimal_import_job(conn, source_path="/fixture/intent-defaults")
+                defaults = conn.execute(
+                    text(
+                        "SELECT story_arc_import_requested, "
+                        "story_arc_materialization_requested FROM import_jobs WHERE id = :id"
+                    ),
+                    {"id": job_id},
+                ).one()
+                assert tuple(defaults) == (0, 0)
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _STORY_ARC_IMPORT_SYNC_REVISION)
+        c4_columns = _get_columns(sync_url, "import_jobs")
+        assert "story_arc_import_requested" not in c4_columns
+        assert "story_arc_materialization_requested" not in c4_columns
+        assert "story_arc_placement_followup_pending" in c4_columns
+        assert "story_arc_rollback_waiting_work_id" in c4_columns
+
+        command.downgrade(cfg, _STORY_ARC_MANAGED_PLACEMENT_REVISION)
+        b3_columns = _get_columns(sync_url, "import_jobs")
+        assert "story_arc_placement_followup_pending" not in b3_columns
+        assert "story_arc_rollback_waiting_work_id" not in b3_columns
+
+        command.upgrade(cfg, "head")
 
     def test_airdcpp_foundation_backfills_populated_history_and_source_order(
         self,

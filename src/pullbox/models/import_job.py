@@ -270,6 +270,16 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     )
     future_root_policy_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # type: ignore[type-arg]
     future_root_policy_applied_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    story_arc_import_requested: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
+    story_arc_materialization_requested: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
 
     # Per-job configuration
     cv_match_threshold: Mapped[float] = mapped_column(Float, default=0.70)

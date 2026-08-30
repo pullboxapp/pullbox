@@ -43,6 +43,10 @@ def build_retry_import_request(original: Any) -> ImportJobCreate:
         source_layout=SourceLayoutSpecPayload.model_validate(source_layout_snapshot),
         future_layout_requested=bool(getattr(original, "future_layout_requested", False)),
         future_root_policy=future_root_policy_snapshot,
+        story_arc_import_requested=bool(getattr(original, "story_arc_import_requested", False)),
+        story_arc_materialization_requested=bool(
+            getattr(original, "story_arc_materialization_requested", False)
+        ),
     )
 
 
@@ -63,3 +67,7 @@ def copy_retry_import_settings(original: Any, retry: Any) -> None:
         dict(future_root_policy_snapshot) if future_root_policy_snapshot is not None else None
     )
     retry.future_root_policy_applied_at = None
+    retry.story_arc_import_requested = bool(getattr(original, "story_arc_import_requested", False))
+    retry.story_arc_materialization_requested = bool(
+        getattr(original, "story_arc_materialization_requested", False)
+    )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from sqlalchemy import func, select
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.config import SystemConfig
@@ -19,6 +20,7 @@ from pullbox.models.library import (
     LibraryRootPolicy,
     LibraryRootPolicySource,
 )
+from pullbox.models.story_arc_import import ImportedStoryArc
 from pullbox.schemas.import_job import FutureRootPolicyPayload, ImportJobCreate, ImportJobRead
 from pullbox.schemas.import_layout import SourceLayoutSpecPayload
 from pullbox.services.import_job_creation import create_job
@@ -81,6 +83,8 @@ async def test_create_job_uses_global_search_on_add_and_logs_event(
     assert job.future_layout_requested is False
     assert job.future_root_policy_snapshot is None
     assert job.future_root_policy_applied_at is None
+    assert job.story_arc_import_requested is False
+    assert job.story_arc_materialization_requested is False
 
     response = ImportJobRead.model_validate(job)
     assert response.file_handling_mode == ImportFileHandlingMode.MANAGED_COPY
@@ -88,6 +92,8 @@ async def test_create_job_uses_global_search_on_add_and_logs_event(
     assert response.future_layout_requested is False
     assert response.future_root_policy_snapshot is None
     assert response.future_root_policy_applied_at is None
+    assert response.story_arc_import_requested is False
+    assert response.story_arc_materialization_requested is False
     assert events == [
         (
             "import_job_created",
@@ -98,6 +104,32 @@ async def test_create_job_uses_global_search_on_add_and_logs_event(
             },
         )
     ]
+
+
+async def test_create_job_persists_story_arc_intent_without_authorizing_review_rows(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    request = ImportJobCreate(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.FILESYSTEM,
+        story_arc_import_requested=True,
+        story_arc_materialization_requested=True,
+    )
+
+    job = await create_job(db_session, request, log_event=_log_event)
+
+    assert job.story_arc_import_requested is True
+    assert job.story_arc_materialization_requested is True
+    assert (
+        await db_session.scalar(
+            select(func.count(ImportedStoryArc.id)).where(ImportedStoryArc.import_job_id == job.id)
+        )
+        == 0
+    )
+    response = ImportJobRead.model_validate(job)
+    assert response.story_arc_import_requested is True
+    assert response.story_arc_materialization_requested is True
 
 
 async def test_create_job_freezes_selected_root_policy(

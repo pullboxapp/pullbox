@@ -99,20 +99,33 @@ async def list_conflicts_response(
     service: Any,
     session: Any,
     job_id: int,
+    *,
+    page: int,
+    page_size: int,
 ) -> ConflictGroupsResponse:
-    """Return all conflict groups for an import job."""
-    groups = await service.get_conflict_groups(session, job_id)
+    """Return one bounded conflict-group page for an import job."""
+    result = await service.get_conflict_groups_page(
+        session,
+        job_id,
+        page=page,
+        page_size=page_size,
+    )
     return ConflictGroupsResponse(
         job_id=job_id,
         groups=[
             FileConflictGroup(
+                kind=g["kind"],
                 conflict_group_id=g["conflict_group_id"],
                 matched_issue_id=g["matched_issue_id"],
+                series_id=g.get("series_id"),
+                diagnostics=dict(g.get("diagnostics") or {}),
                 files=[ImportedFileRead.model_validate(f) for f in g["files"]],
             )
-            for g in groups
+            for g in result.items
         ],
-        total=len(groups),
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
     )
 
 

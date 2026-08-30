@@ -146,32 +146,75 @@
               {% if story_arc.active %}
                 <div class="mt-4 grid gap-3 border-t border-pb-border pt-4 lg:grid-cols-[minmax(0,1fr)_auto]">
                   {% if membership.can_resolve %}
-                    <form
-                      action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve"
-                      method="post"
-                      hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve"
-                      hx-swap="none"
-                      data-testid="story-arc-resolve-membership-{{ membership.id }}"
-                      class="flex flex-col gap-2 sm:flex-row sm:items-end"
-                    >
-                      <div class="min-w-0 flex-1">
-                        <label for="story-arc-resolve-issue-{{ membership.id }}" class="mb-1 block text-sm font-medium text-pb-text">
-                          Existing issue ID
-                        </label>
-                        <input
-                          id="story-arc-resolve-issue-{{ membership.id }}"
-                          name="issue_id"
-                          type="number"
-                          min="1"
-                          required
-                          inputmode="numeric"
-                          class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
+                    <div class="space-y-3">
+                      <form
+                        action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/local-issues"
+                        method="get"
+                        hx-get="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/local-issues"
+                        hx-target="#story-arc-local-issue-results-{{ membership.id }}"
+                        hx-swap="innerHTML"
+                        data-testid="story-arc-local-issue-search-{{ membership.id }}"
+                        class="flex flex-col gap-2 sm:flex-row sm:items-end"
+                      >
+                        <div class="min-w-0 flex-1">
+                          <label for="story-arc-local-issue-query-{{ membership.id }}" class="mb-1 block text-sm font-medium text-pb-text">
+                            Find an issue in this library
+                          </label>
+                          <input
+                            id="story-arc-local-issue-query-{{ membership.id }}"
+                            name="q"
+                            type="search"
+                            maxlength="500"
+                            required
+                            value="{{ membership.local_search_query }}"
+                            autocomplete="off"
+                            class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
+                          >
+                        </div>
+                        <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                        <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                        <button type="submit" class="btn-secondary">Search local issues</button>
+                      </form>
+
+                      <div id="story-arc-local-issue-results-{{ membership.id }}"></div>
+
+                      <p class="text-xs text-pb-text-sec">
+                        Not in this library?
+                        <a href="{{ membership.metadata_add_url }}" class="text-pb-interactive hover:underline">
+                          Open Add Series with this evidence
+                        </a>.
+                      </p>
+
+                      <details class="text-sm text-pb-text-sec">
+                        <summary class="cursor-pointer">Resolve by known issue ID</summary>
+                        <form
+                          action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve"
+                          method="post"
+                          hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve"
+                          hx-swap="none"
+                          data-testid="story-arc-resolve-membership-{{ membership.id }}"
+                          class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end"
                         >
-                      </div>
-                      <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                      <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                      <button type="submit" class="btn-secondary">Resolve</button>
-                    </form>
+                          <div class="min-w-0 flex-1">
+                            <label for="story-arc-resolve-issue-{{ membership.id }}" class="mb-1 block text-sm font-medium text-pb-text">
+                              Existing issue ID
+                            </label>
+                            <input
+                              id="story-arc-resolve-issue-{{ membership.id }}"
+                              name="issue_id"
+                              type="number"
+                              min="1"
+                              required
+                              inputmode="numeric"
+                              class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
+                            >
+                          </div>
+                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                          <button type="submit" class="btn-secondary">Resolve</button>
+                        </form>
+                      </details>
+                    </div>
                   {% else %}
                     <p class="self-center text-sm text-pb-text-sec">Matched to canonical issue ID {{ membership.issue_id }}.</p>
                   {% endif %}

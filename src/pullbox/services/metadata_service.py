@@ -632,8 +632,12 @@ class MetadataService:
             select(Issue).where(Issue.comicvine_id.in_(provider_issue_ids))
         )
         existing_provider_issues = list(provider_result.scalars().all())
-        existing_by_number = {issue.issue_number: issue for issue in existing_issues}
         existing_by_text = {issue.effective_issue_number_text: issue for issue in existing_issues}
+        legacy_by_number = {
+            issue.issue_number: issue
+            for issue in existing_issues
+            if issue.issue_number_text is None
+        }
         existing_by_provider_id = {
             int(issue.comicvine_id): issue
             for issue in existing_provider_issues
@@ -650,7 +654,7 @@ class MetadataService:
             sync_issue_identity = True
             existing = existing_by_text.get(exact_issue_number_text)
             if existing is None:
-                existing = existing_by_number.get(summary.issue_number)
+                existing = legacy_by_number.get(summary.issue_number)
             existing_by_provider = existing_by_provider_id.get(provider_issue_id)
             if existing_by_provider is not None and existing_by_provider.series_id != series_id:
                 log.warning(
@@ -669,9 +673,9 @@ class MetadataService:
                     existing = existing_by_provider
                     existing.issue_number = summary.issue_number
                     existing.issue_number_text = exact_issue_number_text
-                    existing_by_number.pop(old_issue_number, None)
+                    if legacy_by_number.get(old_issue_number) is existing:
+                        legacy_by_number.pop(old_issue_number, None)
                     existing_by_text.pop(old_issue_number_text, None)
-                    existing_by_number[summary.issue_number] = existing
                     existing_by_text[exact_issue_number_text] = existing
                 else:
                     log.warning(
@@ -707,11 +711,10 @@ class MetadataService:
                     old_issue_number_text = existing.effective_issue_number_text
                     existing.issue_number = summary.issue_number
                     existing.issue_number_text = exact_issue_number_text
-                    if existing_by_number.get(old_issue_number) is existing:
-                        existing_by_number.pop(old_issue_number, None)
+                    if legacy_by_number.get(old_issue_number) is existing:
+                        legacy_by_number.pop(old_issue_number, None)
                     if existing_by_text.get(old_issue_number_text) is existing:
                         existing_by_text.pop(old_issue_number_text, None)
-                    existing_by_number[summary.issue_number] = existing
                     existing_by_text[exact_issue_number_text] = existing
                 if assign_provider_issue_id:
                     existing.comicvine_id = provider_issue_id
@@ -743,7 +746,6 @@ class MetadataService:
                 )
                 session.add(issue)
                 created.append(issue)
-                existing_by_number[summary.issue_number] = issue
                 existing_by_text[exact_issue_number_text] = issue
                 if assign_provider_issue_id:
                     existing_by_provider_id[provider_issue_id] = issue

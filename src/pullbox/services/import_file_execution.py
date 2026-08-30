@@ -160,6 +160,7 @@ def _resolve_import_file_issue_id(
     imp_file: ImportedFile,
     *,
     cv_id_to_issue_id: dict[int, int],
+    exact_number_to_issue_id: dict[str, int],
     number_to_issue_id: dict[float, int],
 ) -> int | None:
     if imp_file.matched_issue_id is not None:
@@ -177,7 +178,18 @@ def _resolve_import_file_issue_id(
 
     placeholder_target = _placeholder_issue_target_from_diagnostics(imp_file)
     if placeholder_target is not None:
+        if placeholder_target.issue_number_text is not None:
+            return exact_number_to_issue_id.get(placeholder_target.issue_number_text)
         return number_to_issue_id.get(placeholder_target.issue_number)
+
+    if imp_file.issue_number_raw and imp_file.parsed_issue_number is not None:
+        with suppress(ValueError):
+            exact_issue_number = normalize_issue_number_text(imp_file.issue_number_raw)
+            if issue_number_text_matches_numeric(
+                imp_file.parsed_issue_number,
+                exact_issue_number,
+            ):
+                return exact_number_to_issue_id.get(exact_issue_number)
 
     if imp_file.parsed_issue_number is not None:
         return number_to_issue_id.get(imp_file.parsed_issue_number)
@@ -205,7 +217,7 @@ async def _requires_serial_file_processing(
     resolved_series_id: int,
     importable_files: list[ImportedFile],
 ) -> bool:
-    cv_id_to_issue, number_to_issue = await load_issue_lookup_for_series(
+    cv_id_to_issue, exact_number_to_issue, number_to_issue = await load_issue_lookup_for_series(
         session,
         resolved_series_id,
     )
@@ -219,6 +231,11 @@ async def _requires_serial_file_processing(
         for issue_number, issue in number_to_issue.items()
         if issue.id is not None
     }
+    exact_number_to_issue_id = {
+        issue_number: issue.id
+        for issue_number, issue in exact_number_to_issue.items()
+        if issue.id is not None
+    }
     seen_issue_ids: set[int] = set()
     seen_file_names: set[str] = set()
     for imp_file in importable_files:
@@ -230,6 +247,7 @@ async def _requires_serial_file_processing(
         resolved_issue_id = _resolve_import_file_issue_id(
             imp_file,
             cv_id_to_issue_id=cv_id_to_issue_id,
+            exact_number_to_issue_id=exact_number_to_issue_id,
             number_to_issue_id=number_to_issue_id,
         )
         if resolved_issue_id is None:
@@ -293,13 +311,23 @@ async def _ensure_placeholder_issue_targets(
         return False
 
     issues_result = await session.execute(sa_select(Issue).where(Issue.series_id == series_id))
-    existing_by_number = {issue.issue_number: issue for issue in issues_result.scalars().all()}
+    existing_issues = list(issues_result.scalars().all())
+    existing_by_exact = {issue.effective_issue_number_text: issue for issue in existing_issues}
+    existing_by_number: dict[float, list[Issue]] = {}
+    for issue in existing_issues:
+        existing_by_number.setdefault(issue.issue_number, []).append(issue)
     created_count = 0
     max_target_issue_number = 0
     for target in placeholder_targets:
-        existing = existing_by_number.get(target.issue_number)
+        if target.issue_number_text is not None:
+            existing = existing_by_exact.get(target.issue_number_text)
+        else:
+            numeric_candidates = existing_by_number.get(target.issue_number, [])
+            if len(numeric_candidates) > 1:
+                continue
+            existing = numeric_candidates[0] if numeric_candidates else None
         if existing is not None:
-            if target.issue_number_text is not None:
+            if target.issue_number_text is not None and existing.issue_number_text is None:
                 existing.issue_number_text = target.issue_number_text
             if existing.issue_type == IssueType.ISSUE:
                 existing.issue_type = target.issue_type
@@ -320,7 +348,8 @@ async def _ensure_placeholder_issue_targets(
         if target.issue_number_text is not None:
             issue.issue_number_text = target.issue_number_text
         session.add(issue)
-        existing_by_number[target.issue_number] = issue
+        existing_by_exact[issue.effective_issue_number_text] = issue
+        existing_by_number.setdefault(target.issue_number, []).append(issue)
         created_count += 1
 
     if created_count:
@@ -328,7 +357,7 @@ async def _ensure_placeholder_issue_targets(
         if series is not None:
             series.issue_count = max(
                 int(series.issue_count or 0),
-                len(existing_by_number),
+                len(existing_issues) + created_count,
                 max_target_issue_number,
             )
     await session.flush()
@@ -665,7 +694,7 @@ async def process_import_series_files(
             await session.flush()
         return files_imported, files_failed
 
-    cv_id_to_issue, number_to_issue = await load_issue_lookup_for_series(
+    cv_id_to_issue, exact_number_to_issue, number_to_issue = await load_issue_lookup_for_series(
         session,
         resolved_series_id,
     )
@@ -679,6 +708,11 @@ async def process_import_series_files(
         for issue_number, issue in number_to_issue.items()
         if issue.id is not None
     }
+    exact_number_to_issue_id = {
+        issue_number: issue.id
+        for issue_number, issue in exact_number_to_issue.items()
+        if issue.id is not None
+    }
 
     media_settings = await load_media_settings(session, job)
     skip_existing_enabled = media_settings["skip_existing_files"].lower() == "true"
@@ -686,7 +720,13 @@ async def process_import_series_files(
     permission_policy = await load_permission_policy(session, job)
     trash_dir.mkdir(parents=True, exist_ok=True)
     issue_ids = {
-        issue.id for issue in [*cv_id_to_issue.values(), *number_to_issue.values()] if issue.id
+        issue.id
+        for issue in [
+            *cv_id_to_issue.values(),
+            *exact_number_to_issue.values(),
+            *number_to_issue.values(),
+        ]
+        if issue.id
     }
     owned_issue_ids = (
         await _load_owned_issue_ids(session, issue_ids) if skip_existing_enabled else set()
@@ -770,6 +810,7 @@ async def process_import_series_files(
             resolved_issue_id = _resolve_import_file_issue_id(
                 imp_file,
                 cv_id_to_issue_id=cv_id_to_issue_id,
+                exact_number_to_issue_id=exact_number_to_issue_id,
                 number_to_issue_id=number_to_issue_id,
             )
             if resolved_issue_id is None:

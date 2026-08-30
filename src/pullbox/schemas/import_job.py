@@ -85,14 +85,31 @@ class ImportJobCreate(BaseModel):
         None,
         description="Complete proposed future policy when future_layout_requested is true",
     )
+    story_arc_import_requested: bool = Field(
+        False,
+        description=(
+            "Step 1 intent to review and import detected logical story arcs and memberships"
+        ),
+    )
+    story_arc_materialization_requested: bool = Field(
+        False,
+        description=(
+            "Step 1 intent to review separate story-arc folder placements in addition to "
+            "logical memberships"
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_future_policy_pair(self) -> ImportJobCreate:
-        """Require the future-policy request flag and payload to agree."""
+        """Require paired Step 1 intent fields to agree."""
         if self.future_layout_requested and self.future_root_policy is None:
             raise ValueError("future_root_policy is required when future_layout_requested is true")
         if not self.future_layout_requested and self.future_root_policy is not None:
             raise ValueError("future_root_policy requires future_layout_requested to be true")
+        if self.story_arc_materialization_requested and not self.story_arc_import_requested:
+            raise ValueError(
+                "Story arc materialization requires story_arc_import_requested to be true"
+            )
         return self
 
     @field_validator("file_formats")
@@ -472,10 +489,13 @@ class ImportedFileRead(BaseModel):
 class FileConflictGroup(BaseModel):
     """A group of files that conflict on the same issue match."""
 
-    conflict_group_id: int
-    matched_issue_id: int
+    kind: Literal["file_conflict", "series_conflict"] = "file_conflict"
+    conflict_group_id: int | str
+    matched_issue_id: int | None
+    series_id: int | None = None
     issue_title: str | None = None
-    files: list[ImportedFileRead] = Field(..., min_length=1)
+    diagnostics: dict[str, object] = Field(default_factory=dict)
+    files: list[ImportedFileRead]
 
 
 class ImportJobRead(BaseModel):
@@ -522,6 +542,8 @@ class ImportJobRead(BaseModel):
     future_layout_requested: bool = False
     future_root_policy_snapshot: FutureRootPolicyPayload | None = None
     future_root_policy_applied_at: datetime | None = None
+    story_arc_import_requested: bool = False
+    story_arc_materialization_requested: bool = False
     cv_match_threshold: float
     min_files_per_series: int
     file_formats: str | None
@@ -691,11 +713,13 @@ class ImportedFilesResponse(BaseModel):
 
 
 class ConflictGroupsResponse(BaseModel):
-    """All conflict groups for an import job."""
+    """One bounded page of conflict groups for an import job."""
 
     job_id: int
     groups: list[FileConflictGroup]
     total: int
+    page: int
+    page_size: int
 
 
 class FileSelectionUpdateRequest(BaseModel):

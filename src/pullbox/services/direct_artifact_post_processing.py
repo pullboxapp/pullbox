@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.download import DownloadState
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile
@@ -168,10 +169,15 @@ async def run_direct_artifact_pack_post_processing(
         )
         .where(Issue.series_id == initiating_issue.series_id)
     )
-    issue_by_number = {issue.issue_number: issue for issue in issues_result.unique().scalars()}
+    issue_by_number = {
+        (
+            getattr(issue, "issue_number_text", None) or format_issue_number(issue.issue_number)
+        ): issue
+        for issue in issues_result.unique().scalars()
+    }
     prepared_imports = []
-    for issue_number, file_path in sorted(extracted_paths.items()):
-        candidate = issue_by_number.get(issue_number)
+    for issue_number_text, file_path in sorted(extracted_paths.items()):
+        candidate = issue_by_number.get(issue_number_text)
         if candidate is None:
             continue
         has_existing_file = getattr(candidate, "library_file", None) is not None

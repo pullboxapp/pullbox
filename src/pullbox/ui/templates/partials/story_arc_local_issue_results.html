@@ -1,0 +1,47 @@
+<section
+  data-testid="story-arc-local-issue-results"
+  aria-label="Local issue search results"
+  class="rounded-md border border-pb-border bg-pb-bg p-3"
+>
+  {% if result.items %}
+    <p class="text-xs text-pb-text-sec" role="status" aria-live="polite">
+      Showing {{ result.items|length }} local {{ 'match' if result.items|length == 1 else 'matches' }}{% if result.has_more %}; refine the search to see more{% endif %}.
+    </p>
+    <ul class="mt-3 space-y-2">
+      {% for candidate in result.items %}
+        <li
+          data-local-issue-id="{{ candidate.issue_id }}"
+          class="flex flex-col gap-3 rounded-md border border-pb-border bg-pb-card p-3 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div class="min-w-0">
+            <p class="font-medium text-pb-text">
+              {{ candidate.series_title }}
+              <span class="font-mono">#{{ candidate.issue_number_text }}</span>
+            </p>
+            <p class="text-sm text-pb-text-sec">{{ candidate.issue_title }}</p>
+            <p class="mt-1 text-xs text-pb-text-dim">
+              {{ 'File available' if candidate.canonical_file_available else candidate.status|replace('_', ' ')|title }}
+            </p>
+          </div>
+          <form
+            action="/story-arcs/{{ story_arc_id }}/memberships/{{ membership_id }}/resolve"
+            method="post"
+            hx-post="/story-arcs/{{ story_arc_id }}/memberships/{{ membership_id }}/resolve"
+            hx-swap="none"
+          >
+            <input type="hidden" name="issue_id" value="{{ candidate.issue_id }}">
+            <input type="hidden" name="return_page" value="{{ return_page }}">
+            <input type="hidden" name="return_per_page" value="{{ return_per_page }}">
+            <button type="submit" class="btn-secondary btn-sm">
+              Use this issue
+            </button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-sm text-pb-text-sec" role="status" aria-live="polite">
+      No local issues matched “{{ result.query }}”. Try a series title, issue title, or exact issue number.
+    </p>
+  {% endif %}
+</section>

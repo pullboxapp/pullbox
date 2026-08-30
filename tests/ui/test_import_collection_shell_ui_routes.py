@@ -829,6 +829,13 @@ class TestImportShellRouteContracts:
         assert "Existing files won't be renamed" in response.text
         assert "Current library policy" in response.text
         assert "Proposed for new files" in response.text
+        assert 'data-testid="import-story-arc-section"' in response.text
+        assert 'data-testid="import-story-arc-preview"' in response.text
+        assert 'data-testid="import-story-arc-import-toggle"' in response.text
+        assert 'data-testid="import-story-arc-materialize-toggle"' in response.text
+        assert "Import logical story arcs and memberships" in response.text
+        assert "Materialize and synchronize separate arc files" in response.text
+        assert "Step 3 remains the final review" in response.text
         assert 'data-testid="file-browser-modal"' in response.text
         assert 'data-testid="import-collection-modal-host"' in response.text
 
@@ -855,6 +862,14 @@ class TestImportShellRouteContracts:
         assert "future_root_policy: this.futureLayoutRequested" in source_controller
         assert "target_library_root_id: this.futureLayoutRequested" in source_controller
         assert '"/api/v1/config/library-roots/"' in source_controller
+        assert 'fetch("/api/v1/import/story-arc-preview"' in source_controller
+        assert "storyArcImportRequested: false" in source_controller
+        assert "storyArcMaterializationRequested: false" in source_controller
+        assert "story_arc_import_requested: this.storyArcImportRequested" in source_controller
+        assert (
+            "story_arc_materialization_requested: this.storyArcMaterializationRequested"
+            in source_controller
+        )
 
     async def test_import_collection_exposes_stable_step_mounts(
         self,

@@ -143,6 +143,8 @@ async def create_job(
         future_layout_requested=request.future_layout_requested,
         future_root_policy_snapshot=future_root_policy_snapshot,
         future_root_policy_applied_at=None,
+        story_arc_import_requested=request.story_arc_import_requested,
+        story_arc_materialization_requested=request.story_arc_materialization_requested,
     )
     apply_ingest_policy_to_import_job(job, ingest_policy)
     session.add(job)

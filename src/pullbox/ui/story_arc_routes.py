@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import Annotated, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
@@ -18,7 +19,12 @@ from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
 )
-from pullbox.models.story_arc import StoryArc, StoryArcLifecycle, StoryArcSourceKind
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcLifecycle,
+    StoryArcSourceKind,
+)
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementIntegrationError,
     StoryArcPlacementPolicyInput,
@@ -32,14 +38,12 @@ from pullbox.services.story_arc_service import (
     StoryArcServiceError,
     StoryArcValidationError,
 )
+from pullbox.ui.story_arc_local_issue_search import search_story_arc_local_issues
 from pullbox.ui.story_arc_presenters import (
     load_story_arc_detail,
     load_story_arc_list_page,
     load_story_arc_placement_context,
 )
-
-if TYPE_CHECKING:
-    from pullbox.models.story_arc import IssueStoryArc
 
 router = APIRouter()
 
@@ -265,6 +269,24 @@ async def _nested_memberships(
         if membership.id == membership_id:
             return memberships, index
     raise StoryArcNotFoundError(f"Story-arc membership {membership_id} was not found")
+
+
+async def _bounded_nested_membership(
+    session: DbSession,
+    *,
+    story_arc_id: int,
+    membership_id: int,
+) -> IssueStoryArc:
+    """Load one membership while rejecting cross-arc nested access."""
+    membership = await session.scalar(
+        select(IssueStoryArc).where(
+            IssueStoryArc.id == membership_id,
+            IssueStoryArc.story_arc_id == story_arc_id,
+        )
+    )
+    if membership is None:
+        raise HTTPException(status_code=404, detail="Story arc entry not found")
+    return membership
 
 
 @router.get("/story-arcs", response_class=HTMLResponse, include_in_schema=False)
@@ -741,6 +763,48 @@ async def story_arc_resolve_membership(
             notice="resolved",
             page=return_page,
             per_page=return_per_page,
+        ),
+    )
+
+
+@router.get(
+    "/story-arcs/{story_arc_id}/memberships/{membership_id}/local-issues",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def story_arc_local_issue_search(
+    story_arc_id: int,
+    membership_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    q: Annotated[str, Query(min_length=1, max_length=500)],
+    return_page: Annotated[int, Query(ge=1)] = 1,
+    return_per_page: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> Response:
+    """Return a bounded, provider-free local issue picker for one entry."""
+    membership = await _bounded_nested_membership(
+        session,
+        story_arc_id=story_arc_id,
+        membership_id=membership_id,
+    )
+    result = await search_story_arc_local_issues(
+        session,
+        query=q,
+        source_series_name=membership.source_series_name,
+        source_issue_number_text=membership.source_issue_number_text,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/story_arc_local_issue_results.html",
+        _ctx(
+            request,
+            user,
+            story_arc_id=story_arc_id,
+            membership_id=membership_id,
+            result=result,
+            return_page=return_page,
+            return_per_page=return_per_page,
         ),
     )
 

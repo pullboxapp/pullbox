@@ -14,7 +14,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy import (
     Enum as SQLAlchemyEnum,
@@ -111,7 +110,6 @@ class IssueStatus(enum.StrEnum):
 class Issue(Base, IdentityMixin, TimestampMixin):
     __tablename__ = "issues"
     __table_args__ = (
-        UniqueConstraint("series_id", "issue_number", name="uq_series_issue"),
         Index(
             "uq_series_issue_number_text",
             "series_id",

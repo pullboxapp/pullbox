@@ -394,6 +394,48 @@ class TestStoryArcManagementUI:
         assert f'data-membership-id="{ids["million_membership"]}"' not in second_page.text
         assert f'data-membership-id="{ids["annual_membership"]}"' not in second_page.text
 
+    async def test_missing_entry_searches_bounded_local_issues_and_prefills_add_series(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ids = await _seed_detail_arc(sec_db)
+        async with sec_db() as session:
+            membership = await session.get(IssueStoryArc, ids["annual_membership"])
+            assert membership is not None
+            membership.source_series_name = "Batman Annual"
+            membership.source_issue_title = "Annual Resolution Target"
+            await session.commit()
+
+        detail = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
+
+        assert detail.status_code == 200
+        assert (
+            f'data-testid="story-arc-local-issue-search-{ids["annual_membership"]}"' in detail.text
+        )
+        assert 'value="Batman Annual"' in detail.text
+        assert 'href="/series/add?q=Batman+Annual"' in detail.text
+
+        search = await authenticated_client.get(
+            (f"/story-arcs/{ids['arc']}/memberships/{ids['annual_membership']}/local-issues"),
+            params={"q": "Annual", "return_page": 1, "return_per_page": 25},
+        )
+
+        assert search.status_code == 200
+        assert 'data-testid="story-arc-local-issue-results"' in search.text
+        assert f'data-local-issue-id="{ids["annual_issue"]}"' in search.text
+        assert "Batman Annual" in search.text
+        assert "Annual Resolution Target" in search.text
+        assert f'value="{ids["annual_issue"]}"' in search.text
+        assert f'data-local-issue-id="{ids["million_issue"]}"' not in search.text
+        assert "Showing 1 local match" in search.text
+
+        oversized = await authenticated_client.get(
+            (f"/story-arcs/{ids['arc']}/memberships/{ids['annual_membership']}/local-issues"),
+            params={"q": "a" * 501},
+        )
+        assert oversized.status_code == 422
+
     async def test_detail_exposes_accessible_logical_and_separate_folder_policy_contract(
         self,
         authenticated_client: AsyncClient,

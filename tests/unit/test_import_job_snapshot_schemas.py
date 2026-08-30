@@ -37,6 +37,8 @@ def test_old_create_payload_defaults_to_compatible_durable_contract(tmp_path: Pa
     assert request.source_layout == SourceLayoutSpecPayload()
     assert request.future_layout_requested is False
     assert request.future_root_policy is None
+    assert request.story_arc_import_requested is False
+    assert request.story_arc_materialization_requested is False
 
 
 def test_new_create_payload_is_typed_and_serializable(tmp_path: Path) -> None:
@@ -52,6 +54,8 @@ def test_new_create_payload_is_typed_and_serializable(tmp_path: Path) -> None:
         file_handling_mode=ImportFileHandlingMode.IN_PLACE,
         future_layout_requested=True,
         future_root_policy=_future_policy(),
+        story_arc_import_requested=True,
+        story_arc_materialization_requested=True,
     )
 
     dumped = request.model_dump(mode="json")
@@ -60,6 +64,34 @@ def test_new_create_payload_is_typed_and_serializable(tmp_path: Path) -> None:
     assert dumped["source_layout"]["mode"] == "custom"
     assert dumped["future_layout_requested"] is True
     assert dumped["future_root_policy"]["schema_version"] == 1
+    assert dumped["story_arc_import_requested"] is True
+    assert dumped["story_arc_materialization_requested"] is True
+
+
+def test_create_payload_keeps_logical_story_arcs_independent_from_folder_materialization(
+    tmp_path: Path,
+) -> None:
+    request = ImportJobCreate(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.FILESYSTEM,
+        story_arc_import_requested=True,
+        story_arc_materialization_requested=False,
+    )
+
+    assert request.story_arc_import_requested is True
+    assert request.story_arc_materialization_requested is False
+
+
+def test_create_payload_rejects_story_arc_materialization_without_logical_import(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValidationError, match="Story arc materialization requires"):
+        ImportJobCreate(
+            source_path=str(tmp_path),
+            source_type=ImportSourceType.FILESYSTEM,
+            story_arc_import_requested=False,
+            story_arc_materialization_requested=True,
+        )
 
 
 @pytest.mark.parametrize(

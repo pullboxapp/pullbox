@@ -364,13 +364,14 @@ async def register_stale_library_file(
     confidence = MatchConfidence.UNMATCHED
 
     if series is not None and parsed and parsed.issue_number is not None:
-        issue_result = await session.execute(
-            select(Issue).where(
-                Issue.series_id == series.id,
-                Issue.issue_number == parsed.issue_number,
-            )
-        )
-        issue = issue_result.scalar_one_or_none()
+        issue_filters = [Issue.series_id == series.id]
+        if parsed.issue_number_text is not None:
+            issue_filters.append(Issue.issue_number_text == parsed.issue_number_text)
+        else:
+            issue_filters.append(Issue.issue_number == parsed.issue_number)
+        issue_result = await session.execute(select(Issue).where(*issue_filters).limit(2))
+        issue_candidates = list(issue_result.scalars().all())
+        issue = issue_candidates[0] if len(issue_candidates) == 1 else None
         if issue is not None:
             issue_id = issue.id
             confidence = MatchConfidence.HIGH

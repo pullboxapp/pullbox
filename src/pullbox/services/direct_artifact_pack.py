@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pullbox.core.archive import ArchiveError, ArchiveReader
 from pullbox.core.file_safety import has_archive_member_path_traversal
-from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.release_parser import parse_release_title
 
@@ -49,7 +49,7 @@ def extract_same_series_issue_files(
     destination: Path,
     expected_issue_numbers: frozenset[str],
     expected_series_titles: frozenset[str],
-) -> dict[float, Path]:
+) -> dict[str, Path]:
     """Extract separately packaged issues from one contiguous direct-download pack.
 
     A pack with page images but no nested comic files is one combined comic file.
@@ -95,7 +95,7 @@ def extract_same_series_issue_files(
         )
 
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-    extracted: dict[float, Path] = {}
+    extracted: dict[str, Path] = {}
     for member in candidates:
         if has_archive_member_path_traversal(member.name):
             raise DirectArtifactPackError(
@@ -104,7 +104,11 @@ def extract_same_series_issue_files(
             )
         parsed = parse_release_title(Path(member.name).name)
         issue_number = parsed.issue_number if parsed is not None else None
-        if issue_number is None or issue_number not in expected:
+        issue_number_text = parsed.issue_number_text if parsed is not None else None
+        if issue_number is None:
+            continue
+        exact_issue_number = issue_number_text or format_issue_number(issue_number)
+        if exact_issue_number not in expected:
             continue
         parsed_series_title = NameMatcher.normalize(parsed.series_name or "") if parsed else ""
         if parsed_series_title not in normalized_series_titles:
@@ -112,13 +116,13 @@ def extract_same_series_issue_files(
                 code="direct_pack_mixed_series",
                 message="The direct-download pack contains files for a different series.",
             )
-        if issue_number in extracted:
+        if exact_issue_number in extracted:
             raise DirectArtifactPackError(
                 code="direct_pack_ambiguous_issue",
                 message="The direct-download pack contains more than one file for the same issue.",
             )
         suffix = Path(member.name).suffix.lower()
-        target = destination / f"issue-{_issue_path_token(issue_number)}{suffix}"
+        target = destination / f"issue-{_issue_path_token(exact_issue_number)}{suffix}"
         try:
             target.write_bytes(reader.read_file(member.name, max_bytes=member.size))
             target.chmod(0o600)
@@ -127,7 +131,7 @@ def extract_same_series_issue_files(
                 code="direct_pack_extract_failed",
                 message="Pullbox could not safely extract the direct-download pack.",
             ) from exc
-        extracted[issue_number] = target
+        extracted[exact_issue_number] = target
 
     missing = expected - set(extracted)
     if missing:
@@ -138,11 +142,12 @@ def extract_same_series_issue_files(
     return extracted
 
 
-def _normalized_issue_numbers(issue_numbers: frozenset[str]) -> set[float]:
-    normalized: set[float] = set()
+def _normalized_issue_numbers(issue_numbers: frozenset[str]) -> set[str]:
+    normalized: set[str] = set()
     for value in issue_numbers:
         try:
-            normalized.add(float(value))
+            _, exact_text = parse_issue_number_text(value)
+            normalized.add(exact_text)
         except (TypeError, ValueError) as exc:
             raise DirectArtifactPackError(
                 code="direct_pack_coverage_invalid",
@@ -151,8 +156,16 @@ def _normalized_issue_numbers(issue_numbers: frozenset[str]) -> set[float]:
     return normalized
 
 
-def _issue_path_token(issue_number: float) -> str:
-    return format_issue_number(issue_number).replace(".", "_")
+def _issue_path_token(issue_number: str | float) -> str:
+    try:
+        _, exact_text = parse_issue_number_text(issue_number)
+    except ValueError:
+        exact_text = (
+            format_issue_number(issue_number)
+            if isinstance(issue_number, float)
+            else str(issue_number)
+        )
+    return exact_text.replace(".", "_")
 
 
 def _issue_number_from_member(name: str) -> float | None:

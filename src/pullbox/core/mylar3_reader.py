@@ -14,7 +14,7 @@ import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -33,6 +33,9 @@ from pullbox.core.naming_type_detection import detect_issue_type
 from pullbox.core.release_parser import normalize_issue_number
 from pullbox.core.source_metadata import MetadataSignal, SourceMetadataExtractor
 from pullbox.models.issue import IssueType
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = structlog.get_logger(__name__)
 
@@ -117,6 +120,45 @@ class Mylar3CollectionSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class Mylar3ImportMetadataSnapshot:
+    """Small source-wide metadata shared by bounded Mylar import pages."""
+
+    storyarcs_present: bool
+    readlist_present: bool
+    readlist_count: int
+    arc_settings: Mylar3ArcSettingsSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class Mylar3StoryArcPreflightExample:
+    """One path-free Story Arc row suitable for a bounded Step 1 preview."""
+
+    story_arc: str | None
+    series: str | None
+    issue_number: str | None
+    issue_title: str | None
+    reading_order: str | None
+    status: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Mylar3StoryArcPreflightSnapshot:
+    """Exact aggregate counts plus bounded examples from Mylar Story Arc tables."""
+
+    storyarcs_present: bool
+    arcs_count: int
+    entries_count: int
+    missing_count: int
+    duplicate_count: int
+    existing_location_count: int
+    examples: tuple[Mylar3StoryArcPreflightExample, ...]
+    readlist_present: bool
+    readlist_count: int
+    arc_settings: Mylar3ArcSettingsSnapshot
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class _MylarArcSettingSpec:
     """Static schema for one safe config value."""
 
@@ -181,6 +223,8 @@ class Mylar3Reader:
 
     MYLAR3_CV_PREFIX = "CV-"
     MAX_CONFIG_BYTES = 1_048_576
+    DEFAULT_IMPORT_PAGE_SIZE = 100
+    MAX_IMPORT_PAGE_SIZE = 250
     ARC_SETTING_SPECS = (
         _MylarArcSettingSpec("STORYARCDIR", "StoryArc", "bool", False),
         _MylarArcSettingSpec("STORYARC_LOCATION", "StoryArc", "str", None),
@@ -276,6 +320,78 @@ class Mylar3Reader:
 
         return await asyncio.to_thread(self._read_snapshot_sync)
 
+    async def read_import_metadata(self) -> Mylar3ImportMetadataSnapshot:
+        """Read source-wide flags without retaining comics, issues, or arc rows."""
+        self._require_database()
+        return await asyncio.to_thread(self._read_import_metadata_sync)
+
+    async def iter_import_series_pages(
+        self,
+        *,
+        page_size: int = DEFAULT_IMPORT_PAGE_SIZE,
+    ) -> AsyncIterator[tuple[DiscoveredSeries, ...]]:
+        """Yield complete normalized series cohorts from bounded Comic row pages."""
+        self._require_database()
+        self._require_import_page_size(page_size)
+        after_rowid = 0
+        seen_cv_ids: set[int] = set()
+        while True:
+            page, next_rowid = await asyncio.to_thread(
+                self._read_import_series_page_sync,
+                after_rowid,
+                page_size,
+            )
+            if next_rowid == after_rowid:
+                break
+            after_rowid = next_rowid
+            filtered: list[DiscoveredSeries] = []
+            for series in page:
+                cv_id = series.mylar3_cv_id
+                if cv_id is not None and cv_id in seen_cv_ids:
+                    logger.warning(
+                        "mylar3_duplicate_cv_id",
+                        cv_id=cv_id,
+                        series_name=series.raw_series_name,
+                    )
+                    continue
+                if cv_id is not None:
+                    seen_cv_ids.add(cv_id)
+                filtered.append(series)
+            if filtered:
+                yield tuple(filtered)
+
+    async def iter_import_story_arc_pages(
+        self,
+        *,
+        page_size: int = DEFAULT_IMPORT_PAGE_SIZE,
+    ) -> AsyncIterator[tuple[Mylar3StoryArcSnapshot, ...]]:
+        """Yield deterministic pages of complete Story Arc cohorts."""
+        self._require_database()
+        self._require_import_page_size(page_size)
+        after_group: tuple[str, str] | None = None
+        while True:
+            page, after_group = await asyncio.to_thread(
+                self._read_import_story_arc_page_sync,
+                after_group,
+                page_size,
+            )
+            if not page:
+                break
+            yield page
+
+    async def read_story_arc_preflight(
+        self,
+        *,
+        max_examples: int = 5,
+    ) -> Mylar3StoryArcPreflightSnapshot:
+        """Read aggregate Story Arc evidence without loading the Mylar collection."""
+        if max_examples < 1 or max_examples > 20:
+            raise ValueError("Mylar Story Arc preview examples must be between 1 and 20")
+        if not self._db_path.exists():
+            msg = f"Mylar3 database not found: {self._db_path}"
+            raise FileNotFoundError(msg)
+        return await asyncio.to_thread(self._read_story_arc_preflight_sync, max_examples)
+
     def _read_sync(self) -> list[DiscoveredSeries]:
         """Retain the legacy synchronous series-only helper."""
         return list(self._read_snapshot_sync().series)
@@ -320,6 +436,377 @@ class Mylar3Reader:
             readlist_count=readlist_count,
             arc_settings=self._read_arc_settings(),
         )
+
+    def _require_database(self) -> None:
+        if not self._db_path.exists():
+            msg = f"Mylar3 database not found: {self._db_path}"
+            raise FileNotFoundError(msg)
+
+    def _require_import_page_size(self, page_size: int) -> None:
+        if page_size < 1 or page_size > self.MAX_IMPORT_PAGE_SIZE:
+            msg = f"Mylar import page size must be between 1 and {self.MAX_IMPORT_PAGE_SIZE}"
+            raise ValueError(msg)
+
+    def _read_import_metadata_sync(self) -> Mylar3ImportMetadataSnapshot:
+        """Read bounded source-wide inventory in one explicit read transaction."""
+        try:
+            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+        except sqlite3.DatabaseError as exc:
+            msg = f"Could not read Mylar3 database: {exc}"
+            raise MylarReadError(msg) from exc
+
+        try:
+            conn.execute("BEGIN")
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comics'"
+            ).fetchone():
+                msg = "Not a Mylar3 database: 'comics' table not found"
+                raise MylarReadError(msg)
+            storyarcs_present = self._table_exists(conn, "storyarcs")
+            readlist_present, readlist_count = self._read_readlist_count(conn)
+        except sqlite3.DatabaseError as exc:
+            msg = f"Could not read Mylar3 database: {exc}"
+            raise MylarReadError(msg) from exc
+        finally:
+            conn.close()
+
+        return Mylar3ImportMetadataSnapshot(
+            storyarcs_present=storyarcs_present,
+            readlist_present=readlist_present,
+            readlist_count=readlist_count,
+            arc_settings=self._read_arc_settings(),
+        )
+
+    def _read_import_series_page_sync(
+        self,
+        after_rowid: int,
+        page_size: int,
+    ) -> tuple[tuple[DiscoveredSeries, ...], int]:
+        """Read and normalize one bounded rowid-keyset Comic cohort."""
+        try:
+            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+        except sqlite3.DatabaseError as exc:
+            msg = f"Could not read Mylar3 database: {exc}"
+            raise MylarReadError(msg) from exc
+
+        try:
+            conn.execute("BEGIN")
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comics'"
+            ).fetchone():
+                msg = "Not a Mylar3 database: 'comics' table not found"
+                raise MylarReadError(msg)
+            cursor = conn.execute(
+                "SELECT ComicID, ComicName, ComicYear, ComicPublisher, "
+                "ComicLocation, Status, Total, rowid AS __source_rowid "
+                "FROM comics WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (after_rowid, page_size),
+            )
+            rows = list(cursor)
+            if not rows:
+                return (), after_rowid
+            comic_ids = {
+                cv_id for row in rows if (cv_id := self._parse_cv_id(row["ComicID"])) is not None
+            }
+            issue_records = self._read_issue_records_for_comic_ids(conn, comic_ids)
+            release_ids = {
+                record.series_cv_id
+                for owning_comic_id, records in issue_records.items()
+                for record in records
+                if record.issue_type == IssueType.ANNUAL and record.series_cv_id != owning_comic_id
+            }
+            normal_release_ids = self._existing_comic_ids(conn, release_ids)
+            converted = self._convert_rows(rows, issue_records)
+            page_items = [
+                series
+                for series in converted
+                if not (
+                    series.mylar3_cv_id in normal_release_ids
+                    and series.mylar3_cv_id not in comic_ids
+                )
+            ]
+            cross_release_records = self._read_cross_release_records(conn, comic_ids)
+            if cross_release_records:
+                owner_rows = self._read_comic_rows_by_cv_ids(
+                    conn,
+                    {owner_cv_id for owner_cv_id, _record in cross_release_records},
+                )
+                self._attach_cross_release_records(
+                    page_items,
+                    cross_release_records=cross_release_records,
+                    owner_rows=owner_rows,
+                )
+            page = tuple(page_items)
+            next_rowid = int(rows[-1]["__source_rowid"])
+        except sqlite3.DatabaseError as exc:
+            msg = f"Could not read Mylar3 database: {exc}"
+            raise MylarReadError(msg) from exc
+        finally:
+            conn.close()
+        return page, next_rowid
+
+    def _read_import_story_arc_page_sync(
+        self,
+        after_group: tuple[str, str] | None,
+        page_size: int,
+    ) -> tuple[tuple[Mylar3StoryArcSnapshot, ...], tuple[str, str] | None]:
+        """Read one keyset page of complete Story Arc identity cohorts."""
+        try:
+            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+        except sqlite3.DatabaseError as exc:
+            msg = f"Could not read Mylar3 database: {exc}"
+            raise MylarReadError(msg) from exc
+
+        try:
+            conn.execute("BEGIN")
+            if not self._table_exists(conn, "storyarcs"):
+                return (), after_group
+            available_columns = {
+                column.casefold(): column for column in self._table_columns(conn, "storyarcs")
+            }
+
+            def expression(column_name: str) -> str:
+                actual_column = available_columns.get(column_name.casefold())
+                if actual_column is None:
+                    return "NULL"
+                return f'"{actual_column.replace(chr(34), chr(34) * 2)}"'
+
+            story_arc_id = f"COALESCE(CAST({expression('StoryArcID')} AS TEXT), '')"
+            cv_arc_id = f"COALESCE(CAST({expression('CV_ArcID')} AS TEXT), '')"
+            story_arc_name = f"COALESCE(CAST({expression('StoryArc')} AS TEXT), '')"
+            group_kind = (
+                f"CASE WHEN {story_arc_id} <> '' THEN 'story_arc_id' "
+                f"WHEN {cv_arc_id} <> '' THEN 'cv_arc_id' "
+                f"WHEN {story_arc_name} <> '' THEN 'story_arc_name' "
+                "ELSE 'unidentified_row' END"
+            )
+            group_value = (
+                f"CASE WHEN {story_arc_id} <> '' THEN {story_arc_id} "
+                f"WHEN {cv_arc_id} <> '' THEN {cv_arc_id} "
+                f"WHEN {story_arc_name} <> '' THEN {story_arc_name} "
+                "ELSE printf('%020d', rowid) END"
+            )
+            key_params: list[object] = []
+            key_where = ""
+            if after_group is not None:
+                key_where = "WHERE group_kind > ? OR (group_kind = ? AND group_value > ?)"
+                key_params.extend([after_group[0], after_group[0], after_group[1]])
+            key_params.append(page_size)
+            key_cursor = conn.execute(
+                "SELECT group_kind, group_value FROM ("
+                f"SELECT {group_kind} AS group_kind, {group_value} AS group_value "
+                "FROM storyarcs"
+                ") AS normalized "
+                f"{key_where} "
+                "GROUP BY group_kind, group_value "
+                "ORDER BY group_kind, group_value LIMIT ?",
+                tuple(key_params),
+            )
+            group_rows = list(key_cursor)
+            if not group_rows:
+                return (), after_group
+            group_keys = [(str(row["group_kind"]), str(row["group_value"])) for row in group_rows]
+
+            expressions: list[str] = []
+            for expected_column in self.STORY_ARC_COLUMNS:
+                actual_column = available_columns.get(expected_column.casefold())
+                if actual_column is None:
+                    expressions.append(f'NULL AS "{expected_column}"')
+                    continue
+                quoted_column = actual_column.replace('"', '""')
+                expressions.append(f'"{quoted_column}" AS "{expected_column}"')
+            predicates = " OR ".join(
+                f"({group_kind} = ? AND {group_value} = ?)" for _key in group_keys
+            )
+            row_params = tuple(value for key in group_keys for value in key)
+            row_cursor = conn.execute(
+                f"SELECT {', '.join(expressions)}, rowid AS __source_rowid "
+                f"FROM storyarcs WHERE {predicates} "
+                f"ORDER BY {group_kind}, {group_value}, rowid",
+                row_params,
+            )
+            rows = list(row_cursor)
+            page = self._convert_story_arc_rows(rows)
+            next_group = group_keys[-1]
+        except sqlite3.DatabaseError as exc:
+            msg = f"Could not read Mylar3 database: {exc}"
+            raise MylarReadError(msg) from exc
+        finally:
+            conn.close()
+        return page, next_group
+
+    def _read_story_arc_preflight_sync(
+        self,
+        max_examples: int,
+    ) -> Mylar3StoryArcPreflightSnapshot:
+        """Read exact aggregate counts and a bounded row sample in one RO transaction."""
+        try:
+            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+        except sqlite3.DatabaseError as exc:
+            msg = f"Could not read Mylar3 database: {exc}"
+            raise MylarReadError(msg) from exc
+
+        warnings: list[str] = []
+        try:
+            conn.execute("BEGIN")
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='comics'"
+            )
+            if not cursor.fetchone():
+                msg = "Not a Mylar3 database: 'comics' table not found"
+                raise MylarReadError(msg)
+            if not self._table_exists(conn, "storyarcs"):
+                readlist_present, readlist_count = self._read_readlist_count(conn)
+                return Mylar3StoryArcPreflightSnapshot(
+                    storyarcs_present=False,
+                    arcs_count=0,
+                    entries_count=0,
+                    missing_count=0,
+                    duplicate_count=0,
+                    existing_location_count=0,
+                    examples=(),
+                    readlist_present=readlist_present,
+                    readlist_count=readlist_count,
+                    arc_settings=self._read_arc_settings(),
+                )
+
+            available = {
+                column.casefold(): column for column in self._table_columns(conn, "storyarcs")
+            }
+
+            def expression(column_name: str) -> str:
+                actual = available.get(column_name.casefold())
+                if actual is None:
+                    return "NULL"
+                return f'"{actual.replace(chr(34), chr(34) * 2)}"'
+
+            story_arc_id = expression("StoryArcID")
+            cv_arc_id = expression("CV_ArcID")
+            story_arc_name = expression("StoryArc")
+            reading_order = expression("ReadingOrder")
+            status = expression("Status")
+            location = expression("Location")
+            story_arc_id_text = f"COALESCE(CAST({story_arc_id} AS TEXT), '')"
+            cv_arc_id_text = f"COALESCE(CAST({cv_arc_id} AS TEXT), '')"
+            story_arc_name_text = f"COALESCE(CAST({story_arc_name} AS TEXT), '')"
+            identity_predicate = (
+                f"({story_arc_id_text} <> '' OR {cv_arc_id_text} <> '' "
+                f"OR {story_arc_name_text} <> '')"
+            )
+            group_kind = (
+                f"CASE WHEN {story_arc_id_text} <> '' THEN 'story_arc_id' "
+                f"WHEN {cv_arc_id_text} <> '' THEN 'cv_arc_id' "
+                "ELSE 'story_arc_name' END"
+            )
+            group_value = (
+                f"CASE WHEN {story_arc_id_text} <> '' THEN {story_arc_id_text} "
+                f"WHEN {cv_arc_id_text} <> '' THEN {cv_arc_id_text} "
+                f"ELSE {story_arc_name_text} END"
+            )
+            has_identity_columns = any(
+                available.get(column.casefold())
+                for column in ("StoryArcID", "CV_ArcID", "StoryArc")
+            )
+
+            entries_count = int(
+                conn.execute("SELECT COUNT(*) AS count_value FROM storyarcs").fetchone()[
+                    "count_value"
+                ]
+            )
+            identified_arcs_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count_value FROM ("
+                    "SELECT 1 FROM storyarcs WHERE "
+                    f"{identity_predicate} GROUP BY {group_kind}, {group_value})"
+                ).fetchone()["count_value"]
+            )
+            unidentified_arcs_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS count_value FROM storyarcs WHERE NOT {identity_predicate}"
+                ).fetchone()["count_value"]
+            )
+            arcs_count = identified_arcs_count + unidentified_arcs_count
+            missing_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count_value FROM storyarcs WHERE "
+                    f"LOWER(TRIM(COALESCE(CAST({status} AS TEXT), ''))) IN ('missing', 'wanted')"
+                ).fetchone()["count_value"]
+            )
+            existing_location_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count_value FROM storyarcs WHERE "
+                    f"TRIM(COALESCE(CAST({location} AS TEXT), '')) <> ''"
+                ).fetchone()["count_value"]
+            )
+            duplicate_count = int(
+                conn.execute(
+                    "SELECT COALESCE(SUM(group_count - 1), 0) AS count_value FROM ("
+                    "SELECT COUNT(*) AS group_count FROM storyarcs WHERE "
+                    f"{identity_predicate} AND "
+                    f"TRIM(COALESCE(CAST({reading_order} AS TEXT), '')) <> '' "
+                    f"GROUP BY {group_kind}, {group_value}, {reading_order} "
+                    "HAVING COUNT(*) > 1)"
+                ).fetchone()["count_value"]
+            )
+
+            selected = {
+                "story_arc": story_arc_name,
+                "series": expression("ComicName"),
+                "issue_number": expression("IssueNumber"),
+                "issue_title": expression("IssueName"),
+                "reading_order": reading_order,
+                "status": status,
+            }
+            select_list = ", ".join(f'{column} AS "{alias}"' for alias, column in selected.items())
+            rows = conn.execute(
+                f"SELECT {select_list} FROM storyarcs "
+                f"ORDER BY {story_arc_name}, {reading_order} LIMIT ?",
+                (max_examples,),
+            ).fetchall()
+            examples = tuple(
+                Mylar3StoryArcPreflightExample(
+                    story_arc=self._bounded_preflight_text(row["story_arc"]),
+                    series=self._bounded_preflight_text(row["series"]),
+                    issue_number=self._bounded_preflight_text(row["issue_number"]),
+                    issue_title=self._bounded_preflight_text(row["issue_title"]),
+                    reading_order=self._bounded_preflight_text(row["reading_order"]),
+                    status=self._bounded_preflight_text(row["status"]),
+                )
+                for row in rows
+            )
+            readlist_present, readlist_count = self._read_readlist_count(conn)
+        except sqlite3.DatabaseError as exc:
+            msg = f"Could not read Mylar3 database: {exc}"
+            raise MylarReadError(msg) from exc
+        finally:
+            conn.close()
+
+        if not has_identity_columns:
+            warnings.append("story_arc_identity_columns_missing")
+        return Mylar3StoryArcPreflightSnapshot(
+            storyarcs_present=True,
+            arcs_count=arcs_count,
+            entries_count=entries_count,
+            missing_count=missing_count,
+            duplicate_count=duplicate_count,
+            existing_location_count=existing_location_count,
+            examples=examples,
+            readlist_present=readlist_present,
+            readlist_count=readlist_count,
+            arc_settings=self._read_arc_settings(),
+            warnings=tuple(warnings),
+        )
+
+    def _bounded_preflight_text(self, value: object, *, max_length: int = 200) -> str | None:
+        """Return one single-line display value without retaining paths or control text."""
+        if value is None:
+            return None
+        text = " ".join(str(value).split()).strip()
+        return text[:max_length] or None
 
     def _convert_rows(
         self,
@@ -1016,10 +1503,158 @@ class Mylar3Reader:
         self._append_annual_table_records(conn, records)
         return records
 
+    def _read_issue_records_for_comic_ids(
+        self,
+        conn: sqlite3.Connection,
+        comic_ids: set[int],
+    ) -> dict[int, list[_MylarIssueRecord]]:
+        """Read only issue identities owned by one bounded Comic page."""
+        if not comic_ids:
+            return {}
+        records: dict[int, list[_MylarIssueRecord]] = {}
+        self._append_issue_table_records(conn, records, comic_ids=comic_ids)
+        self._append_annual_table_records(conn, records, comic_ids=comic_ids)
+        return records
+
+    def _existing_comic_ids(
+        self,
+        conn: sqlite3.Connection,
+        comic_ids: set[int],
+    ) -> set[int]:
+        if not comic_ids:
+            return set()
+        where_clause, params = self._comic_id_filter(comic_ids)
+        return {
+            parsed
+            for row in conn.execute(f"SELECT ComicID FROM comics{where_clause}", params)
+            if (parsed := self._parse_cv_id(row["ComicID"])) is not None
+        }
+
+    def _read_cross_release_records(
+        self,
+        conn: sqlite3.Connection,
+        release_comic_ids: set[int],
+    ) -> list[tuple[int, _MylarIssueRecord]]:
+        """Read Annual records whose release identity is in the current Comic page."""
+        if not release_comic_ids or not self._table_has_columns(
+            conn,
+            "annuals",
+            {
+                "IssueID",
+                "ComicID",
+                "Issue_Number",
+                "IssueName",
+                "IssueDate",
+                "Location",
+                "ReleaseComicID",
+            },
+        ):
+            return []
+        annual_columns = self._table_columns(conn, "annuals")
+        base_query = (
+            "SELECT IssueID, ComicID, Issue_Number, IssueName, IssueDate, Location, "
+            "ReleaseComicID, ReleaseComicName FROM annuals"
+            if "ReleaseComicName" in annual_columns
+            else "SELECT IssueID, ComicID, Issue_Number, IssueName, IssueDate, Location, "
+            "ReleaseComicID, NULL AS ReleaseComicName FROM annuals"
+        )
+        where_clause, params = self._comic_id_filter(
+            release_comic_ids,
+            column_name="ReleaseComicID",
+        )
+        records: list[tuple[int, _MylarIssueRecord]] = []
+        for row in conn.execute(f"{base_query}{where_clause}", params):
+            parsed = self._annual_record_from_row(row)
+            if parsed is None or parsed[0] == parsed[1].series_cv_id:
+                continue
+            records.append(parsed)
+        return records
+
+    def _read_comic_rows_by_cv_ids(
+        self,
+        conn: sqlite3.Connection,
+        comic_ids: set[int],
+    ) -> dict[int, sqlite3.Row]:
+        if not comic_ids:
+            return {}
+        where_clause, params = self._comic_id_filter(comic_ids)
+        rows: dict[int, sqlite3.Row] = {}
+        cursor = conn.execute(
+            "SELECT ComicID, ComicName, ComicYear, ComicPublisher, ComicLocation, "
+            f"Status, Total FROM comics{where_clause} ORDER BY rowid",
+            params,
+        )
+        for row in cursor:
+            comic_id = self._parse_cv_id(row["ComicID"])
+            if comic_id is not None:
+                rows.setdefault(comic_id, row)
+        return rows
+
+    def _attach_cross_release_records(
+        self,
+        series_page: list[DiscoveredSeries],
+        *,
+        cross_release_records: list[tuple[int, _MylarIssueRecord]],
+        owner_rows: dict[int, sqlite3.Row],
+    ) -> None:
+        """Attach cross-page Annual files to their existing release series cohort."""
+        target_by_cv_id = {
+            series.mylar3_cv_id: series for series in series_page if series.mylar3_cv_id is not None
+        }
+        for owning_comic_id, record in cross_release_records:
+            target = target_by_cv_id.get(record.series_cv_id)
+            owner_row = owner_rows.get(owning_comic_id)
+            if target is None or owner_row is None or not record.location:
+                continue
+            owner_location = owner_row["ComicLocation"]
+            owner_resolution = self._resolve_location_details(owner_location)
+            if owner_resolution.path is None:
+                continue
+            candidate = owner_resolution.path / Path(record.location).name
+            if not candidate.is_file() or candidate.suffix.lower() not in COMIC_EXTENSIONS:
+                continue
+            existing_paths = {item.file_path for item in target.files}
+            if str(candidate) in existing_paths:
+                continue
+            built_files = self._build_files(
+                [candidate],
+                source_location=owner_location,
+                series_cv_id=target.mylar3_cv_id,
+                series_name=target.raw_series_name,
+                series_year=target.raw_year,
+                series_publisher=target.raw_publisher,
+                issue_records=[record],
+                issue_count_hint=self._parse_positive_int(owner_row["Total"]),
+                series_status=owner_row["Status"],
+            )
+            target.files.extend(built_files)
+            target.file_count = len(target.files)
+            target.sample_paths = [item.file_path for item in target.files[:5]]
+            target.has_files = bool(target.files)
+            target.diagnostics["source_issue_type"] = IssueType.ANNUAL.value
+
+    def _comic_id_filter(
+        self,
+        comic_ids: set[int],
+        *,
+        column_name: str = "ComicID",
+    ) -> tuple[str, tuple[str, ...]]:
+        if column_name not in {"ComicID", "ReleaseComicID"}:
+            raise ValueError("Unsupported Mylar Comic ID filter column")
+        identifiers = tuple(
+            identifier
+            for comic_id in sorted(comic_ids)
+            for identifier in (str(comic_id), f"{self.MYLAR3_CV_PREFIX}{comic_id}")
+        )
+        placeholders = ", ".join("?" for _identifier in identifiers)
+        return f" WHERE {column_name} IN ({placeholders})", identifiers
+
     def _append_issue_table_records(
         self,
         conn: sqlite3.Connection,
         records: dict[int, list[_MylarIssueRecord]],
+        *,
+        comic_ids: set[int] | None = None,
     ) -> None:
         if not self._table_has_columns(
             conn,
@@ -1027,9 +1662,14 @@ class Mylar3Reader:
             {"IssueID", "ComicID", "Issue_Number", "IssueName", "IssueDate", "Location"},
         ):
             return
-        for row in conn.execute(
+        where_clause, params = (
+            self._comic_id_filter(comic_ids) if comic_ids is not None else ("", ())
+        )
+        query = (
             "SELECT IssueID, ComicID, Issue_Number, IssueName, IssueDate, Location FROM issues"
-        ).fetchall():
+            f"{where_clause}"
+        )
+        for row in conn.execute(query, params):
             comic_id = self._parse_cv_id(row["ComicID"])
             issue_id = self._parse_positive_int(row["IssueID"])
             if comic_id is None or issue_id is None:
@@ -1049,6 +1689,8 @@ class Mylar3Reader:
         self,
         conn: sqlite3.Connection,
         records: dict[int, list[_MylarIssueRecord]],
+        *,
+        comic_ids: set[int] | None = None,
     ) -> None:
         if not self._table_has_columns(
             conn,
@@ -1065,31 +1707,42 @@ class Mylar3Reader:
         ):
             return
         annual_columns = self._table_columns(conn, "annuals")
-        query = (
+        base_query = (
             "SELECT IssueID, ComicID, Issue_Number, IssueName, IssueDate, Location, "
             "ReleaseComicID, ReleaseComicName FROM annuals"
             if "ReleaseComicName" in annual_columns
             else "SELECT IssueID, ComicID, Issue_Number, IssueName, IssueDate, Location, "
             "ReleaseComicID, NULL AS ReleaseComicName FROM annuals"
         )
-        for row in conn.execute(query).fetchall():
-            owning_comic_id = self._parse_cv_id(row["ComicID"])
-            issue_id = self._parse_positive_int(row["IssueID"])
-            release_comic_id = self._parse_cv_id(row["ReleaseComicID"])
-            if owning_comic_id is None or issue_id is None:
+        where_clause, params = (
+            self._comic_id_filter(comic_ids) if comic_ids is not None else ("", ())
+        )
+        for row in conn.execute(f"{base_query}{where_clause}", params):
+            parsed = self._annual_record_from_row(row)
+            if parsed is None:
                 continue
-            records.setdefault(owning_comic_id, []).append(
-                _MylarIssueRecord(
-                    issue_id=issue_id,
-                    series_cv_id=release_comic_id or owning_comic_id,
-                    issue_number=row["Issue_Number"],
-                    title=row["IssueName"],
-                    release_date=row["IssueDate"],
-                    location=row["Location"],
-                    issue_type=IssueType.ANNUAL,
-                    series_name=row["ReleaseComicName"],
-                )
-            )
+            owning_comic_id, record = parsed
+            records.setdefault(owning_comic_id, []).append(record)
+
+    def _annual_record_from_row(
+        self,
+        row: sqlite3.Row,
+    ) -> tuple[int, _MylarIssueRecord] | None:
+        owning_comic_id = self._parse_cv_id(row["ComicID"])
+        issue_id = self._parse_positive_int(row["IssueID"])
+        release_comic_id = self._parse_cv_id(row["ReleaseComicID"])
+        if owning_comic_id is None or issue_id is None:
+            return None
+        return owning_comic_id, _MylarIssueRecord(
+            issue_id=issue_id,
+            series_cv_id=release_comic_id or owning_comic_id,
+            issue_number=row["Issue_Number"],
+            title=row["IssueName"],
+            release_date=row["IssueDate"],
+            location=row["Location"],
+            issue_type=IssueType.ANNUAL,
+            series_name=row["ReleaseComicName"],
+        )
 
     def _read_arc_settings(self) -> Mylar3ArcSettingsSnapshot:
         """Read only the allowlisted arc settings from a bounded config file."""
@@ -1450,7 +2103,7 @@ class Mylar3Reader:
         query = queries.get(table_name)
         if query is None:
             return set()
-        rows = conn.execute(query).fetchall()
+        rows = list(conn.execute(query))
         return {str(row["name"]) for row in rows}
 
     def _get_resolved_file_count(self, resolved_path: Path | None) -> int:

@@ -266,6 +266,7 @@ class TestDiagnosticPackageIntegration:
             assert "sqlite_runtime.json" in base_files
             assert "download_history.json" in base_files
             assert "installed_packages.json" in base_files
+            assert "import_story_arc_diagnostics.json" in base_files
             assert "utility_jobs.json" in base_files
             assert "utility_job_logs.json" in base_files
             assert any(name.endswith("/logs/startup.log") for name in names)

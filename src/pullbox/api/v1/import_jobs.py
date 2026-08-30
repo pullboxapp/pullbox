@@ -67,7 +67,7 @@ from pullbox.api.v1.import_job_streams import (
 from pullbox.api.v1.import_job_streams import (
     load_initial_import_progress_sse as _load_initial_import_progress_sse,
 )
-from pullbox.core.exceptions import ValidationError
+from pullbox.core.exceptions import MylarReadError, ValidationError
 from pullbox.core.library_file_ownership import (
     ReferencedFileValidationError,
     resolve_referenced_source_root,
@@ -112,7 +112,12 @@ from pullbox.schemas.import_job import (
     StoryArcReviewDecisionResponse,
 )
 from pullbox.schemas.import_layout import LayoutAnalysisResponse, LayoutPreviewRequest
+from pullbox.schemas.import_story_arc_preflight import (
+    StoryArcPreflightRequest,
+    StoryArcPreflightResponse,
+)
 from pullbox.services.import_layout_analysis import ImportLayoutAnalyzer
+from pullbox.services.import_story_arc_preflight import StoryArcPreflightAnalyzer
 from pullbox.tasks.import_task import (
     purge_import_runtime_state,
     trigger_import_execute,
@@ -243,6 +248,24 @@ async def preview_import_layout(
             warnings=warnings,
         )
     return LayoutAnalysisResponse.model_validate(result)
+
+
+@router.post("/story-arc-preview", response_model=StoryArcPreflightResponse)
+async def preview_import_story_arcs(
+    _user: AuthenticatedUser,
+    body: StoryArcPreflightRequest,
+) -> StoryArcPreflightResponse:
+    """Inspect local Story Arc evidence without creating a job or changing files."""
+    analyzer = StoryArcPreflightAnalyzer()
+    try:
+        return await analyzer.analyze(
+            body.source_path,
+            source_type=body.source_type,
+        )
+    except (MylarReadError, OSError, ValueError) as exc:
+        raise ValidationError(
+            "The Story Arc preview source is no longer available or readable."
+        ) from exc
 
 
 # ── Post-Import Recovery (orphaned routes before /{job_id}) ──────────
@@ -577,10 +600,18 @@ async def list_conflicts(
     job_id: int,
     _user: AuthenticatedUser,
     session: DbSession,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
 ) -> ConflictGroupsResponse:
-    """List all conflict groups for an import job."""
+    """List one bounded page of conflict groups for an import job."""
     service = _make_import_service()
-    return await list_conflicts_response(service, session, job_id)
+    return await list_conflicts_response(
+        service,
+        session,
+        job_id,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.put(

@@ -12,6 +12,7 @@ from typing import Any, TypedDict, cast
 
 from pullbox.core.archive import ArchiveError, ArchiveReader
 from pullbox.core.comicinfo import ComicInfoData
+from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
 from pullbox.core.naming import detect_issue_type
 from pullbox.core.release_parser import ParsedRelease, normalize_issue_number, parse_release_title
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
@@ -291,6 +292,7 @@ class SourceMetadata:
     source_path: str | None = None
     series_name: str | None = None
     issue_number: float | None = None
+    issue_number_text: str | None = None
     year: int | None = None
     volume: str | None = None
     issue_type: IssueType = IssueType.ISSUE
@@ -404,6 +406,7 @@ class SourceMetadataExtractor:
 
         series_name = parsed.series_name if parsed is not None else None
         issue_number = parsed.issue_number if parsed is not None else None
+        issue_number_text = parsed.issue_number_text if parsed is not None else None
         year = parsed.year if parsed is not None else None
         volume = parsed.volume if parsed is not None else None
         diagnostics: dict[str, object] = {}
@@ -418,10 +421,12 @@ class SourceMetadataExtractor:
         if volume_issue_applies and volume_hint is not None and issue_number is None:
             series_name = str(volume_hint["base_series"])
             issue_number = volume_hint["issue_number"]
+            issue_number_text = format_issue_number(issue_number)
             signals["issue_number"] = MetadataSignal.RELEASE_TITLE
             diagnostics["volume_subtitle_hint"] = volume_hint
         elif volume_issue_applies and issue_number is None and volume_issue_number is not None:
             issue_number = volume_issue_number
+            issue_number_text = format_issue_number(issue_number)
             signals["issue_number"] = MetadataSignal.RELEASE_TITLE
 
         return SourceMetadata(
@@ -429,6 +434,7 @@ class SourceMetadataExtractor:
             source_path=source_path,
             series_name=series_name,
             issue_number=issue_number,
+            issue_number_text=issue_number_text,
             year=year,
             volume=volume,
             issue_type=issue_type,
@@ -468,6 +474,7 @@ class SourceMetadataExtractor:
     ) -> SourceMetadata:
         series_name = metadata.series_name
         issue_number = metadata.issue_number
+        issue_number_text = metadata.issue_number_text
         year = metadata.year
         volume = metadata.volume
         publisher = metadata.publisher
@@ -536,6 +543,12 @@ class SourceMetadataExtractor:
                     }
                 elif normalized_comicinfo_issue is not None:
                     issue_number = normalized_comicinfo_issue
+                    try:
+                        _, issue_number_text = parse_issue_number_text(
+                            comicinfo.number.strip().lstrip("#")
+                        )
+                    except ValueError:
+                        issue_number_text = format_issue_number(normalized_comicinfo_issue)
                     signals["issue_number"] = MetadataSignal.COMICINFO
                 else:
                     diagnostics["comicinfo_issue_number_ignored"] = {
@@ -630,6 +643,7 @@ class SourceMetadataExtractor:
             source_path=metadata.source_path,
             series_name=series_name,
             issue_number=issue_number,
+            issue_number_text=issue_number_text,
             year=year,
             volume=volume,
             issue_type=issue_type,
@@ -1056,6 +1070,7 @@ def _serialize_parsed_release(parsed: ParsedRelease | None) -> dict[str, object]
     return {
         "series_name": parsed.series_name if parsed is not None else None,
         "issue_number": parsed.issue_number if parsed is not None else None,
+        "issue_number_text": parsed.issue_number_text if parsed is not None else None,
         "year": parsed.year if parsed is not None else None,
         "volume": parsed.volume if parsed is not None else None,
         "issue_type": parsed.issue_type.value if parsed is not None else None,

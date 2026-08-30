@@ -74,6 +74,7 @@ async def stage_mylar_story_arcs(
     import_job_id: int,
     snapshot: Mylar3CollectionSnapshot,
     batch_size: int = 100,
+    source_ordinal_offset: int = 0,
     cancellation_check: CancellationCheck | None = None,
 ) -> StoryArcStagingResult:
     """Stage a pre-read Mylar collection snapshot without source or provider I/O.
@@ -82,6 +83,8 @@ async def stage_mylar_story_arcs(
     but never commits, so a cancellation can still roll back the complete stage.
     """
     _require_positive_batch_size(batch_size)
+    if source_ordinal_offset < 0:
+        raise ValueError("Mylar story-arc source ordinal offset cannot be negative.")
     await _checkpoint(cancellation_check)
 
     settings_snapshot = _mylar_settings_snapshot(snapshot)
@@ -101,7 +104,7 @@ async def stage_mylar_story_arcs(
             )
             for source_ordinal, source_arc in enumerate(
                 arcs[start : start + batch_size],
-                start=start + 1,
+                start=source_ordinal_offset + start + 1,
             )
         )
         page_source_keys = [source_key for _, _, source_key in source_arcs]

@@ -299,6 +299,77 @@ async def test_global_wanted_targets_include_one_issue_from_multiple_monitored_a
 
 
 @pytest.mark.asyncio
+async def test_global_wanted_targets_include_only_known_upcoming_arc_members(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    today = date.today()
+    async with db_factory() as session:
+        series = Series(
+            comicvine_id=112,
+            title="Upcoming Arc Series",
+            sort_title="upcoming arc series",
+            year_start=today.year,
+            status=SeriesStatus.CONTINUING,
+            series_type=SeriesType.STANDARD,
+            monitored=False,
+            issue_count=3,
+        )
+        session.add(series)
+        await session.flush()
+        upcoming = Issue(
+            series_id=series.id,
+            comicvine_id=212,
+            issue_number=1.0,
+            issue_number_text="1",
+            status=IssueStatus.SKIPPED,
+            issue_type=IssueType.ISSUE,
+            release_date=today + timedelta(days=7),
+        )
+        released = Issue(
+            series_id=series.id,
+            comicvine_id=213,
+            issue_number=2.0,
+            issue_number_text="2",
+            status=IssueStatus.SKIPPED,
+            issue_type=IssueType.ISSUE,
+            release_date=today - timedelta(days=1),
+        )
+        undated = Issue(
+            series_id=series.id,
+            comicvine_id=214,
+            issue_number=3.0,
+            issue_number_text="3",
+            status=IssueStatus.SKIPPED,
+            issue_type=IssueType.ISSUE,
+        )
+        arc = StoryArc(
+            name="Upcoming Only Arc",
+            monitored=True,
+            search_missing=False,
+            include_upcoming=True,
+        )
+        session.add_all([upcoming, released, undated, arc])
+        await session.flush()
+        session.add_all(
+            [
+                IssueStoryArc(
+                    issue_id=issue.id,
+                    story_arc_id=arc.id,
+                    sequence_number=index,
+                    source_ordinal=index,
+                    resolution_state=StoryArcResolutionState.RESOLVED,
+                )
+                for index, issue in enumerate((upcoming, released, undated), start=1)
+            ]
+        )
+        await session.commit()
+
+        targets = await load_wanted_issue_search_targets(session, limit=10)
+
+    assert [target.issue_id for target in targets] == [upcoming.id]
+
+
+@pytest.mark.asyncio
 async def test_global_wanted_targets_skip_pending_intervention_matches(
     db_factory: async_sessionmaker[AsyncSession],
 ) -> None:

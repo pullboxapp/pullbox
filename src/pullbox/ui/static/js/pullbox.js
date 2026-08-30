@@ -2919,6 +2919,39 @@ function importSourceData(config) {
   var cfg = config || {};
   var libraryRoots = Array.isArray(cfg.libraryRoots) ? cfg.libraryRoots : [];
   var initialTargetRootId = libraryRoots.length ? Number(libraryRoots[0].id) : null;
+  var emptyStoryArcPreview = function () {
+    return {
+      evidence_detected: false,
+      arcs_detected: 0,
+      entries_detected: 0,
+      resolution: {
+        resolved: 0,
+        pending: 0,
+        missing: 0,
+        ambiguous: 0,
+        conflicts: 0,
+        duplicates: 0,
+      },
+      existing_arc_files_detected: false,
+      existing_arc_folders_detected: false,
+      pattern_summary: "",
+      settings: [],
+      examples: [],
+      provider_call_summary: "",
+      proposed_policy: {
+        mode: "logical",
+        destination_root_configured: false,
+        folder_template: "",
+        file_template: "",
+        reading_order_prefix: false,
+        synchronize: false,
+      },
+      readlist_present: false,
+      readlist_count: 0,
+      partial: false,
+      warnings: [],
+    };
+  };
 
   return Object.assign(fileBrowserMixin(cfg), {
     sourceType: "",
@@ -2940,6 +2973,14 @@ function importSourceData(config) {
     layoutPreviewTimer: null,
     layoutPreviewController: null,
     layoutPreviewRequestId: 0,
+    storyArcPreview: emptyStoryArcPreview(),
+    storyArcPreviewLoading: false,
+    storyArcPreviewError: "",
+    storyArcPreviewTimer: null,
+    storyArcPreviewController: null,
+    storyArcPreviewRequestId: 0,
+    storyArcImportRequested: false,
+    storyArcMaterializationRequested: false,
     libraryRoots: libraryRoots,
     targetLibraryRootId: initialTargetRootId,
     futureLayoutRequested: false,
@@ -2965,9 +3006,18 @@ function importSourceData(config) {
       }
       this.clearFuturePolicy();
       this.clearLayoutPreview();
+      this.clearStoryArcPreview();
       if (sourceType === "filesystem") {
         this.scheduleLayoutPreview();
       }
+      this.scheduleStoryArcPreview();
+    },
+
+    selectImportSource: function (selection) {
+      this.sourcePath = selection && selection.path ? String(selection.path) : "";
+      this.scheduleLayoutPreview();
+      this.scheduleStoryArcPreview();
+      this.closeFileBrowser();
     },
 
     setFileHandlingMode: function (mode) {
@@ -3222,6 +3272,16 @@ function importSourceData(config) {
       return this.layoutChoice !== "custom" || !!this.customSeriesPathTemplate.trim();
     },
 
+    canAnalyzeStoryArcs: function () {
+      return !!(this.sourceType && this.sourcePath.trim());
+    },
+
+    toggleStoryArcImport: function () {
+      if (!this.storyArcImportRequested) {
+        this.storyArcMaterializationRequested = false;
+      }
+    },
+
     canStartScan: function () {
       if (!this.sourcePath.trim() || this.scanning) {
         return false;
@@ -3260,6 +3320,131 @@ function importSourceData(config) {
       this.layoutPreviewLoading = false;
       this.layoutPreviewError = "";
       this.clearFuturePolicy();
+    },
+
+    clearStoryArcPreview: function () {
+      if (this.storyArcPreviewTimer) {
+        clearTimeout(this.storyArcPreviewTimer);
+        this.storyArcPreviewTimer = null;
+      }
+      if (this.storyArcPreviewController) {
+        this.storyArcPreviewController.abort();
+        this.storyArcPreviewController = null;
+      }
+      this.storyArcPreviewRequestId += 1;
+      this.storyArcPreview = emptyStoryArcPreview();
+      this.storyArcPreviewLoading = false;
+      this.storyArcPreviewError = "";
+      this.storyArcImportRequested = false;
+      this.storyArcMaterializationRequested = false;
+    },
+
+    scheduleStoryArcPreview: function () {
+      if (this.storyArcPreviewTimer) {
+        clearTimeout(this.storyArcPreviewTimer);
+        this.storyArcPreviewTimer = null;
+      }
+      if (this.storyArcPreviewController) {
+        this.storyArcPreviewController.abort();
+        this.storyArcPreviewController = null;
+      }
+      this.storyArcPreviewRequestId += 1;
+      this.storyArcPreview = emptyStoryArcPreview();
+      this.storyArcPreviewLoading = false;
+      this.storyArcPreviewError = "";
+      this.storyArcImportRequested = false;
+      this.storyArcMaterializationRequested = false;
+      if (!this.canAnalyzeStoryArcs()) {
+        return;
+      }
+      var self = this;
+      this.storyArcPreviewTimer = setTimeout(function () {
+        self.storyArcPreviewTimer = null;
+        self.previewStoryArcs();
+      }, 650);
+    },
+
+    previewStoryArcs: async function () {
+      if (!this.canAnalyzeStoryArcs()) {
+        return;
+      }
+      if (this.storyArcPreviewTimer) {
+        clearTimeout(this.storyArcPreviewTimer);
+        this.storyArcPreviewTimer = null;
+      }
+      if (this.storyArcPreviewController) {
+        this.storyArcPreviewController.abort();
+      }
+      var requestId = ++this.storyArcPreviewRequestId;
+      var controller = new AbortController();
+      this.storyArcPreviewController = controller;
+      this.storyArcPreviewLoading = true;
+      this.storyArcPreviewError = "";
+      this.storyArcPreview = emptyStoryArcPreview();
+      this.storyArcImportRequested = false;
+      this.storyArcMaterializationRequested = false;
+      try {
+        var response = await fetch("/api/v1/import/story-arc-preview", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": this.csrfToken(),
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            source_path: this.sourcePath.trim(),
+            source_type: this.sourceType,
+          }),
+        });
+        var payload = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          var detail = payload.detail;
+          if (Array.isArray(detail)) {
+            detail = detail
+              .map(function (item) {
+                return item && item.msg ? item.msg : "";
+              })
+              .filter(Boolean)
+              .join(" ");
+          }
+          throw new Error(
+            detail ||
+              (payload.error && payload.error.message) ||
+              "Pullbox could not inspect Story Arc evidence.",
+          );
+        }
+        if (requestId === this.storyArcPreviewRequestId) {
+          this.storyArcPreview = payload;
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          return;
+        }
+        if (requestId === this.storyArcPreviewRequestId) {
+          this.storyArcPreviewError =
+            err && err.message ? err.message : "Pullbox could not inspect Story Arc evidence.";
+        }
+      } finally {
+        if (requestId === this.storyArcPreviewRequestId) {
+          this.storyArcPreviewLoading = false;
+          this.storyArcPreviewController = null;
+        }
+      }
+    },
+
+    storyArcSettingValue: function (setting) {
+      if (!setting || setting.value === null || setting.value === undefined) {
+        return "Not configured";
+      }
+      if (setting.value === true) {
+        return "Enabled";
+      }
+      if (setting.value === false) {
+        return "Disabled";
+      }
+      return String(setting.value);
     },
 
     scheduleLayoutPreview: function () {
@@ -3406,6 +3591,8 @@ function importSourceData(config) {
               : null,
             future_layout_requested: this.futureLayoutRequested,
             future_root_policy: this.futureLayoutRequested ? this.futureRootPolicy : null,
+            story_arc_import_requested: this.storyArcImportRequested,
+            story_arc_materialization_requested: this.storyArcMaterializationRequested,
           }),
         });
 

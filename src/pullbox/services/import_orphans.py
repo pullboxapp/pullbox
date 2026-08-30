@@ -271,7 +271,7 @@ async def recover_orphan(
                 payload={"series_id": series.id, "import_series_id": item.id},
             )
 
-    cv_id_to_issue, _ = await load_issue_lookup_for_series(session, series.id)
+    cv_id_to_issue, _, _ = await load_issue_lookup_for_series(session, series.id)
     apply_orphan_recovery_decisions(
         item=item,
         files=files,

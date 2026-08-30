@@ -224,6 +224,24 @@
     </p>
   </section>
 
+  {% if job.story_arc_import_requested %}
+  <div class="inline-alert inline-alert-info" data-testid="import-story-arc-step-one-intent">
+    <div>
+      <p class="font-semibold text-pb-text">
+        {% if job.story_arc_materialization_requested %}
+        Logical arcs and separate arc files requested in Step 1
+        {% else %}
+        Logical arcs requested; separate arc files remain off
+        {% endif %}
+      </p>
+      <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+        Review each detected arc below. Step 1 did not select an arc, confirm a policy, or authorize
+        copies and links.
+      </p>
+    </div>
+  </div>
+  {% endif %}
+
   <div
     x-show="showCancelModal"
     x-transition:enter="transition ease-out duration-200"

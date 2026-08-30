@@ -7,6 +7,7 @@ import json
 import weakref
 from typing import TYPE_CHECKING
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
@@ -16,13 +17,20 @@ from pullbox.core.collection_scanner import (
     DiscoveredFile,
     DiscoveredSeries,
 )
+from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.library_layout import ImportLayoutMode, SourceLayoutSpec
 from pullbox.core.mylar3_reader import (
     Mylar3ArcSettingsSnapshot,
     Mylar3CollectionSnapshot,
+    Mylar3ImportMetadataSnapshot,
     Mylar3StoryArcSnapshot,
 )
-from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+from pullbox.models.import_job import (
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSourceType,
+)
 from pullbox.models.issue import IssueType
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.import_scan_materialization import materialize_discovered_scan_results
@@ -349,7 +357,7 @@ async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
     async def log_event(*_args, **_kwargs) -> None:
         return None
 
-    discovered = await _load_mylar3_discovered_series(
+    discovered_count = await _load_mylar3_discovered_series(
         db_session,
         job,
         job_id=job.id,
@@ -358,7 +366,7 @@ async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
         log_event=log_event,
     )
 
-    assert discovered == []
+    assert discovered_count == 0
     assert captured_layouts == [expected_layout]
 
 
@@ -545,7 +553,7 @@ async def test_load_mylar3_stages_arcs_from_one_complete_snapshot(
         nonlocal cancellation_checks
         cancellation_checks += 1
 
-    result = await _load_mylar3_discovered_series(
+    discovered_count = await _load_mylar3_discovered_series(
         db_session,
         job,
         job_id=job.id,
@@ -555,7 +563,7 @@ async def test_load_mylar3_stages_arcs_from_one_complete_snapshot(
         raise_if_cancelled=raise_if_cancelled,
     )
 
-    assert result == [discovered]
+    assert discovered_count == 1
     assert reads == ["collection"]
     assert cancellation_checks >= 2
     assert await db_session.scalar(select(func.count()).select_from(ImportedStoryArc)) == 1
@@ -574,6 +582,235 @@ async def test_load_mylar3_stages_arcs_from_one_complete_snapshot(
         "readlist_count": 3,
     }
     assert str(tmp_path) not in json.dumps(summary)
+
+
+async def test_load_mylar3_streams_bounded_pages_to_persistence(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    db_path.touch()
+    job = ImportJob(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    page_size = 13
+    total_series = 103
+    discovered_refs: list[weakref.ReferenceType[DiscoveredSeries]] = []
+    yielded_series_page_sizes: list[int] = []
+    yielded_arc_page_sizes: list[int] = []
+
+    class ReaderDouble:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def read_import_metadata(self) -> Mylar3ImportMetadataSnapshot:
+            return Mylar3ImportMetadataSnapshot(
+                storyarcs_present=True,
+                readlist_present=True,
+                readlist_count=4,
+                arc_settings=Mylar3ArcSettingsSnapshot(
+                    present=False,
+                    parse_warnings=(),
+                    values=(),
+                ),
+            )
+
+        async def iter_import_story_arc_pages(self):
+            for start in range(0, 5, 2):
+                page = tuple(
+                    Mylar3StoryArcSnapshot(
+                        story_arc_id=f"arc-{index}",
+                        cv_arc_id=None,
+                        name=f"Arc {index}",
+                        entries=(),
+                    )
+                    for index in range(start, min(start + 2, 5))
+                )
+                yielded_arc_page_sizes.append(len(page))
+                yield page
+
+        async def iter_import_series_pages(self):
+            for start in range(0, total_series, page_size):
+                page_items: list[DiscoveredSeries] = []
+                for index in range(start, min(start + page_size, total_series)):
+                    item = DiscoveredSeries(
+                        raw_series_name=f"Series {index:03d}",
+                        raw_year=2026,
+                        raw_publisher="Fixture Comics",
+                        file_count=0,
+                        sample_paths=[],
+                        source_folder=f"/unmounted/Series {index:03d}",
+                        source_folder_relative=f"Series {index:03d}",
+                        files=[],
+                        has_files=False,
+                        mylar3_cv_id=800_000 + index,
+                        diagnostics={
+                            "mylar3_path": {
+                                "status": "missing",
+                                "mapping_applied": False,
+                            }
+                        },
+                    )
+                    discovered_refs.append(weakref.ref(item))
+                    page_items.append(item)
+                yielded_series_page_sizes.append(len(page_items))
+                yield tuple(page_items)
+
+    validated_batch_sizes: list[int] = []
+    materialized_batch_sizes: list[int] = []
+    cancellation_checks = 0
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def validate_batch(_session, batch) -> None:
+        validated_batch_sizes.append(len(batch))
+
+    async def materialize_batch(session, import_job, batch):
+        materialized_batch_sizes.append(len(batch))
+        return await materialize_discovered_scan_results(session, import_job, batch)
+
+    async def raise_if_cancelled(_session, _job_id) -> None:
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+
+    async def log_event(_session, _job_id, _level, event, **kwargs) -> None:
+        events.append((event, kwargs))
+
+    series_count = await _load_mylar3_discovered_series(
+        db_session,
+        job,
+        job_id=job.id,
+        mylar3_reader_cls=ReaderDouble,
+        auto_detect_mylar3_path_map=lambda _path: None,
+        log_event=log_event,
+        validate_discovered_files_safety=validate_batch,
+        materialize_discovered_scan_results=materialize_batch,
+        raise_if_cancelled=raise_if_cancelled,
+    )
+    gc.collect()
+
+    assert series_count == total_series
+    assert max(yielded_series_page_sizes) <= page_size
+    assert validated_batch_sizes == yielded_series_page_sizes
+    assert materialized_batch_sizes == yielded_series_page_sizes
+    assert max(yielded_arc_page_sizes) <= 2
+    assert await db_session.scalar(select(func.count()).select_from(ImportedSeries)) == total_series
+    assert await db_session.scalar(select(func.count()).select_from(ImportedStoryArc)) == 5
+    staged_arcs = list(
+        (
+            await db_session.execute(
+                select(ImportedStoryArc).order_by(ImportedStoryArc.source_ordinal)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [arc.source_ordinal for arc in staged_arcs] == [1, 2, 3, 4, 5]
+    assert cancellation_checks >= len(yielded_series_page_sizes) + len(yielded_arc_page_sizes)
+    assert all(reference() is None for reference in discovered_refs)
+    summaries = [
+        details for event, details in events if event == "import_story_arc_staging_completed"
+    ]
+    assert summaries == [
+        {
+            "message": "Story-arc evidence staged for review",
+            "source_type": "mylar3",
+            "arcs_staged": 5,
+            "entries_staged": 0,
+            "needs_review": 0,
+            "cohorts_examined": 0,
+            "cohorts_skipped": 0,
+            "readlist_present": True,
+            "readlist_count": 4,
+        }
+    ]
+
+
+async def test_load_mylar3_cancellation_stops_before_next_page_persistence(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    db_path.touch()
+    job = ImportJob(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    class ReaderDouble:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def read_import_metadata(self) -> Mylar3ImportMetadataSnapshot:
+            return Mylar3ImportMetadataSnapshot(
+                storyarcs_present=False,
+                readlist_present=False,
+                readlist_count=0,
+                arc_settings=Mylar3ArcSettingsSnapshot(
+                    present=False,
+                    parse_warnings=(),
+                    values=(),
+                ),
+            )
+
+        async def iter_import_story_arc_pages(self):
+            if False:
+                yield ()
+
+        async def iter_import_series_pages(self):
+            for page_index in range(10):
+                yield (
+                    DiscoveredSeries(
+                        raw_series_name=f"Series {page_index}",
+                        raw_year=2026,
+                        raw_publisher=None,
+                        file_count=0,
+                        sample_paths=[],
+                        source_folder="",
+                        source_folder_relative="",
+                        files=[],
+                        has_files=False,
+                    ),
+                )
+
+    materialized_pages = 0
+
+    async def validate_batch(_session, _batch) -> None:
+        return None
+
+    async def materialize_batch(session, import_job, batch):
+        nonlocal materialized_pages
+        materialized_pages += 1
+        return await materialize_discovered_scan_results(session, import_job, batch)
+
+    async def raise_if_cancelled(_session, _job_id) -> None:
+        if materialized_pages >= 2:
+            raise JobCancelledError
+
+    async def log_event(*_args, **_kwargs) -> None:
+        return None
+
+    with pytest.raises(JobCancelledError):
+        await _load_mylar3_discovered_series(
+            db_session,
+            job,
+            job_id=job.id,
+            mylar3_reader_cls=ReaderDouble,
+            auto_detect_mylar3_path_map=lambda _path: None,
+            log_event=log_event,
+            validate_discovered_files_safety=validate_batch,
+            materialize_discovered_scan_results=materialize_batch,
+            raise_if_cancelled=raise_if_cancelled,
+        )
+
+    assert materialized_pages == 2
+    assert await db_session.scalar(select(func.count()).select_from(ImportedSeries)) == 2
 
 
 async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batches(
