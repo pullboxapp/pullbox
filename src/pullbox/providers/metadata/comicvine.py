@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 import structlog
 
-from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
 from pullbox.core.naming import detect_issue_type
 from pullbox.providers.base import (
     IssueMetadata,
@@ -109,13 +109,17 @@ def _parse_issue_number(value: str | None) -> float:
     Handles fraction characters (½ → 0.5) and numeric strings.  Falls back
     to 0.0 for unparseable values like "Annual 1".
     """
+    return _parse_issue_number_fields(value)[0]
+
+
+def _parse_issue_number_fields(value: str | None) -> tuple[float, str | None]:
+    """Parse ComicVine numeric compatibility and preserve exact raw semantics."""
     if value is None:
-        return 0.0
-    value = value.replace("½", ".5").replace("¼", ".25").replace("¾", ".75")
+        return 0.0, None
     try:
-        return float(value)
+        return parse_issue_number_text(value)
     except ValueError:
-        return 0.0
+        return 0.0, None
 
 
 def _format_issue_number_filter(value: float) -> str:
@@ -165,13 +169,15 @@ def _issue_summary_from_item(item: dict[str, Any]) -> IssueSummary:
     image_data = item.get("image")
     cover_url = image_data.get("medium_url") if isinstance(image_data, dict) else None
     title = item.get("name")
+    issue_number, issue_number_text = _parse_issue_number_fields(item.get("issue_number"))
     return IssueSummary(
         provider_id=str(item["id"]),
-        issue_number=_parse_issue_number(item.get("issue_number")),
+        issue_number=issue_number,
         title=title,
         release_date=item.get("cover_date"),
         cover_url=cover_url,
         issue_type=detect_issue_type(str(title or "")),
+        issue_number_text=issue_number_text,
     )
 
 
@@ -630,11 +636,12 @@ class ComicVineProvider:
 
         image_data = item.get("image")
         cover_url = image_data.get("medium_url") if isinstance(image_data, dict) else None
+        issue_number, issue_number_text = _parse_issue_number_fields(item.get("issue_number"))
 
         return IssueMetadata(
             provider_id=str(item.get("id", provider_id)),
             series_provider_id=series_provider_id,
-            issue_number=_parse_issue_number(item.get("issue_number")),
+            issue_number=issue_number,
             title=item.get("name"),
             description=_strip_html(item.get("description") or item.get("deck")),
             release_date=item.get("cover_date"),
@@ -644,6 +651,7 @@ class ComicVineProvider:
             comicvine_url=item.get("site_detail_url"),
             creators=_extract_creators(item.get("person_credits")),
             story_arcs=_extract_story_arcs(item.get("story_arc_credits")),
+            issue_number_text=issue_number_text,
         )
 
     async def get_issues_for_series(self, series_provider_id: str) -> list[IssueSummary]:

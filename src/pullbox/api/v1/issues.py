@@ -155,6 +155,7 @@ def _enrich_issue(issue: Issue) -> dict[str, object]:
     """Add computed fields (series_title, has_file) to an issue."""
     mapper = inspect(type(issue))
     data: dict[str, object] = {c.key: getattr(issue, c.key) for c in mapper.columns}
+    data["issue_number_text"] = issue.effective_issue_number_text
     data["series_title"] = issue.series.title if issue.series else None
     data["has_file"] = issue.library_file is not None
     return data

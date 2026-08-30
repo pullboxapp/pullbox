@@ -26,6 +26,7 @@ _ALEMBIC_DIR = Path(__file__).resolve().parent.parent.parent / "alembic"
 _DIRECT_ACQUISITION_PARENT_REVISION = "d9f0a1b2c345"
 _AIRDCPP_FOUNDATION_PARENT_REVISION = "q2r3s4t5u678"
 _AIRDCPP_SETTINGS_PARENT_REVISION = "r3s4t5u6v789"
+_ISSUE_NUMBER_TEXT_PARENT_REVISION = "y0z1a2b3c456"
 
 
 @pytest.fixture
@@ -139,6 +140,136 @@ class TestMigrationChain:
             assert "system_config" in tables
         finally:
             engine.dispose()
+
+    def test_issue_number_text_migration_backfills_and_round_trips(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Exact issue text is additive, indexed, bounded, and reversible."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, _ISSUE_NUMBER_TEXT_PARENT_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                issue_ids: list[int] = []
+                for slug, number in (
+                    ("million", 1_000_000.0),
+                    ("fraction", 0.5),
+                    ("exponent", 1e86),
+                ):
+                    _, issue_id = _seed_reader_state_owner(conn, slug=slug)
+                    conn.execute(
+                        text("UPDATE issues SET issue_number = :number WHERE id = :issue_id"),
+                        {"number": number, "issue_id": issue_id},
+                    )
+                    issue_ids.append(issue_id)
+                conn.execute(
+                    text(
+                        "INSERT INTO download_history "
+                        "(issue_id, title, download_url, download_client, protocol, state) "
+                        "VALUES (:issue_id, 'Preserved history', "
+                        "'https://example.test/preserved-history', 'SABNZBD', "
+                        "'usenet', 'QUEUED')"
+                    ),
+                    {"issue_id": issue_ids[0]},
+                )
+                preserved_history_id = conn.execute(text("SELECT last_insert_rowid()")).scalar_one()
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            columns = {column["name"]: column for column in inspector.get_columns("issues")}
+            unique_constraints = {
+                constraint["name"]: constraint["column_names"]
+                for constraint in inspector.get_unique_constraints("issues")
+            }
+            indexes = {index["name"]: index for index in inspector.get_indexes("issues")}
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT id, issue_number_text FROM issues "
+                        "WHERE id IN (:one, :two, :three) ORDER BY id"
+                    ),
+                    {"one": issue_ids[0], "two": issue_ids[1], "three": issue_ids[2]},
+                ).fetchall()
+                _, legacy_issue_id = _seed_reader_state_owner(conn, slug="legacy-write")
+                legacy_text = conn.execute(
+                    text("SELECT issue_number_text FROM issues WHERE id = :issue_id"),
+                    {"issue_id": legacy_issue_id},
+                ).scalar_one()
+                preserved_history_issue_id = conn.execute(
+                    text("SELECT issue_id FROM download_history WHERE id = :history_id"),
+                    {"history_id": preserved_history_id},
+                ).scalar_one()
+        finally:
+            engine.dispose()
+
+        assert columns["issue_number_text"]["nullable"] is True
+        assert columns["issue_number_text"]["type"].length == 320
+        assert unique_constraints["uq_series_issue"] == ["series_id", "issue_number"]
+        assert indexes["uq_series_issue_number_text"]["column_names"] == [
+            "series_id",
+            "issue_number_text",
+        ]
+        assert bool(indexes["uq_series_issue_number_text"]["unique"]) is True
+        assert indexes["ix_issues_series_number_order"]["column_names"] == [
+            "series_id",
+            "issue_number",
+            "issue_number_text",
+            "id",
+        ]
+        assert [tuple(row) for row in rows] == [
+            (issue_ids[0], "1000000"),
+            (issue_ids[1], "0.5"),
+            (issue_ids[2], "1" + ("0" * 86)),
+        ]
+        assert legacy_text is None
+        assert preserved_history_issue_id == issue_ids[0]
+
+        command.downgrade(cfg, _ISSUE_NUMBER_TEXT_PARENT_REVISION)
+        assert "issue_number_text" not in _get_columns(sync_url, "issues")
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        text("SELECT issue_id FROM download_history WHERE id = :history_id"),
+                        {"history_id": preserved_history_id},
+                    ).scalar_one()
+                    == issue_ids[0]
+                )
+        finally:
+            engine.dispose()
+        command.upgrade(cfg, "head")
+
+    def test_issue_number_text_downgrade_blocks_divergent_exact_text(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Downgrade refuses to erase exact provider suffix semantics."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                _, issue_id = _seed_reader_state_owner(conn, slug="suffix")
+                conn.execute(
+                    text("UPDATE issues SET issue_number_text = '1AU' WHERE id = :issue_id"),
+                    {"issue_id": issue_id},
+                )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="divergent exact issue-number text"):
+            command.downgrade(cfg, _ISSUE_NUMBER_TEXT_PARENT_REVISION)
+
+        assert "issue_number_text" in _get_columns(sync_url, "issues")
 
     def test_airdcpp_foundation_backfills_populated_history_and_source_order(
         self,

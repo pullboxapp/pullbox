@@ -2527,6 +2527,12 @@ class TestImportShellRouteContracts:
         assert "Blocked Files" in response.text
         assert "Safety review" in response.text
         assert "Oversized Omnibus.cbz" in response.text
+        assert 'data-testid="import-review-safety-category-summary"' in response.text
+        assert "Decompression-size limit" in response.text
+        assert "Code: archive_decompressed_size_limit" in response.text
+        assert "Retry alone will not help" in response.text
+        assert "Trusted override available" in response.text
+        assert "/tmp/review-1/oversized.cbz" not in response.text
         assert 'data-testid="import-review-allow-safety-file"' in response.text
         assert 'data-testid="import-review-skip-safety-file"' in response.text
         assert f'hx-post="/import/{job_id}/files/' in response.text
@@ -2575,6 +2581,9 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         assert "Corrupt Download.cbz" in response.text
+        assert "Archive inspection failed" in response.text
+        assert "Retry may help after remediation" in response.text
+        assert "Override not allowed" in response.text
         assert "Cannot override" in response.text
         assert 'data-testid="import-review-allow-safety-file"' not in response.text
         assert "/safety/allow-once?status=safety_blocked" not in response.text

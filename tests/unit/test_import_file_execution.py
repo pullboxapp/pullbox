@@ -62,6 +62,30 @@ def _make_service(
     )
 
 
+def test_placeholder_issue_target_preserves_only_base_compatible_exact_text() -> None:
+    from pullbox.services.import_file_execution import (
+        _placeholder_issue_target_from_diagnostics,
+    )
+
+    imp_file = ImportedFile(
+        issue_number_raw="4au",
+        diagnostics={
+            "kind": "provider_missing_issue_placeholder",
+            "target_issue_number": 4.0,
+            "target_issue_type": IssueType.ISSUE.value,
+        },
+    )
+
+    compatible = _placeholder_issue_target_from_diagnostics(imp_file)
+    assert compatible is not None
+    assert compatible.issue_number_text == "4AU"
+
+    imp_file.issue_number_raw = "5AU"
+    incompatible = _placeholder_issue_target_from_diagnostics(imp_file)
+    assert incompatible is not None
+    assert incompatible.issue_number_text is None
+
+
 async def _setup_full_scenario(
     session: AsyncSession,
     *,
@@ -441,6 +465,7 @@ class TestFileStatusUpdatedOnSuccess:
             file_format="cbr",
             parsed_series="King Dracula",
             parsed_issue_number=4.0,
+            issue_number_raw="4au",
             parsed_year=2026,
             status=ImportedFileStatus.MATCHED,
             match_confidence="manual",
@@ -538,6 +563,7 @@ class TestFileStatusUpdatedOnSuccess:
         assert created_issue is not None
         assert created_issue.series_id == series.id
         assert created_issue.issue_number == 4.0
+        assert created_issue.issue_number_text == "4AU"
         assert created_issue.comicvine_id is None
         assert created_issue.issue_type == IssueType.ISSUE
         assert created_issue.metadata_source == "provisional_import"
@@ -608,8 +634,18 @@ class TestFileStatusSetToFailedOnError:
         assert imp_files[0].status == ImportedFileStatus.FAILED
         assert imp_files[0].include_in_import is False
         assert imp_files[0].diagnostics["source_revalidation"] == {
-            "reason": "source_changed",
+            "kind": "source_revalidation",
+            "category": "source_changed",
+            "code": "source_changed",
+            "reason": (
+                "The source changed or became unavailable after scanning. Rescan before retrying."
+            ),
+            "sanitized_reason": (
+                "The source changed or became unavailable after scanning. Rescan before retrying."
+            ),
+            "source": "source_revalidation",
             "retryable": True,
+            "overrideable": False,
         }
 
     @pytest.mark.asyncio

@@ -574,6 +574,8 @@ class SourceMetadataExtractor:
                 "publisher": comicinfo.publisher,
                 "web": comicinfo.web,
                 "notes": comicinfo.notes,
+                "story_arc": comicinfo.story_arc,
+                "story_arc_number": comicinfo.story_arc_number,
             }
         else:
             diagnostics["has_comicinfo"] = False
@@ -723,6 +725,7 @@ class SourceMetadataExtractor:
             genre=optional_text("genre"),
             web=optional_text("web"),
             story_arc=optional_text("story_arc"),
+            story_arc_number=optional_text("story_arc_number"),
             series_group=optional_text("series_group"),
             language=optional_text("language"),
         )

@@ -8,7 +8,10 @@ high-confidence matching during the import identification phase.
 from __future__ import annotations
 
 import asyncio
+import configparser
+import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -32,6 +35,95 @@ from pullbox.core.source_metadata import MetadataSignal, SourceMetadataExtractor
 from pullbox.models.issue import IssueType
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class Mylar3StoryArcEntrySnapshot:
+    """Immutable source evidence for one Mylar story-arc row."""
+
+    ordinal: int
+    reading_order: int | None
+    reading_order_raw: str | None
+    story_arc_id: str | None
+    story_arc_name: str | None
+    cv_arc_id: str | None
+    issue_arc_id: str | None
+    issue_id: str | None
+    comic_id: str | None
+    issue_number: str | None
+    comic_name: str | None
+    series_year: str | None
+    issue_year: str | None
+    status: str | None
+    location: str | None
+    release_date: str | None
+    issue_date: str | None
+    publisher: str | None
+    issue_publisher: str | None
+    issue_name: str | None
+    manual: str | None
+    date_added: str | None
+    digital_date: str | None
+    issue_type: str | None
+    aliases: str | None
+    total_issues: str | None
+    in_cache_dir: str | None
+    int_issue_number: str | None
+    dynamic_comic_name: str | None
+    volume: str | None
+    arc_image: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Mylar3StoryArcSnapshot:
+    """Immutable normalized grouping of Mylar story-arc rows."""
+
+    story_arc_id: str | None
+    cv_arc_id: str | None
+    name: str | None
+    entries: tuple[Mylar3StoryArcEntrySnapshot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Mylar3ArcSettingValue:
+    """One allowlisted Mylar arc setting and its reviewable raw value."""
+
+    key: str
+    section: str
+    value: bool | str | None
+    raw_value: str | None
+    used_default: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Mylar3ArcSettingsSnapshot:
+    """Bounded, secret-free snapshot of Mylar's story-arc settings."""
+
+    present: bool
+    parse_warnings: tuple[str, ...]
+    values: tuple[Mylar3ArcSettingValue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Mylar3CollectionSnapshot:
+    """One read-only snapshot of Mylar series, arcs, and read-list inventory."""
+
+    series: tuple[DiscoveredSeries, ...]
+    story_arcs: tuple[Mylar3StoryArcSnapshot, ...]
+    storyarcs_present: bool
+    readlist_present: bool
+    readlist_count: int
+    arc_settings: Mylar3ArcSettingsSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class _MylarArcSettingSpec:
+    """Static schema for one safe config value."""
+
+    key: str
+    section: str
+    kind: str
+    default: bool | str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,17 +175,74 @@ class Mylar3Reader:
         db_path: Path to mylar.db file.
         path_map: Optional dict of {container_prefix: host_prefix}.
                   Applied to ComicLocation before checking disk.
+        config_path: Optional explicit Mylar config.ini path. When omitted, a
+                     safe sibling config.ini is discovered without following links.
     """
 
     MYLAR3_CV_PREFIX = "CV-"
+    MAX_CONFIG_BYTES = 1_048_576
+    ARC_SETTING_SPECS = (
+        _MylarArcSettingSpec("STORYARCDIR", "StoryArc", "bool", False),
+        _MylarArcSettingSpec("STORYARC_LOCATION", "StoryArc", "str", None),
+        _MylarArcSettingSpec("COPY2ARCDIR", "StoryArc", "bool", False),
+        _MylarArcSettingSpec(
+            "ARC_FOLDERFORMAT",
+            "StoryArc",
+            "str",
+            "$arc ($spanyears)",
+        ),
+        _MylarArcSettingSpec("ARC_FILEOPS", "StoryArc", "str", "copy"),
+        _MylarArcSettingSpec(
+            "ARC_FILEOPS_SOFTLINK_RELATIVE",
+            "StoryArc",
+            "bool",
+            False,
+        ),
+        _MylarArcSettingSpec("UPCOMING_STORYARCS", "StoryArc", "bool", False),
+        _MylarArcSettingSpec("SEARCH_STORYARCS", "StoryArc", "bool", False),
+        _MylarArcSettingSpec("READ2FILENAME", "General", "bool", False),
+    )
+    STORY_ARC_COLUMNS = (
+        "StoryArcID",
+        "ComicName",
+        "IssueNumber",
+        "SeriesYear",
+        "IssueYEAR",
+        "StoryArc",
+        "TotalIssues",
+        "Status",
+        "inCacheDir",
+        "Location",
+        "IssueArcID",
+        "ReadingOrder",
+        "IssueID",
+        "ComicID",
+        "ReleaseDate",
+        "IssueDate",
+        "Publisher",
+        "IssuePublisher",
+        "IssueName",
+        "CV_ArcID",
+        "Int_IssueNumber",
+        "DynamicComicName",
+        "Volume",
+        "Manual",
+        "DateAdded",
+        "DigitalDate",
+        "Type",
+        "Aliases",
+        "ArcImage",
+    )
 
     def __init__(
         self,
         db_path: str | Path,
         path_map: dict[str, str] | None = None,
         source_layout: SourceLayoutSpec | None = None,
+        config_path: str | Path | None = None,
     ) -> None:
         self._db_path = Path(db_path)
+        self._config_path = Path(config_path) if config_path is not None else None
         self._path_map = path_map or {}
         self._source_layout = resolve_source_layout_spec(source_layout or SourceLayoutSpec())
         self._compiled_source_layout = (
@@ -112,14 +261,27 @@ class Mylar3Reader:
             FileNotFoundError: If db_path does not exist.
             MylarReadError: If the file is not a valid Mylar3 database.
         """
+        snapshot = await self.read_snapshot()
+        return list(snapshot.series)
+
+    async def read_collection(self) -> Mylar3CollectionSnapshot:
+        """Read the complete normalized Mylar source collection."""
+        return await self.read_snapshot()
+
+    async def read_snapshot(self) -> Mylar3CollectionSnapshot:
+        """Read series, story arcs, and the read-list count in one DB snapshot."""
         if not self._db_path.exists():
             msg = f"Mylar3 database not found: {self._db_path}"
             raise FileNotFoundError(msg)
 
-        return await asyncio.to_thread(self._read_sync)
+        return await asyncio.to_thread(self._read_snapshot_sync)
 
     def _read_sync(self) -> list[DiscoveredSeries]:
-        """Synchronous database read — runs in a thread."""
+        """Retain the legacy synchronous series-only helper."""
+        return list(self._read_snapshot_sync().series)
+
+    def _read_snapshot_sync(self) -> Mylar3CollectionSnapshot:
+        """Read every supported Mylar source domain through one connection."""
         try:
             conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
@@ -128,6 +290,7 @@ class Mylar3Reader:
             raise MylarReadError(msg) from exc
 
         try:
+            conn.execute("BEGIN")
             # Verify the comics table exists
             cursor = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='comics'"
@@ -141,13 +304,22 @@ class Mylar3Reader:
                 "ComicLocation, Status, Total FROM comics"
             ).fetchall()
             issue_records = self._read_issue_records(conn)
+            story_arc_rows, storyarcs_present = self._read_story_arc_rows(conn)
+            readlist_present, readlist_count = self._read_readlist_count(conn)
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"
             raise MylarReadError(msg) from exc
         finally:
             conn.close()
 
-        return self._convert_rows(rows, issue_records)
+        return Mylar3CollectionSnapshot(
+            series=tuple(self._convert_rows(rows, issue_records)),
+            story_arcs=self._convert_story_arc_rows(story_arc_rows),
+            storyarcs_present=storyarcs_present,
+            readlist_present=readlist_present,
+            readlist_count=readlist_count,
+            arc_settings=self._read_arc_settings(),
+        )
 
     def _convert_rows(
         self,
@@ -919,21 +1091,366 @@ class Mylar3Reader:
                 )
             )
 
+    def _read_arc_settings(self) -> Mylar3ArcSettingsSnapshot:
+        """Read only the allowlisted arc settings from a bounded config file."""
+        config_path = self._config_path or self._db_path.with_name("config.ini")
+        content, present, warnings = self._read_bounded_config(config_path)
+        if content is None:
+            return Mylar3ArcSettingsSnapshot(
+                present=present,
+                parse_warnings=tuple(warnings),
+                values=self._arc_setting_values(None, warnings),
+            )
+
+        try:
+            config_text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            warnings.append("config_decode_failed")
+            return Mylar3ArcSettingsSnapshot(
+                present=True,
+                parse_warnings=tuple(warnings),
+                values=self._arc_setting_values(None, warnings),
+            )
+
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            parser.read_string(config_text)
+        except configparser.Error:
+            warnings.append("config_parse_failed")
+            return Mylar3ArcSettingsSnapshot(
+                present=True,
+                parse_warnings=tuple(warnings),
+                values=self._arc_setting_values(None, warnings),
+            )
+
+        values = self._arc_setting_values(parser, warnings)
+        return Mylar3ArcSettingsSnapshot(
+            present=True,
+            parse_warnings=tuple(warnings),
+            values=values,
+        )
+
+    def _read_bounded_config(
+        self,
+        config_path: Path,
+    ) -> tuple[bytes | None, bool, list[str]]:
+        """Open one regular config file without following a symlink."""
+        try:
+            initial_stat = config_path.lstat()
+        except FileNotFoundError:
+            return None, False, []
+        except OSError:
+            return None, True, ["config_stat_failed"]
+        if stat.S_ISLNK(initial_stat.st_mode):
+            return None, True, ["config_symlink_rejected"]
+        if not stat.S_ISREG(initial_stat.st_mode):
+            return None, True, ["config_not_regular_file"]
+        if initial_stat.st_size > self.MAX_CONFIG_BYTES:
+            return None, True, ["config_too_large"]
+
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(config_path, flags)
+        except OSError:
+            return None, True, ["config_open_failed"]
+
+        try:
+            opened_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                return None, True, ["config_not_regular_file"]
+            if opened_stat.st_size > self.MAX_CONFIG_BYTES:
+                return None, True, ["config_too_large"]
+            if (
+                initial_stat.st_ino
+                and opened_stat.st_ino
+                and (initial_stat.st_dev, initial_stat.st_ino)
+                != (opened_stat.st_dev, opened_stat.st_ino)
+            ):
+                return None, True, ["config_source_changed"]
+
+            chunks: list[bytes] = []
+            remaining = self.MAX_CONFIG_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+        except OSError:
+            return None, True, ["config_read_failed"]
+        finally:
+            os.close(descriptor)
+
+        if len(content) > self.MAX_CONFIG_BYTES:
+            return None, True, ["config_too_large"]
+        return content, True, []
+
+    def _arc_setting_values(
+        self,
+        parser: configparser.ConfigParser | None,
+        warnings: list[str],
+    ) -> tuple[Mylar3ArcSettingValue, ...]:
+        """Normalize only known keys while retaining their raw values."""
+        sections = (
+            {section.casefold(): section for section in parser.sections()}
+            if parser is not None
+            else {}
+        )
+        values: list[Mylar3ArcSettingValue] = []
+        for spec in self.ARC_SETTING_SPECS:
+            section = sections.get(spec.section.casefold())
+            raw_value = (
+                parser.get(section, spec.key, raw=True)
+                if parser is not None
+                and section is not None
+                and parser.has_option(section, spec.key)
+                else None
+            )
+            value, used_default = self._normalize_arc_setting(spec, raw_value, warnings)
+            values.append(
+                Mylar3ArcSettingValue(
+                    key=spec.key,
+                    section=spec.section,
+                    value=value,
+                    raw_value=raw_value,
+                    used_default=used_default,
+                )
+            )
+        return tuple(values)
+
+    def _normalize_arc_setting(
+        self,
+        spec: _MylarArcSettingSpec,
+        raw_value: str | None,
+        warnings: list[str],
+    ) -> tuple[bool | str | None, bool]:
+        if raw_value is None:
+            return spec.default, True
+        if spec.kind == "bool":
+            normalized = raw_value.strip().casefold()
+            if normalized in {"1", "yes", "true", "on"}:
+                return True, False
+            if normalized in {"0", "no", "false", "off"}:
+                return False, False
+            warnings.append(f"invalid_boolean:{spec.key}")
+            return spec.default, True
+        if spec.key == "STORYARC_LOCATION" and raw_value.strip().casefold() in {"", "none"}:
+            return None, False
+        if spec.key == "ARC_FILEOPS" and raw_value.strip().casefold() not in {
+            "copy",
+            "move",
+            "hardlink",
+            "softlink",
+        }:
+            warnings.append("unknown_value:ARC_FILEOPS")
+        return raw_value, False
+
+    def _read_story_arc_rows(
+        self,
+        conn: sqlite3.Connection,
+    ) -> tuple[list[sqlite3.Row], bool]:
+        """Read available story-arc evidence without requiring a schema upgrade."""
+        if not self._table_exists(conn, "storyarcs"):
+            return [], False
+
+        available_columns = {
+            column.casefold(): column for column in self._table_columns(conn, "storyarcs")
+        }
+        expressions: list[str] = []
+        for expected_column in self.STORY_ARC_COLUMNS:
+            actual_column = available_columns.get(expected_column.casefold())
+            if actual_column is None:
+                expressions.append(f'NULL AS "{expected_column}"')
+                continue
+            quoted_column = actual_column.replace('"', '""')
+            expressions.append(f'"{quoted_column}" AS "{expected_column}"')
+
+        select_columns = ", ".join(expressions)
+        query_with_rowid = f'SELECT {select_columns}, rowid AS "__source_rowid" FROM storyarcs'
+        try:
+            rows = conn.execute(query_with_rowid).fetchall()
+        except sqlite3.OperationalError:
+            query_without_rowid = (
+                f'SELECT {select_columns}, NULL AS "__source_rowid" FROM storyarcs'
+            )
+            rows = conn.execute(query_without_rowid).fetchall()
+        return rows, True
+
+    def _read_readlist_count(self, conn: sqlite3.Connection) -> tuple[bool, int]:
+        """Inventory Mylar's distinct personal read list without importing it."""
+        if not self._table_exists(conn, "readlist"):
+            return False, 0
+        row = conn.execute("SELECT COUNT(*) AS row_count FROM readlist").fetchone()
+        return True, int(row["row_count"]) if row is not None else 0
+
+    def _convert_story_arc_rows(
+        self,
+        rows: list[sqlite3.Row],
+    ) -> tuple[Mylar3StoryArcSnapshot, ...]:
+        """Group raw Mylar rows while retaining unresolved and duplicate entries."""
+        grouped: dict[tuple[str, str], list[tuple[int, sqlite3.Row]]] = {}
+        for source_index, row in enumerate(rows):
+            group_key = self._story_arc_group_key(row, source_index)
+            grouped.setdefault(group_key, []).append((source_index, row))
+
+        arcs: list[Mylar3StoryArcSnapshot] = []
+        for grouped_rows in grouped.values():
+            ordered_rows = sorted(grouped_rows, key=self._story_arc_row_sort_key)
+            entries = tuple(
+                self._story_arc_entry(row, ordinal=ordinal)
+                for ordinal, (_source_index, row) in enumerate(ordered_rows, start=1)
+            )
+            arcs.append(
+                Mylar3StoryArcSnapshot(
+                    story_arc_id=self._first_story_arc_value(entries, "story_arc_id"),
+                    cv_arc_id=self._first_story_arc_value(entries, "cv_arc_id"),
+                    name=self._first_story_arc_value(entries, "story_arc_name"),
+                    entries=entries,
+                )
+            )
+
+        return tuple(
+            sorted(
+                arcs,
+                key=lambda arc: (
+                    arc.name is None,
+                    (arc.name or "").casefold(),
+                    arc.story_arc_id or "",
+                    arc.cv_arc_id or "",
+                ),
+            )
+        )
+
+    def _story_arc_group_key(
+        self,
+        row: sqlite3.Row,
+        source_index: int,
+    ) -> tuple[str, str]:
+        story_arc_id = self._optional_text(row["StoryArcID"])
+        if story_arc_id:
+            return "story_arc_id", story_arc_id
+        cv_arc_id = self._optional_text(row["CV_ArcID"])
+        if cv_arc_id:
+            return "cv_arc_id", cv_arc_id
+        story_arc_name = self._optional_text(row["StoryArc"])
+        if story_arc_name:
+            return "story_arc_name", story_arc_name
+        source_rowid = self._parse_optional_int(row["__source_rowid"])
+        return "unidentified_row", str(source_rowid if source_rowid is not None else source_index)
+
+    def _story_arc_row_sort_key(
+        self,
+        item: tuple[int, sqlite3.Row],
+    ) -> tuple[object, ...]:
+        source_index, row = item
+        reading_order = self._parse_optional_int(row["ReadingOrder"])
+        source_rowid = self._parse_optional_int(row["__source_rowid"])
+        return (
+            reading_order is None,
+            reading_order if reading_order is not None else 0,
+            source_rowid is None,
+            source_rowid if source_rowid is not None else 0,
+            self._optional_text(row["IssueArcID"]) or "",
+            self._optional_text(row["IssueID"]) or "",
+            self._optional_text(row["ComicID"]) or "",
+            self._optional_text(row["IssueNumber"]) or "",
+            source_index,
+        )
+
+    def _story_arc_entry(
+        self,
+        row: sqlite3.Row,
+        *,
+        ordinal: int,
+    ) -> Mylar3StoryArcEntrySnapshot:
+        reading_order_raw = self._optional_text(row["ReadingOrder"])
+        return Mylar3StoryArcEntrySnapshot(
+            ordinal=ordinal,
+            reading_order=self._parse_optional_int(reading_order_raw),
+            reading_order_raw=reading_order_raw,
+            story_arc_id=self._optional_text(row["StoryArcID"]),
+            story_arc_name=self._optional_text(row["StoryArc"]),
+            cv_arc_id=self._optional_text(row["CV_ArcID"]),
+            issue_arc_id=self._optional_text(row["IssueArcID"]),
+            issue_id=self._optional_text(row["IssueID"]),
+            comic_id=self._optional_text(row["ComicID"]),
+            issue_number=self._optional_text(row["IssueNumber"]),
+            comic_name=self._optional_text(row["ComicName"]),
+            series_year=self._optional_text(row["SeriesYear"]),
+            issue_year=self._optional_text(row["IssueYEAR"]),
+            status=self._optional_text(row["Status"]),
+            location=self._optional_text(row["Location"]),
+            release_date=self._optional_text(row["ReleaseDate"]),
+            issue_date=self._optional_text(row["IssueDate"]),
+            publisher=self._optional_text(row["Publisher"]),
+            issue_publisher=self._optional_text(row["IssuePublisher"]),
+            issue_name=self._optional_text(row["IssueName"]),
+            manual=self._optional_text(row["Manual"]),
+            date_added=self._optional_text(row["DateAdded"]),
+            digital_date=self._optional_text(row["DigitalDate"]),
+            issue_type=self._optional_text(row["Type"]),
+            aliases=self._optional_text(row["Aliases"]),
+            total_issues=self._optional_text(row["TotalIssues"]),
+            in_cache_dir=self._optional_text(row["inCacheDir"]),
+            int_issue_number=self._optional_text(row["Int_IssueNumber"]),
+            dynamic_comic_name=self._optional_text(row["DynamicComicName"]),
+            volume=self._optional_text(row["Volume"]),
+            arc_image=self._optional_text(row["ArcImage"]),
+        )
+
+    def _first_story_arc_value(
+        self,
+        entries: tuple[Mylar3StoryArcEntrySnapshot, ...],
+        attribute_name: str,
+    ) -> str | None:
+        for entry in entries:
+            value = getattr(entry, attribute_name)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def _optional_text(self, value: object) -> str | None:
+        return None if value is None else str(value)
+
+    def _parse_optional_int(self, value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _table_exists(self, conn: sqlite3.Connection, table_name: str) -> bool:
+        if table_name not in {"storyarcs", "readlist"}:
+            return False
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
     def _table_has_columns(
         self,
         conn: sqlite3.Connection,
         table_name: str,
         required_columns: set[str],
     ) -> bool:
-        return required_columns.issubset(self._table_columns(conn, table_name))
+        available = {column.casefold() for column in self._table_columns(conn, table_name)}
+        return {column.casefold() for column in required_columns}.issubset(available)
 
     def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        if table_name == "issues":
-            rows = conn.execute("PRAGMA table_info(issues)").fetchall()
-        elif table_name == "annuals":
-            rows = conn.execute("PRAGMA table_info(annuals)").fetchall()
-        else:
+        queries = {
+            "issues": "PRAGMA table_info(issues)",
+            "annuals": "PRAGMA table_info(annuals)",
+            "storyarcs": "PRAGMA table_info(storyarcs)",
+            "readlist": "PRAGMA table_info(readlist)",
+        }
+        query = queries.get(table_name)
+        if query is None:
             return set()
+        rows = conn.execute(query).fetchall()
         return {str(row["name"]) for row in rows}
 
     def _get_resolved_file_count(self, resolved_path: Path | None) -> int:

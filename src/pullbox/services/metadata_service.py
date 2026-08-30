@@ -15,6 +15,7 @@ import structlog
 from sqlalchemy import delete, select
 
 from pullbox.core.exceptions import NotFoundError, ProviderError
+from pullbox.core.issue_numbers import format_issue_number, normalize_issue_number_text
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.naming import (
     classify_series_type,
@@ -52,6 +53,16 @@ def _provider_error_from_comicvine(exc: ComicVineError) -> ProviderError:
         str(exc),
         details={"status_code": exc.status_code, "retryable": exc.retryable},
     )
+
+
+def _exact_issue_number_text(
+    issue_number: float,
+    issue_number_text: str | None,
+) -> str:
+    """Normalize provider exact text or derive it for legacy provider DTOs."""
+    if issue_number_text is None:
+        return format_issue_number(issue_number)
+    return normalize_issue_number_text(issue_number_text)
 
 
 # Mapping from IssueType → SeriesType for propagating detected issue types
@@ -469,6 +480,11 @@ class MetadataService:
         ).scalar_one_or_none()
 
         if existing:
+            existing.issue_number = meta.issue_number
+            existing.issue_number_text = _exact_issue_number_text(
+                meta.issue_number,
+                meta.issue_number_text,
+            )
             existing.title = meta.title
             existing.description = meta.description
             existing.comicvine_url = meta.comicvine_url
@@ -617,6 +633,7 @@ class MetadataService:
         )
         existing_provider_issues = list(provider_result.scalars().all())
         existing_by_number = {issue.issue_number: issue for issue in existing_issues}
+        existing_by_text = {issue.effective_issue_number_text: issue for issue in existing_issues}
         existing_by_provider_id = {
             int(issue.comicvine_id): issue
             for issue in existing_provider_issues
@@ -625,8 +642,15 @@ class MetadataService:
         summary_evidence_types: list[IssueType] = []
         for summary in summaries:
             provider_issue_id = int(summary.provider_id)
+            exact_issue_number_text = _exact_issue_number_text(
+                summary.issue_number,
+                summary.issue_number_text,
+            )
             assign_provider_issue_id = True
-            existing = existing_by_number.get(summary.issue_number)
+            sync_issue_identity = True
+            existing = existing_by_text.get(exact_issue_number_text)
+            if existing is None:
+                existing = existing_by_number.get(summary.issue_number)
             existing_by_provider = existing_by_provider_id.get(provider_issue_id)
             if existing_by_provider is not None and existing_by_provider.series_id != series_id:
                 log.warning(
@@ -641,10 +665,14 @@ class MetadataService:
             if existing_by_provider is not None and existing_by_provider is not existing:
                 if existing is None:
                     old_issue_number = existing_by_provider.issue_number
+                    old_issue_number_text = existing_by_provider.effective_issue_number_text
                     existing = existing_by_provider
                     existing.issue_number = summary.issue_number
+                    existing.issue_number_text = exact_issue_number_text
                     existing_by_number.pop(old_issue_number, None)
+                    existing_by_text.pop(old_issue_number_text, None)
                     existing_by_number[summary.issue_number] = existing
+                    existing_by_text[exact_issue_number_text] = existing
                 else:
                     log.warning(
                         "issue_summary_provider_id_collision",
@@ -655,6 +683,7 @@ class MetadataService:
                         target_issue_number=summary.issue_number,
                     )
                     existing = existing_by_provider
+                    sync_issue_identity = False
 
             # Compact provider type and provider title are explicit evidence.
             # Series inheritance is a fallback and cannot establish consensus.
@@ -673,6 +702,17 @@ class MetadataService:
                 )
 
             if existing:
+                if sync_issue_identity:
+                    old_issue_number = existing.issue_number
+                    old_issue_number_text = existing.effective_issue_number_text
+                    existing.issue_number = summary.issue_number
+                    existing.issue_number_text = exact_issue_number_text
+                    if existing_by_number.get(old_issue_number) is existing:
+                        existing_by_number.pop(old_issue_number, None)
+                    if existing_by_text.get(old_issue_number_text) is existing:
+                        existing_by_text.pop(old_issue_number_text, None)
+                    existing_by_number[summary.issue_number] = existing
+                    existing_by_text[exact_issue_number_text] = existing
                 if assign_provider_issue_id:
                     existing.comicvine_id = provider_issue_id
                 if summary.title:
@@ -694,6 +734,7 @@ class MetadataService:
                     series_id=series_id,
                     comicvine_id=provider_issue_id if assign_provider_issue_id else None,
                     issue_number=summary.issue_number,
+                    issue_number_text=exact_issue_number_text,
                     title=summary.title,
                     release_date=_parse_date(summary.release_date),
                     cover_url=summary.cover_url,
@@ -703,6 +744,7 @@ class MetadataService:
                 session.add(issue)
                 created.append(issue)
                 existing_by_number[summary.issue_number] = issue
+                existing_by_text[exact_issue_number_text] = issue
                 if assign_provider_issue_id:
                     existing_by_provider_id[provider_issue_id] = issue
 

@@ -557,6 +557,29 @@
         </div>
       </div>
 
+        {% if active_review_view == 'safety_blocked' and safety_failure_summary %}
+        <div data-testid="import-review-safety-category-summary" class="grid gap-3 border-b border-pb-border p-4 lg:grid-cols-2">
+          {% for safety_category in safety_failure_summary %}
+          <div class="rounded-lg border border-pb-border bg-pb-card-hover/40 p-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p class="text-sm font-semibold text-pb-text">{{ safety_category.label }}</p>
+              <span class="count-badge count-badge-error">{{ safety_category.count }}</span>
+            </div>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">{{ safety_category.reason }}</p>
+            <p class="mt-1 text-[11px] text-pb-text-dim">
+              {{ 'Retry may help after remediation' if safety_category.retryable else 'Retry alone will not help' }}
+              · {{ 'Trusted override available' if safety_category.overrideable else 'Override not allowed' }}
+            </p>
+            {% if safety_category.examples %}
+            <p class="mt-2 break-words font-mono text-[11px] text-pb-text-dim">
+              Examples: {{ safety_category.examples|join(', ') }}
+            </p>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
         {% if active_review_view == 'conflicts' %}
         {% set conflict_refresh_mode = "review" %}
         {% set conflict_refresh_target = "#import-step-review-shell" %}
@@ -1028,7 +1051,7 @@
                   <div class="space-y-2">
                     {% for blocked_file in safety_blocked_files_by_series_id.get(item.id, []) %}
                     {% set blocked_diagnostics = blocked_file.diagnostics or {} %}
-                    {% set safety_block = blocked_diagnostics.get('safety_block', {}) %}
+                    {% set safety_block = safety_block_context_by_file_id.get(blocked_file.id, blocked_diagnostics.get('safety_block', {})) %}
                     {% set safety_approved = blocked_file.status.value == 'safety_approved' %}
                     {% set safety_block_overrideable = safety_block.get('overrideable', true) is not sameas false %}
                     <div class="rounded-lg border border-pb-border bg-pb-card/70 p-3">
@@ -1042,6 +1065,13 @@
                             {{ safety_block.get('reason') or blocked_file.error_message or 'File failed archive safety review.' }}
                             {% endif %}
                           </p>
+                          {% if not safety_approved %}
+                          <p class="mt-1 text-[11px] text-pb-text-dim">
+                            {{ safety_block.get('category', 'unknown')|replace('_', ' ')|title }}
+                            · Code: {{ safety_block.get('code', 'unknown_safety_failure') }}
+                            · {{ 'Retry may help after remediation' if safety_block.get('retryable') else 'Retry alone will not help' }}
+                          </p>
+                          {% endif %}
                         </div>
                         <div class="flex shrink-0 flex-wrap items-center gap-2">
                           {% if safety_approved %}

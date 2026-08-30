@@ -18,6 +18,10 @@ from sqlalchemy.orm import joinedload
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
 from pullbox.core.file_ops import LibraryFileRegistrationOutcome
 from pullbox.core.file_safety import classify_resource_safety_exception
+from pullbox.core.issue_numbers import (
+    issue_number_text_matches_numeric,
+    normalize_issue_number_text,
+)
 from pullbox.core.library_file_ownership import ReferencedFileValidationError
 from pullbox.models.import_job import (
     ImportedFile,
@@ -37,6 +41,7 @@ from pullbox.services.import_file_resolution import (
     load_issue_lookup_for_series,
 )
 from pullbox.services.import_folder_adoption import apply_import_series_folder_adoption
+from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.utilities.settings import restore_file_from_utility_trash
 
 if TYPE_CHECKING:
@@ -78,6 +83,7 @@ _MATCH_CONFIDENCE_MAP: dict[str, MatchConfidence] = {
 @dataclass(frozen=True, slots=True)
 class _PlaceholderIssueTarget:
     issue_number: float
+    issue_number_text: str | None
     issue_type: IssueType
     issue_title: str | None
     metadata_source: str
@@ -251,9 +257,16 @@ def _placeholder_issue_target_from_diagnostics(
         issue_type = IssueType(str(diagnostics.get("target_issue_type")))
     except (TypeError, ValueError):
         return None
+    issue_number_text: str | None = None
+    if imp_file.issue_number_raw:
+        with suppress(ValueError):
+            normalized_text = normalize_issue_number_text(imp_file.issue_number_raw)
+            if issue_number_text_matches_numeric(issue_number, normalized_text):
+                issue_number_text = normalized_text
     issue_title = diagnostics.get("target_issue_title")
     return _PlaceholderIssueTarget(
         issue_number=issue_number,
+        issue_number_text=issue_number_text,
         issue_type=issue_type,
         issue_title=str(issue_title) if issue_title else None,
         metadata_source=(
@@ -285,6 +298,8 @@ async def _ensure_placeholder_issue_targets(
     for target in placeholder_targets:
         existing = existing_by_number.get(target.issue_number)
         if existing is not None:
+            if target.issue_number_text is not None:
+                existing.issue_number_text = target.issue_number_text
             if existing.issue_type == IssueType.ISSUE:
                 existing.issue_type = target.issue_type
             if target.issue_title and not existing.title:
@@ -301,6 +316,8 @@ async def _ensure_placeholder_issue_targets(
             status=IssueStatus.SKIPPED,
             metadata_source=target.metadata_source,
         )
+        if target.issue_number_text is not None:
+            issue.issue_number_text = target.issue_number_text
         session.add(issue)
         existing_by_number[target.issue_number] = issue
         created_count += 1
@@ -1135,10 +1152,13 @@ async def process_import_series_files(
             )
             if isinstance(exc, ReferencedFileValidationError):
                 diagnostics = dict(imp_file.diagnostics or {})
-                diagnostics["source_revalidation"] = {
-                    "reason": exc.reason,
-                    "retryable": True,
-                }
+                diagnostics["source_revalidation"] = build_import_safety_diagnostics(
+                    str(exc),
+                    kind="source_revalidation",
+                    code=exc.reason,
+                    source="source_revalidation",
+                    overrideable_hint=False,
+                )
                 imp_file.status = ImportedFileStatus.FAILED
                 imp_file.include_in_import = False
                 imp_file.error_message = str(exc)

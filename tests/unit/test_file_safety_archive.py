@@ -95,7 +95,11 @@ def test_run_safety_checks_inspects_zip_archive_once(
         zf.writestr("safe/page002.jpg", b"ok")
         zf.writestr(
             "metadata/ComicInfo.xml",
-            "<ComicInfo><Series>Batman</Series><Number>1</Number></ComicInfo>",
+            (
+                "<ComicInfo><Series>Batman</Series><Number>1</Number>"
+                "<StoryArc>Batman: The Court of Owls</StoryArc>"
+                "<StoryArcNumber>001.50-A</StoryArcNumber></ComicInfo>"
+            ),
         )
 
     open_count = 0
@@ -121,6 +125,8 @@ def test_run_safety_checks_inspects_zip_archive_once(
     assert report.comicinfo is not None
     assert report.comicinfo.series == "Batman"
     assert report.comicinfo.number == "1"
+    assert report.comicinfo.story_arc == "Batman: The Court of Owls"
+    assert report.comicinfo.story_arc_number == "001.50-A"
     assert report.comicinfo_entry == "metadata/ComicInfo.xml"
     assert report.comicinfo_entry_count == 1
     assert report.comicinfo_error is None

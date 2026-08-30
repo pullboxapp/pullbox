@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from sqlalchemy import DateTime, Integer, Text
 from sqlalchemy import Enum as SQLAlchemyEnum
 
@@ -12,6 +13,7 @@ from pullbox.models import Base
 from pullbox.models.base import UTCDateTime
 from pullbox.models.import_job import ImportJobStatus
 from pullbox.models.indexer import IndexerConfig
+from pullbox.models.issue import Issue
 
 MIGRATION_DIR = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
@@ -153,3 +155,26 @@ def test_set_null_foreign_keys_are_nullable() -> None:
                     offenders.append(f"{model.__name__}.{column.name}")
 
     assert offenders == []
+
+
+def test_issue_number_text_dual_writes_and_falls_back_for_legacy_rows() -> None:
+    """Numeric-only callers remain compatible while exact text stays available."""
+    issue = Issue(series_id=1, issue_number=1e86)
+
+    assert issue.issue_number_text == "1" + ("0" * 86)
+    assert issue.effective_issue_number_text == "1" + ("0" * 86)
+
+    numeric_first = Issue(series_id=1, issue_number=1.0, issue_number_text="001au")
+    text_first = Issue(series_id=1, issue_number_text="001au", issue_number=1.0)
+    assert numeric_first.issue_number_text == "1AU"
+    assert text_first.issue_number_text == "1AU"
+    assert numeric_first.effective_issue_number_text == "1AU"
+    assert text_first.effective_issue_number_text == "1AU"
+
+    with pytest.raises(ValueError, match="must match"):
+        Issue(series_id=1, issue_number=2.0, issue_number_text="1AU")
+    with pytest.raises(ValueError, match="must match"):
+        Issue(series_id=1, issue_number_text="1AU", issue_number=2.0)
+
+    numeric_first.issue_number_text = None
+    assert numeric_first.effective_issue_number_text == "1"

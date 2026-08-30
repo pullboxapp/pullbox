@@ -454,6 +454,7 @@ async def list_series_issues(
         IssueListResponse.model_validate(
             {
                 **{c.key: getattr(i, c.key) for c in issue_mapper.columns},
+                "issue_number_text": i.effective_issue_number_text,
                 "has_file": i.library_file is not None,
             }
         )

@@ -19,6 +19,7 @@ from pullbox.core.file_safety import (
 )
 from pullbox.core.source_metadata import archive_entry_issue_hint_from_names
 from pullbox.models.import_job import ImportedFile, ImportedSeries, ImportJob
+from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,16 +99,14 @@ async def validate_discovered_files_safety(
             inspection = await effective_check_file_safety(session, Path(file_path))
         except FileSafetyError as exc:
             resource_block = classify_resource_safety_exception(exc)
-            safety_block = (
-                resource_block.to_diagnostics()
-                if resource_block is not None
-                else {
-                    "kind": "file_safety_blocked",
-                    "reason": exc.reason,
-                    "details": list(exc.details),
-                    "source": "file_safety",
-                    "overrideable": False,
-                }
+            safety_block = build_import_safety_diagnostics(
+                exc.reason,
+                details=exc.details,
+                kind=(resource_block.kind if resource_block is not None else None),
+                source=(resource_block.source if resource_block is not None else "file_safety"),
+                overrideable_hint=(
+                    resource_block.overrideable if resource_block is not None else False
+                ),
             )
             for discovered_file in discovered_files:
                 metadata_diagnostics = dict(discovered_file.metadata_diagnostics)

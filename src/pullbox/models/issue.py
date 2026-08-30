@@ -19,8 +19,13 @@ from sqlalchemy import (
 from sqlalchemy import (
     Enum as SQLAlchemyEnum,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
+from pullbox.core.issue_numbers import (
+    format_issue_number,
+    issue_number_text_matches_numeric,
+    normalize_issue_number_text,
+)
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin
 
 if TYPE_CHECKING:
@@ -107,6 +112,19 @@ class Issue(Base, IdentityMixin, TimestampMixin):
     __tablename__ = "issues"
     __table_args__ = (
         UniqueConstraint("series_id", "issue_number", name="uq_series_issue"),
+        Index(
+            "uq_series_issue_number_text",
+            "series_id",
+            "issue_number_text",
+            unique=True,
+        ),
+        Index(
+            "ix_issues_series_number_order",
+            "series_id",
+            "issue_number",
+            "issue_number_text",
+            "id",
+        ),
         Index("ix_issues_status", "status"),
         Index("ix_issues_release_date", "release_date"),
     )
@@ -116,6 +134,7 @@ class Issue(Base, IdentityMixin, TimestampMixin):
         ForeignKey("series.id", ondelete="CASCADE"), nullable=False
     )
     issue_number: Mapped[float] = mapped_column(Float, nullable=False)
+    issue_number_text: Mapped[str | None] = mapped_column(String(320), nullable=True)
     title: Mapped[str | None] = mapped_column(String(500))
     description: Mapped[str | None] = mapped_column(Text)
     release_date: Mapped[date | None] = mapped_column(Date)
@@ -153,3 +172,41 @@ class Issue(Base, IdentityMixin, TimestampMixin):
     story_arcs: Mapped[list[StoryArc]] = relationship(
         secondary="issue_story_arcs", back_populates="issues"
     )
+
+    @validates("issue_number")
+    def _dual_write_issue_number(self, _key: str, value: float) -> float:
+        """Keep numeric-only callers compatible with exact-text storage."""
+        previous_number = self.__dict__.get("issue_number")
+        existing_text = self.__dict__.get("issue_number_text")
+        if existing_text is not None and (
+            previous_number is None or float(previous_number) == float(value)
+        ):
+            if not issue_number_text_matches_numeric(value, str(existing_text)):
+                raise ValueError("issue number text must match the numeric issue number")
+            return value
+
+        self.__dict__["_dual_writing_issue_number_text"] = True
+        try:
+            self.issue_number_text = format_issue_number(value)
+        finally:
+            self.__dict__.pop("_dual_writing_issue_number_text", None)
+        return value
+
+    @validates("issue_number_text")
+    def _normalize_issue_number_text(self, _key: str, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = normalize_issue_number_text(value)
+        current_number = self.__dict__.get("issue_number")
+        if (
+            current_number is not None
+            and not self.__dict__.get("_dual_writing_issue_number_text", False)
+            and not issue_number_text_matches_numeric(float(current_number), normalized)
+        ):
+            raise ValueError("issue number text must match the numeric issue number")
+        return normalized
+
+    @property
+    def effective_issue_number_text(self) -> str:
+        """Return exact text, deriving it for rows written by an older image."""
+        return self.issue_number_text or format_issue_number(self.issue_number)

@@ -213,6 +213,8 @@ async def test_validate_discovered_files_safety_reuses_compact_archive_evidence(
             "metadata/ComicInfo.xml",
             (
                 "<ComicInfo><Series>Batman</Series><Number>1</Number>"
+                "<StoryArc>Batman: The Court of Owls</StoryArc>"
+                "<StoryArcNumber>001.50-A</StoryArcNumber>"
                 "<Notes>[cv_vol_id:42721]</Notes></ComicInfo>"
             ),
         )
@@ -246,7 +248,8 @@ async def test_validate_discovered_files_safety_reuses_compact_archive_evidence(
             "page_count": None,
             "genre": None,
             "web": None,
-            "story_arc": None,
+            "story_arc": "Batman: The Court of Owls",
+            "story_arc_number": "001.50-A",
             "series_group": None,
             "language": None,
         },
@@ -306,10 +309,37 @@ async def test_validate_discovered_files_safety_marks_blocked_files_without_rais
     assert "file_safety" not in normal_file.metadata_diagnostics
     assert blocked_file.metadata_diagnostics["file_safety"] == {
         "kind": "archive_decompressed_size",
-        "reason": (
-            "Archive decompressed size (4,248,234,210 bytes) exceeds limit (2,097,152,000 bytes)"
-        ),
-        "details": ["/tmp/comics/Batman Omnibus.cbz"],
+        "category": "decompression_size_limit",
+        "code": "archive_decompressed_size_limit",
+        "reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
+        "sanitized_reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
         "source": "file_safety",
+        "retryable": False,
         "overrideable": True,
     }
+
+
+async def test_validate_discovered_files_safety_sanitizes_non_overrideable_failure(
+    db_session: AsyncSession,
+) -> None:
+    discovered = _discovered_series("/tmp/comics/Corrupt 001.cbz")
+
+    async def check_file_safety(_session: AsyncSession, path: Path) -> None:
+        raise FileSafetyError(
+            f"Archive could not be inspected: {path}",
+            details=[str(path), "/mnt/user/private/not-for-ui.cbz"],
+        )
+
+    await validate_discovered_files_safety(
+        db_session,
+        [discovered],
+        check_file_safety=check_file_safety,
+    )
+
+    safety = discovered.files[0].metadata_diagnostics["file_safety"]
+    assert safety["category"] == "archive_inspection_failed"
+    assert safety["code"] == "archive_inspection_failed"
+    assert safety["retryable"] is True
+    assert safety["overrideable"] is False
+    assert "/tmp/comics" not in str(safety)
+    assert "/mnt/user/private" not in str(safety)

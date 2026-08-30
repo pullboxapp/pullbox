@@ -16,8 +16,12 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.library import LibraryRoot
 from pullbox.services.import_review_selection import load_import_review_selection_state
+from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
-from pullbox.ui.import_review_summary import load_import_review_summary
+from pullbox.ui.import_review_summary import (
+    load_import_review_summary,
+    load_import_safety_failure_summary,
+)
 from pullbox.ui.import_review_tables import (
     _get_import_review_series_order_by,
     _load_import_review_file_detail_groups,
@@ -193,6 +197,22 @@ async def _load_safety_blocked_files_by_series_id(
     return safety_blocked_files_by_series_id
 
 
+def _build_safety_block_context_by_file_id(
+    files_by_series_id: Mapping[int, list[ImportedFile]],
+) -> dict[int, dict[str, object]]:
+    """Normalize persisted/legacy blocks without mutating ORM diagnostics."""
+    result: dict[int, dict[str, object]] = {}
+    for files in files_by_series_id.values():
+        for imp_file in files:
+            diagnostics = imp_file.diagnostics or {}
+            if not isinstance(diagnostics, Mapping):
+                continue
+            safety_block = diagnostics.get("safety_block")
+            if isinstance(safety_block, Mapping):
+                result[imp_file.id] = normalize_import_safety_diagnostics(safety_block)
+    return result
+
+
 async def load_import_review_context(
     session: AsyncSession,
     job: ImportJob,
@@ -293,12 +313,16 @@ async def load_import_review_context(
         "sort": normalized_sort,
         "status_counts": await _load_status_counts(session, job_id),
         "review_summary": await load_import_review_summary(session, job),
+        "safety_failure_summary": await load_import_safety_failure_summary(session, job),
         "selected_series_ids": await _load_selected_review_series_ids(session, job_id),
         "duplicate_selected_file_counts": await _load_duplicate_selected_file_counts(
             session,
             job_id,
         ),
         "safety_blocked_files_by_series_id": safety_blocked_files_by_series_id,
+        "safety_block_context_by_file_id": _build_safety_block_context_by_file_id(
+            safety_blocked_files_by_series_id
+        ),
         "safety_rematch_pending": safety_rematch_pending,
         "matched_file_targets_by_series_id": matched_file_targets_by_series_id,
         "review_file_groups_by_series_id": review_file_groups_by_series_id,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 
 from sqlalchemy import or_
@@ -20,6 +20,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.services.import_duplicates import duplicate_merge_is_actionable, is_duplicate_series
+from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
 
 RecomputeFileCounters = Callable[[AsyncSession, ImportJob, list[int]], Awaitable[None]]
 RecomputeSeriesCounters = Callable[[AsyncSession, ImportJob], Awaitable[None]]
@@ -306,12 +307,15 @@ async def allow_safety_blocked_file_once(
 
     diagnostics = dict(imp_file.diagnostics or {})
     previous_block = diagnostics.pop("safety_block", None)
-    if isinstance(previous_block, dict) and previous_block.get("overrideable") is False:
+    if not isinstance(previous_block, Mapping):
+        raise ValidationError("This safety block cannot be overridden.")
+    normalized_previous_block = normalize_import_safety_diagnostics(previous_block)
+    if normalized_previous_block["overrideable"] is not True:
         raise ValidationError("This safety block cannot be overridden.")
     diagnostics["safety_exception"] = {
         "allowed_once": True,
         "allowed_at": datetime.now(UTC).isoformat(),
-        "previous_block": previous_block,
+        "previous_block": normalized_previous_block,
     }
     imp_file.status = (
         ImportedFileStatus.CONFIRMED if retry_import else ImportedFileStatus.SAFETY_APPROVED

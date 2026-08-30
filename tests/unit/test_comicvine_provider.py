@@ -448,6 +448,7 @@ async def test_get_issue_maps_issue_metadata_creators_and_story_arcs() -> None:
     assert issue.provider_id == "1116296"
     assert issue.series_provider_id == "165083"
     assert issue.issue_number == 0.5
+    assert issue.issue_number_text == "0.5"
     assert issue.title == "Doom"
     assert issue.description == "Bad guys assemble."
     assert issue.release_date == "2026-06-01"
@@ -463,6 +464,25 @@ async def test_get_issue_maps_issue_metadata_creators_and_story_arcs() -> None:
         }
     ]
     assert issue.story_arcs == [{"name": "One World Under Doom", "provider_id": "20"}]
+
+
+@pytest.mark.asyncio
+async def test_comicvine_preserves_suffix_issue_number_text() -> None:
+    provider = ComicVineProvider(api_key="suffix-test-key", rate_limit=999_999)
+    provider._request = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "number_of_total_results": 1,
+            "results": [_issue_item(12001, "1au")],
+        }
+    )
+
+    try:
+        summaries = await provider.get_recent_issues_for_series("97508", limit=1)
+    finally:
+        await provider._client.aclose()
+
+    assert summaries[0].issue_number == 1.0
+    assert summaries[0].issue_number_text == "1AU"
 
 
 @pytest.mark.asyncio
