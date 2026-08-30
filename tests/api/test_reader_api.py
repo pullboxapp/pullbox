@@ -16,7 +16,13 @@ from sqlalchemy import select
 
 from pullbox.core.events import EventBus, ReaderCompletionChanged, ReaderWantToReadChanged
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import User
@@ -121,6 +127,8 @@ async def _seed_adjacent_reader_issue(
 async def _seed_reader_issue(
     factory: async_sessionmaker[AsyncSession],
     source: Path,
+    *,
+    storage_mode: LibraryFileStorageMode = LibraryFileStorageMode.MANAGED,
 ) -> int:
     async with factory() as session:
         series = Series(
@@ -158,6 +166,7 @@ async def _seed_reader_issue(
                 issue_id=issue.id,
                 match_confidence=MatchConfidence.HIGH,
                 library_root_id=root.id,
+                storage_mode=storage_mode,
             )
         )
         await session.commit()
@@ -227,6 +236,36 @@ async def test_manifest_and_page_are_private_authenticated_resources(
     )
     assert not_modified.status_code == 304
     assert not_modified.content == b""
+
+
+@pytest.mark.asyncio
+async def test_reader_serves_referenced_file_without_mutating_source(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    sec_app: object,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "referenced-book.cbz"
+    _write_cbz(source)
+    original = source.read_bytes()
+    original_stat = source.stat()
+    issue_id = await _seed_reader_issue(
+        sec_db,
+        source,
+        storage_mode=LibraryFileStorageMode.REFERENCED,
+    )
+    sec_app.state.reader_content_service = ReaderContentService(cache_dir=tmp_path / "cache")
+
+    manifest_response = await authenticated_client.get(f"/api/v1/reader/issues/{issue_id}/manifest")
+    assert manifest_response.status_code == 200
+    page_response = await authenticated_client.get(
+        manifest_response.json()["page_url_template"].replace("{page_index}", "0")
+    )
+
+    assert page_response.status_code == 200
+    assert source.read_bytes() == original
+    assert source.stat().st_mtime_ns == original_stat.st_mtime_ns
+    assert source.stat().st_mode == original_stat.st_mode
 
 
 @pytest.mark.asyncio

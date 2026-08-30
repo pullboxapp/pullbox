@@ -25,6 +25,7 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobAction,
     ImportJobActionStatus,
@@ -165,12 +166,14 @@ async def _create_job_row(
     source_path: str = "/tmp/comics",
     source_type: ImportSourceType = ImportSourceType.FILESYSTEM,
     status: ImportJobStatus = ImportJobStatus.PENDING,
+    file_handling_mode: ImportFileHandlingMode = ImportFileHandlingMode.MANAGED_COPY,
 ) -> ImportJob:
     """Insert an ImportJob directly for test setup."""
     job = ImportJob(
         source_path=source_path,
         source_type=source_type,
         status=status,
+        file_handling_mode=file_handling_mode,
     )
     session.add(job)
     await session.flush()
@@ -2422,6 +2425,39 @@ class TestMetadataRepair:
         assert timings[(issue.id, str(archive_path), False)]["comicvine_issue_fetch_status"] == (
             "fetched"
         )
+
+    @pytest.mark.asyncio
+    async def test_repair_metadata_rejects_in_place_file_without_mutation(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        tmp_path: Path,
+    ) -> None:
+        job = await _create_job_row(
+            db_session,
+            status=ImportJobStatus.REVIEW,
+            file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        )
+        imported_series = await _create_imported_series(db_session, job)
+        archive_path = tmp_path / "Referenced.cbz"
+        original = b"user-owned comic"
+        archive_path.write_bytes(original)
+        imp_file = ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imported_series.id,
+            file_path=str(archive_path),
+            file_name=archive_path.name,
+            file_size=len(original),
+            file_format="cbz",
+            status=ImportedFileStatus.NO_MATCH,
+        )
+        db_session.add(imp_file)
+        await db_session.flush()
+
+        with pytest.raises(ValidationError, match="In-place import files cannot"):
+            await service.repair_file_metadata(db_session, job.id, imp_file.id)
+
+        assert archive_path.read_bytes() == original
 
     @pytest.mark.asyncio
     async def test_repair_cbz_metadata_in_place(
