@@ -96,6 +96,8 @@ from pullbox.schemas.import_job import (
     SeriesSelectionBulkUpdateRequest,
     SeriesSelectionUpdateRequest,
 )
+from pullbox.schemas.import_layout import LayoutAnalysisResponse, LayoutPreviewRequest
+from pullbox.services.import_layout_analysis import ImportLayoutAnalyzer
 from pullbox.tasks.import_task import (
     purge_import_runtime_state,
     trigger_import_execute,
@@ -195,6 +197,25 @@ async def create_import_job(
         body=body,
         trigger_import_scan=trigger_import_scan,
     )
+
+
+@router.post("/layout-preview", response_model=LayoutAnalysisResponse)
+async def preview_import_layout(
+    _user: AuthenticatedUser,
+    body: LayoutPreviewRequest,
+) -> LayoutAnalysisResponse:
+    """Analyze a source layout without creating a job or mutating files."""
+    analyzer = ImportLayoutAnalyzer()
+    try:
+        result = await analyzer.analyze(
+            body.source_path,
+            spec=body.layout.to_core(),
+        )
+    except (OSError, ValueError) as exc:
+        raise ValidationError(
+            "The layout preview source is no longer available or readable."
+        ) from exc
+    return LayoutAnalysisResponse.model_validate(result)
 
 
 # ── Post-Import Recovery (orphaned routes before /{job_id}) ──────────

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import enum
 import hashlib
 import os
 import time
@@ -15,6 +14,7 @@ from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_layout import (
     CompiledSourceLayout,
     ImportLayoutMode,
+    LayoutClassification,
     LayoutValueError,
     SourceLayoutMatch,
     SourceLayoutSpec,
@@ -43,15 +43,6 @@ _GENERIC_OR_TYPE_CONTAINERS = frozenset(
         "volumes",
     }
 )
-
-
-class LayoutClassification(enum.StrEnum):
-    """Request-local classification of a source or layout cluster."""
-
-    NORMAL_LIBRARY = "normal_library"
-    STORY_ARC = "story_arc"
-    MIXED = "mixed"
-    NEEDS_REVIEW = "needs_review"
 
 
 @dataclass(frozen=True, slots=True)

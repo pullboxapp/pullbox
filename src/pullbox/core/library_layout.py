@@ -52,6 +52,15 @@ class ImportLayoutMode(enum.StrEnum):
     CUSTOM = "custom"
 
 
+class LayoutClassification(enum.StrEnum):
+    """Request-local classification of a source or layout cluster."""
+
+    NORMAL_LIBRARY = "normal_library"
+    STORY_ARC = "story_arc"
+    MIXED = "mixed"
+    NEEDS_REVIEW = "needs_review"
+
+
 class LayoutTemplateError(ValueError):
     """A source-layout specification is unsupported, unsafe, or ambiguous."""
 

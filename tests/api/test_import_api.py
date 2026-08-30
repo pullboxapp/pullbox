@@ -516,6 +516,107 @@ async def _seed_mixed_review_selection_job(
 # ── Tests: POST /import ──────────────────────────────────────────────
 
 
+class TestImportLayoutPreview:
+    """Test POST /api/v1/import/layout-preview."""
+
+    @pytest.mark.asyncio
+    async def test_preview_is_read_only_and_returns_relative_examples(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        series = tmp_path / "DC Comics" / "Batman (2011)"
+        series.mkdir(parents=True)
+        (series / "Issue 001.cbz").write_bytes(b"fixture")
+
+        response = await client.post(
+            "/api/v1/import/layout-preview",
+            json={
+                "source_path": str(tmp_path),
+                "source_type": "filesystem",
+                "layout": {"mode": "auto"},
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["effective_spec"]["mode"] == "auto"
+        assert data["files_considered"] == 1
+        assert data["files_fitting"] == 1
+        assert data["archive_probes"] == 0
+        assert data["clusters"][0]["examples"][0]["relative_path"] == (
+            "DC Comics/Batman (2011)/Issue 001.cbz"
+        )
+        assert str(tmp_path) not in response.text
+
+        from sqlalchemy import func, select
+
+        async with _db_factory() as session:
+            assert await session.scalar(select(func.count(ImportJob.id))) == 0
+
+    @pytest.mark.asyncio
+    async def test_preview_rejects_invalid_custom_template(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        response = await client.post(
+            "/api/v1/import/layout-preview",
+            json={
+                "source_path": str(tmp_path),
+                "source_type": "filesystem",
+                "layout": {
+                    "mode": "custom",
+                    "series_path_template": "../{Series}",
+                },
+            },
+        )
+
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_preview_requires_authentication(
+        self,
+        unauth_client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        response = await unauth_client.post(
+            "/api/v1/import/layout-preview",
+            json={
+                "source_path": str(tmp_path),
+                "source_type": "filesystem",
+            },
+        )
+
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_preview_handles_source_disappearing_after_validation(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        with patch(
+            "pullbox.api.v1.import_jobs.ImportLayoutAnalyzer.analyze",
+            new_callable=AsyncMock,
+            side_effect=FileNotFoundError(str(tmp_path / "private-source")),
+        ):
+            response = await client.post(
+                "/api/v1/import/layout-preview",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                },
+            )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["message"] == (
+            "The layout preview source is no longer available or readable."
+        )
+        assert "private-source" not in response.text
+
+
 class TestCreateImportJob:
     """Test POST /api/v1/import."""
 
