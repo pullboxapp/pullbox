@@ -541,6 +541,33 @@ async def _load_mylar3_discovered_series(
         source_layout=SourceLayoutSpec.from_dict(dict(job.source_layout_snapshot or {})),
     )
     discovered_list = await reader.read_series()
+
+    path_status_counts: dict[str, int] = {}
+    mapping_applied_series = 0
+    incompatible_series = 0
+    for series in discovered_list:
+        path_details = series.diagnostics.get("mylar3_path")
+        if not isinstance(path_details, dict):
+            continue
+
+        status = path_details.get("status")
+        if isinstance(status, str):
+            path_status_counts[status] = path_status_counts.get(status, 0) + 1
+            if status not in {"local", "mapped"}:
+                incompatible_series += 1
+        if path_details.get("mapping_applied") is True:
+            mapping_applied_series += 1
+
+    await log_event(
+        session,
+        job_id,
+        "INFO",
+        "mylar3_path_resolution",
+        message="Resolved Mylar comic folders",
+        path_status_counts=dict(sorted(path_status_counts.items())),
+        mapping_applied_series=mapping_applied_series,
+        incompatible_series=incompatible_series,
+    )
     job.scan_total_files = sum(series.file_count for series in discovered_list)
     job.scan_total_dirs = len(
         {series.source_folder for series in discovered_list if series.source_folder}

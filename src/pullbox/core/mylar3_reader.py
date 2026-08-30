@@ -62,6 +62,17 @@ class _MylarReleaseSeries:
     files: list[DiscoveredFile]
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedMylarPath:
+    """Safe resolution state for one Mylar ComicLocation."""
+
+    path: Path | None
+    status: str
+    mapping_applied: bool
+    reason: str | None = None
+    rejection_reason: str | None = None
+
+
 class Mylar3Reader:
     """Reads series data from a Mylar3 SQLite database.
 
@@ -166,14 +177,17 @@ class Mylar3Reader:
             location = row["ComicLocation"]
             issue_count_hint = self._parse_positive_int(row["Total"])
             series_status = row["Status"]
-            file_count = self._get_file_count(location)
+            path_resolution = self._resolve_location_details(location)
+            resolved_location = (
+                str(path_resolution.path) if path_resolution.path is not None else None
+            )
+            file_count = self._get_resolved_file_count(path_resolution.path)
             has_files = file_count > 0
             series_issue_records = issue_records.get(cv_id, []) if cv_id is not None else []
 
             # Build sample paths and DiscoveredFile objects from the location directory
             sample_paths: list[str] = []
             discovered_files: list[DiscoveredFile] = []
-            resolved_location = self._resolve_location(location)
             if resolved_location:
                 p = Path(resolved_location)
                 if p.is_dir():
@@ -235,6 +249,18 @@ class Mylar3Reader:
                 has_files = bool(discovered_files)
 
             diagnostics: dict[str, object] = {}
+            diagnostics["mylar3_path"] = {
+                "status": path_resolution.status,
+                "mapping_applied": path_resolution.mapping_applied,
+            }
+            if path_resolution.reason is not None:
+                diagnostics.update(
+                    {
+                        "kind": "mylar3_path_incompatible",
+                        "reason": path_resolution.reason,
+                        "rejection_reason": path_resolution.rejection_reason,
+                    }
+                )
             if series_status:
                 diagnostics["series_status"] = series_status
             if issue_count_hint is not None:
@@ -347,16 +373,103 @@ class Mylar3Reader:
 
     def _resolve_location(self, location: str | None) -> str | None:
         """Apply path map translation to a ComicLocation string."""
+        resolved = self._resolve_location_details(location)
+        return str(resolved.path) if resolved.path is not None else None
+
+    def _resolve_location_details(self, location: str | None) -> _ResolvedMylarPath:
+        """Resolve one location without allowing path-map escape or silent misses."""
         if not location:
-            return None
+            return _ResolvedMylarPath(
+                path=None,
+                status="missing",
+                mapping_applied=False,
+                reason="missing_location",
+                rejection_reason="Mylar does not provide a comic folder for this series.",
+            )
         location_path = Path(location)
+        if not location_path.is_absolute():
+            return _ResolvedMylarPath(
+                path=None,
+                status="invalid",
+                mapping_applied=False,
+                reason="invalid_location",
+                rejection_reason="The Mylar comic folder must be an absolute path.",
+            )
         for container_prefix, host_prefix in self._ordered_path_map_items():
+            container_root = Path(container_prefix)
             try:
-                relative = location_path.relative_to(Path(container_prefix))
+                relative = location_path.relative_to(container_root)
             except ValueError:
                 continue
-            return str(Path(host_prefix) / relative)
-        return location
+            if ".." in relative.parts:
+                return _ResolvedMylarPath(
+                    path=None,
+                    status="invalid",
+                    mapping_applied=True,
+                    reason="unsafe_path_mapping",
+                    rejection_reason=(
+                        "The Mylar comic folder resolves outside the configured mapped root."
+                    ),
+                )
+            host_root = Path(host_prefix)
+            if not container_root.is_absolute() or not host_root.is_absolute():
+                return _ResolvedMylarPath(
+                    path=None,
+                    status="invalid",
+                    mapping_applied=True,
+                    reason="invalid_path_mapping",
+                    rejection_reason="Mylar path mappings must use absolute paths.",
+                )
+            resolved_root = host_root.resolve(strict=False)
+            resolved_path = (host_root / relative).resolve(strict=False)
+            if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
+                return _ResolvedMylarPath(
+                    path=None,
+                    status="invalid",
+                    mapping_applied=True,
+                    reason="unsafe_path_mapping",
+                    rejection_reason=(
+                        "The Mylar comic folder resolves outside the configured mapped root."
+                    ),
+                )
+            if not resolved_path.is_dir():
+                return _ResolvedMylarPath(
+                    path=None,
+                    status="missing",
+                    mapping_applied=True,
+                    reason="mapped_path_missing",
+                    rejection_reason=("The mapped Mylar comic folder is not available to Pullbox."),
+                )
+            return _ResolvedMylarPath(
+                path=resolved_path,
+                status="mapped",
+                mapping_applied=True,
+            )
+
+        resolved_local_path = location_path.resolve(strict=False)
+        if resolved_local_path.is_dir():
+            return _ResolvedMylarPath(
+                path=resolved_local_path,
+                status="local",
+                mapping_applied=False,
+            )
+        if self._path_map:
+            return _ResolvedMylarPath(
+                path=None,
+                status="unmapped",
+                mapping_applied=False,
+                reason="unmapped_path",
+                rejection_reason=(
+                    "The Mylar comic folder is not available through the configured path mappings."
+                ),
+            )
+        return _ResolvedMylarPath(
+            path=None,
+            status="missing",
+            mapping_applied=False,
+            reason="path_missing",
+            rejection_reason="The Mylar comic folder is not available to Pullbox.",
+        )
 
     def _ordered_path_map_items(self) -> list[tuple[str, str]]:
         """Return path mappings with the most-specific container prefix first."""
@@ -736,12 +849,8 @@ class Mylar3Reader:
             return set()
         return {str(row["name"]) for row in rows}
 
-    def _get_file_count(self, location: str | None) -> int:
-        """Count comic files in a directory if it exists. Returns 0 otherwise."""
-        resolved = self._resolve_location(location)
-        if not resolved:
+    def _get_resolved_file_count(self, resolved_path: Path | None) -> int:
+        """Count comic files in one validated resolved directory."""
+        if resolved_path is None:
             return 0
-        p = Path(resolved)
-        if not p.exists() or not p.is_dir():
-            return 0
-        return sum(1 for f in p.iterdir() if f.suffix.lower() in COMIC_EXTENSIONS)
+        return sum(1 for f in resolved_path.iterdir() if f.suffix.lower() in COMIC_EXTENSIONS)

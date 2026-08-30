@@ -240,6 +240,44 @@ async def test_materialize_non_fitting_layout_files_as_explicit_review_rows(
     )
 
 
+async def test_materialize_incompatible_mylar_path_as_series_review(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    discovered = DiscoveredSeries(
+        raw_series_name="Batman",
+        raw_year=2011,
+        raw_publisher="DC Comics",
+        file_count=0,
+        sample_paths=[],
+        source_folder="",
+        source_folder_relative="/comics/Batman",
+        files=[],
+        has_files=False,
+        mylar3_cv_id=42721,
+        diagnostics={
+            "kind": "mylar3_path_incompatible",
+            "reason": "unmapped_path",
+            "rejection_reason": (
+                "The Mylar comic folder is not available through the configured path mappings."
+            ),
+            "mylar3_path": {
+                "status": "unmapped",
+                "mapping_applied": False,
+            },
+        },
+    )
+
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+
+    series_row = pairs[0][1]
+    assert series_row.status == ImportSeriesStatus.NO_MATCH
+    assert series_row.cv_id == 42721
+    assert series_row.cv_match_method == "mylar3_cv_id"
+    assert series_row.diagnostics["kind"] == "mylar3_path_incompatible"
+    assert series_row.diagnostics["reason"] == "unmapped_path"
+
+
 async def test_materialize_mixed_layout_keeps_only_non_fitting_file_in_review(
     db_session: AsyncSession,
 ) -> None:

@@ -104,6 +104,47 @@ async def test_selected_layout_applies_to_mapped_mylar_paths_without_overriding_
 
 
 @pytest.mark.asyncio
+async def test_path_mapping_rejects_parent_traversal_outside_mapped_root(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    mapped_root = tmp_path / "mapped-comics"
+    escaped_issue = tmp_path / "escaped" / "Batman 001.cbz"
+    create_minimal_cbz(escaped_issue)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": "/comics/../escaped",
+                "Total": 1,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(mapped_root)},
+    ).read_series()
+
+    assert len(results) == 1
+    series = results[0]
+    assert series.files == []
+    assert series.has_files is False
+    assert series.source_folder == ""
+    assert series.diagnostics["kind"] == "mylar3_path_incompatible"
+    assert series.diagnostics["reason"] == "unsafe_path_mapping"
+    assert series.diagnostics["mylar3_path"] == {
+        "status": "invalid",
+        "mapping_applied": True,
+    }
+    assert "outside the configured mapped root" in str(series.diagnostics["rejection_reason"])
+
+
+@pytest.mark.asyncio
 async def test_annual_row_preserves_release_identity_and_issue_type(tmp_path: Path) -> None:
     db = tmp_path / "mylar.db"
     series_dir = tmp_path / "comics" / "X-Men"

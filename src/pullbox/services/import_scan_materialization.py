@@ -43,6 +43,9 @@ async def materialize_discovered_scan_results(
     """Persist discovered scanner output as import review series/file rows."""
     series_pairs: list[tuple[DiscoveredSeries, ImportedSeries]] = []
     for discovered in discovered_list:
+        mylar_path_incompatible = (
+            dict(discovered.diagnostics).get("kind") == "mylar3_path_incompatible"
+        )
         layout_review_count = sum(
             _requires_source_layout_review(dict(discovered_file.metadata_diagnostics))
             for discovered_file in discovered.files
@@ -72,7 +75,7 @@ async def materialize_discovered_scan_results(
             has_files=discovered.has_files,
             status=(
                 ImportSeriesStatus.NO_MATCH
-                if all_files_require_layout_review
+                if all_files_require_layout_review or mylar_path_incompatible
                 else ImportSeriesStatus.PENDING
             ),
             diagnostics=series_diagnostics,

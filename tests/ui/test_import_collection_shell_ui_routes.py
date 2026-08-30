@@ -1473,6 +1473,36 @@ class TestImportShellRouteContracts:
         assert "1 file does not fit the selected source layout" in response.text
         assert "will not be matched automatically" in response.text
 
+    async def test_import_review_partial_explains_incompatible_mylar_path(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 11)
+            assert series is not None
+            series.diagnostics = {
+                "kind": "mylar3_path_incompatible",
+                "reason": "mapped_path_missing",
+                "rejection_reason": ("The mapped Mylar comic folder is not available to Pullbox."),
+                "mylar3_path": {
+                    "status": "missing",
+                    "mapping_applied": True,
+                },
+            }
+            await session.commit()
+
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+
+        assert response.status_code == 200
+        assert 'data-testid="import-review-mylar-path-review"' in response.text
+        assert "Mylar path review" in response.text
+        assert "The mapped Mylar comic folder is not available to Pullbox." in response.text
+        assert "Correct the Mylar path mapping and retry this import." in response.text
+
     async def test_import_review_partial_renders_matched_file_target_tables(
         self,
         authenticated_client,

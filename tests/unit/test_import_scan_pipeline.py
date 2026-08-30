@@ -243,6 +243,74 @@ async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
     assert captured_layouts == [expected_layout]
 
 
+async def test_load_mylar3_discovered_series_logs_path_resolution_counts(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    db_path.touch()
+    job = ImportJob(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    def discovered(name: str, status: str, *, mapping_applied: bool) -> DiscoveredSeries:
+        return DiscoveredSeries(
+            raw_series_name=name,
+            raw_year=2024,
+            raw_publisher=None,
+            file_count=0,
+            sample_paths=[],
+            source_folder="",
+            source_folder_relative="",
+            files=[],
+            has_files=False,
+            diagnostics={
+                "mylar3_path": {
+                    "status": status,
+                    "mapping_applied": mapping_applied,
+                }
+            },
+        )
+
+    class ReaderDouble:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def read_series(self) -> list[DiscoveredSeries]:
+            return [
+                discovered("Mapped", "mapped", mapping_applied=True),
+                discovered("Local", "local", mapping_applied=False),
+                discovered("Unsafe", "invalid", mapping_applied=True),
+            ]
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def log_event(_session, _job_id, _level, event, **kwargs) -> None:
+        events.append((event, kwargs))
+
+    await _load_mylar3_discovered_series(
+        db_session,
+        job,
+        job_id=job.id,
+        mylar3_reader_cls=ReaderDouble,
+        auto_detect_mylar3_path_map=lambda _path: None,
+        log_event=log_event,
+    )
+
+    summary = next(details for event, details in events if event == "mylar3_path_resolution")
+    assert summary["path_status_counts"] == {
+        "invalid": 1,
+        "local": 1,
+        "mapped": 1,
+    }
+    assert summary["mapping_applied_series"] == 2
+    assert summary["incompatible_series"] == 1
+
+
 def test_scan_failure_message_names_sqlite_lock_contention() -> None:
     exc = OperationalError("INSERT INTO import_job_logs", {}, Exception("database is locked"))
 

@@ -1205,6 +1205,74 @@ class TestMylar3Import:
         assert file_item is not None
         assert file_item.status == ImportedFileStatus.NO_MATCH
 
+    async def test_unsafe_mylar_path_mapping_reaches_review_without_provider_calls(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        mapped_root = tmp_path / "mapped-comics"
+        escaped_issue = tmp_path / "escaped" / "Batman 001.cbz"
+        create_minimal_cbz(escaped_issue)
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-42721",
+                    "ComicName": "Batman",
+                    "ComicYear": "2011",
+                    "ComicPublisher": "DC Comics",
+                    "ComicLocation": "/comics/../escaped",
+                    "Total": 1,
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map={"/comics": str(mapped_root)},
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+        await db_session.refresh(job)
+
+        assert job.status == ImportJobStatus.REVIEW
+        assert job.series_found == 1
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.NO_MATCH
+        assert series_item.cv_id == 42721
+        assert series_item.cv_match_method == "mylar3_cv_id"
+        assert series_item.diagnostics["reason"] == "unsafe_path_mapping"
+        assert series_item.diagnostics["mylar3_path"] == {
+            "status": "invalid",
+            "mapping_applied": True,
+        }
+        assert (
+            await db_session.scalar(
+                sa_select(ImportedFile.id).where(ImportedFile.import_job_id == job.id)
+            )
+            is None
+        )
+
 
 # ── Scenario C: Deduplication ──────────────────────────────────────────
 
