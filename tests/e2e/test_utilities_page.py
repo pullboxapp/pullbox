@@ -272,6 +272,20 @@ class TestUtilitiesPage:
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
+        # Keep response hydration observably asynchronous, including on fast
+        # local machines, so shell visibility cannot stand in for loaded jobs.
+        authed_page.add_init_script(
+            """(() => {
+                const originalFetch = window.fetch;
+                window.fetch = async function (...args) {
+                    const response = await originalFetch.apply(this, args);
+                    if (String(args[0]).includes('/api/v1/utilities/jobs?limit=50')) {
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+                    return response;
+                };
+            })();"""
+        )
         authed_page.route(
             "**/api/v1/utilities/queue",
             lambda route: route.fulfill(
@@ -345,6 +359,7 @@ class TestUtilitiesPage:
         active_card = utilities.queue_panel.locator(
             "[data-testid='utilities-queue-active-job']"
         ).first
+        expect(active_card).to_contain_text("Test Utility Job")
         assert (
             active_card.locator("[data-testid='utilities-queue-active-job-details']").count() == 0
         )
@@ -370,6 +385,7 @@ class TestUtilitiesPage:
         queued_card = utilities.queue_panel.locator(
             "[data-testid='utilities-queue-queued-section'] tbody"
         ).first
+        expect(queued_card).to_contain_text("Queued Integrity Scan")
         assert queued_card.locator("[data-tip='Job details']").count() == 0
         queued_actions = queued_card.locator(".utilities-queue-actions .utilities-queue-act-btn")
         assert queued_actions.count() == 1

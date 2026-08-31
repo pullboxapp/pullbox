@@ -767,18 +767,34 @@ class TestImportCollectionTab:
 
         assert import_page.retry_failed_button.is_visible()
 
-        import_page.retry_failed_button.click()
-        authed_page.wait_for_function(
-            """() => {
-                const progress = document.querySelector("[data-testid='import-collection-progress']");
-                const results = document.querySelector("[data-testid='import-collection-results']");
-                const isVisible = (el) => !!el && el.offsetParent !== null;
-                return isVisible(progress) || isVisible(results);
-            }""",
-            timeout=5000,
+        original_job = authed_page.request.get(
+            f"{seeded_server}/api/v1/import/{completed_job_id}"
+        ).json()
+        authed_page.route(
+            f"**/api/v1/import/{completed_job_id}/retry-failed",
+            lambda route: route.fulfill(
+                status=202,
+                content_type="application/json",
+                body=json.dumps({"job_id": completed_job_id, "retrying_count": 1}),
+            ),
         )
+        with authed_page.expect_response(
+            f"**/api/v1/import/{completed_job_id}/retry-failed"
+        ) as retry_response:
+            import_page.retry_failed_button.click()
+        assert retry_response.value.status == 202
+        assert retry_response.value.request.method == "POST"
+        import_page.progress_panel.wait_for(state="visible", timeout=5000)
 
         assert page_errors == []
+
+        # This UI transition must not consume the completed session fixture
+        # used by the separate finish/results tests.
+        current_job = authed_page.request.get(
+            f"{seeded_server}/api/v1/import/{completed_job_id}"
+        ).json()
+        for key in ("status", "series_failed", "series_imported"):
+            assert current_job[key] == original_job[key]
 
     def test_import_collection_completed_import_requires_explicit_finish_to_show_results(
         self,

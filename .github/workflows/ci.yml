@@ -391,8 +391,15 @@ jobs:
       - name: Setup runner-local venv
         run: .github/scripts/setup-runner-venv.sh "dev,e2e"
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install Node dependencies
+        run: npm ci
+
       - name: Runner preflight
-        run: .github/scripts/preflight-runner.sh python playwright
+        run: .github/scripts/preflight-runner.sh python node playwright
 
       - name: Install Playwright browsers
         run: playwright install ${{ matrix.browser }}
