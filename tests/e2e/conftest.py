@@ -1161,6 +1161,8 @@ def _running_live_server() -> Generator[str, None, None]:
         "PULLBOX_TEMP_DIR": str(temp_dir),
         "PULLBOX_BACKUP_DIR": str(backup_dir),
         "PULLBOX_LIBRARY_ROOT": str(library_root),
+        # The manual-creation E2E module covers the explicit feature-on state.
+        "PULLBOX_STORY_ARC_MANUAL_CREATE_ENABLED": "true",
         # The session-scoped browser suite intentionally sends far more traffic
         # than one real client would within a minute. Keep rate limiting active
         # while preventing unrelated E2E modules from exhausting shared quotas.

@@ -14,6 +14,7 @@
         Keep event reading orders together without changing the canonical issues in your library.
       </p>
     </div>
+    {% if story_arc_manual_create_enabled %}
     <details class="rounded-lg border border-pb-border bg-pb-card p-4 sm:w-[28rem]">
       <summary class="cursor-pointer font-medium text-pb-text">Create Story Arc</summary>
       <form
@@ -64,6 +65,7 @@
         <button type="submit" class="btn-primary">Create empty Story Arc</button>
       </form>
     </details>
+    {% endif %}
   </header>
 
   {% if error_message %}
@@ -184,7 +186,11 @@
       <div class="rounded-lg border border-dashed border-pb-border bg-pb-card px-6 py-12 text-center">
         <h3 class="font-semibold text-pb-text">No Story Arcs found</h3>
         <p class="mt-2 text-sm text-pb-text-sec">
-          Adjust the filters or create an empty Story Arc to build a reading order.
+          {% if story_arc_manual_create_enabled %}
+            Adjust the filters or create an empty Story Arc to build a reading order.
+          {% else %}
+            Adjust the filters or find a Story Arc on Comic Vine to add its reading order.
+          {% endif %}
         </p>
       </div>
     {% endif %}

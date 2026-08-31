@@ -7,6 +7,7 @@ import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -34,6 +35,7 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementSyncService,
 )
 from pullbox.services.story_arc_service import StoryArcService
+from pullbox.ui import story_arc_routes
 from pullbox.ui.story_arc_presenters import _load_sync_work_summary
 
 if TYPE_CHECKING:
@@ -43,6 +45,16 @@ if TYPE_CHECKING:
 pytest_plugins = ["conftest_security"]
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-story-arc-ui")
+
+
+@pytest.fixture(autouse=True)
+def _enable_manual_story_arc_creation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        story_arc_routes,
+        "get_settings",
+        lambda: SimpleNamespace(story_arc_manual_create_enabled=True),
+        raising=False,
+    )
 
 
 def _csrf_header_for(client: AsyncClient) -> dict[str, str]:
@@ -312,6 +324,39 @@ class TestStoryArcManagementUI:
 
         oversized = await authenticated_client.get("/story-arcs?per_page=101")
         assert oversized.status_code == 422
+
+    async def test_manual_creation_is_hidden_and_unreachable_when_feature_flag_is_off(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            story_arc_routes,
+            "get_settings",
+            lambda: SimpleNamespace(story_arc_manual_create_enabled=False),
+            raising=False,
+        )
+
+        page = await authenticated_client.get("/story-arcs")
+
+        assert page.status_code == 200
+        assert 'data-testid="story-arcs-create-form"' not in page.text
+        assert 'data-testid="story-arc-catalog-search"' in page.text
+
+        response = await authenticated_client.post(
+            "/story-arcs",
+            data={"name": "Hidden empty arc"},
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 404
+        async with sec_db() as session:
+            assert (
+                await session.scalar(select(StoryArc.id).where(StoryArc.name == "Hidden empty arc"))
+                is None
+            )
 
     @pytest.mark.parametrize(
         ("prefix", "expected_template"),

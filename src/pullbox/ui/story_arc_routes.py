@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.config import get_settings
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
@@ -384,6 +385,7 @@ async def story_arc_list(
         error_message=_ERROR_MESSAGES.get(error or "", ""),
         placement_roots=placement_roots,
         placement_roots_truncated=placement_roots_truncated,
+        story_arc_manual_create_enabled=get_settings().story_arc_manual_create_enabled,
     )
     return _templates().TemplateResponse(request, "pages/story_arcs.html", context)
 
@@ -410,6 +412,8 @@ async def story_arc_create(
     synchronize: bool = Form(False),
 ) -> Response:
     """Create an empty arc with an optional validated, source-preserving storage policy."""
+    if not get_settings().story_arc_manual_create_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         if filename_style == "original":
             file_template = ORIGINAL_STORY_ARC_FILE_TEMPLATE

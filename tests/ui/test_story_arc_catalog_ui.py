@@ -62,7 +62,7 @@ async def test_registry_has_separate_inline_comicvine_search(authenticated_clien
     assert 'hx-get="/story-arcs/catalog"' in response.text
     assert 'hx-target="#story-arc-catalog-results"' in response.text
     assert "Search Comic Vine" in response.text
-    assert 'data-testid="story-arcs-create-form"' in response.text
+    assert 'data-testid="story-arcs-create-form"' not in response.text
 
 
 async def test_catalog_empty_query_does_not_search_provider(authenticated_client: AsyncClient):

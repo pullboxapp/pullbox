@@ -41,6 +41,7 @@ services:
       PULLBOX_TEMP_DIR: /data/tmp
       PULLBOX_BACKUP_DIR: /data/backups
       PULLBOX_READER_ENABLED: ${PULLBOX_READER_ENABLED:-true}
+      PULLBOX_STORY_ARC_MANUAL_CREATE_ENABLED: ${PULLBOX_STORY_ARC_MANUAL_CREATE_ENABLED:-false}
       PULLBOX_BIND_ADDRESS: 0.0.0.0
       PULLBOX_PORT: 8585
       # Native HTTPS uses the normal Pullbox port; remap the host port above if needed.
