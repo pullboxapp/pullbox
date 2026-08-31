@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 import time
+from unittest.mock import AsyncMock
 
 import pytest
 from playwright.sync_api import expect
@@ -267,11 +268,28 @@ class TestUtilitiesPage:
         assert utilities.gauges.locator(".utilities-gauge").count() == 2
         assert utilities.gauges.get_by_text("Done", exact=True).count() == 0
 
+    @pytest.mark.parametrize("initial_state", ["empty", "completed"])
     def test_utilities_queue_active_and_queued_rows_use_compact_action_contract(
         self,
         authed_page,
-        seeded_server: str,  # type: ignore[no-untyped-def]
+        seeded_server: str,
+        monkeypatch: pytest.MonkeyPatch,
+        initial_state: str,  # type: ignore[no-untyped-def]
     ) -> None:
+        initial_jobs = (
+            [{"id": "completed-before-poll", "state": "COMPLETED", "display_name": "Earlier Job"}]
+            if initial_state == "completed"
+            else []
+        )
+        monkeypatch.setattr(
+            "pullbox.ui.utilities_routes.load_utility_queue_snapshot",
+            AsyncMock(
+                return_value=(
+                    initial_jobs,
+                    {"running": 0, "queued": 0, "paused": 0, "total_completed": len(initial_jobs)},
+                )
+            ),
+        )
         # Keep response hydration observably asynchronous, including on fast
         # local machines, so shell visibility cannot stand in for loaded jobs.
         authed_page.add_init_script(
@@ -359,7 +377,9 @@ class TestUtilitiesPage:
         active_card = utilities.queue_panel.locator(
             "[data-testid='utilities-queue-active-job']"
         ).first
-        expect(active_card).to_contain_text("Test Utility Job")
+        # A populated server snapshot defers the first fetch to the five-second
+        # poll. Allow that poll plus the delayed response, not just shell load.
+        expect(active_card).to_contain_text("Test Utility Job", timeout=10_000)
         assert (
             active_card.locator("[data-testid='utilities-queue-active-job-details']").count() == 0
         )
