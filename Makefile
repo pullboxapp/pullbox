@@ -1,4 +1,4 @@
-.PHONY: help setup dev dev-local dev-docker dev-docker-up dev-docker-down dev-docker-logs dev-docker-shell dev-docker-seed prod-test-pull prod-test-up prod-test-refresh prod-test-down prod-test-logs prod-test-shell run lint format format-fix typecheck test test-unit test-slow test-integration test-api test-providers test-utilities test-a11y test-e2e test-e2e-chrome test-e2e-firefox coverage coverage-check migrate migration seed seed-full reset-db reset-password reset-import import-fixture performance-baseline direct-download-baseline validate runner-preflight release-changelog-check workflow-hygiene secret-scan security-ci ci-local docker-build-check docker-security-check docker-smoke ci-full ci-clean-room security-check pre-commit css-build css-watch clean
+.PHONY: help bootstrap-worktree setup dev dev-local dev-docker dev-docker-up dev-docker-down dev-docker-logs dev-docker-shell dev-docker-seed prod-test-pull prod-test-up prod-test-refresh prod-test-down prod-test-logs prod-test-shell run lint format format-fix typecheck test test-unit test-slow test-integration test-api test-providers test-utilities test-a11y test-e2e test-e2e-chrome test-e2e-firefox coverage coverage-check migrate migration seed seed-full reset-db reset-password reset-import import-fixture performance-baseline direct-download-baseline validate runner-preflight release-changelog-check workflow-hygiene secret-scan security-ci ci-local docker-build-check docker-security-check docker-smoke ci-full ci-clean-room security-check pre-commit css-build css-watch clean
 
 VENV := .venv
 PYTHON_BOOTSTRAP ?= python3
@@ -27,16 +27,25 @@ help: ## Show this help
 
 # ─── Setup ───────────────────────────────────────────────
 
-setup: ## Create venv, install Python + Node dependencies
-	$(PYTHON_BOOTSTRAP) -m venv $(VENV)
+bootstrap-worktree: ## Idempotently prepare this worktree without repointing shared Git hooks
+	@if [ ! -x "$(PYTHON)" ]; then \
+		$(PYTHON_BOOTSTRAP) -m venv $(VENV); \
+	else \
+		echo "\033[36mℹ️  Reusing $(CURDIR)/$(VENV).\033[0m"; \
+	fi
 	$(PIP) install --upgrade "pip>=26.0" wheel
 	$(PIP) install -e ".[dev,e2e]"
-	$(VENV)/bin/pre-commit install
-	npm install
+	npm ci
+	$(PYTHON) -m playwright install chromium firefox
 	@if [ ! -f .env ]; then \
 		cp .env.dev.example .env; \
 		echo "\033[33mℹ️  Created .env from .env.dev.example\033[0m"; \
 	fi
+	@echo ""
+	@echo "\033[32m✅ Worktree ready.\033[0m Python, checks, and browser tests resolve locally."
+
+setup: bootstrap-worktree ## Create venv, install dependencies, and install the shared Git hook
+	$(VENV)/bin/pre-commit install
 	@echo ""
 	@echo "\033[32m✅ Setup complete.\033[0m Run \033[36mmake dev-local\033[0m or \033[36mmake dev-docker\033[0m to start developing."
 

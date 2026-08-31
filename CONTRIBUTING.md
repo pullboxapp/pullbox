@@ -161,6 +161,18 @@ DEV_DOCKER_PORT=8586 make dev-docker
 
 Local venv development is better for quick test runs and editor integration.
 
+For a newly created Git worktree, prepare its isolated toolchain once:
+
+```bash
+make bootstrap-worktree
+```
+
+The command is safe to rerun. It reuses the worktree's `.venv`, installs the
+declared Python and locked Node development dependencies, ensures Chromium and
+Firefox are available to Playwright, and creates `.env` only when it is
+missing. It does not reinstall or repoint the Git hook shared by sibling
+worktrees.
+
 First-time setup:
 
 ```bash
@@ -331,6 +343,7 @@ Most common commands:
 | --- | --- |
 | `make dev-docker` | One-command Docker development environment |
 | `make dev-local` | One-command local venv environment |
+| `make bootstrap-worktree` | Prepare an isolated worktree toolchain without repointing shared hooks |
 | `make setup` | Create venv and install Python plus Node dependencies |
 | `make run` | Start local reload server |
 | `make css-build` | Compile committed Tailwind CSS |
