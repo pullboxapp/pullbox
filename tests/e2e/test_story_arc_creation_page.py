@@ -19,7 +19,7 @@ def test_new_arc_copy_policy_keeps_original_names_with_optional_prefix(
     page = authed_page
     page_errors: list[str] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
-    page.goto(f"{seeded_server}/story-arcs", wait_until="domcontentloaded")
+    page.goto(f"{seeded_server}/story-arcs/add", wait_until="domcontentloaded")
     page.get_by_text("Create Story Arc", exact=True).click()
     form = page.get_by_test_id("story-arcs-create-form")
     form.get_by_label("Name", exact=True).fill(f"Copy policy browser test {prefix}")

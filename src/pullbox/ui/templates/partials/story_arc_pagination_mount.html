@@ -1,0 +1,21 @@
+{% from "components/page_dock.html" import page_dock %}
+
+{% set status_items = [
+  {"led": "green", "label": "active", "value": story_arc_page.active_count|string},
+  {"led": "off", "label": "archived", "value": story_arc_page.archived_count|string},
+  {"label": "monitored", "value": story_arc_page.monitored_count|string},
+  {"label": "members", "value": story_arc_page.membership_count|string},
+  {"label": "attention", "value": (story_arc_page.missing_count + story_arc_page.conflict_count)|string},
+] %}
+
+<div data-testid="story-arcs-footer-dock">
+  {{ page_dock(
+    page=story_arc_page.page,
+    total_pages=story_arc_page.total_pages,
+    base_url=pagination_base_url,
+    status_items=status_items,
+    hx_target="#story-arcs-results-body",
+    hx_swap="outerHTML",
+    hx_base_url=pagination_base_url
+  ) }}
+</div>

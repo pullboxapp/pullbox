@@ -62,6 +62,13 @@ class StoryArcListPageView:
     page: int
     per_page: int
     total_pages: int
+    active_count: int
+    archived_count: int
+    monitored_count: int
+    membership_count: int
+    resolved_count: int
+    missing_count: int
+    conflict_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,10 +318,44 @@ async def load_story_arc_list_page(
     if monitored is not None:
         filters.append(StoryArc.monitored.is_(monitored))
 
-    total = int(await session.scalar(select(func.count(StoryArc.id)).where(*filters)) or 0)
+    counts = _membership_counts_subquery()
+    registry_counts = (
+        await session.execute(
+            select(
+                func.count(StoryArc.id),
+                func.coalesce(
+                    func.sum(case((StoryArc.lifecycle == StoryArcLifecycle.ACTIVE, 1), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(case((StoryArc.lifecycle == StoryArcLifecycle.ARCHIVED, 1), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(case((StoryArc.monitored.is_(True), 1), else_=0)),
+                    0,
+                ),
+                func.coalesce(func.sum(counts.c.membership_count), 0),
+                func.coalesce(func.sum(counts.c.resolved_count), 0),
+                func.coalesce(func.sum(counts.c.missing_count), 0),
+                func.coalesce(func.sum(counts.c.conflict_count), 0),
+            )
+            .outerjoin(counts, counts.c.story_arc_id == StoryArc.id)
+            .where(*filters)
+        )
+    ).one()
+    (
+        total,
+        active_count,
+        archived_count,
+        monitored_count,
+        membership_count,
+        resolved_count,
+        missing_count,
+        conflict_count,
+    ) = (int(value or 0) for value in registry_counts)
     total_pages = max(1, (total + per_page - 1) // per_page)
     safe_page = min(page, total_pages)
-    counts = _membership_counts_subquery()
     rows = (
         await session.execute(
             select(
@@ -361,6 +402,13 @@ async def load_story_arc_list_page(
         page=safe_page,
         per_page=per_page,
         total_pages=total_pages,
+        active_count=active_count,
+        archived_count=archived_count,
+        monitored_count=monitored_count,
+        membership_count=membership_count,
+        resolved_count=resolved_count,
+        missing_count=missing_count,
+        conflict_count=conflict_count,
     )
 
 

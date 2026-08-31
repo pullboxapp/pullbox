@@ -291,6 +291,7 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "story_arc_catalog_refresh",
         ),
         ("/story-arcs", ("GET",), "story_arc_list", "story_arc_list"),
+        ("/story-arcs/add", ("GET",), "story_arc_add", "story_arc_add"),
         ("/story-arcs", ("POST",), "story_arc_create", "story_arc_create"),
         (
             "/story-arcs/{story_arc_id}",

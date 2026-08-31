@@ -54,13 +54,29 @@ def _csrf(client: AsyncClient) -> dict[str, str]:
     return {"X-CSRF-Token": AuthService.get_csrf_token_from_session(token) or ""}
 
 
-async def test_registry_has_separate_inline_comicvine_search(authenticated_client: AsyncClient):
-    response = await authenticated_client.get("/story-arcs")
+async def test_registry_links_to_dedicated_comicvine_add_page(
+    authenticated_client: AsyncClient,
+):
+    registry = await authenticated_client.get("/story-arcs")
+
+    assert registry.status_code == 200
+    assert 'data-testid="story-arcs-add-link"' in registry.text
+    assert 'href="/story-arcs/add"' in registry.text
+    assert 'data-testid="story-arc-catalog-search"' not in registry.text
+
+    response = await authenticated_client.get("/story-arcs/add")
 
     assert response.status_code == 200
+    assert 'data-testid="story-arc-add-page"' in response.text
+    assert 'data-testid="story-arc-add-header"' in response.text
+    assert 'data-testid="story-arc-add-title"' in response.text
+    assert "ADD <span>STORY ARC</span>" in response.text
     assert 'data-testid="story-arc-catalog-search"' in response.text
-    assert 'hx-get="/story-arcs/catalog"' in response.text
-    assert 'hx-target="#story-arc-catalog-results"' in response.text
+    assert 'hx-get="/story-arcs/add"' in response.text
+    assert 'hx-target="#story-arc-add-results"' in response.text
+    assert 'data-search-field-contract="baseline-v2"' in response.text
+    assert 'data-testid="story-arc-add-results"' in response.text
+    assert 'data-testid="story-arc-add-footer-dock"' in response.text
     assert "Search Comic Vine" in response.text
     assert 'data-testid="story-arcs-create-form"' not in response.text
 

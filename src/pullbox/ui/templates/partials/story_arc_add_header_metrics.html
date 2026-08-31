@@ -1,0 +1,39 @@
+{% set gauge_circumference = 138.2 %}
+{% set shown_ratio = ((shown_count / total) * 100)|round(0)|int if total > 0 else 0 %}
+{% set in_library_ratio = ((in_library_count / shown_count) * 100)|round(0)|int if shown_count > 0 else 0 %}
+
+<div class="series-registry-title-block">
+  <h2 data-testid="story-arc-add-title" class="series-registry-title">
+    ADD <span>STORY ARC</span>
+  </h2>
+  <p data-testid="story-arc-add-subtitle" class="series-registry-subtitle">
+    Search Comic Vine · review reading order · add to library
+  </p>
+</div>
+
+<div data-testid="story-arc-add-gauges" class="series-registry-gauges">
+  <div data-testid="story-arc-add-gauge-results" class="series-registry-gauge">
+    <div class="series-registry-gauge-ring">
+      <svg viewBox="0 0 56 56" aria-hidden="true">
+        <circle class="series-registry-gauge-bg" cx="28" cy="28" r="22"></circle>
+        <circle class="series-registry-gauge-fill series-registry-gauge-fill-info" cx="28" cy="28" r="22"
+                stroke-dasharray="{{ gauge_circumference }}"
+                stroke-dashoffset="{{ (gauge_circumference * (100 - shown_ratio) / 100)|round(1) }}"></circle>
+      </svg>
+      <span class="series-registry-gauge-value text-pb-interactive">{{ total }}</span>
+    </div>
+    <div class="series-registry-gauge-label">Results</div>
+  </div>
+  <div data-testid="story-arc-add-gauge-in-library" class="series-registry-gauge">
+    <div class="series-registry-gauge-ring">
+      <svg viewBox="0 0 56 56" aria-hidden="true">
+        <circle class="series-registry-gauge-bg" cx="28" cy="28" r="22"></circle>
+        <circle class="series-registry-gauge-fill series-registry-gauge-fill-success" cx="28" cy="28" r="22"
+                stroke-dasharray="{{ gauge_circumference }}"
+                stroke-dashoffset="{{ (gauge_circumference * (100 - in_library_ratio) / 100)|round(1) }}"></circle>
+      </svg>
+      <span class="series-registry-gauge-value text-pb-success">{{ in_library_count }}</span>
+    </div>
+    <div class="series-registry-gauge-label">In Library</div>
+  </div>
+</div>

@@ -49,6 +49,7 @@ from pullbox.services.story_arc_service import (
 from pullbox.ui import story_arc_catalog_routes
 from pullbox.ui.story_arc_local_issue_search import search_story_arc_local_issues
 from pullbox.ui.story_arc_presenters import (
+    StoryArcPlacementRootView,
     load_story_arc_detail,
     load_story_arc_list_page,
     load_story_arc_placement_context,
@@ -188,6 +189,12 @@ def _detail_url(
 
 def _list_url(*, error: str | None = None) -> str:
     return f"/story-arcs?{urlencode({'error': error})}" if error is not None else "/story-arcs"
+
+
+def _add_url(*, error: str | None = None) -> str:
+    return (
+        f"/story-arcs/add?{urlencode({'error': error})}" if error is not None else "/story-arcs/add"
+    )
 
 
 def _error_code(
@@ -371,9 +378,6 @@ async def story_arc_list(
         base_params.append(("lifecycle", lifecycle.value))
     if monitored is not None:
         base_params.append(("monitored", str(monitored).lower()))
-    placement_roots, placement_roots_truncated = await load_story_arc_placement_roots(
-        session, selected_root_id=None
-    )
     context = _ctx(
         request,
         user,
@@ -383,11 +387,55 @@ async def story_arc_list(
         monitored_filter=(str(monitored).lower() if monitored is not None else ""),
         pagination_base_url=f"/story-arcs?{urlencode(base_params)}",
         error_message=_ERROR_MESSAGES.get(error or "", ""),
+    )
+    template = (
+        "partials/story_arc_results_bundle.html"
+        if request.headers.get("HX-Request")
+        else "pages/story_arcs.html"
+    )
+    return _templates().TemplateResponse(request, template, context)
+
+
+@router.get("/story-arcs/add", response_class=HTMLResponse, include_in_schema=False)
+async def story_arc_add(
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    q: Annotated[str, Query(max_length=500)] = "",
+    page: Annotated[int, Query(ge=1, le=100)] = 1,
+    error: str | None = Query(None),
+) -> Response:
+    """Render provider-first Story Arc discovery on its own add page."""
+    manual_create_enabled = get_settings().story_arc_manual_create_enabled
+    placement_roots: tuple[StoryArcPlacementRootView, ...] = ()
+    placement_roots_truncated = False
+    if manual_create_enabled:
+        placement_roots, placement_roots_truncated = await load_story_arc_placement_roots(
+            session, selected_root_id=None
+        )
+    search_context = await story_arc_catalog_routes.load_story_arc_catalog_search_context(
+        session,
+        q=q,
+        page=page,
+        base_url="/story-arcs/add",
+    )
+    search_context["error_message"] = _ERROR_MESSAGES.get(error or "", "") or str(
+        search_context["error_message"]
+    )
+    context = _ctx(
+        request,
+        user,
+        **search_context,
         placement_roots=placement_roots,
         placement_roots_truncated=placement_roots_truncated,
-        story_arc_manual_create_enabled=get_settings().story_arc_manual_create_enabled,
+        story_arc_manual_create_enabled=manual_create_enabled,
     )
-    return _templates().TemplateResponse(request, "pages/story_arcs.html", context)
+    template = (
+        "partials/story_arc_add_results_bundle.html"
+        if request.headers.get("HX-Request")
+        else "pages/story_arc_add.html"
+    )
+    return _templates().TemplateResponse(request, template, context)
 
 
 @router.post("/story-arcs", include_in_schema=False)
@@ -447,7 +495,7 @@ async def story_arc_create(
         await session.commit()
     except (StoryArcServiceError, StoryArcPlacementIntegrationError, IntegrityError) as exc:
         await session.rollback()
-        return _redirect(request, _list_url(error=_error_code(exc)))
+        return _redirect(request, _add_url(error=_error_code(exc)))
     return _redirect(request, _detail_url(story_arc_id, notice="created"))
 
 

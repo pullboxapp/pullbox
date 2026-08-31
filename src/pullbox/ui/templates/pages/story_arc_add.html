@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% from "components/search_field.html" import search_field %}
+
+{% block title %}Add Story Arc — {{ instance_name() }}{% endblock %}
+{% block page_title %}Add Story Arc{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 pt-4 sm:pt-5{% endblock %}
+
+{% block content %}
+<div id="story-arc-add-app" data-testid="story-arc-add-page" class="space-y-6">
+  <a href="/story-arcs" class="inline-flex items-center gap-1.5 text-sm text-pb-text-sec transition-colors hover:text-pb-text">
+    <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"></path>
+    </svg>
+    All Story Arcs
+  </a>
+
+  <section data-testid="story-arc-add-header" class="series-registry-header add-series-header">
+    <div class="series-registry-header-left">
+      <div id="story-arc-add-header-metrics" class="add-series-header-metrics">
+        {% include "partials/story_arc_add_header_metrics.html" %}
+      </div>
+    </div>
+  </section>
+
+  <form id="story-arc-catalog-search" data-testid="story-arc-catalog-search"
+        class="series-toolbar-shell" autocomplete="off" action="/story-arcs/add" method="get"
+        hx-get="/story-arcs/add" hx-target="#story-arc-add-results" hx-swap="morph:outerHTML"
+        hx-push-url="true" hx-sync="#story-arc-catalog-search:replace"
+        hx-indicator="#story-arc-add-results-loading" hx-trigger="submit">
+    <input type="hidden" value="" data-search-field-submit-mode-input>
+    <div class="series-toolbar-frame">
+      <div class="series-toolbar-body">
+        <div class="series-toolbar-browse">
+          <div class="series-toolbar-primary">
+            {{ search_field(
+              name="q",
+              value=catalog_query,
+              placeholder="Search by story arc title...",
+              input_testid="story-arc-catalog-search-input",
+              clear_testid="story-arc-catalog-search-clear",
+              panel_testid="story-arc-catalog-search-history-panel",
+              root_testid="story-arc-catalog-search-field",
+              mode="remote",
+              history_key="pullbox.searchHistory.addStoryArc",
+              debounce_ms=500,
+              size="sm",
+              class_name="series-registry-search add-series-search-field",
+              input_id="story-arc-provider-query",
+              aria_label="Comic Vine arc name"
+            ) }}
+          </div>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  {% include "partials/story_arc_add_results.html" %}
+
+  {% if story_arc_manual_create_enabled %}
+    {% include "partials/story_arc_manual_create.html" %}
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block footer_dock %}
+  {% include "partials/story_arc_add_footer_dock.html" %}
+{% endblock %}

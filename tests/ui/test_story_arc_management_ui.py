@@ -312,9 +312,18 @@ class TestStoryArcManagementUI:
         assert 'data-testid="story-arcs-search-input"' in response.text
         assert 'value="absolute"' in response.text
         assert 'data-testid="story-arcs-filter-form"' in response.text
-        assert 'data-testid="story-arcs-create-form"' in response.text
-        assert '<label for="story-arc-create-name"' in response.text
-        assert '<label for="story-arc-create-description"' in response.text
+        assert 'data-testid="story-arcs-registry-header"' in response.text
+        assert 'data-testid="story-arcs-registry-title"' in response.text
+        assert "STORY ARC <span>REGISTRY</span>" in response.text
+        assert 'data-testid="story-arcs-add-link"' in response.text
+        assert 'href="/story-arcs/add"' in response.text
+        assert 'data-search-field-contract="baseline-v2"' in response.text
+        assert 'data-dropdown-select-contract="v1"' in response.text
+        assert 'data-testid="story-arcs-results-body"' in response.text
+        assert 'data-testid="story-arcs-mission-control-table"' in response.text
+        assert 'data-testid="story-arcs-footer-dock"' in response.text
+        assert 'data-testid="story-arcs-create-form"' not in response.text
+        assert 'data-testid="story-arc-catalog-search"' not in response.text
         assert f'data-story-arc-id="{ids["absolute"]}"' in response.text
         assert "Absolute Power" in response.text
         assert "House of Brainiac" not in response.text
@@ -338,11 +347,12 @@ class TestStoryArcManagementUI:
             raising=False,
         )
 
-        page = await authenticated_client.get("/story-arcs")
+        page = await authenticated_client.get("/story-arcs/add")
 
         assert page.status_code == 200
-        assert 'data-testid="story-arcs-create-form"' not in page.text
+        assert 'data-testid="story-arc-add-page"' in page.text
         assert 'data-testid="story-arc-catalog-search"' in page.text
+        assert 'data-testid="story-arcs-create-form"' not in page.text
 
         response = await authenticated_client.post(
             "/story-arcs",
@@ -407,7 +417,7 @@ class TestStoryArcManagementUI:
             assert (await session.scalars(select(StoryArcPlacement))).all() == []
         assert list(destination.iterdir()) == []
 
-        page = await authenticated_client.get("/story-arcs")
+        page = await authenticated_client.get("/story-arcs/add")
         assert 'data-testid="story-arc-create-storage"' in page.text
         assert 'name="prefix_reading_order"' in page.text
         assert 'name="filename_style"' in page.text

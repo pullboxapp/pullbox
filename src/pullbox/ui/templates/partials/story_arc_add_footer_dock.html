@@ -1,0 +1,20 @@
+{% from "components/page_dock.html" import page_dock %}
+
+<div data-testid="story-arc-add-footer-dock">
+  {{ page_dock(
+    page=page,
+    total_pages=total_pages,
+    base_url=pagination_base_url,
+    status_items=[
+      {"label": "results", "value": total|string},
+      {"label": "shown", "value": shown_count|string},
+      {"label": "in library", "value": in_library_count|string},
+      {"label": "provider", "value": "Comic Vine"},
+    ],
+    hx_target="#story-arc-add-results",
+    hx_swap="morph:outerHTML show:#content:top",
+    hx_base_url=pagination_base_url,
+    hx_sync="#story-arc-catalog-search:replace",
+    hx_indicator="#story-arc-add-results-loading"
+  ) }}
+</div>

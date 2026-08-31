@@ -1,0 +1,15 @@
+<section id="story-arc-add-results" data-testid="story-arc-add-results" class="add-series-results-shell space-y-3">
+  <div id="story-arc-add-results-loading" data-testid="story-arc-add-results-loading" class="add-series-results-loading htmx-indicator" role="status">
+    <div class="add-series-results-loading-card">
+      <svg class="animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+      </svg>
+      <div>
+        <p class="add-series-results-loading-title">Searching Comic Vine</p>
+        <p class="add-series-results-loading-copy">Large event catalogs can take a moment.</p>
+      </div>
+    </div>
+  </div>
+  {% include "partials/story_arc_catalog_results.html" %}
+</section>
