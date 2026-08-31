@@ -18,9 +18,11 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.models.series import Series
+    from pullbox.models.story_arc import StoryArc
 
 logger = structlog.get_logger(__name__)
 _SERIES_COVER_LOCKS: dict[int, asyncio.Lock] = {}
+_STORY_ARC_COVER_LOCKS: dict[int, asyncio.Lock] = {}
 _SUPPORTED_COVER_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
 
@@ -192,4 +194,45 @@ async def cache_series_cover(session: AsyncSession, series: Series) -> Path | No
         covers_dir.mkdir(parents=True, exist_ok=True)
         cover_dest.write_bytes(response.content)
         series.cover_path = f"/api/v1/series/{series.id}/cover"
+        return cover_dest
+
+
+async def resolve_story_arc_cover_file(session: AsyncSession, story_arc: StoryArc) -> Path | None:
+    """Return a locally cached Story Arc cover if one exists."""
+    covers_base = await resolve_covers_dir(session)
+    return find_cover_file(covers_base / "story_arcs" / str(story_arc.id), "story_arc")
+
+
+async def cache_story_arc_cover(session: AsyncSession, story_arc: StoryArc) -> Path | None:
+    """Download provider artwork into the managed Story Arc cover cache."""
+    from pullbox.services.cover_url_service import story_arc_provider_cover_url
+
+    source_url = story_arc_provider_cover_url(story_arc)
+    if not source_url:
+        return None
+    if not story_arc.cover_url:
+        story_arc.cover_url = source_url
+    lock = _STORY_ARC_COVER_LOCKS.setdefault(story_arc.id, asyncio.Lock())
+    async with lock:
+        existing = await resolve_story_arc_cover_file(session, story_arc)
+        if existing:
+            story_arc.cover_path = f"/api/v1/story-arcs/{story_arc.id}/cover"
+            return existing
+        covers_base = await resolve_covers_dir(session)
+        covers_dir = covers_base / "story_arcs" / str(story_arc.id)
+        try:
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                headers={"User-Agent": "Pullbox/1.0"},
+            ) as client:
+                response = await client.get(source_url)
+                response.raise_for_status()
+        except httpx.HTTPError:
+            logger.exception("story_arc_cover_download_failed", story_arc_id=story_arc.id)
+            return None
+        suffix = suffix_for_cover(response.headers.get("content-type"), source_url)
+        cover_dest = covers_dir / f"story_arc{suffix}"
+        covers_dir.mkdir(parents=True, exist_ok=True)
+        cover_dest.write_bytes(response.content)
+        story_arc.cover_path = f"/api/v1/story-arcs/{story_arc.id}/cover"
         return cover_dest

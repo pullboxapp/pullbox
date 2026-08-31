@@ -5,69 +5,36 @@
 {% endif %}
 
 {% if story_arc_page.items %}
-  <section data-testid="story-arcs-mission-control-view" class="series-mission-control-shell">
-    {% call mission_control_table("story-arcs-mission-control-table") %}
-      <thead>
-        <tr>
-          <th class="c" style="width: 36px">SYS</th>
-          <th>Story Arc</th>
-          <th class="c" style="width: 110px">Issues</th>
-          <th style="width: 220px">Resolution</th>
-          <th class="c" style="width: 110px">Attention</th>
-          <th class="c" style="width: 100px">State</th>
-          <th class="r" style="width: 88px">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
+  {% if active_view == "grid" %}
+    <section data-testid="story-arcs-collector-wall-view" class="series-collector-wall-shell">
+      <div class="series-collector-wall-grid">
         {% for item in story_arc_page.items %}
-          {% set completion_pct = ((item.resolved_count / item.membership_count) * 100)|round(0)|int if item.membership_count > 0 else 0 %}
-          {% set completion_tone = "green" if completion_pct >= 80 else "amber" if completion_pct >= 35 else "red" %}
-          <tr data-story-arc-id="{{ item.id }}" data-testid="story-arc-result-row">
-            <td class="c">
-              <span class="series-led series-led-{{ 'green' if item.monitored and item.lifecycle == 'active' else 'amber' if item.lifecycle == 'active' else 'off' }}"
-                    aria-label="{{ 'Monitored' if item.monitored else 'Unmonitored' }}"></span>
-            </td>
-            <td>
-              <a href="/story-arcs/{{ item.id }}" hx-boost="false" class="series-mission-control-name">{{ item.name }}</a>
-              <div class="series-mission-control-publisher">
-                {{ "Comic Vine" if item.source_kind == "comicvine" else "Pullbox" }} ·
-                {{ "Monitored" if item.monitored else "Unmonitored" }}
-              </div>
-            </td>
-            <td class="c">
-              <span class="series-mission-control-owned">{{ item.resolved_count }}/{{ item.membership_count }}</span>
-              <span class="series-mission-control-reading">resolved</span>
-            </td>
-            <td class="series-mission-control-bar-cell">
-              <div class="series-mission-control-bar">
-                <div class="series-mission-control-bar-track">
-                  <div class="series-mission-control-bar-fill series-mission-control-bar-fill-{{ completion_tone }}" style="width: {{ completion_pct }}%"></div>
-                </div>
-                <span class="series-mission-control-bar-pct series-mission-control-bar-pct-{{ completion_tone }}">{{ completion_pct }}%</span>
-              </div>
-            </td>
-            <td class="c text-pb-text-sec">
-              <span data-testid="story-arc-missing-count">{{ item.missing_count }}</span> missing
-              {% if item.conflict_count %}<span class="series-mission-control-reading">{{ item.conflict_count }} conflict{{ "" if item.conflict_count == 1 else "s" }}</span>{% endif %}
-            </td>
-            <td class="c">
-              <span class="pill {{ 'pill-success' if item.lifecycle == 'active' else 'pill-neutral' }} justify-center">{{ item.lifecycle|title }}</span>
-            </td>
-            <td class="r">
-              <div class="series-mission-control-actions">
-                <a href="/story-arcs/{{ item.id }}" hx-boost="false" class="series-mission-control-action-btn"
-                   data-tip="Open story arc" data-tip-pos="left" data-tip-size="narrow" aria-label="Open {{ item.name }}">
-                  <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"></path>
-                  </svg>
-                </a>
-              </div>
-            </td>
-          </tr>
+          {% include "partials/story_arc_grid_card.html" %}
         {% endfor %}
-      </tbody>
-    {% endcall %}
-  </section>
+      </div>
+    </section>
+  {% else %}
+    <section data-testid="story-arcs-mission-control-view" class="series-mission-control-shell">
+      {% call mission_control_table("story-arcs-mission-control-table") %}
+        <thead>
+          <tr>
+            <th class="c" style="width: 36px">SYS</th>
+            <th>Story Arc</th>
+            <th class="c" style="width: 92px">Status</th>
+            <th class="c" style="width: 78px">Owned</th>
+            <th style="width: 220px">Acquisition</th>
+            <th class="c" style="width: 112px">Needs Review</th>
+            <th class="r" style="width: 88px">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in story_arc_page.items %}
+            {% include "partials/story_arc_list_row.html" %}
+          {% endfor %}
+        </tbody>
+      {% endcall %}
+    </section>
+  {% endif %}
 {% else %}
   <div data-testid="story-arcs-empty-state" class="series-empty-state">
     <svg class="h-12 w-12 text-pb-text-dim" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">

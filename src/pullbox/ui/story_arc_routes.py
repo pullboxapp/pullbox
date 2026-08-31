@@ -67,6 +67,7 @@ _build_context: _BuildContext | None = None
 _story_arc_service = StoryArcService()
 _placement_service = StoryArcPlacementSyncService()
 _managed_reorder_service = StoryArcManagedReorderService()
+_STORY_ARC_VIEW_MODES = {"list", "grid"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +224,14 @@ def _optional_issue_id(value: str) -> int | None:
     return issue_id
 
 
+def resolve_story_arc_view(request: Request, view_mode: str | None) -> str:
+    """Resolve the active registry view from the query or saved preference."""
+    if view_mode in _STORY_ARC_VIEW_MODES:
+        return view_mode
+    cookie_view = request.cookies.get("story_arc_view")
+    return cookie_view if cookie_view in _STORY_ARC_VIEW_MODES else "list"
+
+
 def _placement_policy_input(
     *,
     mode: str,
@@ -356,35 +365,48 @@ async def story_arc_list(
     user: AuthenticatedUser,
     session: DbSession,
     q: Annotated[str | None, Query(max_length=500)] = None,
-    lifecycle: Annotated[StoryArcLifecycle | None, Query()] = None,
-    monitored: Annotated[bool | None, Query()] = None,
+    lifecycle: Annotated[str | None, Query(max_length=20)] = None,
+    monitored: Annotated[str | None, Query(max_length=5)] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 25,
+    view_mode: str | None = Query(None),
     error: str | None = Query(None),
 ) -> Response:
     """Render a bounded, searchable Story Arc registry."""
+    active_view = resolve_story_arc_view(request, view_mode)
+    lifecycle_value = (
+        StoryArcLifecycle(lifecycle)
+        if lifecycle in {item.value for item in StoryArcLifecycle}
+        else None
+    )
+    monitored_value = monitored == "true" if monitored in {"true", "false"} else None
     result = await load_story_arc_list_page(
         session,
         q=q,
-        lifecycle=lifecycle,
-        monitored=monitored,
+        lifecycle=lifecycle_value,
+        monitored=monitored_value,
         page=page,
         per_page=per_page,
+        user_id=user.id,
     )
-    base_params: list[tuple[str, str | int]] = [("per_page", per_page)]
+    base_params: list[tuple[str, str | int]] = [
+        ("per_page", per_page),
+        ("view_mode", active_view),
+    ]
     if q is not None and q.strip():
         base_params.append(("q", q.strip()))
-    if lifecycle is not None:
-        base_params.append(("lifecycle", lifecycle.value))
-    if monitored is not None:
-        base_params.append(("monitored", str(monitored).lower()))
+    if lifecycle_value is not None:
+        base_params.append(("lifecycle", lifecycle_value.value))
+    if monitored_value is not None:
+        base_params.append(("monitored", str(monitored_value).lower()))
     context = _ctx(
         request,
         user,
         story_arc_page=result,
         query=q or "",
-        lifecycle_filter=lifecycle.value if lifecycle is not None else "",
-        monitored_filter=(str(monitored).lower() if monitored is not None else ""),
+        lifecycle_filter=lifecycle_value.value if lifecycle_value is not None else "",
+        monitored_filter=(str(monitored_value).lower() if monitored_value is not None else ""),
+        active_view=active_view,
         pagination_base_url=f"/story-arcs?{urlencode(base_params)}",
         error_message=_ERROR_MESSAGES.get(error or "", ""),
     )
@@ -393,7 +415,16 @@ async def story_arc_list(
         if request.headers.get("HX-Request")
         else "pages/story_arcs.html"
     )
-    return _templates().TemplateResponse(request, template, context)
+    response = _templates().TemplateResponse(request, template, context)
+    if view_mode in _STORY_ARC_VIEW_MODES:
+        response.set_cookie(
+            "story_arc_view",
+            active_view,
+            max_age=31_536_000,
+            path="/",
+            samesite="lax",
+        )
+    return response
 
 
 @router.get("/story-arcs/add", response_class=HTMLResponse, include_in_schema=False)

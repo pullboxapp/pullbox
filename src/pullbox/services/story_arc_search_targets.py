@@ -34,6 +34,61 @@ async def story_arc_search_ceiling(session: AsyncSession, story_arc_id: int) -> 
     return int(result or 0)
 
 
+async def load_story_arc_search_eligible_counts(
+    session: AsyncSession,
+    story_arc_ids: Sequence[int],
+) -> dict[int, int]:
+    """Count currently searchable missing issues for bounded registry rows."""
+    if not story_arc_ids:
+        return {}
+    if len(story_arc_ids) > 100:
+        raise ValueError("Story Arc search eligibility is limited to 100 visible arcs")
+    today = date.today()
+    publication_date = func.coalesce(Issue.store_date, Issue.release_date)
+    upcoming = and_(publication_date.is_not(None), publication_date > today)
+    active_download = exists().where(
+        DownloadHistory.issue_id == Issue.id,
+        or_(
+            DownloadHistory.state.in_(
+                (
+                    DownloadState.QUEUED,
+                    DownloadState.SENT,
+                    DownloadState.DOWNLOADING,
+                    DownloadState.FINALIZING,
+                    DownloadState.PAUSED,
+                    DownloadState.RETRY_PENDING,
+                    DownloadState.POST_PROCESSING,
+                )
+            ),
+            and_(
+                DownloadHistory.state == DownloadState.COMPLETED,
+                DownloadHistory.imported_at.is_(None),
+            ),
+        ),
+    )
+    result = await session.execute(
+        select(IssueStoryArc.story_arc_id, func.count(func.distinct(Issue.id)))
+        .join(StoryArc, StoryArc.id == IssueStoryArc.story_arc_id)
+        .join(Issue, Issue.id == IssueStoryArc.issue_id)
+        .where(
+            IssueStoryArc.story_arc_id.in_(story_arc_ids),
+            IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+            StoryArc.lifecycle == StoryArcLifecycle.ACTIVE,
+            or_(StoryArc.include_upcoming.is_(True), ~upcoming),
+            Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
+            Issue.manual_skip.is_(False),
+            ~exists().where(LibraryFile.issue_id == Issue.id),
+            ~active_download,
+            ~exists().where(
+                PendingMatch.issue_id == Issue.id,
+                PendingMatch.status == PendingMatchStatus.PENDING,
+            ),
+        )
+        .group_by(IssueStoryArc.story_arc_id)
+    )
+    return {int(story_arc_id): int(count) for story_arc_id, count in result.all()}
+
+
 async def load_story_arc_missing_search_targets(
     session: AsyncSession,
     story_arc_id: int,

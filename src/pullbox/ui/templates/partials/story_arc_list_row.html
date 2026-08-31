@@ -1,0 +1,49 @@
+<tr data-story-arc-id="{{ item.id }}" data-testid="story-arc-result-row">
+  <td class="c">
+    <span data-testid="story-arc-monitored-indicator" class="series-led series-led-{{ item.system_tone }}" aria-label="{{ 'Monitored' if item.monitored else 'Unmonitored' }}"></span>
+  </td>
+  <td>
+    <a href="/story-arcs/{{ item.id }}" hx-boost="false" class="series-mission-control-name">{{ item.name }}</a>
+    <div class="series-mission-control-publisher">
+      {{ item.publisher_name or "Unknown publisher" }}
+      {% if not item.monitored %} · <span class="text-pb-warning">Paused</span>{% endif %}
+    </div>
+  </td>
+  <td class="c" data-testid="story-arc-lifecycle-status">
+    <span class="pill {{ 'pill-success' if item.lifecycle == 'active' else 'pill-neutral' }} justify-center">{{ item.lifecycle|title }}</span>
+  </td>
+  <td class="c">
+    <span data-testid="story-arc-owned-count" class="series-mission-control-owned">{{ item.owned_count }}/{{ item.membership_count }}</span>
+    {% if reader_enabled and item.readable_count > 0 %}
+      <span data-testid="story-arc-list-reading" class="series-mission-control-reading">Read {{ item.read_count }}/{{ item.readable_count }}</span>
+    {% endif %}
+  </td>
+  <td class="series-mission-control-bar-cell">
+    <div class="series-mission-control-bar">
+      <div class="series-mission-control-bar-track"><div class="series-mission-control-bar-fill series-mission-control-bar-fill-{{ item.acquisition_tone }}" style="width: {{ item.completion_pct }}%"></div></div>
+      <span data-testid="story-arc-acquisition" class="series-mission-control-bar-pct series-mission-control-bar-pct-{{ item.acquisition_tone }}">{{ item.completion_pct }}%</span>
+    </div>
+  </td>
+  <td class="c">
+    <span data-testid="story-arc-review-indicator" class="story-arc-review-indicator story-arc-review-indicator-{{ item.review_tone }}" data-tip="{{ item.review_summary }}" data-tip-pos="left" data-tip-size="wide" aria-label="{{ item.review_count }} item{{ '' if item.review_count == 1 else 's' }} need review: {{ item.review_summary }}">
+      {% if item.review_count %}
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9.303 3.376c.866 1.5-.217 3.374-1.949 3.374H4.646c-1.732 0-2.815-1.874-1.949-3.374L10.05 3.374c.866-1.5 3.032-1.5 3.898 0l7.353 12.752zM12 15.75h.007v.008H12v-.008z"></path></svg>
+      {% else %}
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"></path></svg>
+      {% endif %}
+      <span data-testid="story-arc-review-count">{{ item.review_count }}</span>
+    </span>
+  </td>
+  <td class="r">
+    <div class="series-mission-control-actions">
+      <form action="/story-arcs/{{ item.id }}/search" method="post" hx-post="/story-arcs/{{ item.id }}/search" hx-swap="none">
+        <button type="submit" class="series-mission-control-action-btn{% if item.search_eligible_count == 0 or item.lifecycle != 'active' %} disabled{% endif %}" data-tip="{{ 'Search missing' if item.search_eligible_count > 0 and item.lifecycle == 'active' else ('Story arc archived' if item.lifecycle != 'active' else 'No searchable missing issues') }}" data-tip-pos="left" data-tip-size="narrow" aria-label="Search missing issues in {{ item.name }}" {% if item.search_eligible_count == 0 or item.lifecycle != 'active' %}disabled{% endif %}>
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"></path></svg>
+        </button>
+      </form>
+      <a href="/story-arcs/{{ item.id }}" hx-boost="false" class="series-mission-control-action-btn" data-tip="Open story arc" data-tip-pos="left" data-tip-size="narrow" aria-label="Open {{ item.name }}">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"></path></svg>
+      </a>
+    </div>
+  </td>
+</tr>

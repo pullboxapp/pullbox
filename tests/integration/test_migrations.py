@@ -35,7 +35,7 @@ _STORY_ARC_DOMAIN_REVISION = "a2b3c4d5e678"
 _STORY_ARC_MANAGED_PLACEMENT_REVISION = "b3c4d5e6f789"
 _STORY_ARC_IMPORT_SYNC_REVISION = "c4d5e6f7a890"
 _STORY_ARC_IMPORT_INTENT_REVISION = "d5e6f7a8b901"
-_EXACT_ISSUE_IDENTITY_REVISION = "e6f7a8b9c012"
+_STORY_ARC_COVER_REVISION = "f7a8b9c0d123"
 
 
 @pytest.fixture
@@ -1581,19 +1581,24 @@ class TestMigrationChain:
         finally:
             engine.dispose()
 
-    def test_story_arc_import_intent_is_non_authorizing_and_the_single_head(
+    def test_story_arc_cover_fields_extend_the_single_migration_head(
         self,
         alembic_cfg,
     ) -> None:
-        """Step 1 intent is durable, defaults off, and extends one migration head."""
+        """Story Arc covers are nullable and extend the existing migration graph."""
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
 
-        assert script.get_heads() == [_EXACT_ISSUE_IDENTITY_REVISION]
+        assert script.get_heads() == [_STORY_ARC_COVER_REVISION]
 
         command.upgrade(cfg, "head")
         engine = create_engine(sync_url)
         try:
+            story_arc_columns = {
+                column["name"]: column for column in inspect(engine).get_columns("story_arcs")
+            }
+            assert story_arc_columns["cover_path"]["nullable"] is True
+            assert story_arc_columns["cover_url"]["nullable"] is True
             columns = {
                 column["name"]: column for column in inspect(engine).get_columns("import_jobs")
             }

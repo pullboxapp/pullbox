@@ -93,6 +93,8 @@ def _arc_response(
             "description": arc.description,
             "comicvine_id": arc.comicvine_id,
             "comicvine_url": arc.comicvine_url,
+            "cover_path": arc.cover_path,
+            "cover_url": arc.cover_url,
             "source_kind": arc.source_kind,
             "lifecycle": arc.lifecycle,
             "monitored": arc.monitored,

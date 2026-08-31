@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.publisher import Publisher
+from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -24,6 +26,8 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcPlacement,
     StoryArcPlacementOwnership,
+    StoryArcPlacementState,
+    StoryArcResolutionState,
     StoryArcSymlinkStyle,
 )
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
@@ -108,6 +112,96 @@ async def _seed_list_arcs(factory: async_sessionmaker[AsyncSession]) -> dict[str
             "brainiac": brainiac.id,
             "archived": archived.id,
         }
+
+
+async def _seed_registry_metrics_arc(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: int,
+    root_path: Path,
+) -> int:
+    service = StoryArcService()
+    async with factory() as session:
+        publisher = Publisher(name="DC Comics")
+        root = LibraryRoot(name="Registry library", path=str(root_path), enabled=True)
+        series = Series(title="Registry Series", sort_title="registry series")
+        session.add_all([publisher, root, series])
+        await session.flush()
+        owned = Issue(
+            series_id=series.id,
+            issue_number=1,
+            issue_number_text="1",
+            status=IssueStatus.OWNED,
+        )
+        wanted = Issue(
+            series_id=series.id,
+            issue_number=2,
+            issue_number_text="2",
+            status=IssueStatus.WANTED,
+        )
+        session.add_all([owned, wanted])
+        await session.flush()
+        library_file = LibraryFile(
+            issue_id=owned.id,
+            library_root_id=root.id,
+            file_path=str(root_path / "Registry Series 001.cbz"),
+            file_name="Registry Series 001.cbz",
+            file_size=1024,
+            file_format=FileFormat.CBZ,
+            file_modified_at=datetime.now(UTC),
+            match_confidence=MatchConfidence.MANUAL,
+        )
+        session.add(library_file)
+        session.add(
+            IssueReaderState(
+                user_id=user_id,
+                issue_id=owned.id,
+                completed_at=datetime.now(UTC),
+                completion_updated_at=datetime.now(UTC),
+            )
+        )
+        arc = await service.create(
+            session,
+            name="Registry Event",
+            monitored=True,
+            search_missing=True,
+        )
+        arc.publisher_id = publisher.id
+        arc.comicvine_id = 31
+        arc.comicvine_url = "https://comicvine.example/story-arc/31"
+        arc.cover_url = "https://comicvine.example/story-arc/31.jpg"
+        owned_membership = await service.add_membership(
+            session,
+            arc.id,
+            issue_id=owned.id,
+            sequence_number=1,
+        )
+        await service.add_membership(
+            session,
+            arc.id,
+            issue_id=wanted.id,
+            sequence_number=2,
+        )
+        ambiguous = await service.add_membership(
+            session,
+            arc.id,
+            issue_id=None,
+            sequence_number=3,
+            source_issue_number_text="3",
+        )
+        ambiguous.resolution_state = StoryArcResolutionState.AMBIGUOUS
+        session.add(
+            StoryArcPlacement(
+                issue_story_arc_id=owned_membership.id,
+                library_file_id=library_file.id,
+                library_root_id=root.id,
+                placement_path=str(root_path / "Story Arcs" / "Registry Event 001.cbz"),
+                ownership=StoryArcPlacementOwnership.REFERENCED,
+                state=StoryArcPlacementState.FAILED,
+            )
+        )
+        await session.commit()
+        return arc.id
 
 
 async def _seed_detail_arc(factory: async_sessionmaker[AsyncSession]) -> dict[str, int]:
@@ -328,11 +422,85 @@ class TestStoryArcManagementUI:
         assert "Absolute Power" in response.text
         assert "House of Brainiac" not in response.text
         assert "Absolute Universe" not in response.text
-        assert 'data-testid="story-arc-missing-count">1<' in response.text
+        assert re.search(r'data-testid="story-arc-review-count"[^>]*>1<', response.text)
         assert "1 result" in response.text
 
         oversized = await authenticated_client.get("/story-arcs?per_page=101")
         assert oversized.status_code == 422
+
+    async def test_registry_matches_series_owned_read_acquisition_review_and_action_contract(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        sec_user,
+        tmp_path: Path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        arc_id = await _seed_registry_metrics_arc(
+            sec_db,
+            user_id=sec_user.id,
+            root_path=tmp_path,
+        )
+
+        response = await authenticated_client.get("/story-arcs?q=Registry")
+
+        assert response.status_code == 200
+        assert '<th class="c" style="width: 92px">Status</th>' in response.text
+        assert '<th class="c" style="width: 78px">Owned</th>' in response.text
+        assert '<th style="width: 220px">Acquisition</th>' in response.text
+        assert "Needs Review" in response.text
+        assert re.search(r'data-testid="story-arc-owned-count"[^>]*>1/3<', response.text)
+        assert 'data-testid="story-arc-list-reading"' in response.text
+        assert "Read 1/1" in response.text
+        assert re.search(r'data-testid="story-arc-acquisition"[^>]*>33%<', response.text)
+        assert re.search(r'data-testid="story-arc-review-count"[^>]*>2<', response.text)
+        assert "1 ambiguous" in response.text
+        assert "1 placement problem" in response.text
+        assert f'action="/story-arcs/{arc_id}/search"' in response.text
+        assert 'data-tip="Search missing"' in response.text
+        assert f'href="/story-arcs/{arc_id}"' in response.text
+        assert "DC Comics" in response.text
+
+    async def test_registry_grid_view_persists_and_uses_story_arc_cover_contract(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        sec_user,
+        tmp_path: Path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        arc_id = await _seed_registry_metrics_arc(
+            sec_db,
+            user_id=sec_user.id,
+            root_path=tmp_path,
+        )
+
+        response = await authenticated_client.get(
+            "/story-arcs",
+            params={
+                "q": "Registry",
+                "lifecycle": "",
+                "monitored": "",
+                "per_page": "25",
+                "view_mode": "grid",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.cookies.get("story_arc_view") == "grid"
+        assert 'data-testid="story-arcs-view-toggle"' in response.text
+        assert 'data-testid="story-arcs-collector-wall-view"' in response.text
+        assert 'data-testid="story-arcs-mission-control-view"' not in response.text
+        assert f'data-story-arc-id="{arc_id}"' in response.text
+        assert 'data-testid="story-arc-grid-card"' in response.text
+        assert f'src="/api/v1/story-arcs/{arc_id}/cover?v=' in response.text
+        assert 'data-testid="story-arc-grid-reading"' in response.text
+        assert "Read 1/1" in response.text
+        assert 'data-testid="story-arc-grid-review"' in response.text
+        assert "Search" in response.text
+        assert "Open" in response.text
+
+        authenticated_client.cookies.set("story_arc_view", "grid")
+        persisted = await authenticated_client.get("/story-arcs?q=Registry")
+        assert 'data-testid="story-arcs-collector-wall-view"' in persisted.text
 
     async def test_manual_creation_is_hidden_and_unreachable_when_feature_flag_is_off(
         self,

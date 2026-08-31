@@ -5,6 +5,16 @@
 
 {% block title %}Story Arcs — {{ instance_name() }}{% endblock %}
 {% block page_title %}Story Arcs{% endblock %}
+{% block head %}
+<script>
+  (function() {
+    var view = {{ active_view|tojson }};
+    document.documentElement.setAttribute("data-story-arc-view", view);
+    localStorage.setItem("story_arc_view", view);
+    document.cookie = "story_arc_view=" + encodeURIComponent(view) + "; path=/; max-age=31536000; SameSite=Lax";
+  })();
+</script>
+{% endblock %}
 {% block content_container_classes %}px-4 sm:px-6 pt-4 sm:pt-5{% endblock %}
 
 {% block content %}
@@ -12,10 +22,10 @@
 {% set gauge_circumference = 138.2 %}
 {% set active_pct = ((registry.active_count / registry.total) * 100)|round(0)|int if registry.total > 0 else 0 %}
 {% set monitored_pct = ((registry.monitored_count / registry.total) * 100)|round(0)|int if registry.total > 0 else 0 %}
-{% set attention_total = registry.missing_count + registry.conflict_count %}
+{% set attention_total = registry.review_count %}
 {% set attention_pct = ((attention_total / registry.membership_count) * 100)|round(0)|int if registry.membership_count > 0 else 0 %}
 
-<div class="series-page-shell" data-testid="story-arcs-page">
+<div class="series-page-shell" data-story-arc-active-view="{{ active_view }}" data-testid="story-arcs-page">
   {% set header_left_html %}
     <div class="series-registry-title-block">
       <h2 data-testid="story-arcs-registry-title" class="series-registry-title">
@@ -152,6 +162,19 @@
             class_name="series-registry-dropdown",
             fit_width=true
           ) }}
+        </div>
+      </div>
+      <div class="series-toolbar-actions">
+        <div class="series-toolbar-view-block">
+          <span class="series-toolbar-label">View</span>
+          <div data-testid="story-arcs-view-toggle" class="series-view-toggle">
+            <button type="submit" name="view_mode" value="list" data-testid="story-arcs-view-list" data-story-arc-view-option="list" data-tip="List view" data-tip-pos="top" data-tip-size="narrow" x-on:click="document.documentElement.setAttribute('data-story-arc-view', 'list'); localStorage.setItem('story_arc_view', 'list'); document.cookie='story_arc_view=list; path=/; max-age=31536000; SameSite=Lax'" class="series-view-toggle-item" aria-label="List view">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M8 6.75h12M8 12h12M8 17.25h12M4.75 6.75h.5M4.75 12h.5M4.75 17.25h.5"></path></svg>
+            </button>
+            <button type="submit" name="view_mode" value="grid" data-testid="story-arcs-view-grid" data-story-arc-view-option="grid" data-tip="Grid view" data-tip-pos="top" data-tip-size="narrow" x-on:click="document.documentElement.setAttribute('data-story-arc-view', 'grid'); localStorage.setItem('story_arc_view', 'grid'); document.cookie='story_arc_view=grid; path=/; max-age=31536000; SameSite=Lax'" class="series-view-toggle-item" aria-label="Grid view">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4.75 4.75h5.5v5.5h-5.5zm9 0h5.5v5.5h-5.5zm-9 9h5.5v5.5h-5.5zm9 0h5.5v5.5h-5.5"></path></svg>
+            </button>
+          </div>
         </div>
       </div>
     </div>

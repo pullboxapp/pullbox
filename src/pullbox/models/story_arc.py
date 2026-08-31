@@ -148,6 +148,8 @@ class StoryArc(Base, IdentityMixin, TimestampMixin):
         ForeignKey("publishers.id", ondelete="SET NULL")
     )
     comicvine_url: Mapped[str | None] = mapped_column(String(500))
+    cover_path: Mapped[str | None] = mapped_column(String(500))
+    cover_url: Mapped[str | None] = mapped_column(String(500))
     source_kind: Mapped[StoryArcSourceKind] = mapped_column(
         story_arc_enum(StoryArcSourceKind),
         default=StoryArcSourceKind.LEGACY,

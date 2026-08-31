@@ -65,6 +65,8 @@ class StoryArcResponse(BaseModel):
     description: str | None = None
     comicvine_id: int | None = None
     comicvine_url: str | None = None
+    cover_path: str | None = None
+    cover_url: str | None = None
     source_kind: StoryArcSourceKind
     lifecycle: StoryArcLifecycle
     monitored: bool

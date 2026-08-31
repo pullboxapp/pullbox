@@ -5,7 +5,8 @@
   {"led": "off", "label": "archived", "value": story_arc_page.archived_count|string},
   {"label": "monitored", "value": story_arc_page.monitored_count|string},
   {"label": "members", "value": story_arc_page.membership_count|string},
-  {"label": "attention", "value": (story_arc_page.missing_count + story_arc_page.conflict_count)|string},
+  {"label": "owned", "value": story_arc_page.owned_count|string},
+  {"label": "attention", "value": story_arc_page.review_count|string},
 ] %}
 
 <div data-testid="story-arcs-footer-dock">

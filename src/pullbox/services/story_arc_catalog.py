@@ -212,6 +212,7 @@ class StoryArcCatalogService:
                 )
                 arc.comicvine_id = exact_provider_id(preview.metadata.provider_id)
                 arc.comicvine_url = preview.metadata.comicvine_url
+                arc.cover_url = preview.metadata.cover_url
                 arc.publisher_id = await publisher_id(session, preview.metadata.publisher)
                 arc.target_library_root_id = policy.target_library_root_id
                 arc.policy_schema_version = STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION
@@ -365,6 +366,7 @@ class StoryArcCatalogService:
                     for row in rows
                     if row.resolution_state is StoryArcResolutionState.PENDING
                 ) + tuple(created)
+                arc.cover_url = preview.metadata.cover_url
                 self._diagnostics(arc, preview, root.id, delta.removed_issue_provider_ids, pending)
                 await session.flush()
                 return StoryArcCatalogRefreshResult(

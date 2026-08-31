@@ -195,6 +195,8 @@ async def test_create_read_patch_and_safe_archive_use_optimistic_revision(
 ) -> None:
     created = await _create_arc(client, "  Absolute   Power ")
     arc_id = created["id"]
+    assert created["cover_path"] is None
+    assert created["cover_url"] is None
     assert created == {
         **created,
         "name": "Absolute Power",

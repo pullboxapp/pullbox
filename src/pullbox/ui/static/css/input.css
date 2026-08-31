@@ -4787,7 +4787,9 @@
     color: var(--pb-text-primary);
   }
   html[data-series-view="list"] .series-view-toggle-item[data-series-view-option="list"],
-  html[data-series-view="grid"] .series-view-toggle-item[data-series-view-option="grid"] {
+  html[data-series-view="grid"] .series-view-toggle-item[data-series-view-option="grid"],
+  html[data-story-arc-view="list"] .series-view-toggle-item[data-story-arc-view-option="list"],
+  html[data-story-arc-view="grid"] .series-view-toggle-item[data-story-arc-view-option="grid"] {
     background: var(--pb-interactive);
     color: var(--pb-text-inverse);
   }
@@ -5334,6 +5336,71 @@
     top: 9px;
     left: 9px;
     z-index: 3;
+  }
+  .story-arc-wall-review {
+    position: absolute;
+    top: 9px;
+    right: 9px;
+    z-index: 4;
+    min-width: 1.75rem;
+    height: 1.75rem;
+    padding-inline: 0.38rem;
+    border: 1px solid var(--pb-border-default);
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.2rem;
+    background: color-mix(in srgb, var(--pb-surface-card) 92%, transparent);
+    box-shadow: var(--pb-shadow-1);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.65rem;
+    font-weight: 700;
+  }
+  .story-arc-wall-review svg {
+    width: 0.8rem;
+    height: 0.8rem;
+  }
+  .story-arc-wall-review-warning {
+    color: var(--pb-warning);
+    border-color: color-mix(in srgb, var(--pb-warning) 48%, transparent);
+  }
+  .story-arc-wall-review-error {
+    color: var(--pb-error);
+    border-color: color-mix(in srgb, var(--pb-error) 48%, transparent);
+  }
+  .story-arc-review-indicator {
+    min-width: 2.5rem;
+    min-height: 1.75rem;
+    padding-inline: 0.45rem;
+    border: 1px solid var(--pb-border-default);
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.28rem;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    font-weight: 700;
+  }
+  .story-arc-review-indicator svg {
+    width: 0.82rem;
+    height: 0.82rem;
+  }
+  .story-arc-review-indicator-success {
+    color: var(--pb-success);
+    background: var(--pb-success-dim);
+    border-color: color-mix(in srgb, var(--pb-success) 32%, transparent);
+  }
+  .story-arc-review-indicator-warning {
+    color: var(--pb-warning);
+    background: var(--pb-warning-dim);
+    border-color: color-mix(in srgb, var(--pb-warning) 32%, transparent);
+  }
+  .story-arc-review-indicator-error {
+    color: var(--pb-error);
+    background: var(--pb-error-dim);
+    border-color: color-mix(in srgb, var(--pb-error) 32%, transparent);
   }
   .series-wall-catalog-state-badge {
     position: absolute;
