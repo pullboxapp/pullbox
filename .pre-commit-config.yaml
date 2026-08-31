@@ -34,7 +34,7 @@ repos:
 
       - id: pytest-fast
         name: fast unit tests
-        entry: pytest tests/unit/ -x -q -m "not slow" --no-header
+        entry: scripts/pre_commit_pytest.sh
         language: system
         types: [python]
         pass_filenames: false
