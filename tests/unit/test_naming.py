@@ -466,6 +466,10 @@ class TestFormatFilenameLegacy:
         result = format_filename("Batman", 1, 2016)
         assert result == "Batman (2016) #001.cbz"
 
+    def test_large_issue_number_never_uses_scientific_notation(self) -> None:
+        result = format_filename("Wonder Woman", 1_000_000.0, 1998)
+        assert result == "Wonder Woman (1998) #1000000.cbz"
+
     def test_lowercase_tokens_normalized(self) -> None:
         result = format_filename(
             "Batman",

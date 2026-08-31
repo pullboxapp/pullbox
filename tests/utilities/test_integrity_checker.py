@@ -378,6 +378,31 @@ class TestProcessItem:
         assert Path(result.after_state["trash_path"]).exists()
         assert not corrupt.exists()
 
+    def test_corrupt_referenced_file_is_reported_without_quarantine(self, tmp_path: Path) -> None:
+        corrupt = tmp_path / "referenced-bad.cbz"
+        original = b"GARBAGE"
+        corrupt.write_bytes(original)
+
+        result = IntegrityCheckerExecutor().process_item(
+            item_data={
+                "id": "item-referenced",
+                "file_path": str(corrupt),
+                "operation": "check",
+                "storage_mode": "referenced",
+            },
+            job_config={
+                "scan_depth": "quick",
+                "corrupt_action": "quarantine",
+                "trash_folder": str(tmp_path / ".trash"),
+            },
+        )
+
+        assert result.result == ItemResult.FAILED
+        assert result.after_state["action"] == "report"
+        assert result.after_state["quarantine_blocked_reason"] == "referenced_file"
+        assert corrupt.read_bytes() == original
+        assert not (tmp_path / ".trash").exists()
+
 
 # ── Rollback ───────────────────────────────────────────────────
 

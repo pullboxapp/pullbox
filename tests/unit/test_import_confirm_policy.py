@@ -8,7 +8,12 @@ import pytest
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.config import SystemConfig
-from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+from pullbox.models.import_job import (
+    ImportFileHandlingMode,
+    ImportJob,
+    ImportJobStatus,
+    ImportSourceType,
+)
 from pullbox.schemas.import_job import ConfirmImportRequest
 from pullbox.services.import_confirm_policy import apply_confirm_import_policy
 
@@ -102,6 +107,54 @@ async def test_apply_confirm_policy_persists_ingest_defaults(
     assert job.transfer_method == "copy"
     assert job.convert_to_preferred_format is True
     assert job.update_embedded_comicinfo_from_match is True
+
+
+async def test_apply_confirm_policy_preserves_in_place_no_mutation_snapshot(
+    db_session: AsyncSession,
+) -> None:
+    db_session.add_all(
+        [
+            SystemConfig(
+                key="convert_to_preferred_format_on_import",
+                value="true",
+                value_type="bool",
+            ),
+            SystemConfig(
+                key="update_embedded_comicinfo_from_match_on_import",
+                value="true",
+                value_type="bool",
+            ),
+        ]
+    )
+    await db_session.flush()
+    job = _make_job()
+    job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+
+    await apply_confirm_import_policy(
+        db_session,
+        job,
+        ConfirmImportRequest(series_ids=[1]),
+    )
+
+    assert job.move_to_library is False
+    assert job.effective_transfer_method == "leave_in_place"
+    assert job.source_preserved is True
+    assert job.convert_to_preferred_format is False
+    assert job.update_embedded_comicinfo_from_match is False
+
+
+async def test_apply_confirm_policy_rejects_managed_legacy_override_for_in_place(
+    db_session: AsyncSession,
+) -> None:
+    job = _make_job()
+    job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+
+    with pytest.raises(ValidationError, match="conflicts with the selected in-place mode"):
+        await apply_confirm_import_policy(
+            db_session,
+            job,
+            ConfirmImportRequest(series_ids=[1], move_to_library=True),
+        )
 
 
 async def test_apply_confirm_policy_allows_convert_with_source_preserving_collection_import(

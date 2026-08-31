@@ -60,6 +60,7 @@ def test_import_control_state_allows_active_scan_controls() -> None:
         "can_delete": False,
         "can_view_results": False,
         "can_retry": False,
+        "can_retry_story_arc_placements": False,
         "can_rollback": False,
         "transfer_method": "copy",
         "convert_to_preferred_format": True,
@@ -78,7 +79,49 @@ def test_import_control_state_allows_paused_resume_discard_and_rollback() -> Non
     assert state["can_retry"] is False
     assert state["can_view_results"] is False
     assert state["can_rollback"] is False
+
+
+def test_import_control_state_does_not_offer_resume_for_stalled_placement_wait() -> None:
+    job = _job(ImportJobStatus.STALLED, import_started=True)
+    job.progress_snapshot = {
+        "mode": "import",
+        "phase": "story_arc_placements",
+        "progress": 99,
+        "story_arc_placements_failed": 1,
+        "story_arc_placements_cancelled": 0,
+    }
+
+    state = import_control_state_for_job(job)
+
+    assert state["can_resume"] is False
+    assert state["can_cancel"] is True
+    assert state["can_retry_story_arc_placements"] is True
     assert state["requested_action"] == ImportControlRequest.NONE.value
+
+
+@pytest.mark.parametrize(
+    ("failed", "cancelled"),
+    [
+        (0, 0),
+        (True, 0),
+        (0, True),
+        ("1", 0),
+    ],
+)
+def test_import_control_state_does_not_offer_placement_retry_without_terminal_counts(
+    failed: object,
+    cancelled: object,
+) -> None:
+    job = _job(ImportJobStatus.STALLED, import_started=True)
+    job.progress_snapshot = {
+        "mode": "import",
+        "phase": "story_arc_placements",
+        "progress": 99,
+        "story_arc_placements_failed": failed,
+        "story_arc_placements_cancelled": cancelled,
+    }
+
+    assert import_control_state_for_job(job)["can_retry_story_arc_placements"] is False
 
 
 def test_import_control_state_allows_review_resume_before_import_starts() -> None:
@@ -102,6 +145,40 @@ def test_import_control_state_hides_cancel_during_active_rollback() -> None:
     assert state["can_cancel"] is False
     assert state["can_rollback"] is False
     assert state["requested_action"] == ImportControlRequest.NONE.value
+
+
+def test_import_control_state_disallows_pause_during_story_arc_placement_wait() -> None:
+    job = _job(ImportJobStatus.IMPORTING, import_started=True)
+    job.progress_snapshot = {
+        "mode": "import",
+        "phase": "story_arc_placements",
+        "progress": 99,
+    }
+
+    state = import_control_state_for_job(job)
+
+    assert state["can_pause"] is False
+    assert state["can_cancel"] is True
+    assert state["can_retry_story_arc_placements"] is False
+
+
+def test_import_control_state_does_not_offer_placement_retry_outside_exact_stall() -> None:
+    wrong_phase = _job(ImportJobStatus.STALLED, import_started=True)
+    wrong_phase.progress_snapshot = {
+        "mode": "import",
+        "phase": "importing",
+        "progress": 83,
+    }
+    cancelling = _job(ImportJobStatus.STALLED, import_started=True)
+    cancelling.progress_snapshot = {
+        "mode": "import",
+        "phase": "story_arc_placements",
+        "progress": 99,
+    }
+    cancelling.control_request = ImportControlRequest.CANCEL
+
+    assert import_control_state_for_job(wrong_phase)["can_retry_story_arc_placements"] is False
+    assert import_control_state_for_job(cancelling)["can_retry_story_arc_placements"] is False
 
 
 def test_import_phase_progress_scales_into_bounded_range() -> None:

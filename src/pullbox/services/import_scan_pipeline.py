@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+from sqlalchemy import func, select
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError, NotFoundError
+from pullbox.core.library_layout import SourceLayoutSpec
+from pullbox.core.mylar3_reader import (
+    Mylar3ArcSettingsSnapshot,
+    Mylar3CollectionSnapshot,
+    Mylar3ImportMetadataSnapshot,
+)
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
 from pullbox.models.import_job import (
+    ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
@@ -19,6 +30,19 @@ from pullbox.models.import_job import (
 )
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_progress_runtime import current_item_payload
+from pullbox.services.import_referenced_sources import (
+    load_mylar_in_place_root,
+    validate_mylar_in_place_files,
+)
+from pullbox.services.import_story_arc_resolution import (
+    StoryArcResolutionResult,
+    resolve_staged_story_arc_entries,
+)
+from pullbox.services.import_story_arc_staging import (
+    StoryArcStagingResult,
+    stage_folder_story_arcs,
+    stage_mylar_story_arcs,
+)
 from pullbox.services.import_workflow_state import (
     SCAN_PROGRESS_ANALYZE_START,
     SCAN_PROGRESS_FILE_MATCH_START,
@@ -70,6 +94,57 @@ def _scan_failure_message(exc: Exception) -> str:
             "Please retry the import; WAL mode and shorter UI transactions help prevent this."
         )
     return str(exc)
+
+
+async def _log_story_arc_staging_summary(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    source_type: ImportSourceType,
+    result: StoryArcStagingResult,
+    log_event: LogEventFunc,
+) -> None:
+    """Log path-free counts for review-only story-arc staging."""
+    await log_event(
+        session,
+        job_id,
+        "INFO",
+        "import_story_arc_staging_completed",
+        message="Story-arc evidence staged for review",
+        source_type=source_type.value,
+        arcs_staged=result.arcs_staged,
+        entries_staged=result.entries_staged,
+        needs_review=result.needs_review,
+        cohorts_examined=result.cohorts_examined,
+        cohorts_skipped=result.cohorts_skipped,
+        readlist_present=result.readlist_present,
+        readlist_count=result.readlist_count,
+    )
+
+
+async def _log_story_arc_resolution_summary(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    result: StoryArcResolutionResult,
+    log_event: LogEventFunc,
+) -> None:
+    """Log path-free story-arc resolution counts."""
+    await log_event(
+        session,
+        job_id,
+        "INFO",
+        "import_story_arc_resolution_completed",
+        message="Staged story-arc entries resolved for review",
+        entries_examined=result.entries_examined,
+        resolved=result.resolved,
+        pending=result.pending,
+        missing=result.missing,
+        ambiguous=result.ambiguous,
+        conflicts=result.conflicts,
+        skipped=result.skipped,
+        linked_files=result.linked_files,
+    )
 
 
 async def run_import_scan_pipeline(
@@ -238,25 +313,30 @@ async def run_import_scan_pipeline(
             )
 
         scan_materialized_incrementally = False
+        discovered_list: list[DiscoveredSeries] = []
 
         scan_phase_started_at = time.monotonic()
         if job.source_type == ImportSourceType.MYLAR3:
-            discovered_list = await _load_mylar3_discovered_series(
+            discovered_count = await _load_mylar3_discovered_series(
                 session,
                 job,
                 job_id=job_id,
                 mylar3_reader_cls=mylar3_reader_cls,
                 auto_detect_mylar3_path_map=auto_detect_mylar3_path_map,
                 log_event=log_event,
+                validate_discovered_files_safety=validate_discovered_files_safety,
+                materialize_discovered_scan_results=materialize_discovered_scan_results,
+                raise_if_cancelled=raise_if_cancelled,
             )
             await emit_scan_progress(
                 status=ImportJobStatus.SCANNING,
                 phase="scanning",
-                message=f"Loaded {len(discovered_list)} series from Mylar3.",
+                message=f"Loaded {discovered_count} series from Mylar3.",
                 progress=SCAN_PROGRESS_MATERIALIZE_END,
             )
+            scan_materialized_incrementally = True
         else:
-            discovered_list = await _scan_collection_discovered_series(
+            discovered_count = await _scan_collection_discovered_series(
                 session,
                 job,
                 scanner_cls=scanner_cls,
@@ -266,6 +346,7 @@ async def run_import_scan_pipeline(
                 validate_discovered_files_safety=validate_discovered_files_safety,
                 materialize_discovered_scan_results=materialize_discovered_scan_results,
                 log_event=log_event,
+                raise_if_cancelled=raise_if_cancelled,
             )
             scan_materialized_incrementally = True
 
@@ -273,7 +354,7 @@ async def run_import_scan_pipeline(
             await emit_scan_progress(
                 status=ImportJobStatus.SCANNING,
                 phase="scanning",
-                message=f"Scan complete: {len(discovered_list)} series ready for analysis.",
+                message=f"Scan complete: {discovered_count} series ready for analysis.",
                 progress=SCAN_PROGRESS_MATERIALIZE_END,
             )
 
@@ -285,13 +366,31 @@ async def run_import_scan_pipeline(
                 discovered_list,
             )
 
+        if job.source_type == ImportSourceType.FILESYSTEM:
+
+            async def check_folder_staging_cancellation() -> None:
+                await raise_if_cancelled(session, job_id)
+
+            story_arc_staging = await stage_folder_story_arcs(
+                session,
+                import_job_id=job_id,
+                cancellation_check=check_folder_staging_cancellation,
+            )
+            await _log_story_arc_staging_summary(
+                session,
+                job_id=job_id,
+                source_type=job.source_type,
+                result=story_arc_staging,
+                log_event=log_event,
+            )
+
         await log_event(
             session,
             job_id,
             "INFO",
             "import_scan_completed",
-            message=f"Scan complete: {len(discovered_list)} series found",
-            series_found=len(discovered_list),
+            message=f"Scan complete: {discovered_count} series found",
+            series_found=discovered_count,
             duration_ms=round((time.monotonic() - scan_phase_started_at) * 1000),
         )
         scan_duration_ms = round((time.monotonic() - scan_phase_started_at) * 1000)
@@ -406,6 +505,21 @@ async def run_import_scan_pipeline(
         file_matching_started_at = time.monotonic()
         await run_file_matching(session, job, progress_callback=progress_callback)
         file_matching_duration_ms = round((time.monotonic() - file_matching_started_at) * 1000)
+
+        async def check_story_arc_resolution_cancellation() -> None:
+            await raise_if_cancelled(session, job_id)
+
+        story_arc_resolution = await resolve_staged_story_arc_entries(
+            session,
+            import_job_id=job_id,
+            cancellation_check=check_story_arc_resolution_cancellation,
+        )
+        await _log_story_arc_resolution_summary(
+            session,
+            job_id=job_id,
+            result=story_arc_resolution,
+            log_event=log_event,
+        )
         await raise_if_cancelled(session, job_id)
 
         job.status = ImportJobStatus.REVIEW
@@ -507,7 +621,10 @@ async def _load_mylar3_discovered_series(
     mylar3_reader_cls: Any,
     auto_detect_mylar3_path_map: AutoDetectPathMapFunc,
     log_event: LogEventFunc,
-) -> list[DiscoveredSeries]:
+    validate_discovered_files_safety: ValidateDiscoveredFilesFunc | None = None,
+    materialize_discovered_scan_results: MaterializeScanResultsFunc | None = None,
+    raise_if_cancelled: RaiseIfCancelledFunc | None = None,
+) -> int:
     db_path = Path(job.source_path)
     if db_path.is_dir():
         db_path = db_path / "mylar.db"
@@ -517,6 +634,11 @@ async def _load_mylar3_discovered_series(
         detected = await asyncio.to_thread(lambda: auto_detect_mylar3_path_map(db_path))
         path_map = detected
         if detected:
+            # Freeze the exact mapping used for scan-time path resolution so
+            # later review/execution can validate the same trusted host roots.
+            # Without this snapshot, auto-detected Mylar arc locations become
+            # unverifiable after the reader returns.
+            job.mylar3_path_map = dict(detected)
             await log_event(
                 session,
                 job_id,
@@ -534,18 +656,215 @@ async def _load_mylar3_discovered_series(
                 message="No Mylar3 path mapping auto-detected",
                 db_path=str(db_path),
             )
+    in_place_root = (
+        await load_mylar_in_place_root(session, job.target_library_root_id)
+        if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+        else None
+    )
+    in_place_root_path = Path(in_place_root.path) if in_place_root is not None else None
+    reader_options: dict[str, object] = {}
+    if in_place_root_path is not None:
+        reader_options["include_missing_files"] = True
     reader = mylar3_reader_cls(
         db_path=db_path,
         path_map=path_map or None,
+        source_layout=SourceLayoutSpec.from_dict(dict(job.source_layout_snapshot or {})),
+        **reader_options,
     )
-    discovered_list = await reader.read_series()
-    job.scan_total_files = sum(series.file_count for series in discovered_list)
-    job.scan_total_dirs = len(
-        {series.source_folder for series in discovered_list if series.source_folder}
+    if raise_if_cancelled is not None:
+        await raise_if_cancelled(session, job_id)
+
+    async def check_mylar_staging_cancellation() -> None:
+        if raise_if_cancelled is not None:
+            await raise_if_cancelled(session, job_id)
+
+    read_import_metadata = getattr(reader, "read_import_metadata", None)
+    iter_story_arc_pages = getattr(reader, "iter_import_story_arc_pages", None)
+    iter_series_pages = getattr(reader, "iter_import_series_pages", None)
+    paged_reader = (
+        inspect.iscoroutinefunction(read_import_metadata)
+        and inspect.isasyncgenfunction(iter_story_arc_pages)
+        and inspect.isasyncgenfunction(iter_series_pages)
     )
-    job.series_found = len(discovered_list)
+    legacy_snapshot: Mylar3CollectionSnapshot | None = None
+    if paged_reader:
+        metadata = cast("Mylar3ImportMetadataSnapshot", await reader.read_import_metadata())
+    else:
+        legacy_snapshot = await _read_mylar3_collection_snapshot(reader)
+        metadata = Mylar3ImportMetadataSnapshot(
+            storyarcs_present=legacy_snapshot.storyarcs_present,
+            readlist_present=legacy_snapshot.readlist_present,
+            readlist_count=legacy_snapshot.readlist_count,
+            arc_settings=legacy_snapshot.arc_settings,
+        )
+
+    story_arc_staging = StoryArcStagingResult(
+        readlist_present=metadata.readlist_present,
+        readlist_count=metadata.readlist_count,
+    )
+
+    async def stage_arc_page(
+        arc_page: tuple[Any, ...],
+        *,
+        source_ordinal_offset: int,
+    ) -> StoryArcStagingResult:
+        page_snapshot = Mylar3CollectionSnapshot(
+            series=(),
+            story_arcs=cast("Any", arc_page),
+            storyarcs_present=metadata.storyarcs_present,
+            readlist_present=metadata.readlist_present,
+            readlist_count=metadata.readlist_count,
+            arc_settings=metadata.arc_settings,
+        )
+        return await stage_mylar_story_arcs(
+            session,
+            import_job_id=job_id,
+            snapshot=page_snapshot,
+            source_ordinal_offset=source_ordinal_offset,
+            cancellation_check=check_mylar_staging_cancellation,
+        )
+
+    def combine_staging(
+        current: StoryArcStagingResult,
+        page_result: StoryArcStagingResult,
+    ) -> StoryArcStagingResult:
+        return StoryArcStagingResult(
+            arcs_staged=current.arcs_staged + page_result.arcs_staged,
+            entries_staged=current.entries_staged + page_result.entries_staged,
+            needs_review=current.needs_review + page_result.needs_review,
+            cohorts_examined=current.cohorts_examined + page_result.cohorts_examined,
+            cohorts_skipped=current.cohorts_skipped + page_result.cohorts_skipped,
+            readlist_present=metadata.readlist_present,
+            readlist_count=metadata.readlist_count,
+        )
+
+    source_ordinal_offset = 0
+    if paged_reader:
+        async for raw_arc_page in reader.iter_import_story_arc_pages():
+            await check_mylar_staging_cancellation()
+            arc_page = tuple(raw_arc_page)
+            if not arc_page:
+                continue
+            page_result = await stage_arc_page(
+                arc_page,
+                source_ordinal_offset=source_ordinal_offset,
+            )
+            story_arc_staging = combine_staging(story_arc_staging, page_result)
+            source_ordinal_offset += len(arc_page)
+            await session.commit()
+    elif legacy_snapshot is not None:
+        page_result = await stage_arc_page(
+            tuple(legacy_snapshot.story_arcs),
+            source_ordinal_offset=0,
+        )
+        story_arc_staging = combine_staging(story_arc_staging, page_result)
+
+    await _log_story_arc_staging_summary(
+        session,
+        job_id=job_id,
+        source_type=job.source_type,
+        result=story_arc_staging,
+        log_event=log_event,
+    )
+
+    path_status_counts: dict[str, int] = {}
+    mapping_applied_series = 0
+    incompatible_series = 0
+    series_count = 0
+    file_count = 0
+    fallback_source_folders: set[str] = set()
+
+    async def persist_series_page(raw_page: tuple[Any, ...]) -> None:
+        nonlocal incompatible_series, mapping_applied_series, series_count, file_count
+        await check_mylar_staging_cancellation()
+        page = cast("list[DiscoveredSeries]", list(raw_page))
+        if not page:
+            return
+        if in_place_root_path is not None:
+            await asyncio.to_thread(validate_mylar_in_place_files, page, in_place_root_path)
+        if validate_discovered_files_safety is not None:
+            await validate_discovered_files_safety(session, page)
+        if materialize_discovered_scan_results is not None:
+            await materialize_discovered_scan_results(session, job, page)
+
+        for series in page:
+            series_count += 1
+            file_count += series.file_count
+            if materialize_discovered_scan_results is None and series.source_folder:
+                fallback_source_folders.add(series.source_folder)
+            path_details = series.diagnostics.get("mylar3_path")
+            if not isinstance(path_details, dict):
+                continue
+            status = path_details.get("status")
+            if isinstance(status, str):
+                path_status_counts[status] = path_status_counts.get(status, 0) + 1
+                if status not in {"local", "mapped"}:
+                    incompatible_series += 1
+            if path_details.get("mapping_applied") is True:
+                mapping_applied_series += 1
+
+        job.scan_total_files = file_count
+        job.series_found = series_count
+        await session.commit()
+        await check_mylar_staging_cancellation()
+
+    if paged_reader:
+        async for raw_series_page in reader.iter_import_series_pages():
+            await persist_series_page(tuple(raw_series_page))
+    elif legacy_snapshot is not None:
+        await persist_series_page(tuple(legacy_snapshot.series))
+
+    if materialize_discovered_scan_results is not None:
+        distinct_source_folders = await session.scalar(
+            select(func.count(func.distinct(ImportedSeries.source_folder))).where(
+                ImportedSeries.import_job_id == job_id,
+                ImportedSeries.source_folder.is_not(None),
+                ImportedSeries.source_folder != "",
+            )
+        )
+        job.scan_total_dirs = int(distinct_source_folders or 0)
+    else:
+        job.scan_total_dirs = len(fallback_source_folders)
+
+    await log_event(
+        session,
+        job_id,
+        "INFO",
+        "mylar3_path_resolution",
+        message="Resolved Mylar comic folders",
+        path_status_counts=dict(sorted(path_status_counts.items())),
+        mapping_applied_series=mapping_applied_series,
+        incompatible_series=incompatible_series,
+    )
+    job.scan_total_files = file_count
+    job.series_found = series_count
     await session.commit()
-    return list(discovered_list)
+    return series_count
+
+
+async def _read_mylar3_collection_snapshot(reader: Any) -> Mylar3CollectionSnapshot:
+    """Read one complete Mylar snapshot, with a series-only test-double fallback."""
+    read_collection = getattr(reader, "read_collection", None)
+    if callable(read_collection) and inspect.iscoroutinefunction(read_collection):
+        return cast("Mylar3CollectionSnapshot", await read_collection())
+
+    read_snapshot = getattr(reader, "read_snapshot", None)
+    if callable(read_snapshot) and inspect.iscoroutinefunction(read_snapshot):
+        return cast("Mylar3CollectionSnapshot", await read_snapshot())
+
+    discovered_list = await reader.read_series()
+    return Mylar3CollectionSnapshot(
+        series=tuple(discovered_list),
+        story_arcs=(),
+        storyarcs_present=False,
+        readlist_present=False,
+        readlist_count=0,
+        arc_settings=Mylar3ArcSettingsSnapshot(
+            present=False,
+            parse_warnings=(),
+            values=(),
+        ),
+    )
 
 
 async def _scan_collection_discovered_series(
@@ -559,10 +878,11 @@ async def _scan_collection_discovered_series(
     validate_discovered_files_safety: ValidateDiscoveredFilesFunc | None = None,
     materialize_discovered_scan_results: MaterializeScanResultsFunc | None = None,
     log_event: LogEventFunc | None = None,
-) -> list[DiscoveredSeries]:
+    raise_if_cancelled: RaiseIfCancelledFunc | None = None,
+) -> int:
     custom_exts = await resolve_import_file_extensions(session, job.file_formats)
-    checked_paths: set[str] = set()
     batch: list[DiscoveredSeries] = []
+    series_found = 0
     last_batch_flush_at = time.monotonic()
 
     async def forward_live_scan_progress(
@@ -597,6 +917,10 @@ async def _scan_collection_discovered_series(
     async def capture_scan_totals(files_found: int, directories_visited: int) -> None:
         job.scan_total_dirs = directories_visited
         job.scan_total_files = files_found
+
+    async def check_scan_cancellation() -> None:
+        if raise_if_cancelled is not None:
+            await raise_if_cancelled(session, job.id)
 
     materialized_files = 0
     last_materialized_emit = 0.0
@@ -641,15 +965,18 @@ async def _scan_collection_discovered_series(
 
         if validate_discovered_files_safety is not None:
             batch_for_validation: list[DiscoveredSeries] = []
+            batch_checked_paths: set[str] = set()
             for discovered in batch_to_flush:
                 pending_files = [
                     discovered_file
                     for discovered_file in discovered.files
-                    if discovered_file.file_path not in checked_paths
+                    if discovered_file.file_path not in batch_checked_paths
                 ]
                 if not pending_files:
                     continue
-                checked_paths.update(discovered_file.file_path for discovered_file in pending_files)
+                batch_checked_paths.update(
+                    discovered_file.file_path for discovered_file in pending_files
+                )
                 batch_for_validation.append(
                     discovered.__class__(
                         raw_series_name=discovered.raw_series_name,
@@ -680,11 +1007,9 @@ async def _scan_collection_discovered_series(
                 job.id,
                 "DEBUG",
                 "import_scan_batch_discovered",
-                message=(
-                    f"Discovered {len(batch_to_flush)} series ({len(discovered_list)} total so far)"
-                ),
+                message=f"Discovered {len(batch_to_flush)} series ({series_found} total so far)",
                 series_found_in_batch=len(batch_to_flush),
-                total_series_found=len(discovered_list),
+                total_series_found=series_found,
                 sample_series=[item.raw_series_name for item in batch_to_flush[:5]],
             )
 
@@ -700,7 +1025,7 @@ async def _scan_collection_discovered_series(
                 max(job.scan_total_files, materialized_files, 1),
             ),
             message=(
-                f"Discovered {len(discovered_list)} series · "
+                f"Discovered {series_found} series · "
                 f"{materialized_files}/{max(job.scan_total_files, 1)} files processed."
             ),
             current_series_name=batch_to_flush[-1].raw_series_name if batch_to_flush else None,
@@ -712,35 +1037,39 @@ async def _scan_collection_discovered_series(
         progress_callback=capture_scan_totals,
         file_progress_callback=capture_materialized_file,
         inventory_progress_callback=capture_inventory_progress,
+        cancellation_check=check_scan_cancellation if raise_if_cancelled is not None else None,
         extensions=custom_exts,
+        source_layout=SourceLayoutSpec.from_dict(dict(job.source_layout_snapshot or {})),
     )
-    discovered_list: list[DiscoveredSeries] = []
-
     file_paths_mode = list(job.selected_file_paths or [])
 
     if file_paths_mode:
-        discovered_list = await scanner.scan_files(file_paths_mode)
-        job.scan_total_files = sum(series.file_count for series in discovered_list)
-        job.scan_total_dirs = len({series.source_folder for series in discovered_list})
-        job.series_found = len(discovered_list)
-        batch.extend(discovered_list)
+        selected_discovered = await scanner.scan_files(
+            file_paths_mode,
+            root_path=job.source_path,
+        )
+        series_found = len(selected_discovered)
+        job.scan_total_files = sum(series.file_count for series in selected_discovered)
+        job.scan_total_dirs = len({series.source_folder for series in selected_discovered})
+        job.series_found = series_found
+        batch.extend(selected_discovered)
         await flush_scan_batch(force=True)
         await forward_live_scan_progress(
             phase="scanning",
-            message=f"Prepared {len(discovered_list)} series from the selected files.",
+            message=f"Prepared {series_found} series from the selected files.",
             progress=SCAN_PROGRESS_MATERIALIZE_END,
         )
-        return discovered_list
+        return series_found
 
     async for series in scanner.scan(job.source_path):
-        discovered_list.append(series)
+        series_found += 1
         batch.append(series)
-        job.series_found = len(discovered_list)
+        job.series_found = series_found
         await flush_scan_batch()
         await forward_live_scan_progress(
             phase="scanning",
             message=(
-                f"Discovered {len(discovered_list)} series · "
+                f"Discovered {series_found} series · "
                 f"{materialized_files}/"
                 f"{max(job.scan_total_files, 1)} files processed."
             ),
@@ -755,4 +1084,4 @@ async def _scan_collection_discovered_series(
 
     await flush_scan_batch(force=True)
 
-    return discovered_list
+    return series_found

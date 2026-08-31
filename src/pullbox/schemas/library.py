@@ -80,6 +80,8 @@ class LibraryBrowserDeleteContext(BaseModel):
     linked_file_count: int = 0
     tracked_file_count: int = 0
     tracked_series_count: int = 0
+    managed_file_count: int = 0
+    referenced_file_count: int = 0
     has_linked_issue: bool = False
     issue_status_after_delete: str | None = None
     issue_status_reason: str | None = None

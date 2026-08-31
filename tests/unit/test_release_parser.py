@@ -32,6 +32,14 @@ class TestParseReleaseTitle:
         assert r.issue_type == IssueType.ISSUE
         assert r.scan_group == "Shan-Empire"
 
+    def test_dc_one_million_issue_number_without_hash_is_exact(self) -> None:
+        r = parse_release_title("Wonder Woman 1000000 [1998] [digital-Empire]")
+
+        assert r is not None
+        assert r.series_name == "Wonder Woman"
+        assert r.issue_number == 1_000_000.0
+        assert r.year == 1998
+
     def test_html_entity_in_name(self) -> None:
         r = parse_release_title(
             "Spider-Man &amp; Wolverine 003 [2025] [4 covers] [Digital] [dekabro-Empire]"

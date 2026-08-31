@@ -1,5 +1,5 @@
 {% set delete_message %}
-Are you sure you want to delete {{ series.title }}? This removes the series and all {{ total_issue_count }} issue records from the database.
+Are you sure you want to delete {{ series.title }}? This removes the series and all {{ total_issue_count }} issue records from the database.{% if delete_referenced_file_count %} {{ delete_referenced_file_count }} referenced file{{ "s" if delete_referenced_file_count != 1 else "" }} will stay on disk and only be detached from Pullbox.{% endif %}
 {% endset %}
 <div
   x-data="{
@@ -61,14 +61,18 @@ Are you sure you want to delete {{ series.title }}? This removes the series and 
   {% set submit_disabled_expr = "deleting" %}
   {% set submit_label_expr = "'Delete Series'" %}
   {% set submitting_label_expr = "'Deleting...'" %}
-  {% set show_files_option = delete_file_count > 0 %}
+  {% set show_files_option = delete_managed_file_count > 0 %}
   {% set show_folders_option = true %}
   {% set delete_files_disabled_expr = "deleteFolder" %}
   {% set folders_change_handler = "syncDeleteOptions()" %}
-  {% set files_option_label = "Delete " ~ delete_file_count ~ " file" ~ ("s" if delete_file_count != 1 else "") ~ " from disk" %}
-  {% set files_option_copy = "This permanently removes the tracked comic files from your library." %}
+  {% set files_option_label = "Delete " ~ delete_managed_file_count ~ " file" ~ ("s" if delete_managed_file_count != 1 else "") ~ " from disk" %}
+  {% set files_option_copy = "This permanently removes Pullbox-managed comic files. Referenced files always stay on disk." %}
   {% set folders_option_label = "Delete the series folder from disk" %}
-  {% set folders_option_copy = "This permanently deletes the folder and everything inside it." %}
+  {% if delete_referenced_file_count %}
+    {% set folders_option_copy = "Folders containing referenced files stay in place. Pullbox removes only eligible managed folders and files." %}
+  {% else %}
+    {% set folders_option_copy = "This permanently deletes the folder and everything inside it." %}
+  {% endif %}
   {% set modal_testid = "series-detail-delete-modal" %}
 
   {% include "components/series_delete_modal.html" %}

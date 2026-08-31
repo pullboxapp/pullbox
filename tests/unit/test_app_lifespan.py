@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_LIFESPAN_EVENTS: list[str] = []
+
+
 class _FakeSession:
     async def __aenter__(self) -> _FakeSession:
         return self
@@ -37,6 +40,7 @@ class _FakeScheduler:
         self.loaded = True
 
     def start(self) -> None:
+        _LIFESPAN_EVENTS.append("scheduler_started")
         self.running = True
 
     def shutdown(self) -> None:
@@ -61,6 +65,7 @@ class _FakeImportRunner:
         self.__class__.instances.append(self)
 
     async def recover_and_dispatch(self) -> int:
+        _LIFESPAN_EVENTS.append("import_recovery_completed")
         return self.recovered
 
 
@@ -176,6 +181,7 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
     _FakeAirDcppRegistry.instances.clear()
     _FakeQueueManager.instances.clear()
     _FakeUpdateCheckService.instances.clear()
+    _LIFESPAN_EVENTS.clear()
     app._startup_background_tasks.clear()
     app._update_check_service_ref.clear()
 
@@ -341,6 +347,36 @@ async def test_lifespan_starts_background_services_and_shuts_down_cleanly(
     assert _FakeDirectRuntime.instances[-1].closed is True
     assert _FakeDirectRunner.registered[-1] is None
     assert _FakeAirDcppRegistry.instances[-1].stopped is True
+
+
+@pytest.mark.asyncio
+async def test_import_recovery_completes_before_scheduler_can_start(
+    patched_lifespan,
+) -> None:
+    async with patched_lifespan.app.lifespan(FastAPI()):
+        assert "import_recovery_completed" in _LIFESPAN_EVENTS
+        assert "scheduler_started" in _LIFESPAN_EVENTS
+        assert _LIFESPAN_EVENTS.index("import_recovery_completed") < _LIFESPAN_EVENTS.index(
+            "scheduler_started"
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_recovery_failure_prevents_scheduler_start(
+    patched_lifespan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fail_recovery(_self: _FakeImportRunner) -> int:
+        raise RuntimeError("recovery failed")
+
+    monkeypatch.setattr(_FakeImportRunner, "recover_and_dispatch", _fail_recovery)
+
+    with pytest.raises(RuntimeError, match="Import recovery failed before scheduler startup"):
+        async with patched_lifespan.app.lifespan(FastAPI()):
+            pytest.fail("lifespan must not become ready after failed import recovery")
+
+    assert patched_lifespan.scheduler.running is False
+    assert "scheduler_started" not in _LIFESPAN_EVENTS
 
 
 @pytest.mark.asyncio

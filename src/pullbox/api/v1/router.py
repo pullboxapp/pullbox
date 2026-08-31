@@ -16,6 +16,7 @@ from pullbox.api.v1.downloads import router as downloads_router
 from pullbox.api.v1.filesystem import router as filesystem_router
 from pullbox.api.v1.health import router as health_router
 from pullbox.api.v1.import_jobs import router as import_jobs_router
+from pullbox.api.v1.import_safety_bulk import router as import_safety_bulk_router
 from pullbox.api.v1.indexers import router as indexers_router
 from pullbox.api.v1.intervention import router as intervention_router
 from pullbox.api.v1.issues import router as issues_router
@@ -23,6 +24,8 @@ from pullbox.api.v1.library import router as library_router
 from pullbox.api.v1.reader import router as reader_router
 from pullbox.api.v1.search import router as search_router
 from pullbox.api.v1.series import router as series_router
+from pullbox.api.v1.story_arc_placements import router as story_arc_placements_router
+from pullbox.api.v1.story_arcs import router as story_arcs_router
 from pullbox.api.v1.suggestions import router as suggestions_router
 from pullbox.api.v1.system import router as system_router
 from pullbox.api.v1.whats_new import router as whats_new_router
@@ -35,6 +38,8 @@ v1_router.include_router(audit_router)
 v1_router.include_router(blocklist_router)
 v1_router.include_router(auth_router)
 v1_router.include_router(series_router)
+v1_router.include_router(story_arcs_router)
+v1_router.include_router(story_arc_placements_router)
 v1_router.include_router(issues_router)
 v1_router.include_router(library_router)
 v1_router.include_router(reader_router)
@@ -50,6 +55,7 @@ v1_router.include_router(covers_router)
 v1_router.include_router(filesystem_router)
 v1_router.include_router(health_router)
 v1_router.include_router(import_jobs_router)
+v1_router.include_router(import_safety_bulk_router)
 v1_router.include_router(intervention_router)
 v1_router.include_router(suggestions_router)
 v1_router.include_router(system_router)

@@ -573,7 +573,14 @@ async def test_issue_response_and_search_log_grab_helpers(
         session.add(library_file)
         await session.flush()
 
+        # Simulate a row written by an older image that does not know the
+        # additive exact-text column yet.
+        issue.issue_number_text = None
+        await session.flush()
+
         response = await issues_api._load_issue_response(session, issue.id)
+        assert response.issue_number == 9.0
+        assert response.issue_number_text == "9"
         assert response.series_title == "Absolute Superman"
         assert response.has_file is True
         assert (await issues_api.get_issue(issue.id, object(), session)).id == issue.id

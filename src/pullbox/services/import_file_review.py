@@ -15,6 +15,7 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
 )
@@ -212,6 +213,11 @@ async def repair_file_metadata(
         raise NotFoundError("ImportJob", job_id)
     if job.status != ImportJobStatus.REVIEW:
         raise ValidationError("Job must be in REVIEW state to repair file metadata")
+    if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE:
+        raise ValidationError(
+            "In-place import files cannot have embedded metadata rewritten. "
+            "Choose a managed copy if Pullbox should repair ComicInfo metadata."
+        )
 
     imp_file = await session.get(ImportedFile, file_id)
     if imp_file is None or imp_file.import_job_id != job_id:

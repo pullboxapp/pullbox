@@ -1,4 +1,4 @@
-.PHONY: help setup dev dev-local dev-docker dev-docker-up dev-docker-down dev-docker-logs dev-docker-shell dev-docker-seed prod-test-pull prod-test-up prod-test-refresh prod-test-down prod-test-logs prod-test-shell run lint format format-fix typecheck test test-unit test-slow test-integration test-api test-providers test-utilities test-a11y test-e2e test-e2e-chrome test-e2e-firefox coverage coverage-check migrate migration seed seed-full reset-db reset-password reset-import import-fixture performance-baseline direct-download-baseline validate runner-preflight release-changelog-check workflow-hygiene secret-scan security-ci ci-local docker-build-check docker-smoke ci-full ci-clean-room security-check pre-commit css-build css-watch clean
+.PHONY: help setup dev dev-local dev-docker dev-docker-up dev-docker-down dev-docker-logs dev-docker-shell dev-docker-seed prod-test-pull prod-test-up prod-test-refresh prod-test-down prod-test-logs prod-test-shell run lint format format-fix typecheck test test-unit test-slow test-integration test-api test-providers test-utilities test-a11y test-e2e test-e2e-chrome test-e2e-firefox coverage coverage-check migrate migration seed seed-full reset-db reset-password reset-import import-fixture performance-baseline direct-download-baseline validate runner-preflight release-changelog-check workflow-hygiene secret-scan security-ci ci-local docker-build-check docker-security-check docker-smoke ci-full ci-clean-room security-check pre-commit css-build css-watch clean
 
 VENV := .venv
 PYTHON_BOOTSTRAP ?= python3
@@ -11,11 +11,15 @@ PULLBOX_IMAGE ?= ghcr.io/pullboxapp/pullbox:latest
 DEV_DOCKER_PORT ?= 8585
 DEV_DOCKER_COMPOSE := PULLBOX_DEV_PORT=$(DEV_DOCKER_PORT) docker compose -f docker/docker-compose.dev.yml
 DEV_DOCKER_URL ?= http://127.0.0.1:$(DEV_DOCKER_PORT)
+# Opt in to stopping without logs or cleanup so a failed smoke container can be reviewed.
+DOCKER_SMOKE_KEEP_ON_FAILURE ?= 0
 PERFORMANCE_BASELINE_URL ?= $(DEV_DOCKER_URL)
 PERFORMANCE_BASELINE_ARGS ?=
 TOOLS_DIR := .cache/tools
 ACTIONLINT := $(TOOLS_DIR)/actionlint
 GITLEAKS := $(TOOLS_DIR)/gitleaks
+GRYPE := $(TOOLS_DIR)/grype
+SECRET_SCAN_BASE ?= origin/develop
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -204,10 +208,10 @@ workflow-hygiene: ## Run local workflow linting with pinned actionlint
 	@bash scripts/install_ci_tool.sh actionlint "$(TOOLS_DIR)"
 	$(ACTIONLINT) -shellcheck= -pyflakes=
 
-secret-scan: ## Run blocking local gitleaks scan with the repo baseline
+secret-scan: ## Scan current files and PR commit history (override SECRET_SCAN_BASE for other bases)
 	@echo "\033[36m──── Secret Scan ────\033[0m"
 	@bash scripts/install_ci_tool.sh gitleaks "$(TOOLS_DIR)"
-	$(GITLEAKS) dir . --no-banner --redact --timeout=300
+	bash scripts/run_secret_scans.sh "$(GITLEAKS)" "$(SECRET_SCAN_BASE)"
 
 security-ci: ## Run the local security lane (pip-audit blocking; safety/bandit advisory)
 	@echo "\033[36m──── Security Checks ────\033[0m"
@@ -273,7 +277,14 @@ docker-build-check: ## Build the production Docker image and verify it can be in
 	@echo "\033[36m──── Docker Inspect ────\033[0m"
 	@docker image inspect pullbox:local >/dev/null
 
-docker-smoke: docker-build-check ## Run Docker smoke tests against the locally built production image
+docker-security-check: docker-build-check ## Verify runtime security and run the blocking Grype High gate
+	@echo "\033[36m──── Container Security Runtime ────\033[0m"
+	docker run --rm -i --entrypoint python pullbox:local - < scripts/verify_container_security_runtime.py
+	@echo "\033[36m──── Container Vulnerability Scan ────\033[0m"
+	@bash scripts/install_ci_tool.sh grype "$(TOOLS_DIR)"
+	$(GRYPE) docker:pullbox:local --config .grype.yaml --fail-on high --output table
+
+docker-smoke: docker-security-check ## Run Docker smoke tests after runtime security and Grype checks
 	@echo "\033[36m──── Start Container ────\033[0m"
 	@docker rm -f pullbox-smoke 2>/dev/null || true
 	docker run -d --name pullbox-smoke -p 18585:8585 \
@@ -288,6 +299,10 @@ docker-smoke: docker-build-check ## Run Docker smoke tests against the locally b
 		fi; \
 		if [ $$i -eq 30 ]; then \
 			echo "\033[31m  ❌ Container failed to become healthy\033[0m"; \
+			if [ "$(DOCKER_SMOKE_KEEP_ON_FAILURE)" = "1" ]; then \
+				echo "Container pullbox-smoke preserved; stopped before logs or cleanup."; \
+				exit 1; \
+			fi; \
 			docker logs pullbox-smoke; \
 			docker rm -f pullbox-smoke; \
 			exit 1; \
@@ -295,8 +310,11 @@ docker-smoke: docker-build-check ## Run Docker smoke tests against the locally b
 		sleep 1; \
 	done
 	@echo "\033[36m──── Smoke Tests ────\033[0m"
-	PULLBOX_SMOKE_URL=http://localhost:18585 $(SECRET) $(VENV)/bin/pytest tests/e2e/test_smoke.py -v || \
-		(docker logs pullbox-smoke; docker rm -f pullbox-smoke; exit 1)
+	PYTHONPATH=src PULLBOX_SMOKE_URL=http://localhost:18585 $(SECRET) $(VENV)/bin/pytest tests/e2e/test_smoke.py -v || \
+		(if [ "$(DOCKER_SMOKE_KEEP_ON_FAILURE)" = "1" ]; then \
+			echo "Container pullbox-smoke preserved; stopped before logs or cleanup."; \
+			exit 1; \
+		fi; docker logs pullbox-smoke; docker rm -f pullbox-smoke; exit 1)
 	@echo "\033[36m──── Teardown ────\033[0m"
 	@docker rm -f pullbox-smoke
 	@echo ""

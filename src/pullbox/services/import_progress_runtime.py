@@ -276,6 +276,11 @@ def scan_review_progress_plan(
     )
 
 
+def scan_review_analysis_weight(series_count: int) -> float:
+    """Return aggregate analysis work without allocating one entry per series."""
+    return max(series_count, 0) * _ANALYSIS_SERIES_WEIGHT
+
+
 def scan_review_series_match_weight(profile: ScanReviewSeriesMatchProfile) -> float:
     """Estimate relative Step 2 cost for one series-level match."""
     base = _SERIES_MATCH_DIRECT_WEIGHT if profile.direct_match else _SERIES_MATCH_SEARCH_WEIGHT
@@ -288,6 +293,13 @@ def scan_review_file_target_weight(profile: ScanReviewFileMatchProfile) -> float
     issue_count = max(int(profile.issue_count or 0), 0)
     issue_bonus = min(issue_count / 250, _FILE_TARGET_MAX_ISSUE_BONUS)
     return max(_FILE_TARGET_BASE_WEIGHT + issue_bonus, 0.1)
+
+
+def scan_review_file_match_weight(profile: ScanReviewFileMatchProfile) -> float:
+    """Return aggregate file-match work without allocating one entry per file."""
+    return scan_review_file_target_weight(profile) + (
+        max(profile.file_count, 0) * _FILE_MATCH_FILE_WEIGHT
+    )
 
 
 def scan_review_completed_weight(

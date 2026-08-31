@@ -1,0 +1,21 @@
+<section aria-labelledby="story-arc-catalog-heading" class="space-y-4 rounded-lg border border-pb-border bg-pb-card p-4">
+  <div>
+    <h2 id="story-arc-catalog-heading" class="text-lg font-semibold text-pb-text">Find a Story Arc on Comic Vine</h2>
+    <p class="mt-1 text-sm text-pb-text-sec">Preview its members and review the reading order before adding. Your existing series keep their monitoring and files.</p>
+  </div>
+  <form action="/story-arcs/catalog" method="get" hx-get="/story-arcs/catalog"
+        hx-target="#story-arc-catalog-results" hx-swap="innerHTML" hx-indicator="#story-arc-catalog-loading"
+        hx-trigger="submit, input changed delay:500ms from:input" hx-sync="this:replace"
+        data-testid="story-arc-catalog-search" class="flex flex-col gap-3 sm:flex-row sm:items-end">
+    <div class="min-w-0 flex-1">
+      <label for="story-arc-provider-query" class="mb-1 block text-sm font-medium text-pb-text">Comic Vine arc name</label>
+      <input id="story-arc-provider-query" name="q" type="search" value="{{ catalog_query|default('') }}" minlength="2" maxlength="500"
+             autocomplete="off" class="input-pb w-full" placeholder="Search by arc name">
+    </div>
+    <button type="submit" class="btn-primary">Search Comic Vine</button>
+    <span id="story-arc-catalog-loading" role="status" class="htmx-indicator text-sm text-pb-text-sec">Searching Comic Vine…</span>
+  </form>
+  <div id="story-arc-catalog-results" aria-live="polite" aria-atomic="false">
+    {% if results is defined %}{% include "partials/story_arc_catalog_results.html" %}{% endif %}
+  </div>
+</section>

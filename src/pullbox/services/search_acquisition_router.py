@@ -6,11 +6,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
 from pullbox.core.exceptions import ProviderError
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
     DirectAcquisitionState,
     DirectArtifactFailureClass,
+    DirectArtifactState,
     DirectProviderConfig,
     DirectProviderState,
 )
@@ -23,6 +27,7 @@ from pullbox.services.direct_acquisition_planner_service import (
 from pullbox.services.direct_acquisition_state import (
     advance_acquisition_progress,
     transition_acquisition,
+    transition_artifact,
 )
 from pullbox.services.direct_provider_quota import (
     automatic_quota_available,
@@ -88,6 +93,7 @@ class DirectRunnerLike(Protocol):
 
 
 DirectPlanner = Callable[..., Awaitable[DirectAcquisitionPlanningResult]]
+AcquisitionEligibilityCheck = Callable[[], Awaitable[bool]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +123,11 @@ async def route_search_acquisition(
     runner: DirectRunnerLike | None,
     source_priority: list[str] | None = None,
     planner: DirectPlanner = plan_direct_acquisition,
+    eligibility_check: AcquisitionEligibilityCheck | None = None,
 ) -> SearchAcquisitionRoutingResult:
-    """Persist all discoveries and route the best result through its own adapter."""
+    """Route a winner, optionally rechecking read-only scope eligibility at each handoff."""
+    if stopped := await _stop_if_ineligible(session, eligibility_check):
+        return stopped
     target = outcome.target
     discoveries: tuple[DirectSearchDiscovery, ...] = ()
     if outcome.direct_outcome is not None:
@@ -139,6 +148,8 @@ async def route_search_acquisition(
     notices: list[str] = []
     first_confidence = ranked[0].validation.confidence.value
     for selected in ranked:
+        if stopped := await _stop_if_ineligible(session, eligibility_check, discoveries):
+            return stopped
         confidence = selected.validation.confidence.value
         auto_grab = should_auto_grab(
             selected.validation.confidence,
@@ -170,6 +181,8 @@ async def route_search_acquisition(
                     release_title=selected.release.title,
                 )
             if not await intervention_service.has_pending_for_issue(session, target.issue_id):
+                if stopped := await _stop_if_ineligible(session, eligibility_check, discoveries):
+                    return stopped
                 await intervention_service.create_pending_match(
                     session,
                     target.issue_id,
@@ -238,6 +251,8 @@ async def route_search_acquisition(
         )
         if provider is None:
             raise RuntimeError("Direct provider configuration was not found.")
+        if stopped := await _stop_if_ineligible(session, eligibility_check, discoveries):
+            return stopped
         reserve_notice = _automatic_reserve_notice(provider)
         if reserve_notice is not None:
             notices.append(reserve_notice)
@@ -254,6 +269,8 @@ async def route_search_acquisition(
         try:
             planned = await planner(session, acquisition_id=discovery.attempt_id)
         except DirectAcquisitionPlanningError as exc:
+            if stopped := await _stop_if_ineligible(session, eligibility_check, discoveries):
+                return stopped
             if exc.intervention:
                 await intervention_service.create_direct_pending_match(
                     session,
@@ -275,6 +292,8 @@ async def route_search_acquisition(
             await session.commit()
             continue
         await session.commit()
+        if stopped := await _stop_if_ineligible(session, eligibility_check, discoveries):
+            return stopped
         if runner is None:
             raise RuntimeError("Direct acquisition runner is not initialized.")
         await runner.dispatch(
@@ -300,6 +319,62 @@ async def route_search_acquisition(
         first_confidence,
         None,
         tuple(notices),
+    )
+
+
+async def _stop_if_ineligible(
+    session: AsyncSession,
+    eligibility_check: AcquisitionEligibilityCheck | None,
+    discoveries: tuple[DirectSearchDiscovery, ...] = (),
+) -> SearchAcquisitionRoutingResult | None:
+    """Re-query current scope without carrying its read snapshot across remote work."""
+    if eligibility_check is None:
+        return None
+    # Resolution may have retained a read snapshot or produced durable planning
+    # state. Preserve that state before the caller checks current eligibility.
+    await session.commit()
+    eligible = await eligibility_check()
+    await session.commit()
+    if eligible is True:
+        return None
+    if discoveries:
+        attempts = await session.scalars(
+            select(DirectAcquisitionAttempt)
+            .where(DirectAcquisitionAttempt.id.in_(item.attempt_id for item in discoveries))
+            .options(selectinload(DirectAcquisitionAttempt.artifact_attempts))
+            .execution_options(populate_existing=True)
+        )
+        for attempt in attempts:
+            _cancel_unsubmitted_attempt(attempt)
+        await session.commit()
+    return SearchAcquisitionRoutingResult(0, 0, "no_longer_eligible", None, None)
+
+
+def _cancel_unsubmitted_attempt(attempt: DirectAcquisitionAttempt) -> None:
+    """Cancel only this router's unsubmitted plans, never rewrite terminal history."""
+    if attempt.state not in {
+        DirectAcquisitionState.DISCOVERED,
+        DirectAcquisitionState.PLANNED,
+        DirectAcquisitionState.INTERVENTION,
+    }:
+        return
+    transition_acquisition(attempt, DirectAcquisitionState.CANCELLED)
+    attempt.failure_class = DirectArtifactFailureClass.USER_ACTION
+    attempt.failure_code = "no_longer_eligible"
+    attempt.error_message = "Search scope changed before acquisition could be submitted."
+    attempt.next_retry_at = None
+    for artifact in attempt.artifact_attempts:
+        if artifact.state not in {DirectArtifactState.PLANNED, DirectArtifactState.INTERVENTION}:
+            continue
+        transition_artifact(artifact, DirectArtifactState.CANCELLED)
+        artifact.failure_class = DirectArtifactFailureClass.USER_ACTION
+        artifact.failure_code = attempt.failure_code
+        artifact.error_message = attempt.error_message
+        artifact.next_retry_at = None
+    advance_acquisition_progress(
+        attempt,
+        revision=attempt.progress_revision + 1,
+        snapshot={"schema_version": 1, "stage": "cancelled", "failure_code": attempt.failure_code},
     )
 
 

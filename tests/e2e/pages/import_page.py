@@ -64,6 +64,86 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-collection-source-browse']").first
 
     @property
+    def source_path_input(self) -> Locator:
+        return self.page.locator("[data-testid='import-collection-source-path']").first
+
+    @property
+    def file_handling_managed(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-managed']").first
+
+    @property
+    def file_handling_in_place(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place']").first
+
+    @property
+    def file_handling_in_place_ready(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place-ready']").first
+
+    @property
+    def file_handling_in_place_blocked(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place-blocked']").first
+
+    @property
+    def start_scan_button(self) -> Locator:
+        return self.page.locator("[data-testid='import-start-scan']").first
+
+    @property
+    def source_layout_series_folders(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-series-folders']").first
+
+    @property
+    def source_layout_section(self) -> Locator:
+        return self.page.locator("[data-testid='import-collection-layout-section']").first
+
+    @property
+    def source_layout_publisher_series(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-publisher-series']").first
+
+    @property
+    def source_layout_custom(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-custom']").first
+
+    @property
+    def source_layout_custom_fields(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-custom-fields']").first
+
+    @property
+    def source_layout_analyze_button(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-analyze']").first
+
+    @property
+    def source_layout_fallback_checkbox(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-fallback']").first
+
+    @property
+    def source_layout_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-preview']").first
+
+    @property
+    def story_arc_section(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-section']").first
+
+    @property
+    def story_arc_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-preview']").first
+
+    @property
+    def story_arc_import_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-import-toggle']").first
+
+    @property
+    def story_arc_materialize_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-materialize-toggle']").first
+
+    @property
+    def future_layout_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-future-layout-toggle']").first
+
+    @property
+    def future_layout_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-future-layout-preview']").first
+
+    @property
     def file_browser_modal(self) -> Locator:
         return self.page.locator("[data-testid='file-browser-modal']").first
 

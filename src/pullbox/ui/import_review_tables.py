@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import ColumnElement, and_, case, func, or_, select
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -226,9 +227,7 @@ def _format_import_review_issue_number(issue_number: object) -> str | None:
         numeric_issue = float(issue_number)
     except (TypeError, ValueError):
         return str(issue_number).strip() or None
-    if numeric_issue.is_integer():
-        return str(int(numeric_issue))
-    return f"{numeric_issue:g}"
+    return format_issue_number(numeric_issue)
 
 
 def _comicvine_issue_url(issue_cv_id: int) -> str:

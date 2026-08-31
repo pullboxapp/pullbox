@@ -1,4 +1,8 @@
-<div x-data="importSourceData()" data-testid="import-collection-source" class="space-y-4">
+<div
+  x-data="importSourceData({ libraryRoots: {{ library_root_options|default([])|tojson|forceescape }} })"
+  data-testid="import-collection-source"
+  class="space-y-4"
+>
   <section class="downloads-table-wrap" data-testid="import-collection-source-shell">
     <div class="space-y-5 px-5 py-5 sm:px-6">
       <div>
@@ -6,7 +10,7 @@
         <div class="mt-4 grid gap-3 md:grid-cols-2">
           <button
             type="button"
-            @click="sourceType = 'filesystem'"
+            @click="selectSourceType('filesystem')"
             class="selection-card cursor-pointer text-left"
             :class="sourceType === 'filesystem' ? 'selection-card-active' : ''"
             :aria-pressed="sourceType === 'filesystem'"
@@ -27,7 +31,7 @@
 
           <button
             type="button"
-            @click="sourceType = 'mylar3'"
+            @click="selectSourceType('mylar3')"
             class="selection-card cursor-pointer text-left"
             :class="sourceType === 'mylar3' ? 'selection-card-active' : ''"
             :aria-pressed="sourceType === 'mylar3'"
@@ -57,14 +61,16 @@
           <input
             type="text"
             x-model="sourcePath"
+            @input.debounce.600ms="scheduleLayoutPreview(); scheduleStoryArcPreview()"
             :placeholder="sourceType === 'filesystem' ? '/imports' : '/imports/mylar.db'"
             class="input-pb flex-1 font-mono"
+            data-testid="import-collection-source-path"
           >
           <button
             type="button"
             @click="sourceType === 'mylar3'
-              ? openFileBrowser('sourcePath', sourcePath, { selectionMode: 'file', extensions: '.db' })
-              : openFileBrowser('sourcePath', sourcePath)"
+              ? openFileBrowser('sourcePath', sourcePath, { selectionMode: 'file', extensions: '.db', onSelectAction: 'selectImportSource' })
+              : openFileBrowser('sourcePath', sourcePath, { onSelectAction: 'selectImportSource' })"
             class="btn-ghost btn-sm shrink-0"
             data-testid="import-collection-source-browse"
           >
@@ -79,14 +85,683 @@
           </span>
           <div class="min-w-0">
             <p class="font-semibold text-pb-text">Collection imports preserve source files.</p>
-            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+            <p
+              x-show="fileHandlingMode === 'managed_copy'"
+              class="mt-1 text-xs leading-5 text-pb-text-sec"
+            >
               Pullbox copies, renames, converts, and writes ComicInfo.xml only in the library
               destination. Files and folders in the selected source stay untouched so existing
               Mylar, Kapowarr, NAS, or shared-folder setups remain safe.
             </p>
+            <p
+              x-show="fileHandlingMode === 'in_place'"
+              class="mt-1 text-xs leading-5 text-pb-text-sec"
+            >
+              Pullbox registers the files at their current paths. It will not create a second
+              comic file or change the existing file or folder layout.
+            </p>
           </div>
         </div>
       </div>
+
+      <section
+        x-show="sourceType === 'filesystem' || sourceType === 'mylar3'"
+        x-cloak
+        class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
+        data-testid="import-file-handling-section"
+      >
+        <div>
+          <p class="downloads-section-label">What should Pullbox do with existing files?</p>
+          <p class="mt-2 text-xs leading-5 text-pb-text-sec">
+            Both choices preserve the selected source. The difference is whether Pullbox creates
+            and manages a library copy or references your current file.
+          </p>
+        </div>
+
+        <div class="grid gap-3 md:grid-cols-2">
+          <button
+            type="button"
+            @click="setFileHandlingMode('managed_copy')"
+            class="selection-card cursor-pointer text-left"
+            :class="fileHandlingMode === 'managed_copy' ? 'selection-card-active' : ''"
+            :aria-pressed="fileHandlingMode === 'managed_copy'"
+            data-testid="import-file-handling-managed"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Copy into Pullbox library</h3>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Recommended. Pullbox creates a managed copy and may apply your naming, format,
+              metadata, and permission settings to that copy.
+            </p>
+          </button>
+
+          <button
+            type="button"
+            @click="setFileHandlingMode('in_place')"
+            class="selection-card cursor-pointer text-left"
+            :class="fileHandlingMode === 'in_place' ? 'selection-card-active' : ''"
+            :aria-pressed="fileHandlingMode === 'in_place'"
+            data-testid="import-file-handling-in-place"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Keep files in place</h3>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Reference files already inside an enabled Pullbox library root. Pullbox will not
+              rename, convert, rewrite metadata, or change permissions on them.
+            </p>
+          </button>
+        </div>
+
+        <div
+          x-show="sourceType === 'filesystem' && fileHandlingMode === 'in_place' && !layoutPreview"
+          class="inline-alert inline-alert-info"
+        >
+          Analyze the folder layout to verify that every sampled file can stay in place safely.
+        </div>
+        <div
+          x-show="sourceType === 'filesystem' && fileHandlingMode === 'in_place' && layoutPreview && layoutPreview.can_keep_in_place"
+          class="inline-alert inline-alert-success"
+          data-testid="import-file-handling-in-place-ready"
+        >
+          This sample is inside a configured library root and can be registered in place.
+        </div>
+        <div
+          x-show="sourceType === 'filesystem' && fileHandlingMode === 'in_place' && layoutPreview && !layoutPreview.can_keep_in_place"
+          class="inline-alert inline-alert-warning"
+          data-testid="import-file-handling-in-place-blocked"
+        >
+          This source cannot be kept in place yet. Review the layout warnings or choose a managed
+          copy.
+        </div>
+        <div x-show="sourceType === 'mylar3' && fileHandlingMode === 'in_place'" class="space-y-3">
+          <div class="space-y-2">
+            <label for="import-in-place-library-root" class="block text-xs font-medium text-pb-text-sec">
+              Existing library root
+            </label>
+            <select
+              id="import-in-place-library-root"
+              x-model.number="targetLibraryRootId"
+              class="input-pb w-full"
+              aria-describedby="import-mylar-in-place-help"
+              data-testid="import-in-place-library-root"
+            >
+              <option value="">Choose a library root</option>
+              <template x-for="root in libraryRoots" :key="root.id">
+                <option :value="root.id" x-text="root.name + ' — ' + root.path"></option>
+              </template>
+            </select>
+          </div>
+          <div
+            id="import-mylar-in-place-help"
+            class="inline-alert inline-alert-info"
+            data-testid="import-mylar-in-place-review"
+          >
+            Pullbox checks comic files after path mapping during the scan. Files outside this
+            root or missing on disk need review. Your Mylar database can be elsewhere;
+            the database and source files stay unchanged.
+          </div>
+          <div x-show="!libraryRoots.length" class="inline-alert inline-alert-warning">
+            Configure an enabled library root before importing Mylar files in place.
+          </div>
+        </div>
+      </section>
+
+      <section
+        x-show="sourceType === 'filesystem' || sourceType === 'mylar3'"
+        x-cloak
+        class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
+        data-testid="import-collection-layout-section"
+      >
+        <div>
+          <p class="downloads-section-label">How is this library organized?</p>
+          <p x-show="sourceType === 'filesystem'" class="mt-2 text-xs leading-5 text-pb-text-sec">
+            Choose how Pullbox should read series folders and issue filenames. Previewing only
+            inspects a bounded sample; it does not create an import or change files.
+          </p>
+          <p x-show="sourceType === 'mylar3'" class="mt-2 text-xs leading-5 text-pb-text-sec">
+            Choose how Pullbox should read the series folders and issue filenames referenced by
+            Mylar. Pullbox applies this after path mapping while keeping trusted Mylar IDs
+            authoritative.
+          </p>
+        </div>
+
+        <div class="grid gap-3 md:grid-cols-2">
+          <button
+            type="button"
+            @click="setLayoutChoice('auto')"
+            class="selection-card cursor-pointer text-left"
+            :class="layoutChoice === 'auto' ? 'selection-card-active' : ''"
+            :aria-pressed="layoutChoice === 'auto'"
+            data-testid="import-layout-auto"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Automatic detection</h3>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Best for mixed libraries or when you are not sure. Recommended.
+            </p>
+          </button>
+
+          <button
+            type="button"
+            @click="setLayoutChoice('series_folders')"
+            class="selection-card cursor-pointer text-left"
+            :class="layoutChoice === 'series_folders' ? 'selection-card-active' : ''"
+            :aria-pressed="layoutChoice === 'series_folders'"
+            data-testid="import-layout-series-folders"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Series folders</h3>
+            <p class="mt-1 font-mono text-xs text-pb-text-sec">&#123;Series&#125;/issue.cbz</p>
+          </button>
+
+          <button
+            type="button"
+            @click="setLayoutChoice('publisher_series')"
+            class="selection-card cursor-pointer text-left"
+            :class="layoutChoice === 'publisher_series' ? 'selection-card-active' : ''"
+            :aria-pressed="layoutChoice === 'publisher_series'"
+            data-testid="import-layout-publisher-series"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Publisher and series folders</h3>
+            <p class="mt-1 font-mono text-xs text-pb-text-sec">
+              &#123;Publisher&#125;/&#123;Series&#125;/issue.cbz
+            </p>
+          </button>
+
+          <button
+            type="button"
+            @click="setLayoutChoice('custom')"
+            class="selection-card cursor-pointer text-left"
+            :class="layoutChoice === 'custom' ? 'selection-card-active' : ''"
+            :aria-pressed="layoutChoice === 'custom'"
+            data-testid="import-layout-custom"
+          >
+            <h3 class="text-sm font-semibold text-pb-text">Custom templates</h3>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Describe an existing folder and issue naming pattern.
+            </p>
+          </button>
+        </div>
+
+        <div
+          x-show="layoutChoice === 'custom'"
+          x-cloak
+          class="grid gap-4 rounded-xl border border-pb-border bg-pb-bg/40 p-4 md:grid-cols-2"
+          data-testid="import-layout-custom-fields"
+        >
+          <div>
+            <label for="import-source-series-template" class="block text-xs font-medium text-pb-text-sec">
+              Series folder structure
+            </label>
+            <input
+              id="import-source-series-template"
+              type="text"
+              x-model="customSeriesPathTemplate"
+              @input.debounce.600ms="scheduleLayoutPreview()"
+              class="input-pb mt-2 w-full font-mono"
+              autocomplete="off"
+            >
+            <p class="mt-1 text-[11px] leading-5 text-pb-text-dim">
+              Example: &#123;Publisher&#125;/&#123;Series&#125; (&#123;Year&#125;)
+            </p>
+          </div>
+          <div>
+            <label for="import-source-issue-template" class="block text-xs font-medium text-pb-text-sec">
+              Issue filename structure <span class="font-normal">(optional)</span>
+            </label>
+            <input
+              id="import-source-issue-template"
+              type="text"
+              x-model="customIssueFilenameTemplate"
+              @input.debounce.600ms="scheduleLayoutPreview()"
+              class="input-pb mt-2 w-full font-mono"
+              autocomplete="off"
+            >
+            <p class="mt-1 text-[11px] leading-5 text-pb-text-dim">
+              Example: &#123;Series&#125; &#123;IssueTitle&#125; Issue &#123;Issue:03d&#125;
+            </p>
+          </div>
+        </div>
+
+        <div
+          x-show="layoutChoice !== 'auto'"
+          x-cloak
+          class="rounded-xl border border-pb-border bg-pb-bg/40 p-4"
+        >
+          <label class="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              x-model="layoutFallbackToAuto"
+              @change="scheduleLayoutPreview()"
+              class="checkbox-pb mt-0.5 shrink-0"
+              data-testid="import-layout-fallback"
+            >
+            <span class="min-w-0">
+              <span class="block text-sm font-semibold text-pb-text">
+                Use automatic detection for files that do not fit
+              </span>
+              <span
+                x-show="layoutFallbackToAuto"
+                class="mt-1 block text-xs leading-5 text-pb-text-sec"
+              >
+                Pullbox keeps those files visible and applies its existing safe detection.
+              </span>
+              <span
+                x-show="!layoutFallbackToAuto"
+                class="mt-1 block text-xs leading-5 text-pb-warning"
+              >
+                Files that do not fit will wait for review and will not be matched automatically.
+              </span>
+            </span>
+          </label>
+        </div>
+
+        <div x-show="sourceType === 'filesystem'" class="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            @click="previewLayout(); previewStoryArcs()"
+            :disabled="!canAnalyzeLayout() || layoutPreviewLoading"
+            class="btn-secondary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
+            data-testid="import-layout-analyze"
+          >
+            <svg x-show="layoutPreviewLoading" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            <span x-text="layoutPreviewLoading ? 'Analyzing...' : 'Analyze folder layout'"></span>
+          </button>
+          <span class="text-[11px] text-pb-text-dim">Uses a server-bounded sample.</span>
+        </div>
+
+        <div x-show="sourceType === 'mylar3'" class="space-y-3">
+          <div class="inline-alert inline-alert-info">
+            Pullbox will validate this layout against resolved Mylar paths during the scan. Files
+            that do not fit remain visible for review according to the fallback choice above.
+          </div>
+          <button
+            type="button"
+            @click="previewStoryArcs()"
+            :disabled="!canAnalyzeStoryArcs() || storyArcPreviewLoading"
+            class="btn-secondary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
+            data-testid="import-story-arc-analyze"
+          >
+            <svg x-show="storyArcPreviewLoading" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            <span x-text="storyArcPreviewLoading ? 'Inspecting...' : 'Inspect Mylar Story Arcs'"></span>
+          </button>
+        </div>
+
+        <div x-show="sourceType === 'filesystem' && layoutPreviewError" x-cloak class="inline-alert inline-alert-danger" role="alert">
+          <span x-text="layoutPreviewError"></span>
+        </div>
+
+        <div
+          x-show="sourceType === 'filesystem' && layoutPreview"
+          x-cloak
+          class="space-y-4 rounded-xl border border-pb-border bg-pb-bg/50 p-4"
+          data-testid="import-layout-preview"
+          aria-live="polite"
+        >
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p class="text-sm font-semibold text-pb-text" x-text="layoutClassificationLabel(layoutPreview && layoutPreview.classification)"></p>
+              <p class="mt-1 text-xs text-pb-text-sec" x-text="layoutPreviewSummary()"></p>
+            </div>
+            <span
+              x-show="layoutPreview && layoutPreview.partial"
+              class="pill pill-warning self-start"
+            >Partial sample</span>
+          </div>
+
+          <template x-if="layoutPreview && layoutPreview.files_ambiguous">
+            <div class="inline-alert inline-alert-warning">
+              <span x-text="layoutPreview.files_ambiguous + ' sampled file(s) need another interpretation.'"></span>
+            </div>
+          </template>
+
+          <template x-for="warning in ((layoutPreview && layoutPreview.warnings) || [])" :key="warning">
+            <p class="text-xs leading-5 text-pb-warning" x-text="warning"></p>
+          </template>
+
+          <div class="space-y-3">
+            <template x-for="cluster in ((layoutPreview && layoutPreview.clusters) || [])" :key="cluster.cluster_id">
+              <article class="rounded-lg border border-pb-border bg-pb-surface/50 p-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <strong class="text-xs text-pb-text" x-text="layoutClassificationLabel(cluster.classification)"></strong>
+                  <span class="text-[11px] text-pb-text-dim" x-text="cluster.file_count + ' file(s) · ' + cluster.confidence + ' confidence'"></span>
+                </div>
+                <div class="mt-3 space-y-2">
+                  <template x-for="example in cluster.examples" :key="example.relative_path">
+                    <div class="rounded-md border border-pb-border/70 bg-pb-bg/60 p-3">
+                      <code class="block break-all text-[11px] text-pb-text" x-text="example.relative_path"></code>
+                      <p class="mt-1 text-[11px] text-pb-text-sec">
+                        <span x-text="example.series || 'Series needs review'"></span>
+                        <span x-show="example.issue_number" x-text="' · Issue ' + example.issue_number"></span>
+                        <span x-show="example.issue_title" x-text="' · ' + example.issue_title"></span>
+                      </p>
+                    </div>
+                  </template>
+                </div>
+              </article>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <div
+        x-show="storyArcPreviewError"
+        x-cloak
+        class="inline-alert inline-alert-danger"
+        role="alert"
+      >
+        <span x-text="storyArcPreviewError"></span>
+      </div>
+
+      <section
+        x-show="storyArcPreview && storyArcPreview.evidence_detected"
+        x-cloak
+        class="space-y-5 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
+        data-testid="import-story-arc-section"
+      >
+        <div>
+          <p class="downloads-section-label">Story Arcs</p>
+          <p class="mt-2 text-xs leading-5 text-pb-text-sec">
+            Pullbox found local Story Arc evidence. Choose what you want included in this import;
+            these choices do not change files during analysis.
+          </p>
+        </div>
+
+        <div
+          class="space-y-4 rounded-xl border border-pb-border bg-pb-bg/50 p-4"
+          data-testid="import-story-arc-preview"
+          aria-live="polite"
+        >
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-pb-text">
+                <span x-text="storyArcPreview.arcs_detected + (storyArcPreview.arcs_detected === 1 ? ' arc' : ' arcs')"></span>
+                <span aria-hidden="true"> · </span>
+                <span x-text="storyArcPreview.entries_detected + (storyArcPreview.entries_detected === 1 ? ' entry' : ' entries')"></span>
+              </p>
+              <p class="mt-1 text-xs text-pb-text-sec" x-text="storyArcPreview.pattern_summary || 'Local Story Arc metadata'"></p>
+            </div>
+            <span x-show="storyArcPreview.partial" class="pill pill-warning">Preliminary sample</span>
+          </div>
+
+          <dl class="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
+            <div class="rounded-lg border border-pb-border/70 p-3">
+              <dt class="text-pb-text-dim">Resolved</dt>
+              <dd class="mt-1 font-semibold text-pb-text" x-text="storyArcPreview.resolution.resolved"></dd>
+            </div>
+            <div class="rounded-lg border border-pb-border/70 p-3">
+              <dt class="text-pb-text-dim">Pending</dt>
+              <dd class="mt-1 font-semibold text-pb-text" x-text="storyArcPreview.resolution.pending"></dd>
+            </div>
+            <div class="rounded-lg border border-pb-border/70 p-3">
+              <dt class="text-pb-text-dim">Missing</dt>
+              <dd class="mt-1 font-semibold text-pb-text" x-text="storyArcPreview.resolution.missing"></dd>
+            </div>
+            <div class="rounded-lg border border-pb-border/70 p-3">
+              <dt class="text-pb-text-dim">Ambiguous</dt>
+              <dd class="mt-1 font-semibold text-pb-text" x-text="storyArcPreview.resolution.ambiguous"></dd>
+            </div>
+            <div class="rounded-lg border border-pb-border/70 p-3">
+              <dt class="text-pb-text-dim">Conflicts</dt>
+              <dd class="mt-1 font-semibold text-pb-text" x-text="storyArcPreview.resolution.conflicts"></dd>
+            </div>
+            <div class="rounded-lg border border-pb-border/70 p-3">
+              <dt class="text-pb-text-dim">Duplicates</dt>
+              <dd class="mt-1 font-semibold text-pb-text" x-text="storyArcPreview.resolution.duplicates"></dd>
+            </div>
+          </dl>
+
+          <div class="grid gap-3 lg:grid-cols-2">
+            <div class="rounded-lg border border-pb-border/70 p-3 text-xs leading-5 text-pb-text-sec">
+              <p class="font-semibold text-pb-text">Existing arc files</p>
+              <p class="mt-1" x-text="storyArcPreview.existing_arc_files_detected
+                ? 'Existing separate arc folders or files were reported. Pullbox will treat them as user-owned references.'
+                : 'No existing separate arc files were reported in this sample.'"></p>
+            </div>
+            <div class="rounded-lg border border-pb-border/70 p-3 text-xs leading-5 text-pb-text-sec">
+              <p class="font-semibold text-pb-text">Provider use</p>
+              <p class="mt-1" x-text="storyArcPreview.provider_call_summary"></p>
+            </div>
+          </div>
+
+          <div x-show="storyArcPreview.settings && storyArcPreview.settings.length" class="space-y-2">
+            <p class="text-xs font-semibold text-pb-text">Detected Mylar settings</p>
+            <dl class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              <template x-for="setting in storyArcPreview.settings" :key="setting.key">
+                <div class="rounded-lg border border-pb-border/70 p-3 text-xs">
+                  <dt class="font-mono text-[11px] text-pb-text-dim" x-text="setting.key"></dt>
+                  <dd class="mt-1 break-words text-pb-text" x-text="storyArcSettingValue(setting)"></dd>
+                </div>
+              </template>
+            </dl>
+          </div>
+
+          <div x-show="storyArcPreview.examples && storyArcPreview.examples.length" class="space-y-2">
+            <p class="text-xs font-semibold text-pb-text">Sanitized examples</p>
+            <div class="space-y-2">
+              <template x-for="(example, index) in storyArcPreview.examples" :key="(example.story_arc || 'arc') + '-' + index">
+                <div class="rounded-lg border border-pb-border/70 p-3 text-xs">
+                  <p class="font-semibold text-pb-text" x-text="example.story_arc || 'Story Arc needs review'"></p>
+                  <p class="mt-1 text-pb-text-sec">
+                    <span x-show="example.reading_order" x-text="'Order ' + example.reading_order + ' · '"></span>
+                    <span x-text="example.series || 'Series needs review'"></span>
+                    <span x-show="example.issue_number" x-text="' · Issue ' + example.issue_number"></span>
+                    <span x-show="example.issue_title" x-text="' · ' + example.issue_title"></span>
+                  </p>
+                  <code x-show="example.relative_path" class="mt-1 block break-all text-[11px] text-pb-text-dim" x-text="example.relative_path"></code>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-pb-border/70 p-3 text-xs">
+            <p class="font-semibold text-pb-text">Proposed arc-folder policy</p>
+            <dl class="mt-2 grid gap-x-4 gap-y-2 sm:grid-cols-2">
+              <div><dt class="text-pb-text-dim">Mode</dt><dd class="font-mono text-pb-text" x-text="storyArcPreview.proposed_policy.mode"></dd></div>
+              <div><dt class="text-pb-text-dim">Arc root</dt><dd class="text-pb-text" x-text="storyArcPreview.proposed_policy.destination_root_configured ? 'Configured (path hidden)' : 'Choose during review'"></dd></div>
+              <div><dt class="text-pb-text-dim">Folder template</dt><dd class="break-all font-mono text-pb-text" x-text="storyArcPreview.proposed_policy.folder_template"></dd></div>
+              <div><dt class="text-pb-text-dim">Filename template</dt><dd class="break-all font-mono text-pb-text" x-text="storyArcPreview.proposed_policy.file_template"></dd></div>
+              <div><dt class="text-pb-text-dim">Reading-order prefix</dt><dd class="text-pb-text" x-text="storyArcPreview.proposed_policy.reading_order_prefix ? 'Enabled' : 'Disabled'"></dd></div>
+              <div><dt class="text-pb-text-dim">Synchronize future changes</dt><dd class="text-pb-text" x-text="storyArcPreview.proposed_policy.synchronize ? 'Proposed' : 'Off'"></dd></div>
+            </dl>
+          </div>
+
+          <div x-show="storyArcPreview.readlist_present" class="inline-alert inline-alert-info">
+            Mylar also contains <span x-text="storyArcPreview.readlist_count"></span> reading-list
+            item(s). Reading lists are reported here but remain deferred to v1.5.0; Pullbox will not
+            turn them into Story Arcs.
+          </div>
+
+          <template x-for="warning in (storyArcPreview.warnings || [])" :key="warning">
+            <p class="text-xs leading-5 text-pb-warning" x-text="warning"></p>
+          </template>
+        </div>
+
+        <div class="space-y-3">
+          <label class="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              x-model="storyArcImportRequested"
+              @change="toggleStoryArcImport()"
+              class="checkbox-pb mt-0.5 shrink-0"
+              data-testid="import-story-arc-import-toggle"
+            >
+            <span class="min-w-0">
+              <span class="block text-sm font-semibold text-pb-text">Import logical story arcs and memberships</span>
+              <span class="mt-1 block text-xs leading-5 text-pb-text-sec">
+                Include detected arcs in review while keeping canonical issues in their normal series.
+              </span>
+            </span>
+          </label>
+
+          <label
+            class="flex items-start gap-3"
+            :class="storyArcImportRequested ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'"
+          >
+            <input
+              type="checkbox"
+              x-model="storyArcMaterializationRequested"
+              :disabled="!storyArcImportRequested"
+              class="checkbox-pb mt-0.5 shrink-0"
+              data-testid="import-story-arc-materialize-toggle"
+            >
+            <span class="min-w-0">
+              <span class="block text-sm font-semibold text-pb-text">Materialize and synchronize separate arc files</span>
+              <span class="mt-1 block text-xs leading-5 text-pb-text-sec">
+                Also review optional copies or links in a separate arc folder. Turning this off keeps
+                the logical arc and memberships.
+              </span>
+            </span>
+          </label>
+        </div>
+
+        <div class="inline-alert inline-alert-info">
+          Step 3 remains the final review. No Story Arc, membership, policy, copy, or link is
+          confirmed by these Step 1 choices.
+        </div>
+      </section>
+
+      <section
+        x-show="sourceType === 'filesystem'"
+        x-cloak
+        class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
+        data-testid="import-future-layout-section"
+      >
+        <div>
+          <p class="downloads-section-label">How should Pullbox organize new files?</p>
+          <p class="mt-2 text-xs leading-5 text-pb-text-sec">
+            This is independent from keeping existing files in place. It changes future managed
+            imports and downloads for one library only.
+          </p>
+        </div>
+
+        <label class="flex items-start gap-3" :class="!canRequestFutureLayout() && 'opacity-60'">
+          <input
+            type="checkbox"
+            x-model="futureLayoutRequested"
+            @change="toggleFutureLayout()"
+            :disabled="!canRequestFutureLayout() || futurePolicyLoading"
+            class="checkbox-pb mt-0.5 shrink-0"
+            data-testid="import-future-layout-toggle"
+          >
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold text-pb-text">Use this layout for future files</span>
+            <span class="mt-1 block text-xs leading-5 text-pb-text-sec">
+              Existing files won't be renamed. Pullbox activates this policy only after at least
+              one file is registered successfully in Step 4.
+            </span>
+          </span>
+        </label>
+
+        <div x-show="libraryRoots.length" x-cloak class="space-y-2">
+          <label for="import-future-library-root" class="block text-xs font-medium text-pb-text-sec">
+            Target library
+          </label>
+          <select
+            id="import-future-library-root"
+            x-model.number="targetLibraryRootId"
+            @change="futureLayoutRootChanged()"
+            :disabled="futurePolicyLoading"
+            class="input-pb max-w-2xl"
+            data-testid="import-future-layout-root"
+          >
+            <template x-for="root in libraryRoots" :key="root.id">
+              <option :value="root.id" x-text="root.name + ' — ' + root.path"></option>
+            </template>
+          </select>
+        </div>
+
+        <div x-show="!libraryRoots.length" class="inline-alert inline-alert-warning">
+          Configure an enabled library root before saving a future layout.
+        </div>
+        <div
+          x-show="libraryRoots.length && (!layoutPreview || !layoutPreview.can_apply_future_policy)"
+          class="inline-alert inline-alert-info"
+        >
+          Analyze a single, unambiguous folder pattern before enabling future organization.
+        </div>
+        <div
+          x-show="layoutPreview && layoutPreview.can_apply_future_policy && !futureLayoutRequested"
+          class="inline-alert inline-alert-success"
+          data-testid="import-future-layout-ready"
+        >
+          This sample has one safe layout. You can preview and save it for future files.
+        </div>
+
+        <div x-show="futureLayoutRequested" x-cloak class="space-y-4">
+          <div class="grid gap-4 md:grid-cols-2">
+            <div>
+              <label for="import-future-series-template" class="block text-xs font-medium text-pb-text-sec">
+                Future series path
+              </label>
+              <input
+                id="import-future-series-template"
+                type="text"
+                x-model="futureRootPolicy.series_path_template"
+                @input.debounce.350ms="previewFuturePolicy()"
+                class="input-pb mt-2 w-full font-mono"
+                data-testid="import-future-series-template"
+              >
+              <p class="mt-1 text-[11px] leading-5 text-pb-text-dim">
+                Forward slashes create publisher or other nested folders under this library.
+              </p>
+            </div>
+            <div>
+              <label for="import-future-file-template" class="block text-xs font-medium text-pb-text-sec">
+                Future standard issue filename
+              </label>
+              <input
+                id="import-future-file-template"
+                type="text"
+                x-model="futureRootPolicy.comic_file_template"
+                @input.debounce.350ms="previewFuturePolicy()"
+                class="input-pb mt-2 w-full font-mono"
+                data-testid="import-future-file-template"
+              >
+              <p class="mt-1 text-[11px] leading-5 text-pb-text-dim">
+                Annual and non-standard templates retain the selected library's current values.
+              </p>
+            </div>
+          </div>
+
+          <div x-show="futurePolicyError" class="inline-alert inline-alert-danger" role="alert">
+            <span x-text="futurePolicyError"></span>
+          </div>
+
+          <div
+            x-show="futurePolicyLoading || futurePolicyComparison"
+            class="grid gap-3 lg:grid-cols-2"
+            data-testid="import-future-layout-preview"
+            aria-live="polite"
+          >
+            <div class="rounded-lg border border-pb-border bg-pb-bg/50 p-3">
+              <p class="text-xs font-semibold uppercase tracking-wide text-pb-text-dim">Current library policy</p>
+              <div class="mt-2 space-y-1 font-mono text-[11px] text-pb-text-sec">
+                <template x-for="path in ((futurePolicyComparison && futurePolicyComparison.current_series_paths) || [])" :key="'current-path-' + path">
+                  <p x-text="path"></p>
+                </template>
+                <template x-for="name in ((futurePolicyComparison && futurePolicyComparison.current_file_names) || [])" :key="'current-file-' + name">
+                  <p class="text-pb-text-dim" x-text="name"></p>
+                </template>
+              </div>
+            </div>
+            <div class="rounded-lg border border-pb-border bg-pb-bg/50 p-3">
+              <p class="text-xs font-semibold uppercase tracking-wide text-pb-text-dim">Proposed for new files</p>
+              <p x-show="futurePolicyLoading" class="mt-2 text-xs italic text-pb-text-dim">Loading preview…</p>
+              <div class="mt-2 space-y-1 font-mono text-[11px]">
+                <template x-for="path in ((futurePolicyComparison && futurePolicyComparison.proposed_series_paths) || [])" :key="'proposed-path-' + path">
+                  <p class="text-pb-success" x-text="path"></p>
+                </template>
+                <template x-for="name in ((futurePolicyComparison && futurePolicyComparison.proposed_file_names) || [])" :key="'proposed-file-' + name">
+                  <p class="text-pb-text-sec" x-text="name"></p>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <div x-show="sourceType" x-cloak class="space-y-3">
         <button
@@ -156,8 +831,9 @@
         <button
           type="button"
           @click="startScan()"
-          :disabled="!sourcePath.trim() || scanning"
+          :disabled="!canStartScan()"
           class="btn-primary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
+          data-testid="import-start-scan"
         >
           <svg x-show="scanning" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>

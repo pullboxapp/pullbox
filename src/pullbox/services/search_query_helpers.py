@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.issue_title import collection_title_fragment, collection_title_subtitle
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.issue import IssueType
@@ -96,6 +97,7 @@ def _collection_query_strings(target: IssueSearchTarget) -> list[str]:
         target.series_title,
         target.issue_number,
         target.issue_type,
+        issue_number_text=target.effective_issue_number_text,
     ):
         _append_unique(queries, query)
     return queries
@@ -136,12 +138,20 @@ def _sanitize_query(query: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
-def _standard_issue_query_variants(series_title: str, issue_number: float | None) -> list[str]:
+def _standard_issue_query_variants(
+    series_title: str,
+    issue_number: float | None,
+    *,
+    issue_number_text: str | None = None,
+) -> list[str]:
     """Build issue query variants for indexers with strict issue-number token matching."""
     if issue_number is None:
         return [_sanitize_query(series_title)]
+    numeric_text = format_issue_number(issue_number)
+    if issue_number_text is not None and issue_number_text != numeric_text:
+        return [_sanitize_query(f"{series_title} {issue_number_text}")]
     if issue_number != int(issue_number):
-        return [_sanitize_query(f"{series_title} {issue_number}")]
+        return [_sanitize_query(f"{series_title} {issue_number_text or numeric_text}")]
 
     issue_int = int(issue_number)
     variants = [
@@ -163,21 +173,27 @@ def _build_type_queries(
     series_title: str,
     issue_number: float | None,
     issue_type: IssueType,
+    *,
+    issue_number_text: str | None = None,
 ) -> list[str]:
     """Build search query strings, appending type keywords for non-standard types."""
     keywords = _TYPE_QUERY_KEYWORDS.get(issue_type.value, [])
 
     def _fmt_issue(num: float) -> str:
-        return str(int(num)) if num == int(num) else str(num)
+        return format_issue_number(num)
 
     if not keywords:
-        return _standard_issue_query_variants(series_title, issue_number)
+        return _standard_issue_query_variants(
+            series_title,
+            issue_number,
+            issue_number_text=issue_number_text,
+        )
 
     queries: list[str] = []
     for kw in keywords:
         query = f"{series_title} {kw}"
         if issue_number is not None:
-            query += f" {_fmt_issue(issue_number)}"
+            query += f" {issue_number_text or _fmt_issue(issue_number)}"
         queries.append(_sanitize_query(query))
     return queries
 
@@ -191,7 +207,10 @@ def build_issue_queries(
     """Build search queries for one issue target and mode."""
     issue_type = target.issue_type
     if mode == "fast":
-        if issue_type == IssueType.ISSUE and not force_generic:
+        exact_differs_from_numeric = target.effective_issue_number_text != format_issue_number(
+            target.issue_number
+        )
+        if issue_type == IssueType.ISSUE and (not force_generic or exact_differs_from_numeric):
             return [
                 SearchQuery(
                     series_title=query_string,
@@ -202,6 +221,7 @@ def build_issue_queries(
                 for query_string in _standard_issue_query_variants(
                     target.series_title,
                     target.issue_number,
+                    issue_number_text=target.effective_issue_number_text,
                 )
             ]
         if issue_type_family(issue_type) is TypeFamily.COLLECTION and not force_generic:
@@ -228,6 +248,7 @@ def build_issue_queries(
             target.series_title,
             target.issue_number,
             IssueType.ISSUE,
+            issue_number_text=target.effective_issue_number_text,
         )
     else:
         query_strings = _collection_query_strings(target)
@@ -236,6 +257,7 @@ def build_issue_queries(
                 target.series_title,
                 target.issue_number,
                 issue_type,
+                issue_number_text=target.effective_issue_number_text,
             )
 
     if not force_generic and issue_type in _COLLECTION_TYPES:
@@ -276,6 +298,9 @@ def build_auto_fallback_queries(target: IssueSearchTarget) -> list[SearchQuery]:
             target.series_title,
             fallback_issue,
             IssueType.ISSUE,
+            issue_number_text=(
+                target.effective_issue_number_text if fallback_issue is not None else None
+            ),
         )
         return [
             SearchQuery(
@@ -285,6 +310,18 @@ def build_auto_fallback_queries(target: IssueSearchTarget) -> list[SearchQuery]:
                 issue_type=target.issue_type.value,
             )
             for query_string in generic_queries
+        ]
+
+    if target.effective_issue_number_text != format_issue_number(target.issue_number):
+        return [
+            SearchQuery(
+                series_title=_sanitize_query(
+                    f"{target.series_title} {target.effective_issue_number_text}"
+                ),
+                issue_number=None,
+                year=target.search_year,
+                issue_type=target.issue_type.value,
+            )
         ]
 
     return [

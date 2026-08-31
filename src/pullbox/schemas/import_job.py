@@ -1,19 +1,39 @@
 """Import job request/response schemas."""
 
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime  # noqa: TC003 - Pydantic needs this at runtime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pullbox.models.import_job import (
     ImportControlRequest,
     ImportedFileStatus,
+    ImportFileHandlingMode,
     ImportJobStatus,
     ImportSeriesStatus,
     ImportSourceType,
 )
+from pullbox.schemas.import_layout import SourceLayoutSpecPayload
+from pullbox.schemas.story_arc_placement import (  # noqa: TC001 - Pydantic resolves at runtime
+    StoryArcPlacementPolicyPayload,
+)
 
 # ── Request Schemas ──────────────────────────────────────────────────────
+
+
+class FutureRootPolicyPayload(BaseModel):
+    """Complete proposed naming policy for a later per-root implementation."""
+
+    schema_version: Literal[1] = 1
+    series_path_template: str = Field(..., min_length=1, max_length=1024)
+    comic_file_template: str = Field(..., min_length=1, max_length=1024)
+    annual_file_template: str = Field(..., min_length=1, max_length=1024)
+    non_standard_file_template: str = Field(..., min_length=1, max_length=1024)
+    single_non_standard_file_template: str = Field(..., min_length=1, max_length=1024)
+    replace_illegal_characters: bool
+    colon_replacement: Literal["dash", "space", "empty", "smart"]
 
 
 class ImportJobCreate(BaseModel):
@@ -49,6 +69,48 @@ class ImportJobCreate(BaseModel):
     file_formats: str | None = Field(
         None, description="Comma-separated file extensions to scan (e.g. 'cbz, cbr, pdf')"
     )
+    source_layout: SourceLayoutSpecPayload = Field(
+        default_factory=SourceLayoutSpecPayload,
+        description="Versioned interpretation of source folders and filenames",
+    )
+    file_handling_mode: ImportFileHandlingMode = Field(
+        ImportFileHandlingMode.MANAGED_COPY,
+        description="Whether Pullbox creates a managed artifact or references the source",
+    )
+    future_layout_requested: bool = Field(
+        False,
+        description="Whether the proposed layout should become the target root's future policy",
+    )
+    future_root_policy: FutureRootPolicyPayload | None = Field(
+        None,
+        description="Complete proposed future policy when future_layout_requested is true",
+    )
+    story_arc_import_requested: bool = Field(
+        False,
+        description=(
+            "Step 1 intent to review and import detected logical story arcs and memberships"
+        ),
+    )
+    story_arc_materialization_requested: bool = Field(
+        False,
+        description=(
+            "Step 1 intent to review separate story-arc folder placements in addition to "
+            "logical memberships"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_future_policy_pair(self) -> ImportJobCreate:
+        """Require paired Step 1 intent fields to agree."""
+        if self.future_layout_requested and self.future_root_policy is None:
+            raise ValueError("future_root_policy is required when future_layout_requested is true")
+        if not self.future_layout_requested and self.future_root_policy is not None:
+            raise ValueError("future_root_policy requires future_layout_requested to be true")
+        if self.story_arc_materialization_requested and not self.story_arc_import_requested:
+            raise ValueError(
+                "Story arc materialization requires story_arc_import_requested to be true"
+            )
+        return self
 
     @field_validator("file_formats")
     @classmethod
@@ -109,6 +171,90 @@ class ConflictResolution(BaseModel):
     chosen_file_id: int = Field(..., gt=0, description="ImportedFile ID to keep")
 
 
+class StoryArcReviewDecision(BaseModel):
+    """Explicit Step 3 decision for one staged story arc."""
+
+    imported_story_arc_id: int = Field(..., gt=0, description="ImportedStoryArc ID")
+    action: Literal["select", "skip"] = Field(..., description="Import or skip this arc")
+    proposed_story_arc_id: int | None = Field(
+        None,
+        gt=0,
+        description="Existing StoryArc target when the staged arc should be merged",
+    )
+
+    @model_validator(mode="after")
+    def validate_skip_has_no_merge_target(self) -> StoryArcReviewDecision:
+        """A skipped staged arc cannot retain an active merge decision."""
+        if self.action == "skip" and self.proposed_story_arc_id is not None:
+            raise ValueError("proposed_story_arc_id is only valid when action is select")
+        return self
+
+
+class StoryArcReviewDecisionRequest(BaseModel):
+    """Update one staged story-arc decision from the Step 3 review UI."""
+
+    action: Literal["select", "skip"] = Field(..., description="Import or skip this arc")
+    proposed_story_arc_id: int | None = Field(
+        None,
+        gt=0,
+        description="Existing StoryArc target when the staged arc should be merged",
+    )
+
+    @model_validator(mode="after")
+    def validate_skip_has_no_merge_target(self) -> StoryArcReviewDecisionRequest:
+        """A skipped staged arc cannot retain an active merge decision."""
+        if self.action == "skip" and self.proposed_story_arc_id is not None:
+            raise ValueError("proposed_story_arc_id is only valid when action is select")
+        return self
+
+
+class StoryArcReviewDecisionResponse(BaseModel):
+    """Persisted review state for one staged story arc."""
+
+    imported_story_arc_id: int
+    status: str
+    selected_for_import: bool
+    proposed_story_arc_id: int | None
+
+
+class StoryArcPolicyConfirmationRequest(BaseModel):
+    """Explicitly freeze one staged arc policy during Step 3 review."""
+
+    confirm_policy: Literal[True]
+    expected_policy_digest: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    materialize_filesystem: bool
+    monitored: bool
+    search_missing: bool
+    include_upcoming: bool
+    placement_policy: StoryArcPlacementPolicyPayload
+
+    @model_validator(mode="after")
+    def validate_materialization_choice(self) -> StoryArcPolicyConfirmationRequest:
+        """Keep logical membership and filesystem materialization independent."""
+        logical = self.placement_policy.mode.value == "logical"
+        if self.materialize_filesystem == logical:
+            raise ValueError(
+                "materialize_filesystem must be false for logical policy and true otherwise"
+            )
+        if not self.monitored and (self.search_missing or self.include_upcoming):
+            raise ValueError("search_missing and include_upcoming require monitored to be true")
+        return self
+
+
+class StoryArcPolicyConfirmationResponse(BaseModel):
+    """Sanitized persisted state for one confirmed staged policy."""
+
+    imported_story_arc_id: int
+    activation: Literal["confirmed"]
+    materialize_filesystem: bool
+    mode: str
+    monitored: bool
+    search_missing: bool
+    include_upcoming: bool
+    sync_enabled: bool
+    policy_digest: str
+
+
 class ConfirmImportRequest(BaseModel):
     """Confirm which series to import from a REVIEW-state job."""
 
@@ -150,6 +296,17 @@ class ConfirmImportRequest(BaseModel):
     conflict_resolutions: list[ConflictResolution] = Field(
         default_factory=list, description="Conflict group resolutions"
     )
+    story_arc_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Compatibility list of staged story arcs to select. Durable per-arc "
+            "review decisions remain authoritative when already present."
+        ),
+    )
+    story_arc_decisions: list[StoryArcReviewDecision] = Field(
+        default_factory=list,
+        description="Explicit select/skip and optional merge decisions for staged story arcs",
+    )
 
     @field_validator("series_ids")
     @classmethod
@@ -159,6 +316,26 @@ class ConfirmImportRequest(BaseModel):
             msg = "All series_ids must be positive integers"
             raise ValueError(msg)
         return list(dict.fromkeys(v))
+
+    @field_validator("story_arc_ids")
+    @classmethod
+    def validate_story_arc_ids(cls, v: list[int]) -> list[int]:
+        """Keep story-arc identity separate from series selection."""
+        if any(arc_id <= 0 for arc_id in v):
+            raise ValueError("All story_arc_ids must be positive integers")
+        return list(dict.fromkeys(v))
+
+    @field_validator("story_arc_decisions")
+    @classmethod
+    def validate_unique_story_arc_decisions(
+        cls,
+        v: list[StoryArcReviewDecision],
+    ) -> list[StoryArcReviewDecision]:
+        """Reject ambiguous duplicate decisions in one confirmation request."""
+        ids = [decision.imported_story_arc_id for decision in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("story_arc_decisions must contain at most one decision per arc")
+        return v
 
 
 class SeriesSearchOverride(BaseModel):
@@ -312,10 +489,13 @@ class ImportedFileRead(BaseModel):
 class FileConflictGroup(BaseModel):
     """A group of files that conflict on the same issue match."""
 
-    conflict_group_id: int
-    matched_issue_id: int
+    kind: Literal["file_conflict", "series_conflict"] = "file_conflict"
+    conflict_group_id: int | str
+    matched_issue_id: int | None
+    series_id: int | None = None
     issue_title: str | None = None
-    files: list[ImportedFileRead] = Field(..., min_length=1)
+    diagnostics: dict[str, object] = Field(default_factory=dict)
+    files: list[ImportedFileRead] = Field(min_length=1)
 
 
 class ImportJobRead(BaseModel):
@@ -357,6 +537,13 @@ class ImportJobRead(BaseModel):
     transfer_method: str = "move"
     convert_to_preferred_format: bool = False
     update_embedded_comicinfo_from_match: bool = False
+    file_handling_mode: ImportFileHandlingMode = ImportFileHandlingMode.MANAGED_COPY
+    source_layout_snapshot: SourceLayoutSpecPayload = Field(default_factory=SourceLayoutSpecPayload)
+    future_layout_requested: bool = False
+    future_root_policy_snapshot: FutureRootPolicyPayload | None = None
+    future_root_policy_applied_at: datetime | None = None
+    story_arc_import_requested: bool = False
+    story_arc_materialization_requested: bool = False
     cv_match_threshold: float
     min_files_per_series: int
     file_formats: str | None
@@ -476,6 +663,13 @@ class ImportProgressEvent(BaseModel):
     total_files_no_match: int | None = None
     total_files_imported: int | None = None
     total_files_failed: int | None = None
+    story_arc_placements_total: int | None = None
+    story_arc_placements_queued: int | None = None
+    story_arc_placements_running: int | None = None
+    story_arc_placements_retry_wait: int | None = None
+    story_arc_placements_failed: int | None = None
+    story_arc_placements_completed: int | None = None
+    story_arc_placements_cancelled: int | None = None
     review_summary: dict[str, int] | None = None
     control_state: dict[str, object] | None = None
 
@@ -519,11 +713,13 @@ class ImportedFilesResponse(BaseModel):
 
 
 class ConflictGroupsResponse(BaseModel):
-    """All conflict groups for an import job."""
+    """One bounded page of conflict groups for an import job."""
 
     job_id: int
     groups: list[FileConflictGroup]
     total: int
+    page: int
+    page_size: int
 
 
 class FileSelectionUpdateRequest(BaseModel):
@@ -738,6 +934,20 @@ class OrphanRecoveryProgressResponse(BaseModel):
 
 class RetryFailedResponse(BaseModel):
     """Result of retrying failed series in a completed import job."""
+
+    job_id: int
+    retrying_count: int
+
+
+class ImportJobDeleteResponse(BaseModel):
+    """Accepted deletion whose cooperative rollback has not finished yet."""
+
+    status: Literal["rollback_pending"] = "rollback_pending"
+    message: str
+
+
+class RetryStoryArcPlacementsResponse(BaseModel):
+    """Result of reopening failed/cancelled placement work for a stalled import."""
 
     job_id: int
     retrying_count: int

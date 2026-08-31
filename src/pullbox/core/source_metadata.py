@@ -8,16 +8,15 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 from pullbox.core.archive import ArchiveError, ArchiveReader
+from pullbox.core.comicinfo import ComicInfoData
+from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
 from pullbox.core.naming import detect_issue_type
 from pullbox.core.release_parser import ParsedRelease, normalize_issue_number, parse_release_title
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.issue import IssueType
-
-if TYPE_CHECKING:
-    from pullbox.core.comicinfo import ComicInfoData
 
 _CV_ISSUE_URL_RE = re.compile(r"comicvine\.gamespot\.com/.*?/4000-(\d+)", re.IGNORECASE)
 _CV_SERIES_URL_RE = re.compile(r"comicvine\.gamespot\.com/.*?/4050-(\d+)", re.IGNORECASE)
@@ -282,6 +281,7 @@ class MetadataSignal(enum.StrEnum):
     FOLDER_HINT = "folder_hint"
     PULLBOX_FOLDER = "pullbox_folder"
     MYLAR3 = "mylar3"
+    SOURCE_LAYOUT = "source_layout"
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +292,7 @@ class SourceMetadata:
     source_path: str | None = None
     series_name: str | None = None
     issue_number: float | None = None
+    issue_number_text: str | None = None
     year: int | None = None
     volume: str | None = None
     issue_type: IssueType = IssueType.ISSUE
@@ -320,6 +321,7 @@ class SourceMetadataExtractor:
         include_archive_comicinfo: bool = True,
         include_archive_entry_issue_hint: bool = True,
         sidecar_data: dict[str, Any] | None = None,
+        archive_member_evidence: dict[str, Any] | None = None,
     ) -> SourceMetadata:
         """Build metadata from filename, folder sidecars, and optional archive ComicInfo."""
         path = Path(archive_path)
@@ -329,20 +331,27 @@ class SourceMetadataExtractor:
             source_path=str(path),
             folder_name=folder_name,
         )
-        comicinfo = self._read_archive_comicinfo(path) if include_archive_comicinfo else None
-        archive_entry_issue_hint = (
-            self.archive_entry_issue_hint_from_path(
-                path,
-                expected_series_name=metadata.series_name,
-            )
+        comicinfo: ComicInfoData | None = None
+        archive_entry_issue_hint: ArchiveEntryIssueHint | None = None
+        if include_archive_comicinfo:
             if (
-                include_archive_comicinfo and include_archive_entry_issue_hint and comicinfo is None
-            )
-            else None
-        )
+                isinstance(archive_member_evidence, dict)
+                and archive_member_evidence.get("member_index_scanned") is True
+            ):
+                comicinfo = self._comicinfo_from_member_evidence(archive_member_evidence)
+                if comicinfo is None and include_archive_entry_issue_hint:
+                    archive_entry_issue_hint = self._archive_hint_from_member_evidence(
+                        archive_member_evidence
+                    )
+            else:
+                comicinfo, archive_entry_issue_hint = self._read_archive_evidence(
+                    path,
+                    expected_series_name=metadata.series_name,
+                    include_archive_entry_issue_hint=include_archive_entry_issue_hint,
+                )
         sidecar = sidecar_data if sidecar_data is not None else self._read_sidecars(path.parent)
 
-        return self._merge_path_metadata(
+        merged = self._merge_path_metadata(
             metadata=metadata,
             folder_name=folder_name,
             comicinfo=comicinfo,
@@ -351,6 +360,29 @@ class SourceMetadataExtractor:
             include_archive_comicinfo=include_archive_comicinfo,
             include_archive_entry_issue_hint=include_archive_entry_issue_hint,
         )
+        if (
+            include_archive_comicinfo
+            and isinstance(archive_member_evidence, dict)
+            and archive_member_evidence.get("member_index_scanned") is True
+        ):
+            evidence_diagnostics: dict[str, object] = {
+                "archive_member_index_reused": True,
+                "comicinfo_entry_count": int(
+                    archive_member_evidence.get("comicinfo_entry_count") or 0
+                ),
+            }
+            comicinfo_error = archive_member_evidence.get("comicinfo_error")
+            if isinstance(comicinfo_error, str):
+                evidence_diagnostics["comicinfo_error"] = comicinfo_error
+            merged = merged.model_copy(
+                update={
+                    "diagnostics": {
+                        **merged.diagnostics,
+                        **evidence_diagnostics,
+                    }
+                }
+            )
+        return merged
 
     def from_release_title(
         self,
@@ -374,6 +406,7 @@ class SourceMetadataExtractor:
 
         series_name = parsed.series_name if parsed is not None else None
         issue_number = parsed.issue_number if parsed is not None else None
+        issue_number_text = parsed.issue_number_text if parsed is not None else None
         year = parsed.year if parsed is not None else None
         volume = parsed.volume if parsed is not None else None
         diagnostics: dict[str, object] = {}
@@ -388,10 +421,12 @@ class SourceMetadataExtractor:
         if volume_issue_applies and volume_hint is not None and issue_number is None:
             series_name = str(volume_hint["base_series"])
             issue_number = volume_hint["issue_number"]
+            issue_number_text = format_issue_number(issue_number)
             signals["issue_number"] = MetadataSignal.RELEASE_TITLE
             diagnostics["volume_subtitle_hint"] = volume_hint
         elif volume_issue_applies and issue_number is None and volume_issue_number is not None:
             issue_number = volume_issue_number
+            issue_number_text = format_issue_number(issue_number)
             signals["issue_number"] = MetadataSignal.RELEASE_TITLE
 
         return SourceMetadata(
@@ -399,6 +434,7 @@ class SourceMetadataExtractor:
             source_path=source_path,
             series_name=series_name,
             issue_number=issue_number,
+            issue_number_text=issue_number_text,
             year=year,
             volume=volume,
             issue_type=issue_type,
@@ -438,6 +474,7 @@ class SourceMetadataExtractor:
     ) -> SourceMetadata:
         series_name = metadata.series_name
         issue_number = metadata.issue_number
+        issue_number_text = metadata.issue_number_text
         year = metadata.year
         volume = metadata.volume
         publisher = metadata.publisher
@@ -506,6 +543,12 @@ class SourceMetadataExtractor:
                     }
                 elif normalized_comicinfo_issue is not None:
                     issue_number = normalized_comicinfo_issue
+                    try:
+                        _, issue_number_text = parse_issue_number_text(
+                            comicinfo.number.strip().lstrip("#")
+                        )
+                    except ValueError:
+                        issue_number_text = format_issue_number(normalized_comicinfo_issue)
                     signals["issue_number"] = MetadataSignal.COMICINFO
                 else:
                     diagnostics["comicinfo_issue_number_ignored"] = {
@@ -544,6 +587,8 @@ class SourceMetadataExtractor:
                 "publisher": comicinfo.publisher,
                 "web": comicinfo.web,
                 "notes": comicinfo.notes,
+                "story_arc": comicinfo.story_arc,
+                "story_arc_number": comicinfo.story_arc_number,
             }
         else:
             diagnostics["has_comicinfo"] = False
@@ -598,6 +643,7 @@ class SourceMetadataExtractor:
             source_path=metadata.source_path,
             series_name=series_name,
             issue_number=issue_number,
+            issue_number_text=issue_number_text,
             year=year,
             volume=volume,
             issue_type=issue_type,
@@ -630,6 +676,110 @@ class SourceMetadataExtractor:
             return ArchiveReader(path).read_comicinfo()
         except ArchiveError:
             return None
+
+    @staticmethod
+    def _read_archive_evidence(
+        path: Path,
+        *,
+        expected_series_name: str | None,
+        include_archive_entry_issue_hint: bool,
+    ) -> tuple[ComicInfoData | None, ArchiveEntryIssueHint | None]:
+        """Read ComicInfo or page-name evidence with one archive member listing."""
+        try:
+            reader = ArchiveReader(path)
+            entries = reader.list_files()
+            comicinfo = reader.read_comicinfo(entries=entries)
+        except ArchiveError:
+            return None, None
+        if comicinfo is not None or not include_archive_entry_issue_hint:
+            return comicinfo, None
+        return (
+            None,
+            archive_entry_issue_hint_from_names(
+                entries,
+                expected_series_name=expected_series_name,
+            ),
+        )
+
+    @staticmethod
+    def _comicinfo_from_member_evidence(
+        evidence: dict[str, Any],
+    ) -> ComicInfoData | None:
+        raw = evidence.get("comicinfo")
+        if not isinstance(raw, dict):
+            return None
+
+        def optional_text(name: str) -> str | None:
+            value = raw.get(name)
+            return value if isinstance(value, str) else None
+
+        def optional_int(name: str) -> int | None:
+            value = raw.get(name)
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+        return ComicInfoData(
+            series=optional_text("series"),
+            number=optional_text("number"),
+            volume=optional_text("volume"),
+            title=optional_text("title"),
+            year=optional_int("year"),
+            month=optional_int("month"),
+            day=optional_int("day"),
+            publisher=optional_text("publisher"),
+            notes=optional_text("notes"),
+            summary=optional_text("summary"),
+            writer=optional_text("writer"),
+            penciller=optional_text("penciller"),
+            inker=optional_text("inker"),
+            colorist=optional_text("colorist"),
+            letterer=optional_text("letterer"),
+            cover_artist=optional_text("cover_artist"),
+            editor=optional_text("editor"),
+            page_count=optional_int("page_count"),
+            genre=optional_text("genre"),
+            web=optional_text("web"),
+            story_arc=optional_text("story_arc"),
+            story_arc_number=optional_text("story_arc_number"),
+            series_group=optional_text("series_group"),
+            language=optional_text("language"),
+        )
+
+    @staticmethod
+    def _archive_hint_from_member_evidence(
+        evidence: dict[str, Any],
+    ) -> ArchiveEntryIssueHint | None:
+        raw = evidence.get("archive_entry_issue_hint")
+        if not isinstance(raw, dict) or raw.get("confidence") != "strong":
+            return None
+        series_name = raw.get("series_name")
+        issue_number = normalize_issue_number(raw.get("issue_number"))
+        if not isinstance(series_name, str) or issue_number is None:
+            return None
+        year = raw.get("year")
+        sample_entries = raw.get("sample_entries")
+        count_fields = (
+            "total_image_entries",
+            "parseable_image_entries",
+            "matching_entry_count",
+        )
+        if year is not None and not isinstance(year, int):
+            return None
+        if not isinstance(sample_entries, list) or not all(
+            isinstance(entry, str) for entry in sample_entries
+        ):
+            return None
+        if not all(isinstance(raw.get(field), int) for field in count_fields):
+            return None
+        return {
+            "series_name": series_name,
+            "issue_number": issue_number,
+            "year": year,
+            "confidence": "strong",
+            "total_image_entries": int(raw["total_image_entries"]),
+            "parseable_image_entries": int(raw["parseable_image_entries"]),
+            "matching_entry_count": int(raw["matching_entry_count"]),
+            "sample_entries": list(sample_entries),
+        }
 
     @staticmethod
     def archive_entry_issue_hint_from_path(
@@ -920,6 +1070,7 @@ def _serialize_parsed_release(parsed: ParsedRelease | None) -> dict[str, object]
     return {
         "series_name": parsed.series_name if parsed is not None else None,
         "issue_number": parsed.issue_number if parsed is not None else None,
+        "issue_number_text": parsed.issue_number_text if parsed is not None else None,
         "year": parsed.year if parsed is not None else None,
         "volume": parsed.volume if parsed is not None else None,
         "issue_type": parsed.issue_type.value if parsed is not None else None,

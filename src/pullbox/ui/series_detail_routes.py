@@ -269,6 +269,8 @@ async def series_detail(
             series=series,
             file_count=file_count,
             delete_file_count=delete_context.linked_file_count,
+            delete_managed_file_count=delete_context.managed_file_count,
+            delete_referenced_file_count=delete_context.referenced_file_count,
             detail_origin=source if source == "pull-list" else None,
             detail_back_url=(
                 _pull_list_return_url(return_to) if source == "pull-list" else "/series"

@@ -17,6 +17,10 @@ from sqlalchemy import select
 
 from pullbox.core.archive import ArchiveError
 from pullbox.core.events import EventBus, FileMatched
+from pullbox.core.issue_numbers import (
+    issue_number_text_matches_numeric,
+    normalize_issue_number_text,
+)
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.naming import (
     detect_series_type,
@@ -371,7 +375,12 @@ class MatchingService:
                 matched_series_only = True
                 continue
 
-            issue = await _find_issue(session, series.id, metadata.issue_number)
+            issue = await _find_issue(
+                session,
+                series.id,
+                metadata.issue_number,
+                issue_number_text=metadata.issue_number_text,
+            )
             if issue is None:
                 logger.debug(
                     "matching_semantic_series_hit_no_issue",
@@ -493,12 +502,32 @@ async def _find_issue(
     session: AsyncSession,
     series_id: int,
     issue_number: float,
+    *,
+    issue_number_text: str | None = None,
 ) -> Issue | None:
-    """Find an issue by series ID and issue number."""
+    """Find one exact issue, failing closed on ambiguous legacy numeric identity."""
+    if issue_number_text is not None:
+        try:
+            normalized_text = normalize_issue_number_text(issue_number_text)
+        except ValueError:
+            return None
+        if not issue_number_text_matches_numeric(issue_number, normalized_text):
+            return None
+        result = await session.execute(
+            select(Issue).where(
+                Issue.series_id == series_id,
+                Issue.issue_number_text == normalized_text,
+            )
+        )
+        return result.scalar_one_or_none()
+
     result = await session.execute(
-        select(Issue).where(
+        select(Issue)
+        .where(
             Issue.series_id == series_id,
             Issue.issue_number == issue_number,
         )
+        .limit(2)
     )
-    return result.scalar_one_or_none()
+    candidates = list(result.scalars().all())
+    return candidates[0] if len(candidates) == 1 else None

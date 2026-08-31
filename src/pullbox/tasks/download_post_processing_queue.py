@@ -19,6 +19,7 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.services.post_processing_operation_progress import (
     project_post_processing_operation_progress,
 )
+from pullbox.services.story_arc_sync_queue import request_story_arc_sync_now
 from pullbox.tasks.post_processing_progress import (
     PostProcessingPhase,
     _clear_post_processing,
@@ -193,6 +194,16 @@ async def process_completed(
                         )
 
                         await session.commit()
+                        try:
+                            request_story_arc_sync_now()
+                        except Exception:
+                            # Canonical completion is already durable. This
+                            # latency-only nudge must never enter failure repair.
+                            log.warning(
+                                "story_arc_sync_trigger_failed_after_completion",
+                                download_id=dl_id,
+                                exc_info=True,
+                            )
                     except Exception as exc:
                         failed_duration_ms = (
                             round((_time.monotonic() - handoff_start) * 1000, 1)

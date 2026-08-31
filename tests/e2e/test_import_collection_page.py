@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.pages.import_page import ImportPage
 
 pytestmark = pytest.mark.e2e
@@ -766,18 +767,34 @@ class TestImportCollectionTab:
 
         assert import_page.retry_failed_button.is_visible()
 
-        import_page.retry_failed_button.click()
-        authed_page.wait_for_function(
-            """() => {
-                const progress = document.querySelector("[data-testid='import-collection-progress']");
-                const results = document.querySelector("[data-testid='import-collection-results']");
-                const isVisible = (el) => !!el && el.offsetParent !== null;
-                return isVisible(progress) || isVisible(results);
-            }""",
-            timeout=5000,
+        original_job = authed_page.request.get(
+            f"{seeded_server}/api/v1/import/{completed_job_id}"
+        ).json()
+        authed_page.route(
+            f"**/api/v1/import/{completed_job_id}/retry-failed",
+            lambda route: route.fulfill(
+                status=202,
+                content_type="application/json",
+                body=json.dumps({"job_id": completed_job_id, "retrying_count": 1}),
+            ),
         )
+        with authed_page.expect_response(
+            f"**/api/v1/import/{completed_job_id}/retry-failed"
+        ) as retry_response:
+            import_page.retry_failed_button.click()
+        assert retry_response.value.status == 202
+        assert retry_response.value.request.method == "POST"
+        import_page.progress_panel.wait_for(state="visible", timeout=5000)
 
         assert page_errors == []
+
+        # This UI transition must not consume the completed session fixture
+        # used by the separate finish/results tests.
+        current_job = authed_page.request.get(
+            f"{seeded_server}/api/v1/import/{completed_job_id}"
+        ).json()
+        for key in ("status", "series_failed", "series_imported"):
+            assert current_job[key] == original_job[key]
 
     def test_import_collection_completed_import_requires_explicit_finish_to_show_results(
         self,
@@ -1282,6 +1299,186 @@ class TestImportCollectionTab:
 
         assert f"resume_job_id={expected_resume['resumeJobId']}" in authed_page.url
         assert f"resume_step={expected_resume['resumeStep']}" in authed_page.url
+
+    def test_import_collection_story_arc_placement_retry_has_truthful_busy_and_success_state(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+
+        state = authed_page.evaluate(
+            """async () => {
+                const originalFetch = window.fetch;
+                try {
+                    const controller = window.importProgressData(
+                        42,
+                        5,
+                        "filesystem",
+                        {
+                            job_id: 42,
+                            status: "stalled",
+                            mode: "import",
+                            phase: "story_arc_placements",
+                            progress: 99,
+                            message: "One or more story-arc placements failed.",
+                            control_state: {
+                                can_pause: false,
+                                can_resume: false,
+                                can_cancel: true,
+                                can_retry_story_arc_placements: true,
+                                requested_action: "none",
+                            },
+                        },
+                        "import",
+                    );
+                    controller.hydrateFromSnapshot();
+                    let pollStarts = 0;
+                    let sseStarts = 0;
+                    let request = null;
+                    let finishFetch = null;
+                    controller.startClock = function () {};
+                    controller.startPolling = function () { pollStarts += 1; };
+                    controller.connectSSE = function () { sseStarts += 1; };
+                    window.fetch = function (url, options) {
+                        request = { url, options };
+                        return new Promise(function (resolve) {
+                            finishFetch = function () {
+                                resolve({
+                                    ok: true,
+                                    json: async function () {
+                                        return { job_id: 42, retrying_count: 2 };
+                                    },
+                                });
+                            };
+                        });
+                    };
+
+                    const pending = controller.retryStoryArcPlacements();
+                    await Promise.resolve();
+                    const busy = {
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                    };
+                    finishFetch();
+                    await pending;
+
+                    return {
+                        busy,
+                        requestUrl: request.url,
+                        requestMethod: request.options.method,
+                        hasCsrf: Boolean(request.options.headers["X-CSRF-Token"]),
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                        canRetry: controller.controlState.can_retry_story_arc_placements,
+                        status: controller.jobStatus,
+                        phase: controller.phase,
+                        progress: controller.progress,
+                        message: controller.message,
+                        success: controller.storyArcPlacementRetrySuccess,
+                        error: controller.storyArcPlacementRetryError,
+                        pollStarts,
+                        sseStarts,
+                    };
+                } finally {
+                    window.fetch = originalFetch;
+                }
+            }"""
+        )
+
+        assert state == {
+            "busy": {"retrying": True, "visible": True},
+            "requestUrl": "/api/v1/import/42/story-arc-placements/retry",
+            "requestMethod": "POST",
+            "hasCsrf": True,
+            "retrying": False,
+            "visible": False,
+            "canRetry": False,
+            "status": "importing",
+            "phase": "story_arc_placements",
+            "progress": 99,
+            "message": "Retrying 2 Story Arc placements...",
+            "success": "Retry requested for 2 Story Arc placements.",
+            "error": "",
+            "pollStarts": 1,
+            "sseStarts": 1,
+        }
+
+    def test_import_collection_story_arc_placement_retry_keeps_recovery_on_error(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+
+        state = authed_page.evaluate(
+            """async () => {
+                const originalFetch = window.fetch;
+                try {
+                    const controller = window.importProgressData(
+                        42,
+                        5,
+                        "filesystem",
+                        {
+                            job_id: 42,
+                            status: "stalled",
+                            mode: "import",
+                            phase: "story_arc_placements",
+                            progress: 99,
+                            control_state: {
+                                can_pause: false,
+                                can_resume: false,
+                                can_cancel: true,
+                                can_retry_story_arc_placements: true,
+                                requested_action: "none",
+                            },
+                        },
+                        "import",
+                    );
+                    controller.hydrateFromSnapshot();
+                    let pollStarts = 0;
+                    let sseStarts = 0;
+                    controller.startPolling = function () { pollStarts += 1; };
+                    controller.connectSSE = function () { sseStarts += 1; };
+                    window.fetch = async function () {
+                        return {
+                            ok: false,
+                            json: async function () {
+                                return { detail: "Placement provenance changed; retry refused." };
+                            },
+                        };
+                    };
+
+                    await controller.retryStoryArcPlacements();
+
+                    return {
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                        canRetry: controller.controlState.can_retry_story_arc_placements,
+                        status: controller.jobStatus,
+                        error: controller.storyArcPlacementRetryError,
+                        success: controller.storyArcPlacementRetrySuccess,
+                        pollStarts,
+                        sseStarts,
+                    };
+                } finally {
+                    window.fetch = originalFetch;
+                }
+            }"""
+        )
+
+        assert state == {
+            "retrying": False,
+            "visible": True,
+            "canRetry": True,
+            "status": "stalled",
+            "error": "Placement provenance changed; retry refused.",
+            "success": "",
+            "pollStarts": 0,
+            "sseStarts": 0,
+        }
 
     def test_import_collection_pause_swaps_to_resume_without_button_gap(
         self,
@@ -2387,3 +2584,565 @@ class TestImportCollectionTab:
         import_page.source_browse_button.click()
         import_page.file_browser_modal.wait_for(state="visible", timeout=5000)
         assert import_page.file_browser_title.text_content() == "Browse Files"
+
+    def test_import_collection_source_step_previews_selected_layout(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "preset",
+                            "preset": "publisher_series",
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "publisher_series",
+                        "clusters": [
+                            {
+                                "cluster_id": "publisher-series",
+                                "classification": "publisher_series",
+                                "file_count": 2,
+                                "directory_count": 2,
+                                "confidence": "high",
+                                "proposed_series_path_template": "{Publisher}/{Series}",
+                                "proposed_issue_filename_template": None,
+                                "examples": [
+                                    {
+                                        "relative_path": "DC Comics/Batman (2011)/Issue 001.cbz",
+                                        "publisher": "DC Comics",
+                                        "series": "Batman",
+                                        "year": 2011,
+                                        "issue_number": "1",
+                                        "issue_title": None,
+                                        "evidence": ["source_layout"],
+                                        "warnings": [],
+                                    }
+                                ],
+                            }
+                        ],
+                        "directories_considered": 2,
+                        "files_considered": 2,
+                        "files_fitting": 2,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": False,
+                        "can_apply_future_policy": False,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/imports")
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+
+        assert requests[-1] == {
+            "source_path": "/imports",
+            "source_type": "filesystem",
+            "layout": {
+                "schema_version": 1,
+                "mode": "preset",
+                "preset": "publisher_series",
+                "fallback_to_auto": True,
+            },
+        }
+        assert "Publisher Series" in (import_page.source_layout_preview.text_content() or "")
+        assert "2 of 2 sampled files fit" in (
+            import_page.source_layout_preview.text_content() or ""
+        )
+        assert "DC Comics/Batman (2011)/Issue 001.cbz" in (
+            import_page.source_layout_preview.text_content() or ""
+        )
+
+        import_page.source_layout_fallback_checkbox.uncheck()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+        assert requests[-1]["layout"] == {
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "fallback_to_auto": False,
+        }
+
+        import_page.source_layout_custom.click()
+        import_page.source_layout_custom_fields.wait_for(state="visible", timeout=5000)
+
+    def test_import_collection_submits_selected_layout_for_mylar_without_folder_preview(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        layout_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            layout_preview_requests.append(route.request.post_data_json)
+            route.fulfill(status=500, content_type="application/json", body="{}")
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 322, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.source_layout_section.wait_for(state="visible", timeout=5000)
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_fallback_checkbox.uncheck()
+
+        assert import_page.source_layout_analyze_button.is_hidden()
+        assert import_page.start_scan_button.is_enabled()
+        assert_no_axe_violations(
+            authed_page,
+            name="Mylar source layout controls",
+            include=["[data-testid='import-collection-layout-section']"],
+        )
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert layout_preview_requests == []
+        assert created_requests
+        assert created_requests[-1]["source_type"] == "mylar3"
+        assert created_requests[-1]["source_layout"] == {
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "fallback_to_auto": False,
+        }
+
+    def test_mylar_in_place_requires_library_root_without_folder_preview(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        layout_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            layout_preview_requests.append(route.request.post_data_json)
+            route.fulfill(status=500, content_type="application/json", body="{}")
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 323, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.file_handling_in_place.wait_for(state="visible", timeout=5000)
+        import_page.file_handling_in_place.click()
+
+        root_selector = authed_page.get_by_test_id("import-in-place-library-root")
+        root_selector.wait_for(state="visible", timeout=5000)
+        root_value = root_selector.locator("option[value]:not([value=''])").first.get_attribute(
+            "value"
+        )
+        assert root_value
+        root_selector.select_option("")
+        assert import_page.start_scan_button.is_disabled()
+        root_selector.select_option(root_value)
+        assert import_page.start_scan_button.is_enabled()
+        assert import_page.source_layout_analyze_button.is_hidden()
+        assert "after path mapping" in (
+            authed_page.get_by_test_id("import-mylar-in-place-review").text_content() or ""
+        )
+        assert_no_axe_violations(
+            authed_page,
+            name="Mylar in-place controls",
+            include=["[data-testid='import-file-handling-section']"],
+        )
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert layout_preview_requests == []
+        assert created_requests
+        assert created_requests[-1]["source_type"] == "mylar3"
+        assert created_requests[-1]["file_handling_mode"] == "in_place"
+        assert created_requests[-1]["target_library_root_id"] == int(root_value)
+        assert created_requests[-1]["future_layout_requested"] is False
+
+    def test_import_collection_shows_story_arc_evidence_and_submits_independent_choices(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+
+        def fulfill_arc_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "source_type": "mylar3",
+                        "evidence_detected": True,
+                        "arcs_detected": 2,
+                        "entries_detected": 3,
+                        "resolution": {
+                            "resolved": 0,
+                            "pending": 2,
+                            "missing": 1,
+                            "ambiguous": 0,
+                            "conflicts": 0,
+                            "duplicates": 0,
+                        },
+                        "existing_arc_files_detected": True,
+                        "existing_arc_folders_detected": True,
+                        "pattern_summary": "Mylar Story Arc rows and saved ordering",
+                        "settings": [
+                            {"key": "STORYARCDIR", "value": True, "used_default": False},
+                            {
+                                "key": "STORYARC_LOCATION",
+                                "value": "Configured",
+                                "used_default": False,
+                            },
+                        ],
+                        "examples": [
+                            {
+                                "story_arc": "Knightfall",
+                                "series": "Batman",
+                                "issue_number": "497",
+                                "issue_title": "Broken Bat",
+                                "reading_order": "1",
+                                "status": "Downloaded",
+                                "relative_path": None,
+                            }
+                        ],
+                        "provider_calls_required": False,
+                        "provider_call_summary": (
+                            "No provider calls are needed for trusted Mylar data."
+                        ),
+                        "proposed_policy": {
+                            "mode": "copy",
+                            "destination_root_configured": True,
+                            "folder_template": "{StoryArc}",
+                            "file_template": (
+                                "{ReadingOrder:03d} - {Series} {IssueNumber}{IssueTitleOptional}"
+                            ),
+                            "reading_order_prefix": True,
+                            "synchronize": True,
+                            "requires_confirmation": True,
+                        },
+                        "readlist_present": True,
+                        "readlist_count": 4,
+                        "readlist_import_state": "deferred_v1.5.0",
+                        "archive_probes": 0,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 323, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/story-arc-preview", fulfill_arc_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.story_arc_section.wait_for(state="visible", timeout=5000)
+
+        preview_text = import_page.story_arc_preview.text_content() or ""
+        assert "2 arcs" in preview_text
+        assert "3 entries" in preview_text
+        assert "Knightfall" in preview_text
+        assert "No provider calls" in preview_text
+        assert "/private" not in preview_text
+        assert import_page.story_arc_import_toggle.is_checked() is False
+        assert import_page.story_arc_materialize_toggle.is_disabled()
+
+        import_page.story_arc_import_toggle.check()
+        assert import_page.story_arc_materialize_toggle.is_enabled()
+        import_page.story_arc_materialize_toggle.check()
+        assert_no_axe_violations(
+            authed_page,
+            name="Story Arc Step 1 controls",
+            include=["[data-testid='import-story-arc-section']"],
+        )
+
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        assert created_requests[-1]["story_arc_import_requested"] is True
+        assert created_requests[-1]["story_arc_materialization_requested"] is True
+
+    def test_import_collection_submits_validated_in_place_mode(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "auto",
+                            "preset": None,
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "series_folders",
+                        "clusters": [],
+                        "directories_considered": 1,
+                        "files_considered": 1,
+                        "files_fitting": 1,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": True,
+                        "can_apply_future_policy": False,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 321, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/comics/Existing Layout")
+        import_page.file_handling_in_place.click()
+        import_page.source_layout_analyze_button.click()
+        import_page.file_handling_in_place_ready.wait_for(state="visible", timeout=5000)
+
+        assert import_page.start_scan_button.is_enabled()
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        assert created_requests[-1]["file_handling_mode"] == "in_place"
+        assert created_requests[-1]["source_path"] == "/comics/Existing Layout"
+
+    def test_import_collection_submits_confirmed_future_root_policy(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        policy_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_layout_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "preset",
+                            "preset": "publisher_series",
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "normal_library",
+                        "clusters": [
+                            {
+                                "cluster_id": "publisher-series",
+                                "classification": "normal_library",
+                                "file_count": 2,
+                                "directory_count": 2,
+                                "confidence": "high",
+                                "proposed_series_path_template": "{Publisher}/{Series}",
+                                "proposed_issue_filename_template": (
+                                    "{Series} {IssueTitle} Issue {Issue:03d}"
+                                ),
+                                "examples": [
+                                    {
+                                        "relative_path": (
+                                            "DC Comics/Batman/Issue 017 - The Brave and the Bold.cbz"
+                                        ),
+                                        "publisher": "DC Comics",
+                                        "series": "Batman",
+                                        "year": 2024,
+                                        "issue_number": "17",
+                                        "issue_title": "The Brave and the Bold",
+                                        "evidence": ["selected_layout_match"],
+                                        "warnings": [],
+                                    }
+                                ],
+                            }
+                        ],
+                        "directories_considered": 2,
+                        "files_considered": 2,
+                        "files_fitting": 2,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": False,
+                        "can_apply_future_policy": True,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_policy_requests(route) -> None:  # type: ignore[no-untyped-def]
+            if route.request.url.endswith("/preview"):
+                policy_preview_requests.append(route.request.post_data_json)
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "current_scope": "global_default",
+                            "current_series_paths": ["Batman (2024)"],
+                            "proposed_series_paths": ["DC Comics/Batman"],
+                            "current_file_names": ["Batman (2024) #017.cbz"],
+                            "proposed_file_names": ["Batman The Brave and the Bold Issue 017.cbz"],
+                        }
+                    ),
+                )
+                return
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "library_root_id": 1,
+                        "library_root_name": "E2E Library",
+                        "scope": "global_default",
+                        "policy_id": None,
+                        "revision": 0,
+                        "effective_policy": {
+                            "schema_version": 1,
+                            "series_path_template": "{Series} ({Year})",
+                            "series_folder_template": "{Series} ({Year})",
+                            "comic_file_template": "{Series} ({Year}) #{Issue:03d}",
+                            "annual_file_template": "{Series} ({Year}) Annual #{Issue:03d}",
+                            "non_standard_file_template": (
+                                "{Series} ({Year}) {Type} {Volume:02d} - {Title}"
+                            ),
+                            "single_non_standard_file_template": (
+                                "{Series} ({Year}) {Type} - {Title}"
+                            ),
+                            "replace_illegal_characters": True,
+                            "colon_replacement": "dash",
+                            "source": "global_default",
+                            "source_import_job_id": None,
+                        },
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 654, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_layout_preview)
+        authed_page.route("**/api/v1/config/library-roots/**", fulfill_policy_requests)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/imports")
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+        assert import_page.future_layout_toggle.is_enabled()
+
+        import_page.future_layout_toggle.check()
+        import_page.future_layout_preview.wait_for(state="visible", timeout=5000)
+        assert "Batman (2024)" in (import_page.future_layout_preview.text_content() or "")
+        assert "DC Comics/Batman" in (import_page.future_layout_preview.text_content() or "")
+        assert policy_preview_requests
+        assert policy_preview_requests[-1]["examples"][0] == {  # type: ignore[index]
+            "publisher": "DC Comics",
+            "series": "Batman",
+            "year": 2024,
+            "issue_number": 17,
+            "issue_title": "The Brave and the Bold",
+        }
+        assert_no_axe_violations(
+            authed_page,
+            name="import future layout controls",
+            include=["[data-testid='import-future-layout-section']"],
+        )
+
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        payload = created_requests[-1]
+        assert payload["future_layout_requested"] is True
+        assert isinstance(payload["target_library_root_id"], int)
+        assert payload["future_root_policy"]["series_path_template"] == (  # type: ignore[index]
+            "{Publisher}/{Series}"
+        )
+        assert payload["future_root_policy"]["comic_file_template"] == (  # type: ignore[index]
+            "{Series} {IssueTitle} Issue {Issue:03d}"
+        )

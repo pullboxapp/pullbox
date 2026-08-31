@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added import source-layout previews for series folders, publisher/series
+  folders, and custom folder and issue naming patterns.
+- Added independent options to keep existing files in place and use an approved
+  layout for future managed files without reorganizing an existing library.
+- Added first-class Story Arcs with ordered memberships, local issue selection,
+  monitoring, Mylar Story Arc import, and folder-based arc evidence.
+- Added optional separate Story Arc copies or links, reading-order filename
+  prefixes, and safe previewed reordering while preserving canonical files and
+  user-owned arc references.
+- Added category-scoped bulk import safety review with bounded previews and
+  audit evidence.
+- Added Comic Vine Story Arc discovery, reviewed member ordering, canonical
+  series/issue reuse, provider-change review, and arc-scoped missing-issue search.
+- Added Mylar in-place adoption and original-filename arc copies with optional
+  leading reading-order numbers. Initial copies can run independently of future
+  synchronization and expose resumable progress and explicit retries.
+- Added a guarded, manually published signed development-image channel for
+  isolated testing without a general-availability release.
+
+### Fixed
+
+- Matched issue-only filenames using series-folder context and handled issue
+  titles embedded in filenames without treating the title as a new series.
+- Preserved exact issue-number identity for large and special issue numbers
+  instead of allowing floating-point or scientific-notation drift.
+- Preserved exact issue numbers in managed filenames, embedded ComicInfo, and
+  the reader, including suffixes and fractional padded filenames.
+- Preserved other series' in-place files when deleting or trashing a shared
+  folder, without treating literal folder-name characters as SQL wildcards.
+- Applied sensitive-directory restrictions to import previews and preserved
+  literal special characters when opening Mylar databases read-only.
+- Preserved Mylar, ComicInfo, and supported series sidecar evidence through
+  import review and matching without silently overriding stronger identities.
+- Rechecked arc search eligibility after provider waits so newly skipped or
+  removed members cannot be queued from stale search results.
+- Fixed import-conflict review queries overflowing the parser stack on older
+  SQLite builds while retaining server-side sorting and bounded pagination.
+- Preserved replaced or edited Story Arc files during failed-publication
+  cleanup instead of relying only on filesystem device and inode identifiers.
+
+### Performance
+
+- Bounded Mylar staging, file matching, and conflict rebuilding so large jobs do
+  not retain complete ORM result sets or unbounded task queues.
+- Moved filesystem inventory and source ordering to a private temporary SQLite
+  spool, with bounded active workers, archive tasks, progress delivery, and
+  cooperative cancellation cleanup.
+
+The v1.3 testing scope and remaining large-library and placement-policy limits
+are documented in [Import update testing](docs/features/import-update.md).
+
 ## [1.2.1] - 2026-08-28
 
 Patch release hardening AirDC++ acquisition recovery so retries, cancellation,

@@ -23,7 +23,15 @@ from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.download import DownloadClientType
 from pullbox.models.issue import Issue, IssueStatus, IssueType
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    LibraryRootPolicy,
+    LibraryRootPolicySource,
+    MatchConfidence,
+)
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 
@@ -1093,13 +1101,17 @@ class TestLeaveInPlace:
     ) -> None:
         from pullbox.core.file_ops import register_library_file
 
-        lf = await register_library_file(
-            session, source_file, issue, MatchConfidence.HIGH, move_to_library=False
-        )
+        with pytest.raises(ConfigurationError, match="inside an enabled library root"):
+            await register_library_file(
+                session,
+                source_file,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+            )
 
-        # File stays at original location
+        # Rejected referenced registration never mutates the source.
         assert source_file.exists()
-        assert lf.file_path == str(source_file)
 
     @pytest.mark.asyncio
     async def test_leave_in_place_source_inside_comics_dir(
@@ -1119,6 +1131,74 @@ class TestLeaveInPlace:
         # No move, just register
         assert src.exists()
         assert lf.file_path == str(src)
+        assert lf.storage_mode == LibraryFileStorageMode.REFERENCED
+        assert lf.source_signature == {
+            "schema_version": 1,
+            "resolved_path": str(src.resolve()),
+            "size": src.stat().st_size,
+            "mtime_ns": src.stat().st_mtime_ns,
+            "device": src.stat().st_dev,
+            "inode": src.stat().st_ino,
+        }
+
+    @pytest.mark.asyncio
+    async def test_leave_in_place_rejects_source_mutation_options(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+
+        src = comics_dir_config / "existing" / "loose-name.cbz"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"PK" + b"\x00" * 100)
+
+        with pytest.raises(ConfigurationError, match="cannot rename"):
+            await register_library_file(
+                session,
+                src,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+                rename=True,
+            )
+
+        assert src.exists()
+        assert src.name == "loose-name.cbz"
+
+    @pytest.mark.asyncio
+    async def test_leave_in_place_rejects_source_changed_since_scan(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+        from pullbox.core.library_file_ownership import (
+            ReferencedFileValidationError,
+            build_file_identity_signature,
+        )
+
+        src = comics_dir_config / "existing" / "Batman 017.cbz"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"original comic")
+        scan_signature = build_file_identity_signature(src)
+        src.write_bytes(b"replacement comic")
+
+        with pytest.raises(ReferencedFileValidationError) as exc_info:
+            await register_library_file(
+                session,
+                src,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+                rename=False,
+                expected_source_signature=scan_signature,
+            )
+
+        assert exc_info.value.reason == "source_changed"
+        assert src.read_bytes() == b"replacement comic"
 
 
 class TestLibraryFileRecord:
@@ -1138,6 +1218,7 @@ class TestLibraryFileRecord:
         assert lf.file_size > 0
         assert lf.issue_id == issue.id
         assert lf.match_confidence == MatchConfidence.HIGH
+        assert lf.storage_mode == LibraryFileStorageMode.MANAGED
         assert lf.library_root_id is not None
 
 
@@ -1183,6 +1264,82 @@ class TestDuplicateDetection:
         )
 
         assert lf1.id == lf2.id
+
+    @pytest.mark.asyncio
+    async def test_same_referenced_path_rejects_different_issue(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+
+        src = comics_dir_config / "existing" / "Batman 017.cbz"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"PK" + b"\x00" * 100)
+        other_issue = Issue(
+            series_id=issue.series_id,
+            issue_number=18.0,
+            status=IssueStatus.WANTED,
+            issue_type=IssueType.ISSUE,
+        )
+        session.add(other_issue)
+        await session.flush()
+        await register_library_file(
+            session,
+            src,
+            issue,
+            MatchConfidence.HIGH,
+            move_to_library=False,
+            rename=False,
+        )
+
+        with pytest.raises(ConfigurationError, match="different issue"):
+            await register_library_file(
+                session,
+                src,
+                other_issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+                rename=False,
+            )
+
+        assert src.exists()
+
+    @pytest.mark.asyncio
+    async def test_existing_file_ownership_cannot_flip_during_registration(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+
+        src = comics_dir_config / "existing" / "Batman 017.cbz"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"PK" + b"\x00" * 100)
+        existing = await register_library_file(
+            session,
+            src,
+            issue,
+            MatchConfidence.HIGH,
+            move_to_library=False,
+            rename=False,
+        )
+        existing.storage_mode = LibraryFileStorageMode.MANAGED
+        await session.flush()
+
+        with pytest.raises(ConfigurationError, match="ownership cannot be changed"):
+            await register_library_file(
+                session,
+                src,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+                rename=False,
+            )
+
+        assert src.exists()
 
 
 class TestReplacementRegistration:
@@ -1447,26 +1604,25 @@ class TestLibraryRootResolution:
         assert lf.library_root_id == root.id
 
     @pytest.mark.asyncio
-    async def test_fallback_to_primary(
+    async def test_referenced_path_does_not_fallback_to_primary(
         self, session: AsyncSession, issue: Issue, source_file: Path, comics_dir_config: Path
     ) -> None:
         from pullbox.core.file_ops import register_library_file
 
-        # Source outside comics dir, no explicit root — should use primary
-        lf = await register_library_file(
-            session, source_file, issue, MatchConfidence.HIGH, move_to_library=False
-        )
+        with pytest.raises(ConfigurationError, match="inside an enabled library root"):
+            await register_library_file(
+                session,
+                source_file,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+            )
 
-        result = await session.execute(
-            select(LibraryRoot).where(LibraryRoot.path == str(comics_dir_config))
-        )
-        root = result.scalars().first()
-        assert root is not None
-        assert lf.library_root_id == root.id
+        assert source_file.exists()
 
 
 class TestRenameInPlace:
-    """Source inside comics directory, rename enabled, file renamed in current location."""
+    """Referenced files cannot be renamed during registration."""
 
     @pytest.mark.asyncio
     async def test_rename_in_place(
@@ -1481,15 +1637,18 @@ class TestRenameInPlace:
         session.add(SystemConfig(key="rename_on_import", value="true", value_type="bool"))
         await session.flush()
 
-        lf = await register_library_file(
-            session, src, issue, MatchConfidence.HIGH, move_to_library=False, rename=True
-        )
+        with pytest.raises(ConfigurationError, match="cannot rename"):
+            await register_library_file(
+                session,
+                src,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+                rename=True,
+            )
 
-        # Original file should be gone (renamed)
-        assert not src.exists()
-        # New file should exist in same directory
-        assert Path(lf.file_path).exists()
-        assert Path(lf.file_path).parent == src.parent
+        assert src.exists()
+        assert src.name == "batman_017_raw.cbz"
 
 
 class TestSeriesFolderCreation:
@@ -1548,6 +1707,60 @@ class TestSeriesFolderCreation:
         assert (
             lf.naming_snapshot["templates"]["comic_file_template"]
             == "{Series} ({Year}) #{Issue:03d}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_registration_uses_effective_root_policy_for_new_series(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        source_file: Path,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+
+        root = (
+            await session.execute(
+                select(LibraryRoot).where(LibraryRoot.path == str(comics_dir_config))
+            )
+        ).scalar_one()
+        root_policy = LibraryRootPolicy(
+            library_root_id=root.id,
+            schema_version=1,
+            series_path_template="{Publisher}/{Series} ({Year})",
+            comic_file_template="{Series} {IssueTitle} Issue {Issue:03d}",
+            annual_file_template="{Series} Annual Issue {Issue:03d}",
+            non_standard_file_template=("{Series} {Type} {Volume:02d} - {IssueTitle}"),
+            single_non_standard_file_template="{Series} {Type} - {IssueTitle}",
+            replace_illegal_characters=True,
+            colon_replacement="dash",
+            source=LibraryRootPolicySource.MANUAL,
+            revision=1,
+        )
+        session.add(root_policy)
+        await session.flush()
+
+        library_file = await register_library_file(
+            session,
+            source_file,
+            issue,
+            MatchConfidence.HIGH,
+            move_to_library=True,
+            rename=True,
+        )
+
+        final_path = Path(library_file.file_path)
+        assert final_path.parent == comics_dir_config / "DC Comics" / "Batman (2024)"
+        assert final_path.name == "Batman The Brave and the Bold Issue 017.cbz"
+        assert library_file.naming_snapshot["root_policy"] == {
+            "id": root_policy.id,
+            "source": "manual",
+            "revision": 1,
+            "source_import_job_id": None,
+        }
+        assert (
+            library_file.naming_snapshot["templates"]["series_path_template"]
+            == "{Publisher}/{Series} ({Year})"
         )
 
 
@@ -1982,7 +2195,7 @@ class TestTargetFilename:
     async def test_leave_in_place_rename_outside_comics_dir(
         self, session: AsyncSession, issue: Issue, comics_dir_config: Path, tmp_path: Path
     ) -> None:
-        """Leave in place + rename=True but source OUTSIDE comics dir — file NOT renamed."""
+        """Referenced registration rejects rename without touching an external source."""
         from pullbox.core.file_ops import register_library_file
 
         # Create source file outside comics dir
@@ -1990,14 +2203,19 @@ class TestTargetFilename:
         src.parent.mkdir(parents=True, exist_ok=True)
         src.write_bytes(b"PK" + b"\x00" * 100)
 
-        lf = await register_library_file(
-            session, src, issue, MatchConfidence.HIGH, move_to_library=False, rename=True
-        )
+        with pytest.raises(ConfigurationError, match="cannot rename"):
+            await register_library_file(
+                session,
+                src,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=False,
+                rename=True,
+            )
 
-        # File should stay with original name and path (not renamed)
+        # Rejected registration leaves the external source untouched.
         assert src.exists()
-        assert lf.file_path == str(src)
-        assert lf.file_name == "batman_raw_017.cbz"
+        assert src.name == "batman_raw_017.cbz"
 
     @pytest.mark.asyncio
     async def test_epub_format_detection(

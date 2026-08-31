@@ -18,9 +18,19 @@ from sqlalchemy.orm import joinedload
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
 from pullbox.core.file_ops import LibraryFileRegistrationOutcome
 from pullbox.core.file_safety import classify_resource_safety_exception
-from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportJobAction
+from pullbox.core.issue_numbers import (
+    issue_number_text_matches_numeric,
+    normalize_issue_number_text,
+)
+from pullbox.core.library_file_ownership import ReferencedFileValidationError
+from pullbox.models.import_job import (
+    ImportedFile,
+    ImportedFileStatus,
+    ImportFileHandlingMode,
+    ImportJobAction,
+)
 from pullbox.models.issue import Issue, IssueStatus, IssueType
-from pullbox.models.library import LibraryFile, MatchConfidence
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, MatchConfidence
 from pullbox.models.series import Series
 from pullbox.services.import_file_match_targets import (
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND,
@@ -31,6 +41,8 @@ from pullbox.services.import_file_resolution import (
     load_issue_lookup_for_series,
 )
 from pullbox.services.import_folder_adoption import apply_import_series_folder_adoption
+from pullbox.services.import_job_actions import seed_action_sequence_cache
+from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.utilities.settings import restore_file_from_utility_trash
 
 if TYPE_CHECKING:
@@ -72,6 +84,7 @@ _MATCH_CONFIDENCE_MAP: dict[str, MatchConfidence] = {
 @dataclass(frozen=True, slots=True)
 class _PlaceholderIssueTarget:
     issue_number: float
+    issue_number_text: str | None
     issue_type: IssueType
     issue_title: str | None
     metadata_source: str
@@ -83,10 +96,14 @@ def _cleanup_failed_library_artifact(
     original_source: Path | None,
     original_trash_path: Path | None,
     transfer_method: str | None,
+    storage_mode: str | None,
     created_series_folder: bool,
     created_series_folder_path: Path | None,
 ) -> None:
     """Best-effort cleanup when import fails after the library artifact was placed."""
+    if storage_mode == "referenced" or transfer_method == "leave_in_place":
+        return
+
     if (
         original_trash_path is not None
         and original_source is not None
@@ -143,6 +160,7 @@ def _resolve_import_file_issue_id(
     imp_file: ImportedFile,
     *,
     cv_id_to_issue_id: dict[int, int],
+    exact_number_to_issue_id: dict[str, int],
     number_to_issue_id: dict[float, int],
 ) -> int | None:
     if imp_file.matched_issue_id is not None:
@@ -160,7 +178,18 @@ def _resolve_import_file_issue_id(
 
     placeholder_target = _placeholder_issue_target_from_diagnostics(imp_file)
     if placeholder_target is not None:
+        if placeholder_target.issue_number_text is not None:
+            return exact_number_to_issue_id.get(placeholder_target.issue_number_text)
         return number_to_issue_id.get(placeholder_target.issue_number)
+
+    if imp_file.issue_number_raw and imp_file.parsed_issue_number is not None:
+        with suppress(ValueError):
+            exact_issue_number = normalize_issue_number_text(imp_file.issue_number_raw)
+            if issue_number_text_matches_numeric(
+                imp_file.parsed_issue_number,
+                exact_issue_number,
+            ):
+                return exact_number_to_issue_id.get(exact_issue_number)
 
     if imp_file.parsed_issue_number is not None:
         return number_to_issue_id.get(imp_file.parsed_issue_number)
@@ -188,7 +217,7 @@ async def _requires_serial_file_processing(
     resolved_series_id: int,
     importable_files: list[ImportedFile],
 ) -> bool:
-    cv_id_to_issue, number_to_issue = await load_issue_lookup_for_series(
+    cv_id_to_issue, exact_number_to_issue, number_to_issue = await load_issue_lookup_for_series(
         session,
         resolved_series_id,
     )
@@ -202,6 +231,11 @@ async def _requires_serial_file_processing(
         for issue_number, issue in number_to_issue.items()
         if issue.id is not None
     }
+    exact_number_to_issue_id = {
+        issue_number: issue.id
+        for issue_number, issue in exact_number_to_issue.items()
+        if issue.id is not None
+    }
     seen_issue_ids: set[int] = set()
     seen_file_names: set[str] = set()
     for imp_file in importable_files:
@@ -213,6 +247,7 @@ async def _requires_serial_file_processing(
         resolved_issue_id = _resolve_import_file_issue_id(
             imp_file,
             cv_id_to_issue_id=cv_id_to_issue_id,
+            exact_number_to_issue_id=exact_number_to_issue_id,
             number_to_issue_id=number_to_issue_id,
         )
         if resolved_issue_id is None:
@@ -241,9 +276,16 @@ def _placeholder_issue_target_from_diagnostics(
         issue_type = IssueType(str(diagnostics.get("target_issue_type")))
     except (TypeError, ValueError):
         return None
+    issue_number_text: str | None = None
+    if imp_file.issue_number_raw:
+        with suppress(ValueError):
+            normalized_text = normalize_issue_number_text(imp_file.issue_number_raw)
+            if issue_number_text_matches_numeric(issue_number, normalized_text):
+                issue_number_text = normalized_text
     issue_title = diagnostics.get("target_issue_title")
     return _PlaceholderIssueTarget(
         issue_number=issue_number,
+        issue_number_text=issue_number_text,
         issue_type=issue_type,
         issue_title=str(issue_title) if issue_title else None,
         metadata_source=(
@@ -269,12 +311,24 @@ async def _ensure_placeholder_issue_targets(
         return False
 
     issues_result = await session.execute(sa_select(Issue).where(Issue.series_id == series_id))
-    existing_by_number = {issue.issue_number: issue for issue in issues_result.scalars().all()}
+    existing_issues = list(issues_result.scalars().all())
+    existing_by_exact = {issue.effective_issue_number_text: issue for issue in existing_issues}
+    existing_by_number: dict[float, list[Issue]] = {}
+    for issue in existing_issues:
+        existing_by_number.setdefault(issue.issue_number, []).append(issue)
     created_count = 0
     max_target_issue_number = 0
     for target in placeholder_targets:
-        existing = existing_by_number.get(target.issue_number)
+        if target.issue_number_text is not None:
+            existing = existing_by_exact.get(target.issue_number_text)
+        else:
+            numeric_candidates = existing_by_number.get(target.issue_number, [])
+            if len(numeric_candidates) > 1:
+                continue
+            existing = numeric_candidates[0] if numeric_candidates else None
         if existing is not None:
+            if target.issue_number_text is not None and existing.issue_number_text is None:
+                existing.issue_number_text = target.issue_number_text
             if existing.issue_type == IssueType.ISSUE:
                 existing.issue_type = target.issue_type
             if target.issue_title and not existing.title:
@@ -291,8 +345,11 @@ async def _ensure_placeholder_issue_targets(
             status=IssueStatus.SKIPPED,
             metadata_source=target.metadata_source,
         )
+        if target.issue_number_text is not None:
+            issue.issue_number_text = target.issue_number_text
         session.add(issue)
-        existing_by_number[target.issue_number] = issue
+        existing_by_exact[issue.effective_issue_number_text] = issue
+        existing_by_number.setdefault(target.issue_number, []).append(issue)
         created_count += 1
 
     if created_count:
@@ -300,7 +357,7 @@ async def _ensure_placeholder_issue_targets(
         if series is not None:
             series.issue_count = max(
                 int(series.issue_count or 0),
-                len(existing_by_number),
+                len(existing_issues) + created_count,
                 max_target_issue_number,
             )
     await session.flush()
@@ -483,8 +540,12 @@ async def process_import_series_files(
         raise ValueError("Resolved series id is required before importing files")
     item_id = item.id
     job_id = job.id
-    move_to_library = bool(job.move_to_library)
-    transfer_method = job.effective_transfer_method or job.transfer_method
+    in_place = job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+    move_to_library = not in_place
+    transfer_method = (
+        "leave_in_place" if in_place else job.effective_transfer_method or job.transfer_method
+    )
+    storage_mode = LibraryFileStorageMode.REFERENCED if in_place else LibraryFileStorageMode.MANAGED
     target_library_root_id = job.target_library_root_id
     update_embedded_comicinfo_from_match = bool(job.update_embedded_comicinfo_from_match)
     ingest_policy = await load_ingest_policy(session, job)
@@ -550,6 +611,11 @@ async def process_import_series_files(
             nonlocal next_action_sequence
             async with record_action_lock:
                 next_action_sequence += 1
+                seed_action_sequence_cache(
+                    session,
+                    int(job.id),
+                    last_sequence=next_action_sequence - 1,
+                )
                 action = await record_action(
                     session,
                     job,
@@ -628,7 +694,7 @@ async def process_import_series_files(
             await session.flush()
         return files_imported, files_failed
 
-    cv_id_to_issue, number_to_issue = await load_issue_lookup_for_series(
+    cv_id_to_issue, exact_number_to_issue, number_to_issue = await load_issue_lookup_for_series(
         session,
         resolved_series_id,
     )
@@ -642,6 +708,11 @@ async def process_import_series_files(
         for issue_number, issue in number_to_issue.items()
         if issue.id is not None
     }
+    exact_number_to_issue_id = {
+        issue_number: issue.id
+        for issue_number, issue in exact_number_to_issue.items()
+        if issue.id is not None
+    }
 
     media_settings = await load_media_settings(session, job)
     skip_existing_enabled = media_settings["skip_existing_files"].lower() == "true"
@@ -649,7 +720,13 @@ async def process_import_series_files(
     permission_policy = await load_permission_policy(session, job)
     trash_dir.mkdir(parents=True, exist_ok=True)
     issue_ids = {
-        issue.id for issue in [*cv_id_to_issue.values(), *number_to_issue.values()] if issue.id
+        issue.id
+        for issue in [
+            *cv_id_to_issue.values(),
+            *exact_number_to_issue.values(),
+            *number_to_issue.values(),
+        ]
+        if issue.id
     }
     owned_issue_ids = (
         await _load_owned_issue_ids(session, issue_ids) if skip_existing_enabled else set()
@@ -672,6 +749,7 @@ async def process_import_series_files(
         placed_destination_path: Path | None = None
         placed_series_folder_created = False
         placed_series_folder_path: Path | None = None
+        placed_storage_mode = "referenced" if not move_to_library else "managed"
         original_trash_path: Path | None = None
         imp_file = await _load_imported_file_for_processing(session, imp_file_id)
         if imp_file is None:
@@ -732,6 +810,7 @@ async def process_import_series_files(
             resolved_issue_id = _resolve_import_file_issue_id(
                 imp_file,
                 cv_id_to_issue_id=cv_id_to_issue_id,
+                exact_number_to_issue_id=exact_number_to_issue_id,
                 number_to_issue_id=number_to_issue_id,
             )
             if resolved_issue_id is None:
@@ -859,6 +938,10 @@ async def process_import_series_files(
                     resolved_issue,
                     confidence,
                     move_to_library=move_to_library,
+                    storage_mode=storage_mode,
+                    expected_source_signature=(
+                        dict(imp_file.source_signature) if in_place else None
+                    ),
                     library_root_id=target_library_root_id,
                     transfer_method=transfer_method,
                     normalize_to_cbz=False,
@@ -876,6 +959,7 @@ async def process_import_series_files(
                 )
             library_file, registration = _registration_outcome(registration_result)
             placed_destination_path = Path(library_file.file_path)
+            placed_storage_mode = library_file.storage_mode.value
             placed_series_folder_created = (
                 bool(registration.series_folder_created) if registration is not None else False
             )
@@ -980,6 +1064,7 @@ async def process_import_series_files(
                     "destination_path": library_file.file_path,
                     "original_source_path": str(prepared.original_source),
                     "transfer_method": (transfer_method if move_to_library else "leave_in_place"),
+                    "storage_mode": placed_storage_mode,
                     "original_trash_path": (
                         str(original_trash_path) if original_trash_path is not None else ""
                     ),
@@ -1086,6 +1171,7 @@ async def process_import_series_files(
                     original_source=prepared.original_source if prepared is not None else None,
                     original_trash_path=original_trash_path,
                     transfer_method=transfer_method,
+                    storage_mode=placed_storage_mode,
                     created_series_folder=placed_series_folder_created,
                     created_series_folder_path=placed_series_folder_path,
                 )
@@ -1111,6 +1197,32 @@ async def process_import_series_files(
                 file_path=imp_file_path,
                 error=str(exc),
             )
+            if isinstance(exc, ReferencedFileValidationError):
+                diagnostics = dict(imp_file.diagnostics or {})
+                diagnostics["source_revalidation"] = build_import_safety_diagnostics(
+                    str(exc),
+                    kind="source_revalidation",
+                    code=exc.reason,
+                    source="source_revalidation",
+                    overrideable_hint=False,
+                )
+                imp_file.status = ImportedFileStatus.FAILED
+                imp_file.include_in_import = False
+                imp_file.error_message = str(exc)
+                imp_file.diagnostics = diagnostics
+                files_failed += 1
+                await log_event(
+                    session,
+                    job_id,
+                    "WARNING",
+                    "import_file_source_revalidation_failed",
+                    message=f"Source changed after scan; rescan before retry: {imp_file_name}",
+                    source_path=imp_file_path,
+                    reason=exc.reason,
+                )
+                await session.commit()
+                continue
+
             resource_block = classify_resource_safety_exception(exc)
             if resource_block is not None:
                 diagnostics = dict(imp_file.diagnostics or {})

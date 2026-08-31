@@ -239,6 +239,63 @@ ignore:
       version: 2.41-12+deb13u3+dhi1
       type: deb
 
+  # Accepted risk approved by Adam Hernandez on 2026-08-30 for the DHI +dhi2
+  # refresh in PR #133; this is NOT a vulnerability fix or a false-positive claim.
+  # Debian 13 still lists these as vulnerable with no-dsa/minor-issue status:
+  # https://security-tracker.debian.org/tracker/CVE-2026-5435 (DNS TSIG printing)
+  # https://security-tracker.debian.org/tracker/CVE-2026-5450 (scanf %mc width >1024)
+  # https://security-tracker.debian.org/tracker/CVE-2026-5928 (ungetwc pushback)
+  # No direct calls were found in Pullbox source/native integration code, but
+  # reachability through bundled third-party helpers and DHI backport status are
+  # unproven. Keep the High gate blocking and scope only these nine matches.
+  # Retain +dhi1 entries above for older/cached image variants. Re-review at the
+  # next base refresh or by 2026-09-30; remove when fixed Debian 13 packages ship.
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5450
+    package:
+      name: libc6
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5450
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5450
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5928
+    package:
+      name: libc6
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5928
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5928
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+
   - vulnerability: CVE-2021-45346
     package:
       name: libsqlite3-0

@@ -629,6 +629,19 @@ def test_environment_bootstrap_uses_current_packaging_tool_floor() -> None:
     assert '$(PIP) install --upgrade "pip>=26.0" wheel' in makefile
 
 
+def test_local_docker_smoke_imports_pullbox_from_active_worktree() -> None:
+    """A shared editable venv must not redirect smoke tests to another checkout."""
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = re.search(
+        r"^docker-smoke:.*?(?=^\S|\Z)",
+        makefile,
+        re.MULTILINE | re.DOTALL,
+    )
+
+    assert target is not None
+    assert "PYTHONPATH=src PULLBOX_SMOKE_URL=" in target.group(0)
+
+
 def test_docker_validation_workflow_never_publishes_images() -> None:
     docker_validate_path = WORKFLOW_DIR / "docker-validate.yml"
     docker_validate = docker_validate_path.read_text(encoding="utf-8")
@@ -1066,8 +1079,8 @@ def test_docker_workflow_signs_and_verifies_published_images() -> None:
     assert "cosign verify" in docker_workflow
     assert "verify_image_signature()" in docker_workflow
     assert "Signature for ${label} was not discoverable yet" in docker_workflow
-    assert "--certificate-identity-regexp" in docker_workflow
-    assert "docker-release\\.yml" in docker_workflow
+    assert '--certificate-identity "${CERTIFICATE_IDENTITY}"' in docker_workflow
+    assert "CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}" in docker_workflow
     assert "--certificate-oidc-issuer" in docker_workflow
 
 

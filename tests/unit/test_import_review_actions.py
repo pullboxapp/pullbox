@@ -661,9 +661,13 @@ async def test_allow_safety_blocked_file_once_keeps_file_in_safety_review_until_
     assert updated_file.error_message is None
     assert imported.selected_for_import is False
     assert updated_file.diagnostics["safety_exception"]["allowed_once"] is True
-    assert updated_file.diagnostics["safety_exception"]["previous_block"]["reason"] == (
-        "Archive decompressed size exceeds limit"
+    previous_block = updated_file.diagnostics["safety_exception"]["previous_block"]
+    assert previous_block["category"] == "decompression_size_limit"
+    assert previous_block["code"] == "archive_decompressed_size_limit"
+    assert previous_block["reason"] == (
+        "The archive exceeds Pullbox's configured decompressed-size limit."
     )
+    assert "/tmp/comics" not in str(previous_block)
     recompute_files.assert_awaited_once_with(db_session, job, [imported.id])
     recompute_series.assert_awaited_once_with(db_session, job)
 
@@ -705,6 +709,46 @@ async def test_allow_safety_blocked_file_once_rejects_non_overrideable_blocks(
 
     assert imp_file.status == ImportedFileStatus.SAFETY_BLOCKED
     assert imp_file.include_in_import is True
+    assert "safety_exception" not in imp_file.diagnostics
+    recompute_files.assert_not_awaited()
+    recompute_series.assert_not_awaited()
+
+
+async def test_allow_safety_blocked_file_once_rejects_dangerous_legacy_override_hint(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job_row(db_session)
+    imported = await _create_imported_series(db_session, job, selected_for_import=True)
+    imp_file = _make_file(
+        job,
+        imported,
+        name="unsafe.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        include_in_import=True,
+    )
+    imp_file.diagnostics = {
+        "safety_block": {
+            "kind": "file_safety_blocked",
+            "reason": "Archive contains path traversal entries",
+            "details": ["../../private"],
+            "overrideable": True,
+        }
+    }
+    db_session.add(imp_file)
+    await db_session.flush()
+    recompute_files = AsyncMock()
+    recompute_series = AsyncMock()
+
+    with pytest.raises(ValidationError, match="cannot be overridden"):
+        await allow_safety_blocked_file_once(
+            db_session,
+            job.id,
+            imp_file.id,
+            recompute_file_counters=recompute_files,
+            recompute_series_counters=recompute_series,
+        )
+
+    assert imp_file.status == ImportedFileStatus.SAFETY_BLOCKED
     assert "safety_exception" not in imp_file.diagnostics
     recompute_files.assert_not_awaited()
     recompute_series.assert_not_awaited()

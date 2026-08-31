@@ -15,19 +15,26 @@ if TYPE_CHECKING:
 
 
 class _SessionResult:
-    def __init__(self, rows: list[tuple[int, str]]) -> None:
+    def __init__(self, rows: list[Any]) -> None:
         self._rows = rows
 
-    def all(self) -> list[tuple[int, str]]:
+    def all(self) -> list[Any]:
         return self._rows
+
+    def scalars(self) -> _SessionResult:
+        return self
 
 
 class _FakeSession:
     def __init__(self, root_path: Path) -> None:
         self.root_path = root_path
+        self._execute_count = 0
 
     async def execute(self, _stmt: Any) -> _SessionResult:
-        return _SessionResult([(1, str(self.root_path))])
+        self._execute_count += 1
+        if self._execute_count == 1:
+            return _SessionResult([(1, str(self.root_path))])
+        return _SessionResult([])
 
 
 @pytest.mark.asyncio

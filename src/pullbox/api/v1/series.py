@@ -335,6 +335,8 @@ async def build_series_delete_context(
     return SeriesDeleteContextResponse(
         series_count=context.series_count,
         linked_file_count=context.linked_file_count,
+        managed_file_count=context.managed_file_count,
+        referenced_file_count=context.referenced_file_count,
     )
 
 
@@ -452,6 +454,7 @@ async def list_series_issues(
         IssueListResponse.model_validate(
             {
                 **{c.key: getattr(i, c.key) for c in issue_mapper.columns},
+                "issue_number_text": i.effective_issue_number_text,
                 "has_file": i.library_file is not None,
             }
         )

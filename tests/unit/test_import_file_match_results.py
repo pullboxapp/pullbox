@@ -239,6 +239,57 @@ def test_file_match_summary_preserves_trusted_folder_series_with_unmatched_file(
     assert series.cv_match_method == "comicinfo_cv_id"
 
 
+def test_file_match_summary_holds_mixed_selected_layout_group_for_review() -> None:
+    series = ImportedSeries(
+        raw_series_name="Batman",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=97508,
+        cv_title="Batman",
+        cv_year=2016,
+        cv_match_score=0.98,
+        cv_match_method="exact_title_year",
+    )
+    files = [
+        ImportedFile(
+            file_name="Batman 001.cbz",
+            status=ImportedFileStatus.MATCHED,
+        ),
+        ImportedFile(
+            file_name="Batman Special.cbz",
+            status=ImportedFileStatus.NO_MATCH,
+            diagnostics={
+                "kind": "source_layout_review",
+                "rejection_reason": (
+                    "This file does not fit the selected source layout. "
+                    "Review its series before importing."
+                ),
+            },
+        ),
+    ]
+
+    summary = apply_file_match_series_summary(
+        series,
+        files,
+        duplicate_series=False,
+        duplicate_merge_profile=None,
+        cv_match_threshold=0.88,
+    )
+
+    assert summary.series_invalidated is True
+    assert series.status == ImportSeriesStatus.NO_MATCH
+    assert series.cv_id == 97508
+    assert series.cv_match_method == "exact_title_year"
+    assert series.diagnostics == {
+        "kind": "source_layout_review",
+        "reason": "selected_layout_no_match",
+        "rejection_reason": (
+            "This file does not fit the selected source layout. Review its series before importing."
+        ),
+        "source_layout_review_files": 1,
+        "unmatched_files": ["Batman Special.cbz"],
+    }
+
+
 def test_file_match_summary_updates_duplicate_series_diagnostics_from_profile() -> None:
     series = ImportedSeries(
         raw_series_name="Absolute Batman",

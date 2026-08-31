@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, overload
 
 from sqlalchemy import func, select
@@ -17,6 +18,27 @@ from pullbox.core.naming import (
 )
 from pullbox.models.issue import Issue, IssueType, is_non_standard_issue_type
 from pullbox.models.series import Series
+
+_SERIES_PATH_TOKEN_RE = re.compile(r"\{(?P<name>[A-Za-z][A-Za-z0-9]*)\}")
+_SERIES_PATH_TOKENS = frozenset({"Publisher", "Series", "Year", "ComicVineId", "Type"})
+_MAX_SERIES_PATH_TEMPLATE_BYTES = 1024
+_FILE_TEMPLATE_TOKEN_RE = re.compile(r"\{[^{}]+\}")
+_FILE_TEMPLATE_TOKENS = frozenset(
+    {
+        "{Series}",
+        "{Year}",
+        "{Issue}",
+        "{Issue:03d}",
+        "{Volume}",
+        "{Volume:02d}",
+        "{Type}",
+        "{IssueTitle}",
+        "{Title}",
+        "{Publisher}",
+        "{Edition}",
+    }
+)
+_MAX_FILE_TEMPLATE_BYTES = 1024
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,17 +105,42 @@ def build_naming_snapshot(
             "id": root.id,
             "path": root.path,
         },
+        "root_policy": {
+            "id": getattr(naming_policy, "root_policy_id", None),
+            "source": str(getattr(naming_policy, "policy_source", "global_default")),
+            "revision": int(getattr(naming_policy, "policy_revision", 0)),
+            "source_import_job_id": getattr(
+                naming_policy,
+                "source_import_job_id",
+                None,
+            ),
+        },
         "series": series_payload,
         "issue": {
             "id": issue.id,
             "comicvine_id": issue.comicvine_id,
             "issue_number": issue.issue_number,
+            "issue_number_text": issue.effective_issue_number_text,
             "title": issue.title,
             "raw_issue_type": raw_issue_type,
             "effective_issue_type": effective_issue_type,
         },
         "template_key": template_key_for_issue_type(effective_issue_type),
         "templates": {
+            "series_path_template": policy_value(
+                naming_policy,
+                "series_path_template",
+                policy_value(
+                    naming_policy,
+                    "series_folder_template",
+                    "{Series} ({Year})",
+                ),
+            )
+            or policy_value(
+                naming_policy,
+                "series_folder_template",
+                "{Series} ({Year})",
+            ),
             "series_folder_template": policy_value(
                 naming_policy, "series_folder_template", "{Series} ({Year})"
             ),
@@ -186,6 +233,79 @@ def build_series_folder_name(
     )
 
 
+def build_series_relative_path(
+    series: object,
+    naming_policy: LibraryIngestPolicy | dict[str, str],
+) -> Path:
+    """Render and sanitize every segment in a root-relative series path."""
+    from pathlib import Path
+
+    template = policy_value(
+        naming_policy,
+        "series_path_template",
+        policy_value(naming_policy, "series_folder_template", "{Series} ({Year})"),
+    ) or policy_value(naming_policy, "series_folder_template", "{Series} ({Year})")
+    raw_segments = validate_series_path_template(template)
+
+    rendered_segments = tuple(
+        build_series_folder_name(
+            series,
+            {
+                "series_folder_template": segment,
+                "replace_illegal_characters": str(
+                    policy_bool(naming_policy, "replace_illegal_characters", True)
+                ),
+                "colon_replacement": policy_value(
+                    naming_policy,
+                    "colon_replacement",
+                    "dash",
+                ),
+            },
+        )
+        for segment in raw_segments
+    )
+    if any("/" in segment or "\\" in segment for segment in rendered_segments):
+        raise ValueError("Series path token rendered an unsafe path separator.")
+    if any(segment in {"", ".", ".."} for segment in rendered_segments):
+        raise ValueError("Series path template rendered an unsafe segment.")
+    return Path(*rendered_segments)
+
+
+def validate_series_path_template(template: str) -> tuple[str, ...]:
+    """Validate a root-relative output template and return its raw segments."""
+    if not template or len(template.encode("utf-8")) > _MAX_SERIES_PATH_TEMPLATE_BYTES:
+        raise ValueError("Series path template is empty or too long.")
+    if template.startswith(("/", "\\")) or "\\" in template:
+        raise ValueError("Series path template must be root-relative.")
+
+    raw_segments = template.split("/")
+    if any(segment in {"", ".", ".."} for segment in raw_segments):
+        raise ValueError("Series path template contains an unsafe segment.")
+
+    for matched in _SERIES_PATH_TOKEN_RE.finditer(template):
+        if matched.group("name") not in _SERIES_PATH_TOKENS:
+            raise ValueError(f"Unsupported series path token: {matched.group('name')}")
+    without_tokens = _SERIES_PATH_TOKEN_RE.sub("", template)
+    if "{" in without_tokens or "}" in without_tokens:
+        raise ValueError("Series path template contains an invalid token.")
+    return tuple(raw_segments)
+
+
+def validate_library_file_template(template: str) -> None:
+    """Reject unsupported or path-producing tokens in a file-name template."""
+    if not template or len(template.encode("utf-8")) > _MAX_FILE_TEMPLATE_BYTES:
+        raise ValueError("Library file template is empty or too long.")
+    if "/" in template or "\\" in template or any(ord(char) < 32 for char in template):
+        raise ValueError("Library file template must produce a single file name.")
+
+    for token in _FILE_TEMPLATE_TOKEN_RE.findall(template):
+        if token not in _FILE_TEMPLATE_TOKENS:
+            raise ValueError(f"Unsupported library file token: {token}")
+    without_tokens = _FILE_TEMPLATE_TOKEN_RE.sub("", template)
+    if "{" in without_tokens or "}" in without_tokens:
+        raise ValueError("Library file template contains an invalid token.")
+
+
 def compute_target_filename(
     issue: Issue,
     series: object,
@@ -239,7 +359,7 @@ def compute_target_filename(
     return format_comic_file(
         series=title,
         year=year,
-        issue=issue.issue_number,
+        issue=issue.effective_issue_number_text,
         volume=volume_number,
         issue_type=issue_type,
         title=issue.title,

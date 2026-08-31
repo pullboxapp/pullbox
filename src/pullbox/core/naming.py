@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.naming_type_detection import (
     classify_series_type as classify_series_type,
 )
@@ -574,7 +575,7 @@ def normalize_issue_type_for_naming(
 def format_comic_file(
     series: str,
     year: int | None = None,
-    issue: float | None = None,
+    issue: str | float | None = None,
     volume: int | None = None,
     issue_type: str = "issue",
     title: str | None = None,
@@ -590,12 +591,13 @@ def format_comic_file(
 
     Supported tokens:
         ``{Series}``, ``{Year}``, ``{Issue}``, ``{Issue:03d}``,
-        ``{Volume}``, ``{Volume:02d}``, ``{Type}``, ``{Title}``, ``{Publisher}``
+        ``{Volume}``, ``{Volume:02d}``, ``{Type}``, ``{IssueTitle}``,
+        ``{Title}``, ``{Publisher}``
 
     Args:
         series: Series title.
         year: Year (from series or release date).
-        issue: Issue number (may be ``None`` for one-shots/GNs).
+        issue: Exact issue designation or legacy number (``None`` for unnumbered items).
         volume: Volume number (for TPBs, omnibuses, etc.).
         issue_type: String value of ``IssueType`` enum.
         title: Issue/collection title.
@@ -641,6 +643,7 @@ def format_comic_file(
     name = name.replace("{Series}", clean_series)
     name = name.replace("{Year}", year_str)
     name = name.replace("{Type}", type_display)
+    name = name.replace("{IssueTitle}", title_str)
     name = name.replace("{Title}", title_str)
     name = name.replace("{Publisher}", publisher_str)
     # Keep older saved templates from leaking the deprecated token literally.
@@ -648,11 +651,15 @@ def format_comic_file(
 
     # Handle {Issue:03d} and {Issue} — leave blank if None
     if issue is not None:
-        issue_val = int(issue) if issue == int(issue) else issue
-        if "{Issue:03d}" in name:
-            name = name.replace("{Issue:03d}", f"{issue_val:03d}")
-        if "{Issue}" in name:
-            name = name.replace("{Issue}", str(issue_val))
+        issue_text = normalize_issue_number_text(issue)
+        # Pad the integer component without rounding fractions or dropping suffixes.
+        padded_issue = re.sub(
+            r"^([+-]?)([0-9]+)",
+            lambda match: match.group(1) + match.group(2).zfill(3 - len(match.group(1))),
+            issue_text,
+        )
+        name = name.replace("{Issue:03d}", padded_issue)
+        name = name.replace("{Issue}", issue_text)
     else:
         name = name.replace("#{Issue:03d}", "").replace("{Issue:03d}", "")
         name = name.replace("#{Issue}", "").replace("{Issue}", "")

@@ -15,6 +15,7 @@ from pullbox.core.events import (
     ReaderWantToReadChanged,
     get_event_bus,
 )
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.page_sources import PageSourceError, PageSourceErrorCode, ReaderResourceLimits
 from pullbox.core.page_sources.capabilities import inspect_reader_capabilities
 from pullbox.schemas.reader import (
@@ -386,7 +387,7 @@ def _adjacent_response(
     issue_id = adjacent.issue_id
     return ReaderAdjacentIssueResponse(
         issue_id=issue_id,
-        issue_label=f"#{adjacent.issue_number:g}",
+        issue_label=f"#{format_issue_number(adjacent.issue_number)}",
         title=adjacent.title,
         manifest_url=f"/api/v1/reader/issues/{issue_id}/manifest",
         issue_detail_url=f"/issues/{issue_id}",

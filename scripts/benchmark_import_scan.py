@@ -18,7 +18,8 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from pullbox.core.source_metadata import SourceMetadataExtractor
+from pullbox.core import file_safety
+from pullbox.core.archive import ArchiveReader
 from pullbox.models import import_job as _import_job_models  # noqa: F401
 from pullbox.models import issue as _issue_models  # noqa: F401
 from pullbox.models import library as _library_models  # noqa: F401
@@ -28,6 +29,7 @@ from pullbox.models.base import Base
 from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 from pullbox.performance.baseline import current_process_peak_rss_bytes
 from pullbox.providers.base import IssueSummary, SeriesSearchResult
+from pullbox.services import import_scan_helpers
 from pullbox.services.import_provider_cache import CachedImportMetadataProvider
 from pullbox.services.import_service import ImportService
 
@@ -171,35 +173,60 @@ async def main() -> None:
     )
 
     archive_read_count = 0
+    archive_member_payload_read_count = 0
+    archive_safety_inspection_count = 0
+    archive_metadata_evidence_count = 0
     archive_entry_issue_hint_count = 0
     commit_count = 0
-    original_read_archive_comicinfo = SourceMetadataExtractor._read_archive_comicinfo
-    original_archive_entry_issue_hint_from_path = (
-        SourceMetadataExtractor.archive_entry_issue_hint_from_path
+    original_list_zip = ArchiveReader._list_zip
+    original_read_zip = ArchiveReader._read_zip
+    original_inspect_zip_archive_safety = file_safety.inspect_zip_archive_safety
+    original_archive_entry_issue_hint_from_names = (
+        import_scan_helpers.archive_entry_issue_hint_from_names
     )
 
-    def counting_read_archive_comicinfo(path: Path) -> Any:
+    def counting_list_zip(reader: ArchiveReader) -> list[str]:
         nonlocal archive_read_count
         archive_read_count += 1
-        return original_read_archive_comicinfo(path)
+        return original_list_zip(reader)
 
-    def counting_archive_entry_issue_hint_from_path(
-        path: str | Path,
+    def counting_read_zip(
+        reader: ArchiveReader,
+        name: str,
+        *,
+        max_bytes: int | None,
+    ) -> bytes:
+        nonlocal archive_member_payload_read_count
+        archive_member_payload_read_count += 1
+        return original_read_zip(reader, name, max_bytes=max_bytes)
+
+    def counting_inspect_zip_archive_safety(*call_args: Any, **call_kwargs: Any) -> Any:
+        nonlocal archive_metadata_evidence_count, archive_safety_inspection_count
+        archive_safety_inspection_count += 1
+        report = original_inspect_zip_archive_safety(*call_args, **call_kwargs)
+        if report is not None and report.comicinfo is not None:
+            archive_metadata_evidence_count += 1
+        return report
+
+    def counting_archive_entry_issue_hint_from_names(
+        entry_names: list[str],
         *,
         expected_series_name: str | None = None,
     ) -> Any:
         nonlocal archive_entry_issue_hint_count
         archive_entry_issue_hint_count += 1
-        return original_archive_entry_issue_hint_from_path(
-            path,
+        return original_archive_entry_issue_hint_from_names(
+            entry_names,
             expected_series_name=expected_series_name,
         )
 
-    SourceMetadataExtractor._read_archive_comicinfo = staticmethod(  # type: ignore[method-assign]
-        counting_read_archive_comicinfo
+    ArchiveReader._list_zip = counting_list_zip  # type: ignore[method-assign]
+    ArchiveReader._read_zip = counting_read_zip  # type: ignore[method-assign]
+    file_safety.inspect_zip_archive_safety = (  # type: ignore[assignment]
+        counting_inspect_zip_archive_safety
     )
-    SourceMetadataExtractor.archive_entry_issue_hint_from_path = staticmethod(  # type: ignore[method-assign]
-        counting_archive_entry_issue_hint_from_path
+    import_scan_helpers.archive_entry_issue_hint_from_names = (  # type: ignore[assignment]
+        counting_archive_entry_issue_hint_from_names
     )
     try:
         with tempfile.TemporaryDirectory(prefix="pullbox-scan-bench-") as tmp:
@@ -247,6 +274,9 @@ async def main() -> None:
                     "trusted_comicinfo": args.trusted_comicinfo,
                     "elapsed_ms": elapsed_ms,
                     "archive_read_count": archive_read_count,
+                    "archive_member_payload_read_count": archive_member_payload_read_count,
+                    "archive_safety_inspection_count": archive_safety_inspection_count,
+                    "archive_metadata_evidence_count": archive_metadata_evidence_count,
                     "archive_entry_issue_hint_count": archive_entry_issue_hint_count,
                     "provider_search_calls": provider.search_calls,
                     "provider_get_series_calls": provider.series_calls,
@@ -268,11 +298,13 @@ async def main() -> None:
 
             await engine.dispose()
     finally:
-        SourceMetadataExtractor._read_archive_comicinfo = staticmethod(  # type: ignore[method-assign]
-            original_read_archive_comicinfo
+        ArchiveReader._list_zip = original_list_zip  # type: ignore[method-assign]
+        ArchiveReader._read_zip = original_read_zip  # type: ignore[method-assign]
+        file_safety.inspect_zip_archive_safety = (  # type: ignore[assignment]
+            original_inspect_zip_archive_safety
         )
-        SourceMetadataExtractor.archive_entry_issue_hint_from_path = staticmethod(  # type: ignore[method-assign]
-            original_archive_entry_issue_hint_from_path
+        import_scan_helpers.archive_entry_issue_hint_from_names = (  # type: ignore[assignment]
+            original_archive_entry_issue_hint_from_names
         )
 
 

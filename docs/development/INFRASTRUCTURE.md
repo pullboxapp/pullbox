@@ -140,7 +140,9 @@ Key gates:
 |---|---|
 | `make validate` | CSS build, lint, format, typecheck, and non-E2E tests |
 | `make ci-local` | GitHub-aligned local CI shape |
-| `make ci-full` | CI-local plus security and Docker smoke validation |
+| `make ci-full` | CI-local, security, current-tree/history secret scans, container runtime/Grype checks, and Docker smoke validation |
+| `make secret-scan` | Blocking Gitleaks scan of current files and the PR commit range |
+| `make docker-security-check` | Build the production image, verify its security runtime, and run Grype with the blocking High cutoff |
 | `make test-a11y` | Contrast gate plus accessibility browser checks |
 | `make workflow-hygiene` | Local workflow linting |
 | `make security-check` | Local security checks |
@@ -160,6 +162,17 @@ Key gates:
 
 - Full validation can be slow. Focused tests are still expected during
   development.
+- Before `make secret-scan` or `make ci-full`, refresh the intended PR base
+  with `git fetch origin develop`. The default history range is
+  `origin/develop..HEAD`, excluding merge commits as in PR CI. For another
+  base, fetch it and set `SECRET_SCAN_BASE=origin/main` (or the intended ref).
+  A missing base fails the gate; current uncommitted files are also scanned.
+- `make docker-smoke` first runs the same container security runtime script,
+  pinned Grype version, `.grype.yaml`, and blocking High cutoff as Docker CI.
+  Local architecture, cached base layers, and vulnerability DB freshness may
+  differ from hosted CI, so a local pass does not replace the remote gate.
+- Set `DOCKER_SMOKE_KEEP_ON_FAILURE=1` when a failure must stop before smoke
+  logs or cleanup. Runtime and Grype failures stop before smoke startup.
 - CSS drift is a real failure and should not be hand-waved.
 - E2E failures should be diagnosed from logs, traces, screenshots, and artifacts
   before guessing at a fix.

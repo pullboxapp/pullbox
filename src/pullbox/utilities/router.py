@@ -16,7 +16,7 @@ from pullbox.api.deps import DbSession, InteractiveOperatorUser  # noqa: TC001
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
 from pullbox.models.config import DEFAULT_SYSTEM_CONFIG, SystemConfig
-from pullbox.models.library import LibraryFile, LibraryRoot
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.services.database_optimization_service import DatabaseOptimizationService
 from pullbox.services.health_helpers import _sqlite_database_path
 from pullbox.utilities.import_guards import (
@@ -497,9 +497,15 @@ async def convert_preview(
     session: DbSession,
 ) -> ConvertPreviewResponse:
     """Preview files that would be converted without submitting a job."""
+    referenced_result = await session.execute(
+        select(LibraryFile.file_path).where(
+            LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED
+        )
+    )
     return build_convert_preview_response(
         body,
         allowed_roots=await _load_enabled_library_roots(session),
+        excluded_paths=frozenset(referenced_result.scalars().all()),
     )
 
 

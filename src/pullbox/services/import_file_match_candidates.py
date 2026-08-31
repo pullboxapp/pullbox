@@ -15,7 +15,10 @@ from pullbox.core.type_semantics import (
 )
 from pullbox.models.issue import IssueType
 from pullbox.services.import_embedded_title_match import embedded_issue_number_title_match
-from pullbox.services.import_file_issue_signals import candidate_issue_number
+from pullbox.services.import_file_issue_signals import (
+    candidate_issue_number,
+    candidate_issue_number_text,
+)
 from pullbox.services.import_file_match_targets import (
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
     PROVIDER_ZERO_ISSUE_PLACEHOLDER_METHOD,
@@ -174,6 +177,30 @@ def select_file_match_candidate(
 
     if imp_file.comicvine_issue_id is not None:
         return None
+
+    exact_issue_number = candidate_issue_number_text(imp_file)
+    if exact_issue_number is not None and target_index.exact_number_map:
+        exact_target = target_index.exact_number_map.get(exact_issue_number)
+        if exact_target is None:
+            return None
+        matched_issue_id, matched_issue_cv_id, has_library_file, matched_issue, issue_title = (
+            exact_target
+        )
+        target_issue_number = (
+            matched_issue.issue_number
+            if matched_issue is not None
+            else candidate_issue_number(imp_file)
+        )
+        return FileMatchCandidate(
+            matched_issue_id=matched_issue_id,
+            matched_issue_cv_id=matched_issue_cv_id,
+            target_issue_number=target_issue_number,
+            has_library_file=has_library_file,
+            matched_issue=matched_issue,
+            target_issue_title=issue_title,
+            confidence="high" if series_high_confidence else "medium",
+            method="issue_number",
+        )
 
     issue_number = candidate_issue_number(imp_file)
     if issue_number is not None and issue_number in target_index.number_map:

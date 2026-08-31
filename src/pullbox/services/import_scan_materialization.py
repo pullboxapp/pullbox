@@ -19,6 +19,22 @@ if TYPE_CHECKING:
     from pullbox.models.import_job import ImportJob
 
 
+_SOURCE_LAYOUT_REVIEW_REASON = "selected_layout_no_match"
+_SOURCE_LAYOUT_REVIEW_MESSAGE = (
+    "This file does not fit the selected source layout. Review its series before importing."
+)
+
+
+def _requires_source_layout_review(metadata_diagnostics: dict[str, object]) -> bool:
+    """Return whether a selected no-fallback layout requires explicit review."""
+    layout = metadata_diagnostics.get("source_layout")
+    return (
+        isinstance(layout, dict)
+        and layout.get("review_required") is True
+        and layout.get("review_reason") == _SOURCE_LAYOUT_REVIEW_REASON
+    )
+
+
 async def materialize_discovered_scan_results(
     session: AsyncSession,
     job: ImportJob,
@@ -27,6 +43,27 @@ async def materialize_discovered_scan_results(
     """Persist discovered scanner output as import review series/file rows."""
     series_pairs: list[tuple[DiscoveredSeries, ImportedSeries]] = []
     for discovered in discovered_list:
+        mylar_path_incompatible = (
+            dict(discovered.diagnostics).get("kind") == "mylar3_path_incompatible"
+        )
+        layout_review_count = sum(
+            _requires_source_layout_review(dict(discovered_file.metadata_diagnostics))
+            for discovered_file in discovered.files
+        )
+        all_files_require_layout_review = bool(discovered.files) and layout_review_count == len(
+            discovered.files
+        )
+        series_diagnostics = dict(discovered.diagnostics)
+        if layout_review_count:
+            series_diagnostics["source_layout_review_files"] = layout_review_count
+        if all_files_require_layout_review:
+            series_diagnostics.update(
+                {
+                    "kind": "source_layout_review",
+                    "reason": _SOURCE_LAYOUT_REVIEW_REASON,
+                    "rejection_reason": _SOURCE_LAYOUT_REVIEW_MESSAGE,
+                }
+            )
         item = ImportedSeries(
             import_job_id=job.id,
             raw_series_name=discovered.raw_series_name,
@@ -36,8 +73,12 @@ async def materialize_discovered_scan_results(
             sample_paths=[str(p) for p in discovered.sample_paths],
             source_folder=discovered.source_folder,
             has_files=discovered.has_files,
-            status=ImportSeriesStatus.PENDING,
-            diagnostics=dict(discovered.diagnostics),
+            status=(
+                ImportSeriesStatus.NO_MATCH
+                if all_files_require_layout_review or mylar_path_incompatible
+                else ImportSeriesStatus.PENDING
+            ),
+            diagnostics=series_diagnostics,
         )
         if discovered.mylar3_cv_id:
             item.cv_id = discovered.mylar3_cv_id
@@ -61,11 +102,13 @@ async def materialize_discovered_scan_results(
         for df in discovered.files:
             metadata_diagnostics = dict(df.metadata_diagnostics)
             safety_block = metadata_diagnostics.pop("file_safety", None)
-            file_status = (
-                ImportedFileStatus.SAFETY_BLOCKED
-                if isinstance(safety_block, dict)
-                else ImportedFileStatus.PENDING
-            )
+            source_layout_review = _requires_source_layout_review(metadata_diagnostics)
+            if isinstance(safety_block, dict):
+                file_status = ImportedFileStatus.SAFETY_BLOCKED
+            elif source_layout_review:
+                file_status = ImportedFileStatus.NO_MATCH
+            else:
+                file_status = ImportedFileStatus.PENDING
             diagnostics = {
                 "source_issue_type": df.issue_type.value,
                 "comicvine_series_id": df.comicvine_series_id,
@@ -76,6 +119,13 @@ async def materialize_discovered_scan_results(
             }
             if isinstance(safety_block, dict):
                 diagnostics["safety_block"] = safety_block
+            elif source_layout_review:
+                diagnostics.update(
+                    {
+                        "kind": "source_layout_review",
+                        "rejection_reason": _SOURCE_LAYOUT_REVIEW_MESSAGE,
+                    }
+                )
             error_message = safety_block.get("reason") if isinstance(safety_block, dict) else None
             file_item = ImportedFile(
                 import_job_id=job.id,
@@ -90,6 +140,9 @@ async def materialize_discovered_scan_results(
                 has_comicinfo=df.has_comicinfo,
                 comicvine_issue_id=df.comicvine_issue_id,
                 issue_number_raw=df.issue_number_raw,
+                source_folder_cohort_key=df.source_folder_cohort_key,
+                source_ordinal=df.source_ordinal,
+                source_signature=dict(df.source_signature),
                 status=file_status,
                 include_in_import=False,
                 error_message=error_message,

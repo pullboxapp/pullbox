@@ -79,6 +79,7 @@ class IssueSummary:
     release_date: str | None
     cover_url: str | None
     issue_type: str
+    issue_number_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ class IssueMetadata:
     comicvine_url: str | None
     creators: list[dict[str, str]] = field(default_factory=list)
     story_arcs: list[dict[str, str]] = field(default_factory=list)
+    issue_number_text: str | None = None
 
 
 @dataclass(frozen=True)

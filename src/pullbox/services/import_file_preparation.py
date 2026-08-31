@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from pullbox.core.archive import inspect_archive_page_count as inspect_archive_page_count
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.file_safety import is_resource_safety_exception_allowed
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 from pullbox.utilities.comicinfo import embed_comicinfo_in_cbz
@@ -132,9 +133,7 @@ def format_comicinfo_issue_number(issue_number: float | None) -> str | None:
     """Render an issue number for ComicInfo.xml output."""
     if issue_number is None:
         return None
-    if float(issue_number).is_integer():
-        return str(int(issue_number))
-    return f"{issue_number:g}"
+    return format_issue_number(issue_number)
 
 
 async def build_comicinfo_payload_for_issue(
@@ -168,7 +167,7 @@ async def build_comicinfo_payload_for_issue(
 
     payload: dict[str, Any] = {
         "Series": series.title,
-        "Number": format_comicinfo_issue_number(issue.issue_number),
+        "Number": issue.effective_issue_number_text,
         "Title": issue.title,
         "Summary": issue.description,
         "Publisher": publisher_name,

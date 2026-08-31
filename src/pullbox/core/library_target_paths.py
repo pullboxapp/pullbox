@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.library_naming import (
-    build_series_folder_name,
+    build_series_relative_path,
     compute_target_filename,
     resolve_naming_issue_type,
 )
@@ -94,9 +94,22 @@ async def predict_library_target_path(
 
     if isinstance(series, Series) and series.path:
         series_folder = Path(series.path)
+        if series.library_root_id is not None and series.library_root_id != root.id:
+            raise ConfigurationError("Series belongs to a different library root.")
+        try:
+            series_folder.resolve(strict=False).relative_to(comics_dir.resolve(strict=False))
+        except ValueError as exc:
+            raise ConfigurationError("Existing series path is outside its library root.") from exc
     else:
-        folder_name = build_series_folder_name(series, ingest_policy)
-        series_folder = comics_dir / folder_name
+        try:
+            relative_series_path = build_series_relative_path(series, ingest_policy)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from exc
+        series_folder = comics_dir / relative_series_path
+        try:
+            series_folder.resolve(strict=False).relative_to(comics_dir.resolve(strict=False))
+        except ValueError as exc:
+            raise ConfigurationError("Rendered series path is outside its library root.") from exc
 
     if rename:
         effective_issue_type = await resolve_naming_issue_type(session, issue)

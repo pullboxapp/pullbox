@@ -63,6 +63,10 @@ def _target() -> IssueSearchTarget:
     )
 
 
+def _large_issue_target() -> IssueSearchTarget:
+    return replace(_target(), issue_number=1_000_000.0)
+
+
 def _provider(identity: str, priority: int) -> DirectSearchProvider:
     return DirectSearchProvider(
         provider_config_id=priority,
@@ -180,6 +184,20 @@ def _reset() -> None:
     _Client.requests = []
     _Client.challenge_required = set()
     _Client.resolver_failures = {}
+
+
+async def test_direct_search_preserves_large_issue_number_in_provider_intent() -> None:
+    _reset()
+    provider = _provider("pullbox.getcomics", 10)
+    _Client.responses = {provider.provider_identity: []}
+
+    await search_direct_issue_target(
+        _large_issue_target(),
+        [provider],
+        client_factory=_factory,
+    )
+
+    assert _Client.requests[0][1].intent.issue_number == "1000000"
 
 
 def _resolver_option(

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import select
@@ -486,7 +487,10 @@ async def _successful_post_processor(*_args: Any, **_kwargs: Any) -> DirectPostP
 async def test_executor_completes_with_durable_redacted_progress(
     session: AsyncSession,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    nudge = Mock(side_effect=RuntimeError("scheduler unavailable"))
+    monkeypatch.setattr(direct_executor_module, "request_story_arc_sync_now", nudge)
     attempt = _attempt()
     session.add(attempt)
     await session.flush()
@@ -545,6 +549,7 @@ async def test_executor_completes_with_durable_redacted_progress(
     assert refreshed_history.imported_at == NOW
     assert refreshed_history.error_message is None
     assert observed_download_history_id == refreshed_history.id
+    nudge.assert_called_once_with()
 
     await drain_operation_progress_updates()
     post_processing_operations = list(

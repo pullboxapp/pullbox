@@ -18,6 +18,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.issue import Issue
+from pullbox.services.import_story_arc_review import confirm_import_story_arcs
 from pullbox.services.import_workflow_state import initialize_progress_snapshot
 
 if TYPE_CHECKING:
@@ -101,9 +102,23 @@ async def confirm_import_job(
     await apply_confirm_policy(session, job, request)
 
     duplicate_selected_count = await _count_selected_duplicate_files(session, job_id)
-    if not items and duplicate_selected_count == 0:
+    confirmed_story_arc_count = await confirm_import_story_arcs(
+        session,
+        job_id,
+        story_arc_ids=request.story_arc_ids,
+        decisions=[
+            (
+                decision.imported_story_arc_id,
+                decision.action,
+                decision.proposed_story_arc_id,
+            )
+            for decision in request.story_arc_decisions
+        ],
+    )
+    if not items and duplicate_selected_count == 0 and confirmed_story_arc_count == 0:
         raise ValidationError(
-            "Select at least one matched series or duplicate importable file before importing"
+            "Select at least one matched series, duplicate importable file, or story arc "
+            "before importing"
         )
 
     job.status = ImportJobStatus.IMPORTING
@@ -113,7 +128,7 @@ async def confirm_import_job(
         mode="import",
         phase="queued",
         progress=0,
-        message="Preparing the selected series for import...",
+        message="Preparing the selected import items...",
         status=ImportJobStatus.IMPORTING,
     )
     await session.flush()
@@ -125,10 +140,12 @@ async def confirm_import_job(
         "import_confirmed",
         message=(
             f"User confirmed {len(items)} series and "
-            f"{duplicate_selected_count} duplicate-series files for import"
+            f"{duplicate_selected_count} duplicate-series files and "
+            f"{confirmed_story_arc_count} story arcs for import"
         ),
         confirmed_count=len(items),
         duplicate_file_count=duplicate_selected_count,
+        story_arc_count=confirmed_story_arc_count,
     )
 
     return job

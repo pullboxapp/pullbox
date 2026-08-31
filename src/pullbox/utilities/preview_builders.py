@@ -23,7 +23,12 @@ from pullbox.core.naming import (
     resolve_single_non_standard_file_template,
 )
 from pullbox.models.issue import Issue, IssueType, is_non_standard_issue_type
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+)
 from pullbox.models.series import Series
 from pullbox.utilities.schemas import (
     ConvertPreviewRequest,
@@ -56,6 +61,7 @@ def build_convert_preview_response(
     body: ConvertPreviewRequest,
     *,
     allowed_roots: Sequence[str | Path] | None = None,
+    excluded_paths: frozenset[str] = frozenset(),
 ) -> ConvertPreviewResponse:
     """Preview files that would be converted without submitting a job."""
     from pullbox.utilities.executors.file_converter import build_convert_preview
@@ -67,6 +73,7 @@ def build_convert_preview_response(
             scope=body.scope,
             file_paths=body.file_paths,
             allowed_roots=allowed_roots,
+            excluded_paths=excluded_paths,
         )
         return result
     except ValueError as exc:
@@ -246,7 +253,10 @@ async def build_mass_convert_preview(
             raise ValidationError("A database session is required for library preview.")
         result = await session.execute(
             select(LibraryFile)
-            .where(LibraryFile.file_format.in_(_MASS_CONVERT_SUPPORTED_FORMATS))
+            .where(
+                LibraryFile.file_format.in_(_MASS_CONVERT_SUPPORTED_FORMATS),
+                LibraryFile.storage_mode == LibraryFileStorageMode.MANAGED,
+            )
             .order_by(LibraryFile.file_path.asc())
         )
         for library_file in result.scalars().all():
@@ -258,6 +268,15 @@ async def build_mass_convert_preview(
             candidate_paths.append(path)
 
     deduped_paths = list(dict.fromkeys(candidate_paths))
+    if deduped_paths and scope != "library":
+        referenced_result = await session.execute(
+            select(LibraryFile.file_path).where(
+                LibraryFile.file_path.in_([str(path) for path in deduped_paths]),
+                LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED,
+            )
+        )
+        referenced_paths = set(referenced_result.scalars().all())
+        deduped_paths = [path for path in deduped_paths if str(path) not in referenced_paths]
     items = [_build_mass_convert_preview_item(path) for path in deduped_paths[:100]]
     total_size_bytes = sum(path.stat().st_size for path in deduped_paths)
 
@@ -290,11 +309,17 @@ async def build_library_permissions_preview(
     root_result = await session.execute(
         select(LibraryRoot.id, LibraryRoot.path).where(LibraryRoot.enabled.is_(True))
     )
-    job_context = {
+    job_context: dict[str, Any] = {
         "library_roots": [
             {"id": root_id, "path": root_path} for root_id, root_path in root_result.all()
         ]
     }
+    referenced_result = await session.execute(
+        select(LibraryFile.file_path).where(
+            LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED
+        )
+    )
+    job_context["referenced_paths"] = list(referenced_result.scalars().all())
     job_config: dict[str, Any] = {
         "scope": "library",
         "run_mode": "dry_run",
@@ -325,6 +350,12 @@ async def build_library_permissions_preview(
             str(item.get("file_path", "")),
             [Path(root["path"]) for root in job_context["library_roots"]],
         )
+        referenced_paths = job_context["referenced_paths"]
+        if any(
+            Path(referenced_path) == path or Path(referenced_path).is_relative_to(path)
+            for referenced_path in referenced_paths
+        ):
+            continue
         try:
             path_stat = _preview_lstat(path)
         except OSError:
@@ -356,7 +387,7 @@ async def build_library_permissions_preview(
 
     return LibraryPermissionsPreviewResponse(
         scope=scope,
-        item_count=len(generated_items),
+        item_count=folder_count + file_count,
         folder_count=folder_count,
         file_count=file_count,
         items=preview_items,
@@ -494,6 +525,18 @@ async def build_mass_rename_preview(
                     )
                 )
                 continue
+            if library_file_match.storage_mode == LibraryFileStorageMode.REFERENCED:
+                preview_items.append(
+                    MassRenamePreviewItem(
+                        file_path=file_path,
+                        current_name=current_name,
+                        proposed_name=current_name,
+                        actionable=False,
+                        status="blocked",
+                        reason="Referenced library files stay unchanged on disk.",
+                    )
+                )
+                continue
             if library_file_match.issue is None:
                 preview_items.append(
                     MassRenamePreviewItem(
@@ -602,6 +645,31 @@ async def build_mass_rename_preview(
                         actionable=False,
                         status="unmatched",
                         reason="No linked series record found for this folder.",
+                    )
+                )
+                continue
+
+            referenced_descendant = (
+                await session.execute(
+                    select(LibraryFile.id)
+                    .where(
+                        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED,
+                        LibraryFile.file_path.like(f"{folder_path.rstrip('/')}/%"),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if referenced_descendant is not None:
+                preview_items.append(
+                    MassRenamePreviewItem(
+                        file_path=folder_path,
+                        current_name=current_name,
+                        proposed_name=current_name,
+                        template_key="series_folder_template",
+                        template_label="Folder Template",
+                        actionable=False,
+                        status="blocked",
+                        reason="This folder contains referenced files that stay unchanged on disk.",
                     )
                 )
                 continue

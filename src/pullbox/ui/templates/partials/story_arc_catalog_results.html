@@ -1,0 +1,32 @@
+<div data-testid="story-arc-catalog-results" class="space-y-3">
+  {% if error_message %}
+    <p role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 p-3 text-sm text-pb-text">{{ error_message }}</p>
+  {% elif query|length < 2 %}
+    <p class="text-sm text-pb-text-sec">Enter at least two characters to search Comic Vine.</p>
+  {% elif not results %}
+    <p class="text-sm text-pb-text-sec">No matching Story Arcs. Try another name.</p>
+  {% else %}
+    <p class="text-sm text-pb-text-sec">{{ total }} matching Story Arc{{ '' if total == 1 else 's' }}</p>
+    <ul class="divide-y divide-pb-border" aria-label="Comic Vine Story Arcs">
+      {% for result in results %}
+        <li class="flex flex-wrap items-center justify-between gap-3 py-3">
+          <div class="min-w-0">
+            <span class="font-semibold text-pb-text">{{ result.metadata.title }}</span>
+            <p class="text-sm text-pb-text-sec">{{ result.metadata.publisher or 'Publisher unknown' }} · {{ result.metadata.declared_issue_count if result.metadata.declared_issue_count is not none else 'Unknown' }} reported members</p>
+          </div>
+          {% if result.existing_id %}
+            <a href="/story-arcs/{{ result.existing_id }}" class="btn-secondary">Already added — open arc</a>
+          {% else %}
+            <a href="/story-arcs/catalog/{{ result.metadata.provider_id }}" class="btn-secondary" aria-label="Preview {{ result.metadata.title }}">Preview members</a>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+    {% if previous_url or next_url %}
+      <nav aria-label="Comic Vine result pages" class="flex gap-2">
+        {% if previous_url %}<a href="{{ previous_url }}" hx-get="{{ previous_url }}" hx-target="#story-arc-catalog-results" class="btn-secondary">Previous results</a>{% endif %}
+        {% if next_url %}<a href="{{ next_url }}" hx-get="{{ next_url }}" hx-target="#story-arc-catalog-results" class="btn-secondary">Next results</a>{% endif %}
+      </nav>
+    {% endif %}
+  {% endif %}
+</div>

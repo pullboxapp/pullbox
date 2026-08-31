@@ -10,26 +10,10 @@ from pydantic import BaseModel
 
 from pullbox.api.deps import DbSession, InteractiveOperatorUser
 from pullbox.core.file_safety import get_allowed_extensions
+from pullbox.core.filesystem_policy import is_sensitive_path
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/filesystem", tags=["filesystem"], include_in_schema=False)
-
-# Directories that should never be browsable via the API.
-# We resolve() each prefix so symlinks (e.g. macOS /etc → /private/etc) are caught.
-_BLOCKED_DIRS: tuple[str, ...] = (
-    "/etc",
-    "/proc",
-    "/sys",
-    "/dev",
-    "/run",
-    "/boot",
-    "/root",
-    "/var/log",
-    "/var/run",
-)
-_BLOCKED_PREFIXES: frozenset[str] = frozenset(
-    {p for d in _BLOCKED_DIRS for p in (d, str(Path(d).resolve()))}
-)
 
 _MAX_PATH_LENGTH = 4096
 
@@ -168,7 +152,6 @@ def _validate_browsable_path(path: str, allowed_roots: Sequence[Path] | None = N
     # before any listing is returned.
     # codeql[py/path-injection]
     resolved = Path(sanitized).resolve()
-    resolved_str = str(resolved)
 
     # Defense in depth: reject if ".." survived resolution
     if ".." in resolved.parts:
@@ -176,12 +159,9 @@ def _validate_browsable_path(path: str, allowed_roots: Sequence[Path] | None = N
         return fallback
 
     # Block sensitive system directories
-    for prefix in _BLOCKED_PREFIXES:
-        if resolved_str == prefix or resolved_str.startswith(f"{prefix}/"):
-            logger.warning(
-                "filesystem_path_blocked", requested_path=path, reason="sensitive_directory"
-            )
-            return fallback
+    if is_sensitive_path(resolved):
+        logger.warning("filesystem_path_blocked", requested_path=path, reason="sensitive_directory")
+        return fallback
 
     # Fallback if path doesn't exist
     # ``resolved`` has passed the browser safety checks above; this probe only

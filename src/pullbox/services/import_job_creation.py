@@ -2,14 +2,35 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import select as sa_select
 
 from pullbox.core.exceptions import ValidationError
-from pullbox.core.library_policy import load_library_ingest_policy, load_search_on_add_default
-from pullbox.models.import_job import ImportControlRequest, ImportJob, ImportJobStatus
+from pullbox.core.library_file_ownership import (
+    ReferencedFileValidationError,
+    resolve_referenced_source_root,
+)
+from pullbox.core.library_layout import resolve_source_layout_spec
+from pullbox.core.library_policy import (
+    load_effective_library_ingest_policy,
+    load_library_ingest_policy,
+    load_search_on_add_default,
+)
+from pullbox.models.import_job import (
+    ImportControlRequest,
+    ImportFileHandlingMode,
+    ImportJob,
+    ImportJobStatus,
+    ImportSourceType,
+)
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
+from pullbox.services.import_referenced_sources import load_mylar_in_place_root
+from pullbox.services.import_root_policy_activation import (
+    apply_future_root_policy_to_ingest_policy,
+    build_future_root_policy_snapshot,
+)
 from pullbox.services.import_workflow_state import (
     ACTIVE_IMPORT_JOB_STATUSES,
     initialize_progress_snapshot,
@@ -44,6 +65,23 @@ async def create_job(
     log_event: ImportEventLogger,
 ) -> ImportJob:
     """Create an import job record without starting scan execution."""
+    resolved_target_library_root_id = request.target_library_root_id
+    if request.file_handling_mode == ImportFileHandlingMode.IN_PLACE:
+        try:
+            if request.source_type == ImportSourceType.MYLAR3:
+                root = await load_mylar_in_place_root(session, request.target_library_root_id)
+            else:
+                root, _ = await resolve_referenced_source_root(
+                    session,
+                    Path(request.source_path),
+                    request.target_library_root_id,
+                )
+        except ReferencedFileValidationError as exc:
+            raise ValidationError(exc.message) from exc
+        resolved_target_library_root_id = root.id
+    if request.future_layout_requested and resolved_target_library_root_id is None:
+        raise ValidationError("Future library layout requires a target library root.")
+
     active_job_id = await session.scalar(
         sa_select(ImportJob.id)
         .where(ImportJob.status.in_(ACTIVE_IMPORT_JOB_STATUSES))
@@ -61,7 +99,31 @@ async def create_job(
         raise ValidationError("Search on add is now controlled by the global import policy.")
 
     monitored = request.monitored or search_on_add
-    ingest_policy = await load_library_ingest_policy(session)
+    baseline_ingest_policy = (
+        await load_effective_library_ingest_policy(
+            session,
+            resolved_target_library_root_id,
+        )
+        if resolved_target_library_root_id is not None
+        else await load_library_ingest_policy(session)
+    )
+    future_root_policy_snapshot = (
+        build_future_root_policy_snapshot(
+            request.future_root_policy.model_dump(mode="json"),
+            baseline_ingest_policy,
+        )
+        if request.future_root_policy is not None
+        else None
+    )
+    ingest_policy = (
+        apply_future_root_policy_to_ingest_policy(
+            baseline_ingest_policy,
+            future_root_policy_snapshot,
+        )
+        if future_root_policy_snapshot is not None
+        else baseline_ingest_policy
+    )
+    source_layout_snapshot = resolve_source_layout_spec(request.source_layout.to_core()).to_dict()
 
     job = ImportJob(
         source_path=request.source_path,
@@ -70,7 +132,7 @@ async def create_job(
         status=ImportJobStatus.PENDING,
         monitored=monitored,
         search_on_add=search_on_add,
-        target_library_root_id=request.target_library_root_id,
+        target_library_root_id=resolved_target_library_root_id,
         mylar3_path_map=request.mylar3_path_map,
         cv_match_threshold=request.cv_match_threshold,
         min_files_per_series=request.min_files_per_series,
@@ -78,10 +140,26 @@ async def create_job(
         progress_snapshot={},
         progress_revision=0,
         control_request=ImportControlRequest.NONE,
+        file_handling_mode=request.file_handling_mode,
+        source_layout_snapshot=source_layout_snapshot,
+        future_layout_requested=request.future_layout_requested,
+        future_root_policy_snapshot=future_root_policy_snapshot,
+        future_root_policy_applied_at=None,
+        story_arc_import_requested=request.story_arc_import_requested,
+        story_arc_materialization_requested=request.story_arc_materialization_requested,
     )
     apply_ingest_policy_to_import_job(job, ingest_policy)
     session.add(job)
     await session.flush()
+    if future_root_policy_snapshot is not None:
+        apply_ingest_policy_to_import_job(
+            job,
+            apply_future_root_policy_to_ingest_policy(
+                baseline_ingest_policy,
+                future_root_policy_snapshot,
+                source_import_job_id=job.id,
+            ),
+        )
     job.progress_snapshot = initialize_progress_snapshot(
         job,
         mode="scan",

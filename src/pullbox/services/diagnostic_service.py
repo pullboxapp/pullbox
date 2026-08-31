@@ -11,6 +11,9 @@ import structlog
 from pullbox.services.diagnostic_db_snapshot import (
     create_sanitized_db_copy as _create_sanitized_db_copy,
 )
+from pullbox.services.diagnostic_import_collectors import (
+    collect_import_story_arc_diagnostics as _collect_import_story_arc_diagnostics,
+)
 from pullbox.services.diagnostic_log_collector import (
     MAX_LOG_FILE_BYTES as _MAX_LOG_FILE_BYTES,  # noqa: F401
 )
@@ -413,6 +416,7 @@ async def create_diagnostic_package(session: AsyncSession) -> tuple[bytes, str]:
     disk_permissions = await _collect_disk_and_permissions(session)
     runtime_info = await _collect_runtime_info(session)
     import_jobs = await _collect_import_jobs(session)
+    import_story_arc_diagnostics = await _collect_import_story_arc_diagnostics(session)
     utility_jobs = await _collect_utility_jobs(session)
     utility_job_logs = await _collect_utility_job_logs(
         session,
@@ -453,6 +457,7 @@ async def create_diagnostic_package(session: AsyncSession) -> tuple[bytes, str]:
             "disk_and_permissions.json": disk_permissions,
             "runtime_info.json": runtime_info,
             "import_jobs.json": import_jobs,
+            "import_story_arc_diagnostics.json": import_story_arc_diagnostics,
             "utility_jobs.json": utility_jobs,
             "utility_job_logs.json": utility_job_logs,
         },

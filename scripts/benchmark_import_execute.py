@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import tempfile
 import time
@@ -45,6 +46,73 @@ from pullbox.models.operation_progress import OperationProgress
 from pullbox.models.series import Series
 from pullbox.performance.baseline import current_process_peak_rss_bytes
 from pullbox.services.import_service import ImportService
+
+_REPORT_DIGEST_PAGE_SIZE = 1_000
+_MAX_REPORT_SAMPLE_LIMIT = 100
+
+
+def _bounded_sample_limit(value: str) -> int:
+    limit = int(value)
+    if not 0 <= limit <= _MAX_REPORT_SAMPLE_LIMIT:
+        raise argparse.ArgumentTypeError(
+            f"report sample limit must be between 0 and {_MAX_REPORT_SAMPLE_LIMIT}"
+        )
+    return limit
+
+
+async def _summarize_library_files(
+    session: AsyncSession,
+    *,
+    sample_limit: int,
+) -> dict[str, object]:
+    """Return bounded examples and a digest without materializing every row."""
+    library_file_count = int(await session.scalar(select(func.count(LibraryFile.id))) or 0)
+    format_rows = (
+        await session.execute(
+            select(LibraryFile.file_format, func.count(LibraryFile.id))
+            .group_by(LibraryFile.file_format)
+            .order_by(LibraryFile.file_format)
+        )
+    ).all()
+    library_format_counts = {
+        file_format.value.lower(): int(count) for file_format, count in format_rows
+    }
+    name_samples = list(
+        (
+            await session.scalars(
+                select(LibraryFile.file_name)
+                .order_by(LibraryFile.file_name, LibraryFile.id)
+                .limit(sample_limit)
+            )
+        ).all()
+    )
+
+    digest = hashlib.sha256()
+    last_id = 0
+    while True:
+        page = (
+            await session.execute(
+                select(LibraryFile.id, LibraryFile.file_name)
+                .where(LibraryFile.id > last_id)
+                .order_by(LibraryFile.id)
+                .limit(_REPORT_DIGEST_PAGE_SIZE)
+            )
+        ).all()
+        if not page:
+            break
+        for library_file_id, file_name in page:
+            encoded = file_name.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, byteorder="big"))
+            digest.update(encoded)
+            last_id = library_file_id
+
+    return {
+        "library_file_count": library_file_count,
+        "library_file_name_sample_limit": sample_limit,
+        "library_file_name_samples": name_samples,
+        "library_file_name_digest_sha256": digest.hexdigest(),
+        "library_format_counts": dict(sorted(library_format_counts.items())),
+    }
 
 
 class FakeSeriesService:
@@ -233,6 +301,12 @@ async def main() -> None:
             "and ComicInfo writes on small valid archives."
         ),
     )
+    parser.add_argument(
+        "--report-sample-limit",
+        type=_bounded_sample_limit,
+        default=20,
+        help="Maximum library filenames included in the bounded JSON report (0-100).",
+    )
     args = parser.parse_args()
 
     fake_series_service = FakeSeriesService(args.files_per_series)
@@ -400,10 +474,9 @@ async def main() -> None:
                 await asyncio.gather(*pending_enrichment, return_exceptions=True)
 
             await session.refresh(job)
-            library_files = (
-                (await session.execute(select(LibraryFile).order_by(LibraryFile.file_name)))
-                .scalars()
-                .all()
+            library_file_summary = await _summarize_library_files(
+                session,
+                sample_limit=args.report_sample_limit,
             )
             operation_progress_count = int(
                 await session.scalar(select(func.count(OperationProgress.id))) or 0
@@ -412,9 +485,6 @@ async def main() -> None:
                 path.suffix.lower().lstrip(".")
                 for file_paths in series_files
                 for path in file_paths
-            )
-            library_format_counts = Counter(
-                library_file.file_format.value.lower() for library_file in library_files
             )
             report = {
                 "file_work_profile": args.file_work_profile,
@@ -426,10 +496,8 @@ async def main() -> None:
                 "prefetch_calls": fake_series_service.prefetch_calls,
                 "series_add_calls": fake_series_service.add_calls,
                 "register_calls": register_calls,
-                "library_file_count": len(library_files),
                 "operation_progress_count": operation_progress_count,
-                "library_file_names": [library_file.file_name for library_file in library_files],
-                "library_format_counts": dict(sorted(library_format_counts.items())),
+                **library_file_summary,
                 "source_format_counts": dict(sorted(source_format_counts.items())),
                 "peak_rss_bytes": current_process_peak_rss_bytes(),
                 "final_status": job.status.value,

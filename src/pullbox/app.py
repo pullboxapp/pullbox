@@ -414,24 +414,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         factory = get_session_factory()
         import_runner = ImportRunner(factory)
         set_import_runner(import_runner)
-        import_runner_task = asyncio.create_task(import_runner.recover_and_dispatch())
-        _startup_background_tasks.add(import_runner_task)
-
-        def _cleanup_import_runner_task(task: asyncio.Task[object]) -> None:
-            _startup_background_tasks.discard(task)
-            with suppress(asyncio.CancelledError):
-                exc = task.exception()
-                if exc is not None:
-                    logger.warning("import_runner_startup_failed", exc_info=exc)
-                    return
-
-                recovered = task.result()
-                if isinstance(recovered, int) and recovered:
-                    logger.info("import_jobs_recovered_at_startup", count=recovered)
-
-        import_runner_task.add_done_callback(_cleanup_import_runner_task)
-    except Exception:
+        # Reconcile durable import/control state before the scheduler can claim
+        # Story Arc work. Dispatch itself remains asynchronous inside the runner.
+        recovered = await import_runner.recover_and_dispatch()
+        if recovered:
+            logger.info("import_jobs_recovered_at_startup", count=recovered)
+    except Exception as exc:
         logger.warning("import_recovery_failed", subsystem="import_recovery", exc_info=True)
+        raise RuntimeError("Import recovery failed before scheduler startup") from exc
 
     # Recover native direct-download attempts. Signed artifact URLs remain
     # ephemeral and are reconstructed by the runner only when work resumes.

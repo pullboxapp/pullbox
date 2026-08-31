@@ -111,6 +111,8 @@ class SeriesDeleteContextResponse(BaseModel):
 
     series_count: int = Field(..., description="Number of resolved series in the request")
     linked_file_count: int = Field(..., ge=0, description="Linked files that still exist on disk")
+    managed_file_count: int = Field(..., ge=0, description="Pullbox-owned files in scope")
+    referenced_file_count: int = Field(..., ge=0, description="Referenced files detached only")
 
 
 class SeriesListResponse(BaseModel):

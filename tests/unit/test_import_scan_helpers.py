@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from pullbox.core.collection_scanner import DiscoveredFile, DiscoveredSeries
 from pullbox.core.file_safety import FileSafetyError
@@ -20,6 +21,8 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
     ImportSourceType,
 )
+from pullbox.models.story_arc import StoryArcResolutionState, StoryArcSourceKind
+from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services import import_scan_helpers
 from pullbox.services.import_scan_helpers import (
     reset_scan_artifacts,
@@ -102,7 +105,7 @@ async def test_reset_scan_artifacts_deletes_rows_and_clears_counters(
     db_session.add(imported_series)
     await db_session.flush()
     db_session.add(
-        ImportedFile(
+        imported_file := ImportedFile(
             import_job_id=job.id,
             import_series_id=imported_series.id,
             file_path="/tmp/comics/Batman/Batman 001.cbz",
@@ -113,8 +116,30 @@ async def test_reset_scan_artifacts_deletes_rows_and_clears_counters(
         )
     )
     await db_session.flush()
+    staged_arc = ImportedStoryArc(
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.FOLDER,
+        source_key="folder:batman",
+        source_ordinal=1,
+        name="Batman Event",
+    )
+    db_session.add(staged_arc)
+    await db_session.flush()
+    db_session.add(
+        ImportedStoryArcEntry(
+            imported_story_arc_id=staged_arc.id,
+            import_file_id=imported_file.id,
+            source_ordinal=1,
+            resolution_state=StoryArcResolutionState.PENDING,
+            source_kind=StoryArcSourceKind.FOLDER,
+        )
+    )
+    await db_session.flush()
 
     await reset_scan_artifacts(db_session, job)
+
+    assert await db_session.scalar(select(func.count(ImportedStoryArc.id))) == 0
+    assert await db_session.scalar(select(func.count(ImportedStoryArcEntry.id))) == 0
 
     assert job.error_message is None
     assert job.progress_snapshot == {}
@@ -201,6 +226,86 @@ async def test_validate_discovered_files_safety_reuses_default_policy_for_batch(
     ]
 
 
+async def test_validate_discovered_files_safety_reuses_compact_archive_evidence(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "Batman 001.cbz"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Batman 001 p001.jpg", b"page")
+        archive.writestr(
+            "metadata/ComicInfo.xml",
+            (
+                "<ComicInfo><Series>Batman</Series><Number>1</Number>"
+                "<StoryArc>Batman: The Court of Owls</StoryArc>"
+                "<StoryArcNumber>001.50-A</StoryArcNumber>"
+                "<Notes>[cv_vol_id:42721]</Notes></ComicInfo>"
+            ),
+        )
+    discovered = _discovered_series(str(archive_path))
+
+    await validate_discovered_files_safety(db_session, [discovered])
+
+    evidence = discovered.files[0].metadata_diagnostics["archive_member_evidence"]
+    assert evidence == {
+        "member_index_scanned": True,
+        "comicinfo_entry_count": 1,
+        "comicinfo_entry": "metadata/ComicInfo.xml",
+        "comicinfo": {
+            "series": "Batman",
+            "number": "1",
+            "volume": None,
+            "title": None,
+            "year": None,
+            "month": None,
+            "day": None,
+            "publisher": None,
+            "notes": "[cv_vol_id:42721]",
+            "summary": None,
+            "writer": None,
+            "penciller": None,
+            "inker": None,
+            "colorist": None,
+            "letterer": None,
+            "cover_artist": None,
+            "editor": None,
+            "page_count": None,
+            "genre": None,
+            "web": None,
+            "story_arc": "Batman: The Court of Owls",
+            "story_arc_number": "001.50-A",
+            "series_group": None,
+            "language": None,
+        },
+    }
+    assert "entry_names" not in evidence
+
+
+async def test_validate_discovered_files_safety_closes_metadata_poor_archive_probe(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "Batman 001.cbz"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("page001.jpg", b"page")
+    discovered = _discovered_series(str(archive_path))
+    discovered.files[0].metadata_diagnostics.update(
+        {
+            "archive_metadata_loaded": False,
+            "archive_metadata_deferred": True,
+        }
+    )
+
+    await validate_discovered_files_safety(db_session, [discovered])
+
+    diagnostics = discovered.files[0].metadata_diagnostics
+    assert diagnostics["archive_metadata_loaded"] is True
+    assert diagnostics["archive_metadata_deferred"] is False
+    assert diagnostics["archive_entry_issue_hint_checked"] is True
+    assert diagnostics["has_comicinfo"] is False
+    assert "archive_member_evidence" not in diagnostics
+
+
 async def test_validate_discovered_files_safety_marks_blocked_files_without_raising(
     db_session: AsyncSession,
 ) -> None:
@@ -228,10 +333,37 @@ async def test_validate_discovered_files_safety_marks_blocked_files_without_rais
     assert "file_safety" not in normal_file.metadata_diagnostics
     assert blocked_file.metadata_diagnostics["file_safety"] == {
         "kind": "archive_decompressed_size",
-        "reason": (
-            "Archive decompressed size (4,248,234,210 bytes) exceeds limit (2,097,152,000 bytes)"
-        ),
-        "details": ["/tmp/comics/Batman Omnibus.cbz"],
+        "category": "decompression_size_limit",
+        "code": "archive_decompressed_size_limit",
+        "reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
+        "sanitized_reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
         "source": "file_safety",
+        "retryable": False,
         "overrideable": True,
     }
+
+
+async def test_validate_discovered_files_safety_sanitizes_non_overrideable_failure(
+    db_session: AsyncSession,
+) -> None:
+    discovered = _discovered_series("/tmp/comics/Corrupt 001.cbz")
+
+    async def check_file_safety(_session: AsyncSession, path: Path) -> None:
+        raise FileSafetyError(
+            f"Archive could not be inspected: {path}",
+            details=[str(path), "/mnt/user/private/not-for-ui.cbz"],
+        )
+
+    await validate_discovered_files_safety(
+        db_session,
+        [discovered],
+        check_file_safety=check_file_safety,
+    )
+
+    safety = discovered.files[0].metadata_diagnostics["file_safety"]
+    assert safety["category"] == "archive_inspection_failed"
+    assert safety["code"] == "archive_inspection_failed"
+    assert safety["retryable"] is True
+    assert safety["overrideable"] is False
+    assert "/tmp/comics" not in str(safety)
+    assert "/mnt/user/private" not in str(safety)

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
-from fastapi import APIRouter, Query, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse  # noqa: TC002
+from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy.exc import OperationalError
 
 from pullbox.api.deps import AuthenticatedStreamUser, AuthenticatedUser, DbSession  # noqa: TC001
@@ -25,6 +27,7 @@ from pullbox.api.v1.import_job_control_actions import (
     resume_import_job_response,
     retry_failed_series_response,
     retry_import_job_response,
+    retry_story_arc_placements_response,
     rollback_import_job_response,
 )
 from pullbox.api.v1.import_job_logs import (
@@ -37,6 +40,7 @@ from pullbox.api.v1.import_job_review_actions import (
     allow_safety_blocked_file_once_response,
     bulk_update_file_selection_response,
     bulk_update_series_selection_response,
+    confirm_story_arc_policy_response,
     get_selection_state_response,
     list_conflicts_response,
     list_import_files_response,
@@ -50,6 +54,7 @@ from pullbox.api.v1.import_job_review_actions import (
     unmatch_series_match_response,
     update_file_selection_response,
     update_series_selection_response,
+    update_story_arc_decision_response,
 )
 from pullbox.api.v1.import_job_streams import (
     ensure_import_job_exists_for_stream as _ensure_import_job_exists_for_stream,
@@ -62,7 +67,11 @@ from pullbox.api.v1.import_job_streams import (
 from pullbox.api.v1.import_job_streams import (
     load_initial_import_progress_sse as _load_initial_import_progress_sse,
 )
-from pullbox.core.exceptions import ValidationError
+from pullbox.core.exceptions import MylarReadError, ValidationError
+from pullbox.core.library_file_ownership import (
+    ReferencedFileValidationError,
+    resolve_referenced_source_root,
+)
 from pullbox.core.sqlite_lock import (
     SQLITE_LOCK_RETRY_ATTEMPTS,
     is_sqlite_locked_error,
@@ -85,6 +94,7 @@ from pullbox.schemas.import_job import (
     ImportedFilesResponse,
     ImportedSeriesRead,
     ImportJobCreate,
+    ImportJobDeleteResponse,
     ImportJobLogsResponse,
     ImportJobRead,
     ImportPreviewResponse,
@@ -93,9 +103,21 @@ from pullbox.schemas.import_job import (
     ImportSelectionBulkUpdateResponse,
     RetryFailedResponse,
     RetryImportResponse,
+    RetryStoryArcPlacementsResponse,
     SeriesSelectionBulkUpdateRequest,
     SeriesSelectionUpdateRequest,
+    StoryArcPolicyConfirmationRequest,
+    StoryArcPolicyConfirmationResponse,
+    StoryArcReviewDecisionRequest,
+    StoryArcReviewDecisionResponse,
 )
+from pullbox.schemas.import_layout import LayoutAnalysisResponse, LayoutPreviewRequest
+from pullbox.schemas.import_story_arc_preflight import (
+    StoryArcPreflightRequest,
+    StoryArcPreflightResponse,
+)
+from pullbox.services.import_layout_analysis import ImportLayoutAnalyzer
+from pullbox.services.import_story_arc_preflight import StoryArcPreflightAnalyzer
 from pullbox.tasks.import_task import (
     purge_import_runtime_state,
     trigger_import_execute,
@@ -195,6 +217,55 @@ async def create_import_job(
         body=body,
         trigger_import_scan=trigger_import_scan,
     )
+
+
+@router.post("/layout-preview", response_model=LayoutAnalysisResponse)
+async def preview_import_layout(
+    _user: AuthenticatedUser,
+    session: DbSession,
+    body: LayoutPreviewRequest,
+) -> LayoutAnalysisResponse:
+    """Analyze a source layout without creating a job or mutating files."""
+    analyzer = ImportLayoutAnalyzer()
+    try:
+        result = await analyzer.analyze(
+            body.source_path,
+            spec=body.layout.to_core(),
+        )
+    except (OSError, ValueError) as exc:
+        raise ValidationError(
+            "The layout preview source is no longer available or readable."
+        ) from exc
+    try:
+        await resolve_referenced_source_root(session, Path(body.source_path), None)
+    except ReferencedFileValidationError:
+        warnings = list(result.warnings)
+        if "source_outside_library_root" not in warnings:
+            warnings.append("source_outside_library_root")
+        result = replace(
+            result,
+            can_keep_in_place=False,
+            warnings=warnings,
+        )
+    return LayoutAnalysisResponse.model_validate(result)
+
+
+@router.post("/story-arc-preview", response_model=StoryArcPreflightResponse)
+async def preview_import_story_arcs(
+    _user: AuthenticatedUser,
+    body: StoryArcPreflightRequest,
+) -> StoryArcPreflightResponse:
+    """Inspect local Story Arc evidence without creating a job or changing files."""
+    analyzer = StoryArcPreflightAnalyzer()
+    try:
+        return await analyzer.analyze(
+            body.source_path,
+            source_type=body.source_type,
+        )
+    except (MylarReadError, OSError, ValueError) as exc:
+        raise ValidationError(
+            "The Story Arc preview source is no longer available or readable."
+        ) from exc
 
 
 # ── Post-Import Recovery (orphaned routes before /{job_id}) ──────────
@@ -333,20 +404,32 @@ async def clear_import_history(
     return await clear_import_history_response(session)
 
 
-@router.delete("/{job_id}", status_code=204)
+@router.delete(
+    "/{job_id}",
+    status_code=204,
+    responses={
+        202: {
+            "model": ImportJobDeleteResponse,
+            "description": "Deletion is waiting for cooperative Story Arc rollback.",
+        }
+    },
+)
 async def cancel_import_job(
     job_id: int,
     _user: AuthenticatedUser,
     session: DbSession,
-) -> None:
+) -> Response:
     """Cancel an active import job or delete a finished one from history."""
     service = _make_import_service()
-    await cancel_import_job_response(
+    pending = await cancel_import_job_response(
         service,
         session=session,
         job_id=job_id,
         purge_import_runtime_state=purge_import_runtime_state,
     )
+    if pending is not None:
+        return JSONResponse(status_code=202, content=pending.model_dump(mode="json"))
+    return Response(status_code=204)
 
 
 @router.post("/{job_id}/pause", response_model=ImportJobRead)
@@ -426,6 +509,26 @@ async def retry_failed_series(
 
 
 @router.post(
+    "/{job_id}/story-arc-placements/retry",
+    status_code=202,
+    response_model=RetryStoryArcPlacementsResponse,
+)
+async def retry_import_story_arc_placements(
+    job_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+) -> RetryStoryArcPlacementsResponse:
+    """Retry only failed/cancelled placement work for a stalled import."""
+    service = _make_import_service()
+    return await retry_story_arc_placements_response(
+        service,
+        session=session,
+        job_id=job_id,
+        trigger_story_arc_sync=service.schedule_story_arc_sync,
+    )
+
+
+@router.post(
     "/{job_id}/files/{file_id}/safety/allow-once-and-retry",
     status_code=202,
     response_model=RetryFailedResponse,
@@ -497,10 +600,18 @@ async def list_conflicts(
     job_id: int,
     _user: AuthenticatedUser,
     session: DbSession,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
 ) -> ConflictGroupsResponse:
-    """List all conflict groups for an import job."""
+    """List one bounded page of conflict groups for an import job."""
     service = _make_import_service()
-    return await list_conflicts_response(service, session, job_id)
+    return await list_conflicts_response(
+        service,
+        session,
+        job_id,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.put(
@@ -571,6 +682,52 @@ async def update_series_selection(
         session,
         job_id,
         imported_series_id,
+        body,
+    )
+    await session.commit()
+    return response
+
+
+@router.put(
+    "/{job_id}/story-arcs/{imported_story_arc_id}/decision",
+    response_model=StoryArcReviewDecisionResponse,
+)
+async def update_story_arc_decision(
+    job_id: int,
+    imported_story_arc_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    body: StoryArcReviewDecisionRequest,
+) -> StoryArcReviewDecisionResponse:
+    """Persist an explicit Step 3 select/skip decision for one staged story arc."""
+    service = _make_import_service()
+    response = await update_story_arc_decision_response(
+        service,
+        session,
+        job_id,
+        imported_story_arc_id,
+        body,
+    )
+    await session.commit()
+    return response
+
+
+@router.put(
+    "/{job_id}/story-arcs/{imported_story_arc_id}/policy-confirmation",
+    response_model=StoryArcPolicyConfirmationResponse,
+)
+async def confirm_story_arc_policy(
+    job_id: int,
+    imported_story_arc_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+    body: StoryArcPolicyConfirmationRequest,
+) -> StoryArcPolicyConfirmationResponse:
+    """Explicitly confirm one complete Step 3 story-arc policy."""
+    response = await confirm_story_arc_policy_response(
+        session,
+        job_id,
+        imported_story_arc_id,
         body,
     )
     await session.commit()

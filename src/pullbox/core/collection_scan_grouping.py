@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
@@ -10,15 +11,17 @@ from pullbox.models.issue import IssueType
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
     from typing import Protocol
 
     class DiscoveredFileLike(Protocol):
+        file_name: str
+        parsed_series: str | None
         parsed_issue_number: float | None
         comicvine_issue_id: int | None
         comicvine_series_id: int | None
         has_comicinfo: bool
         issue_type: IssueType
+        metadata_signals: dict[str, str]
 
 
 _LOW_SIGNAL_GROUPING_TOKENS: frozenset[str] = frozenset(
@@ -36,6 +39,35 @@ _LOW_SIGNAL_GROUPING_TOKENS: frozenset[str] = frozenset(
 
 _GENERIC_FILE_SERIES_RE = re.compile(
     r"^(?:issue|issues|chapter|chapters|part|parts|book|books|file|files)\b(?:\s+\d+.*)?$",
+    re.IGNORECASE,
+)
+
+_GENERIC_SERIES_CONTAINER_IDENTITIES: frozenset[str] = frozenset(
+    {
+        "books",
+        "collection",
+        "comics",
+        "downloads",
+        "imports",
+        "incoming",
+        "library",
+        "media",
+        "raw imports",
+        "staging",
+    }
+)
+
+_EXACT_SERIES_METADATA_SIGNALS: frozenset[str] = frozenset(
+    {"comicinfo", "mylar3", "pullbox_folder", "sidecar", "source_layout"}
+)
+
+_LEADING_ISSUE_TITLE_RE = re.compile(
+    r"^(?:issue|issues)\s*#?\s*\d+(?:\.\d+)?\b",
+    re.IGNORECASE,
+)
+
+_EXPLICIT_ISSUE_MARKER_RE = re.compile(
+    r"\bissue\s*#?\s*\d+(?:\.\d+)?\b",
     re.IGNORECASE,
 )
 
@@ -88,6 +120,41 @@ def _should_collapse_to_folder_identity(parsed_series: str, folder_name: str) ->
     return bool(extras) and extras.issubset(_LOW_SIGNAL_GROUPING_TOKENS)
 
 
+def _series_identity_token_sequence(value: str) -> tuple[str, ...]:
+    """Return ordered, non-numeric identity tokens for prefix comparisons."""
+    normalized = _normalize_series_identity(_strip_year_volume_tokens(value))
+    return tuple(token for token in normalized.split() if token and not token.isdigit())
+
+
+def _should_use_folder_identity_for_issue_title_file(
+    discovered_file: DiscoveredFileLike,
+    folder_name: str,
+) -> bool:
+    """Recognize title-bearing issue filenames inside a real series folder."""
+    if (
+        discovered_file.parsed_issue_number is None
+        or not discovered_file.parsed_series
+        or discovered_file.comicvine_series_id is not None
+        or discovered_file.metadata_signals.get("series_name") in _EXACT_SERIES_METADATA_SIGNALS
+    ):
+        return False
+
+    normalized_folder = _normalize_series_identity(folder_name)
+    if not normalized_folder or normalized_folder in _GENERIC_SERIES_CONTAINER_IDENTITIES:
+        return False
+
+    file_stem = re.sub(r"[._-]+", " ", Path(discovered_file.file_name).stem)
+    file_stem = re.sub(r"\s+", " ", file_stem).strip()
+    if _LEADING_ISSUE_TITLE_RE.match(file_stem):
+        return True
+    if not _EXPLICIT_ISSUE_MARKER_RE.search(file_stem):
+        return False
+
+    folder_tokens = _series_identity_token_sequence(folder_name)
+    file_tokens = _series_identity_token_sequence(file_stem)
+    return bool(folder_tokens) and file_tokens[: len(folder_tokens)] == folder_tokens
+
+
 def _is_low_signal_file_series_name(parsed_series: str) -> bool:
     """Return true when a parsed filename series looks like a generic placeholder."""
     normalized = re.sub(r"[_-]+", " ", parsed_series.strip())
@@ -103,6 +170,7 @@ def _has_strong_file_identity(discovered_file: DiscoveredFileLike) -> bool:
             discovered_file.comicvine_issue_id is not None,
             discovered_file.comicvine_series_id is not None,
             discovered_file.has_comicinfo,
+            discovered_file.metadata_signals.get("series_name") == "source_layout",
         )
     )
 

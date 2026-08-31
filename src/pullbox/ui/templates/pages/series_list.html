@@ -85,6 +85,8 @@
     deleteFiles: false,
     deleteFolder: false,
     deleteLinkedFileCount: 0,
+    deleteManagedFileCount: 0,
+    deleteReferencedFileCount: 0,
     deleteContextLoading: false,
     deleteMode: null,
     deleteTargetIds: [],
@@ -302,9 +304,13 @@
 
         const payload = await response.json();
         this.deleteLinkedFileCount = Number(payload.linked_file_count) || 0;
+        this.deleteManagedFileCount = Number(payload.managed_file_count) || 0;
+        this.deleteReferencedFileCount = Number(payload.referenced_file_count) || 0;
         return true;
       } catch (_) {
         this.deleteLinkedFileCount = 0;
+        this.deleteManagedFileCount = 0;
+        this.deleteReferencedFileCount = 0;
         this.dispatchToast('Unable to load delete options right now', 'error');
         return false;
       } finally {
@@ -312,10 +318,22 @@
       }
     },
     deleteFileOptionLabel() {
-      if (this.deleteLinkedFileCount === 1) {
+      if (this.deleteManagedFileCount === 1) {
         return 'Delete 1 file from disk';
       }
-      return `Delete ${this.deleteLinkedFileCount} files from disk`;
+      return `Delete ${this.deleteManagedFileCount} files from disk`;
+    },
+    deleteFileOptionCopy() {
+      if (this.deleteReferencedFileCount > 0) {
+        return 'Referenced files stay on disk and are only detached from Pullbox. This option removes Pullbox-managed files.';
+      }
+      return 'Also remove any Pullbox-managed library files associated with the selected series.';
+    },
+    deleteFolderOptionCopy() {
+      if (this.deleteReferencedFileCount > 0) {
+        return 'Folders containing referenced files stay in place. Pullbox removes only eligible managed folders and files.';
+      }
+      return 'Remove the series folders and any remaining contents from disk. This also requires deleting linked files.';
     },
     async openDeleteConfirm() {
       if (this.bulkBusy || this.deleteContextLoading || this.selectedIds.length === 0) {
@@ -368,10 +386,13 @@
       return `Delete ${this.deleteTargetIds.length} selected series?`;
     },
     deleteModalMessage() {
+      const referenceNotice = this.deleteReferencedFileCount > 0
+        ? ` ${this.deleteReferencedFileCount} referenced file${this.deleteReferencedFileCount === 1 ? '' : 's'} will stay on disk and be detached from Pullbox.`
+        : '';
       if (this.deleteMode === 'single') {
-        return 'This removes the series and its issue records from the database. Review the disk deletion options below before continuing.';
+        return 'This removes the series and its issue records from the database.' + referenceNotice + ' Review the disk deletion options below before continuing.';
       }
-      return 'This removes the selected series and their issue records from the database. Disk deletion is optional and cannot be undone.';
+      return 'This removes the selected series and their issue records from the database.' + referenceNotice + ' Managed-file deletion is optional and cannot be undone.';
     },
     deleteSubmitLabel() {
       if (this.bulkBusy) {
@@ -460,6 +481,8 @@
       this.deleteFiles = false;
       this.deleteFolder = false;
       this.deleteLinkedFileCount = 0;
+      this.deleteManagedFileCount = 0;
+      this.deleteReferencedFileCount = 0;
       this.deleteMode = null;
       this.deleteTargetIds = [];
       this.deleteTargetTitle = '';
@@ -977,14 +1000,14 @@
   {% set submit_label_expr = "deleteMode === 'single' ? 'Delete Series' : 'Delete Selected'" %}
   {% set submitting_label_expr = "'Deleting...'" %}
   {% set show_folders_option = true %}
-  {% set show_files_option_expr = "deleteLinkedFileCount > 0" %}
+  {% set show_files_option_expr = "deleteManagedFileCount > 0" %}
   {% set delete_files_disabled_expr = "deleteFolder" %}
   {% set folders_change_handler = "syncDeleteOptions()" %}
   {% set cancel_ref = "deleteCancelButton" %}
   {% set files_option_label_expr = "deleteFileOptionLabel()" %}
-  {% set files_option_copy = "Also remove any tracked library files associated with the selected series." %}
+  {% set files_option_copy_expr = "deleteFileOptionCopy()" %}
   {% set folders_option_label = "Delete series folders from disk" %}
-  {% set folders_option_copy = "Remove the series folders and any remaining contents from disk. This also requires deleting linked files." %}
+  {% set folders_option_copy_expr = "deleteFolderOptionCopy()" %}
   {% include "components/series_delete_modal.html" %}
 </div>
 {% endblock %}

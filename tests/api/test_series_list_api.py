@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from pullbox.api.v1.series import get_series, list_series
+from pullbox.api.v1.series import get_series, list_series, list_series_issues
 from pullbox.models import Base
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.publisher import Publisher
@@ -171,5 +171,51 @@ async def test_get_series_counts_issues_without_eager_loading_issue_rows() -> No
         assert response.owned_count == 1
         assert response.wanted_count == 1
         assert all("issues_1" not in statement for statement in recorder.statements)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_list_series_issues_adds_exact_text_with_legacy_fallback() -> None:
+    """Issue-list responses add exact text without changing the numeric field."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            series = Series(
+                title="DC One Million",
+                sort_title="DC One Million",
+                status=SeriesStatus.ENDED,
+                issue_count=1,
+            )
+            session.add(series)
+            await session.flush()
+            issue = Issue(
+                series_id=series.id,
+                issue_number=1_000_000.0,
+                status=IssueStatus.OWNED,
+            )
+            session.add(issue)
+            await session.flush()
+            issue.issue_number_text = None
+            await session.commit()
+            series_id = series.id
+
+        async with factory() as session:
+            response = await list_series_issues(
+                series_id,
+                User(username="apiuser", password_hash="test"),
+                session,
+                limit=100,
+                offset=0,
+            )
+
+        assert response.items[0].issue_number == 1_000_000.0
+        assert response.items[0].issue_number_text == "1000000"
     finally:
         await engine.dispose()

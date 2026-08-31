@@ -116,6 +116,18 @@
           <span x-show="resuming" x-cloak>Resuming...</span>
         </button>
         <button
+          x-show="showRetryStoryArcPlacementsAction()"
+          x-cloak
+          type="button"
+          @click="retryStoryArcPlacements()"
+          :disabled="retryingStoryArcPlacements"
+          data-testid="import-progress-retry-story-arc-placements"
+          class="btn-primary btn-sm inline-flex items-center justify-center"
+        >
+          <span x-show="!retryingStoryArcPlacements">Retry Story Arc placements</span>
+          <span x-show="retryingStoryArcPlacements" x-cloak>Retrying placements...</span>
+        </button>
+        <button
           x-show="showCancelAction()"
           x-cloak
           type="button"
@@ -171,6 +183,22 @@
         </button>
       </div>
     </div>
+    <p
+      x-show="storyArcPlacementRetryError"
+      x-cloak
+      x-text="storyArcPlacementRetryError"
+      role="alert"
+      data-testid="import-progress-story-arc-placement-retry-error"
+      class="mt-3 text-sm text-pb-error"
+    ></p>
+    <p
+      x-show="storyArcPlacementRetrySuccess"
+      x-cloak
+      x-text="storyArcPlacementRetrySuccess"
+      role="status"
+      data-testid="import-progress-story-arc-placement-retry-success"
+      class="mt-3 text-sm text-pb-success"
+    ></p>
   </div>
 
   <div class="section-card">

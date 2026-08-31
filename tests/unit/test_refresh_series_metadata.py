@@ -1003,8 +1003,47 @@ class TestUpsertIssueSummaries:
 
             await session.refresh(provisional)
             assert provisional.comicvine_id == 1170004
+            assert provisional.issue_number_text == "4"
             assert provisional.title == "Final Sacrifice"
             assert provisional.metadata_source == "comicvine"
+
+    @pytest.mark.asyncio
+    async def test_upsert_issue_summaries_dual_writes_provider_issue_number_text(
+        self,
+        db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        service = MetadataService(provider=MagicMock(), covers_dir=MagicMock())
+
+        async with db_factory() as session:
+            series = Series(
+                title="Suffix Issue",
+                sort_title="Suffix Issue",
+                comicvine_id=170001,
+                status=SeriesStatus.CONTINUING,
+                series_type=SeriesType.STANDARD,
+            )
+            session.add(series)
+            await session.flush()
+
+            created = await service.upsert_issue_summaries(
+                session,
+                series,
+                [
+                    IssueSummary(
+                        provider_id="12001",
+                        issue_number=1.0,
+                        title="After Universe",
+                        release_date=None,
+                        cover_url=None,
+                        issue_type="issue",
+                        issue_number_text="1au",
+                    )
+                ],
+            )
+
+            assert len(created) == 1
+            assert created[0].issue_number == 1.0
+            assert created[0].issue_number_text == "1AU"
 
     @pytest.mark.asyncio
     async def test_upsert_issue_summaries_honors_explicit_issue_type(
@@ -1314,6 +1353,7 @@ class TestFetchIssue:
                 comicvine_url=(
                     "https://comicvine.gamespot.com/bring-on-the-bad-guys-doom-1/4000-1116296/"
                 ),
+                issue_number_text="1au",
                 creators=[
                     {"provider_id": "42339", "name": "Marc Guggenheim", "role": "writer"},
                     {"provider_id": "61433", "name": "Neeraj Menon", "role": "colorist"},
@@ -1349,6 +1389,8 @@ class TestFetchIssue:
             enriched = await service.fetch_issue(session, 1116296)
 
             assert enriched.id == issue.id
+            assert enriched.issue_number == 1.0
+            assert enriched.issue_number_text == "1AU"
             assert enriched.title is None
             assert enriched.description == "THE BALANCE OF POWER IS FOREVER CHANGED!"
             assert enriched.release_date == date(2025, 8, 1)

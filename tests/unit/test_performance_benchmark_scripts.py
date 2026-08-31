@@ -53,11 +53,42 @@ def test_import_scan_benchmark_exits_cleanly() -> None:
     assert report["series_count"] == 1
     assert report["files_per_series"] == 1
     assert report["total_files_matched"] == 1
+    assert report["archive_safety_inspection_count"] == 1
+    # A single-file folder is ambiguous during discovery, so the scanner performs
+    # one bounded pre-safety member listing before the unified safety pass.
+    assert report["archive_read_count"] == 1
     assert report["archive_entry_issue_hint_count"] == 1
     assert report["provider_search_calls"] == 0
     assert report["provider_get_series_calls"] == 0
     assert report["provider_issue_summary_calls"] == 0
     assert report["provider_issue_number_calls"] == 0
+
+
+def test_import_directory_classification_benchmark_is_metadata_only() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/benchmark_import_directory_classification.py",
+            "--series-count",
+            "1000",
+            "--publisher-count",
+            "25",
+        ],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["profile"] == "directory_classification_only"
+    assert report["filesystem_scan_count"] == 0
+    assert report["input_comic_directory_count"] == 1025
+    assert report["series_directory_count"] == 1000
+    assert report["series_count"] == 1000
+    assert float(report["classification_seconds"]) >= 0
 
 
 def test_import_scan_benchmark_uses_stable_provider_ids_for_multi_series() -> None:
@@ -73,6 +104,8 @@ def test_import_scan_benchmark_uses_stable_provider_ids_for_multi_series() -> No
     assert report["series_matched"] == 4
     assert report["total_files_matched"] == 16
     assert report["total_files_conflict"] == 0
+    assert report["archive_safety_inspection_count"] == 16
+    assert report["archive_read_count"] == 0
     assert report["archive_entry_issue_hint_count"] == 16
     assert report["provider_search_calls"] == 0
     assert report["provider_get_series_calls"] == 0
@@ -93,7 +126,11 @@ def test_import_scan_benchmark_uses_trusted_folder_metadata_without_provider_cal
     assert report["trusted_comicinfo"] is True
     assert report["series_matched"] == 4
     assert report["total_files_matched"] == 16
-    assert report["archive_read_count"] == 4
+    assert report["archive_safety_inspection_count"] == 16
+    assert report["archive_metadata_evidence_count"] == 16
+    assert report["archive_read_count"] == 0
+    assert report["archive_member_payload_read_count"] == 0
+    assert report["archive_entry_issue_hint_count"] == 0
     assert report["provider_search_calls"] == 0
     assert report["provider_get_series_calls"] == 0
     assert report["provider_issue_summary_calls"] == 0
@@ -101,11 +138,43 @@ def test_import_scan_benchmark_uses_trusted_folder_metadata_without_provider_cal
 
 
 def test_import_execute_benchmark_exits_cleanly() -> None:
-    report = _run_benchmark(_repo_root(), "scripts/benchmark_import_execute.py")
+    report = _run_benchmark(
+        _repo_root(),
+        "scripts/benchmark_import_execute.py",
+        "--report-sample-limit",
+        "1",
+        files_per_series=3,
+    )
 
     assert report["final_status"] == "completed"
     assert report["series_count"] == 1
-    assert report["files_per_series"] == 1
+    assert report["files_per_series"] == 3
+    assert report["library_file_count"] == 3
+    assert report["library_file_name_sample_limit"] == 1
+    assert len(cast("list[str]", report["library_file_name_samples"])) == 1
+    assert len(str(report["library_file_name_digest_sha256"])) == 64
+    assert "library_file_names" not in report
+
+
+def test_import_metadata_scale_benchmark_uses_no_archive_payloads_or_providers() -> None:
+    report = _run_benchmark(
+        _repo_root(),
+        "scripts/benchmark_import_metadata_scale.py",
+        "--story-arc-count",
+        "3",
+    )
+
+    assert report["profile"] == "metadata_only"
+    assert report["represented_file_count"] == 1
+    assert report["story_arc_count"] == 3
+    assert report["archive_payload_count"] == 0
+    assert report["provider_call_count"] == 0
+    assert report["filesystem_scan_count"] == 0
+    assert report["confirmed_arc_count"] == 3
+    assert report["final_matched_series_count"] == 1
+    assert report["final_no_match_file_count"] == 1
+    assert report["final_confirmed_arc_count"] == 3
+    assert int(report["peak_rss_bytes"] or 0) > 0
 
 
 def test_import_execute_mixed_file_work_profile_uses_real_registration() -> None:
@@ -128,7 +197,7 @@ def test_import_execute_mixed_file_work_profile_uses_real_registration() -> None
     assert report["operation_progress_count"] == 1
     assert report["source_format_counts"] == {"cb7": 1, "cbr": 1, "cbz": 1}
     assert report["library_format_counts"] == {"cbz": 3}
-    library_file_names = cast("list[Any]", report["library_file_names"])
+    library_file_names = cast("list[Any]", report["library_file_name_samples"])
     assert all(str(name).endswith(".cbz") for name in library_file_names)
 
 

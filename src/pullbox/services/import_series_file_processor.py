@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from pullbox.core.library_policy import LibraryIngestPolicy
     from pullbox.models.import_job import ImportedSeries, ImportJob, ImportJobAction
     from pullbox.models.issue import Issue
-    from pullbox.models.library import LibraryFile, MatchConfidence
+    from pullbox.models.library import LibraryFile, LibraryFileStorageMode, MatchConfidence
     from pullbox.services.import_file_execution_protocols import ReportFileProgressFunc
     from pullbox.services.import_file_preparation import PreparedImportFile
 
@@ -94,6 +94,8 @@ async def process_series_files_for_import(
         confidence: MatchConfidence,
         *,
         move_to_library: bool,
+        storage_mode: LibraryFileStorageMode,
+        expected_source_signature: dict[str, object] | None,
         library_root_id: int | None,
         transfer_method: str | None,
         normalize_to_cbz: bool | None = None,
@@ -114,6 +116,8 @@ async def process_series_files_for_import(
             issue,
             confidence,
             move_to_library=move_to_library,
+            storage_mode=storage_mode,
+            expected_source_signature=expected_source_signature,
             library_root_id=library_root_id,
             transfer_method=transfer_method,
             normalize_to_cbz=normalize_to_cbz,

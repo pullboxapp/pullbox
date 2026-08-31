@@ -10,6 +10,7 @@ from sqlalchemy.orm import joinedload
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
+from pullbox.services.import_file_issue_signals import candidate_issue_number_text
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,10 +49,10 @@ async def load_importable_files(
 async def load_issue_lookup_for_series(
     session: AsyncSession,
     series_id: int | None,
-) -> tuple[dict[int, Issue], dict[float, Issue]]:
-    """Build ComicVine-ID and issue-number lookup maps for a library series."""
+) -> tuple[dict[int, Issue], dict[str, Issue], dict[float, Issue]]:
+    """Build ComicVine, exact-number, and unambiguous numeric lookup maps."""
     if series_id is None:
-        return {}, {}
+        return {}, {}, {}
 
     issues_result = await session.execute(
         sa_select(Issue)
@@ -62,12 +63,19 @@ async def load_issue_lookup_for_series(
     issues = issues_result.scalars().all()
 
     cv_id_to_issue: dict[int, Issue] = {}
-    number_to_issue: dict[float, Issue] = {}
+    exact_number_to_issue: dict[str, Issue] = {}
+    issues_by_number: dict[float, list[Issue]] = {}
     for issue in issues:
         if issue.comicvine_id is not None:
             cv_id_to_issue[issue.comicvine_id] = issue
-        number_to_issue[issue.issue_number] = issue
-    return cv_id_to_issue, number_to_issue
+        exact_number_to_issue[issue.effective_issue_number_text] = issue
+        issues_by_number.setdefault(issue.issue_number, []).append(issue)
+    number_to_issue = {
+        issue_number: candidates[0]
+        for issue_number, candidates in issues_by_number.items()
+        if len(candidates) == 1
+    }
+    return cv_id_to_issue, exact_number_to_issue, number_to_issue
 
 
 async def resolve_import_file_issue(
@@ -75,6 +83,7 @@ async def resolve_import_file_issue(
     imp_file: ImportedFile,
     *,
     cv_id_to_issue: dict[int, Issue],
+    exact_number_to_issue: dict[str, Issue],
     number_to_issue: dict[float, Issue],
 ) -> Issue | None:
     """Resolve a pre-import file match to a persisted library issue."""
@@ -92,6 +101,10 @@ async def resolve_import_file_issue(
         resolved_issue = cv_id_to_issue.get(imp_file.comicvine_issue_id)
         if resolved_issue is not None:
             return resolved_issue
+
+    exact_issue_number = candidate_issue_number_text(imp_file)
+    if exact_issue_number is not None:
+        return exact_number_to_issue.get(exact_issue_number)
 
     if imp_file.parsed_issue_number is not None:
         return number_to_issue.get(imp_file.parsed_issue_number)

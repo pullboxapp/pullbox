@@ -681,6 +681,23 @@ class TestImportShellRouteContracts:
         assert "this.phase = String(data.phase || activeStatus);" in handler
         assert 'this.jobStatus = "importing";' not in handler
 
+    async def test_step_four_has_a_specific_story_arc_placement_retry_control(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        template = Path("src/pullbox/ui/templates/partials/import_step_progress.html").read_text()
+        start = script.index("function importProgressData")
+        end = script.index("function importSeriesDetailsModalData", start)
+        controller = script[start:end]
+
+        assert 'data-testid="import-progress-retry-story-arc-placements"' in template
+        assert '@click="retryStoryArcPlacements()"' in template
+        assert 'x-show="showRetryStoryArcPlacementsAction()"' in template
+        assert 'data-testid="import-progress-story-arc-placement-retry-error"' in template
+        assert 'data-testid="import-progress-story-arc-placement-retry-success"' in template
+        assert "showRetryStoryArcPlacementsAction: function" in controller
+        assert "retryStoryArcPlacements: async function" in controller
+        assert '"/api/v1/import/" + this.jobId + "/story-arc-placements/retry"' in controller
+        assert 'headers: { "X-CSRF-Token": readCsrfTokenFromBody() }' in controller
+
     async def test_import_footer_pagination_has_delegated_click_handler(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
 
@@ -789,8 +806,70 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-collection-source-browse"' in response.text
         assert "Collection imports preserve source files." in response.text
         assert "Files and folders in the selected source stay untouched" in response.text
+        assert 'data-testid="import-file-handling-section"' in response.text
+        assert 'data-testid="import-file-handling-managed"' in response.text
+        assert 'data-testid="import-file-handling-in-place"' in response.text
+        assert "Copy into Pullbox library" in response.text
+        assert "Keep files in place" in response.text
+        assert "rename, convert, rewrite metadata, or change permissions on them." in response.text
+        assert 'data-testid="import-collection-layout-section"' in response.text
+        assert 'data-testid="import-layout-auto"' in response.text
+        assert 'data-testid="import-layout-series-folders"' in response.text
+        assert 'data-testid="import-layout-publisher-series"' in response.text
+        assert 'data-testid="import-layout-custom"' in response.text
+        assert 'data-testid="import-layout-analyze"' in response.text
+        assert 'data-testid="import-layout-preview"' in response.text
+        assert 'data-testid="import-layout-fallback"' in response.text
+        assert "How is this library organized?" in response.text
+        assert "Use automatic detection for files that do not fit" in response.text
+        assert "Files that do not fit will wait for review" in response.text
+        assert 'data-testid="import-future-layout-section"' in response.text
+        assert 'data-testid="import-future-layout-toggle"' in response.text
+        assert "Use this layout for future files" in response.text
+        assert "Existing files won't be renamed" in response.text
+        assert "Current library policy" in response.text
+        assert "Proposed for new files" in response.text
+        assert 'data-testid="import-story-arc-section"' in response.text
+        assert 'data-testid="import-story-arc-preview"' in response.text
+        assert 'data-testid="import-story-arc-import-toggle"' in response.text
+        assert 'data-testid="import-story-arc-materialize-toggle"' in response.text
+        assert "Import logical story arcs and memberships" in response.text
+        assert "Materialize and synchronize separate arc files" in response.text
+        assert "Step 3 remains the final review" in response.text
         assert 'data-testid="file-browser-modal"' in response.text
         assert 'data-testid="import-collection-modal-host"' in response.text
+
+    async def test_import_source_controller_previews_and_submits_frozen_layout(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = script.index("function importSourceData")
+        end = script.index("function importJobLogViewerData", start)
+        source_controller = script[start:end]
+
+        assert 'fetch("/api/v1/import/layout-preview"' in source_controller
+        assert "new AbortController()" in source_controller
+        assert "layoutPreviewRequestId" in source_controller
+        assert "sourceLayoutPayload: function" in source_controller
+        assert "layoutFallbackToAuto: true" in source_controller
+        assert "fallback_to_auto: this.layoutFallbackToAuto" in source_controller
+        assert "source_layout: this.sourceLayoutPayload()" in source_controller
+        assert 'fileHandlingMode: "managed_copy"' in source_controller
+        assert "file_handling_mode: this.fileHandlingMode" in source_controller
+        assert 'this.fileHandlingMode === "in_place"' in source_controller
+        assert "this.layoutPreview.can_keep_in_place" in source_controller
+        assert "futureLayoutRequested: false" in source_controller
+        assert "this.layoutPreview.can_apply_future_policy" in source_controller
+        assert "future_layout_requested: this.futureLayoutRequested" in source_controller
+        assert "future_root_policy: this.futureLayoutRequested" in source_controller
+        assert "target_library_root_id: this.futureLayoutRequested" in source_controller
+        assert '"/api/v1/config/library-roots/"' in source_controller
+        assert 'fetch("/api/v1/import/story-arc-preview"' in source_controller
+        assert "storyArcImportRequested: false" in source_controller
+        assert "storyArcMaterializationRequested: false" in source_controller
+        assert "story_arc_import_requested: this.storyArcImportRequested" in source_controller
+        assert (
+            "story_arc_materialization_requested: this.storyArcMaterializationRequested"
+            in source_controller
+        )
 
     async def test_import_collection_exposes_stable_step_mounts(
         self,
@@ -1395,6 +1474,66 @@ class TestImportShellRouteContracts:
         action_bar_index = response.text.index('data-testid="import-review-action-bar"')
         status_bar_index = response.text.index('data-testid="import-review-series-filters"')
         assert action_bar_index < status_bar_index
+
+    async def test_import_review_partial_explains_selected_layout_review(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 11)
+            assert series is not None
+            series.diagnostics = {
+                "kind": "source_layout_review",
+                "reason": "selected_layout_no_match",
+                "rejection_reason": (
+                    "This file does not fit the selected source layout. "
+                    "Review its series before importing."
+                ),
+                "source_layout_review_files": 1,
+            }
+            await session.commit()
+
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+
+        assert response.status_code == 200
+        assert 'data-testid="import-review-layout-review"' in response.text
+        assert "Layout review" in response.text
+        assert "1 file does not fit the selected source layout" in response.text
+        assert "will not be matched automatically" in response.text
+
+    async def test_import_review_partial_explains_incompatible_mylar_path(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 11)
+            assert series is not None
+            series.diagnostics = {
+                "kind": "mylar3_path_incompatible",
+                "reason": "mapped_path_missing",
+                "rejection_reason": ("The mapped Mylar comic folder is not available to Pullbox."),
+                "mylar3_path": {
+                    "status": "missing",
+                    "mapping_applied": True,
+                },
+            }
+            await session.commit()
+
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+
+        assert response.status_code == 200
+        assert 'data-testid="import-review-mylar-path-review"' in response.text
+        assert "Mylar path review" in response.text
+        assert "The mapped Mylar comic folder is not available to Pullbox." in response.text
+        assert "Correct the Mylar path mapping and retry this import." in response.text
 
     async def test_import_review_partial_renders_matched_file_target_tables(
         self,
@@ -2420,6 +2559,12 @@ class TestImportShellRouteContracts:
         assert "Blocked Files" in response.text
         assert "Safety review" in response.text
         assert "Oversized Omnibus.cbz" in response.text
+        assert 'data-testid="import-review-safety-category-summary"' in response.text
+        assert "Decompression-size limit" in response.text
+        assert "Code: archive_decompressed_size_limit" in response.text
+        assert "Retry alone will not help" in response.text
+        assert "Trusted override available" in response.text
+        assert "/tmp/review-1/oversized.cbz" not in response.text
         assert 'data-testid="import-review-allow-safety-file"' in response.text
         assert 'data-testid="import-review-skip-safety-file"' in response.text
         assert f'hx-post="/import/{job_id}/files/' in response.text
@@ -2468,6 +2613,9 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         assert "Corrupt Download.cbz" in response.text
+        assert "Archive inspection failed" in response.text
+        assert "Retry may help after remediation" in response.text
+        assert "Override not allowed" in response.text
         assert "Cannot override" in response.text
         assert 'data-testid="import-review-allow-safety-file"' not in response.text
         assert "/safety/allow-once?status=safety_blocked" not in response.text

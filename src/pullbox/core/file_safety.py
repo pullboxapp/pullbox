@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from pullbox.core.comicinfo import ComicInfoData, parse_comicinfo
 from pullbox.core.filesystem_scan import iter_supported_files_with_handler
 
 if TYPE_CHECKING:
@@ -117,9 +118,25 @@ class ResourceSafetyBlock:
 class ZipArchiveSafetyReport:
     """Single-pass safety facts for one ZIP-based archive."""
 
+    archive_path: Path
     total_size: int
     traversal_entries: list[str]
     dangerous_entries: list[str]
+    entry_names: tuple[str, ...]
+    comicinfo: ComicInfoData | None
+    comicinfo_entry: str | None
+    comicinfo_entry_count: int
+    comicinfo_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FileSafetyInspection:
+    """Immutable transient evidence returned for a single-file safety check."""
+
+    archives: tuple[ZipArchiveSafetyReport, ...] = ()
+
+
+_MAX_COMICINFO_XML_BYTES = 2 * 1024 * 1024
 
 
 _ARCHIVE_SIZE_MARKERS = (
@@ -411,6 +428,50 @@ def inspect_zip_archive_safety(
     try:
         with zipfile.ZipFile(archive_path, "r") as zf:
             entries = zf.infolist()
+
+            total_size = 0
+            traversal_entries: list[str] = []
+            dangerous_entries: list[str] = []
+            for entry in entries:
+                entry_name = entry.filename
+                total_size += entry.file_size
+                if _has_path_traversal(entry_name):
+                    traversal_entries.append(entry_name)
+                if block_dangerous and Path(entry_name).suffix.lower() in DANGEROUS_EXTENSIONS:
+                    dangerous_entries.append(entry_name)
+
+            comicinfo_entries = sorted(
+                (
+                    entry
+                    for entry in entries
+                    if not entry.is_dir()
+                    and PurePosixPath(entry.filename.replace("\\", "/")).name.lower()
+                    == "comicinfo.xml"
+                ),
+                key=lambda entry: entry.filename.casefold(),
+            )
+            comicinfo: ComicInfoData | None = None
+            comicinfo_entry = comicinfo_entries[0].filename if comicinfo_entries else None
+            comicinfo_error: str | None = None
+            if comicinfo_entries:
+                comicinfo_member = comicinfo_entries[0]
+                if comicinfo_member.file_size > _MAX_COMICINFO_XML_BYTES:
+                    comicinfo_error = "comicinfo_size_limit"
+                else:
+                    try:
+                        with zf.open(comicinfo_member, "r") as member:
+                            xml_bytes = member.read(_MAX_COMICINFO_XML_BYTES + 1)
+                        if len(xml_bytes) > _MAX_COMICINFO_XML_BYTES:
+                            comicinfo_error = "comicinfo_size_limit"
+                        else:
+                            comicinfo = parse_comicinfo(xml_bytes.decode("utf-8", errors="replace"))
+                    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                        logger.warning(
+                            "archive_comicinfo_inspection_failed",
+                            path=str(archive_path),
+                            error=str(exc),
+                        )
+                        comicinfo_error = "comicinfo_unreadable"
     except (zipfile.BadZipFile, OSError) as exc:
         logger.warning(
             "archive_inspection_failed",
@@ -422,21 +483,16 @@ def inspect_zip_archive_safety(
             details=[str(archive_path)],
         ) from exc
 
-    total_size = 0
-    traversal_entries: list[str] = []
-    dangerous_entries: list[str] = []
-    for entry in entries:
-        entry_name = entry.filename
-        total_size += entry.file_size
-        if _has_path_traversal(entry_name):
-            traversal_entries.append(entry_name)
-        if block_dangerous and Path(entry_name).suffix.lower() in DANGEROUS_EXTENSIONS:
-            dangerous_entries.append(entry_name)
-
     return ZipArchiveSafetyReport(
+        archive_path=archive_path,
         total_size=total_size,
         traversal_entries=traversal_entries,
         dangerous_entries=dangerous_entries,
+        entry_names=tuple(entry.filename for entry in entries),
+        comicinfo=comicinfo,
+        comicinfo_entry=comicinfo_entry,
+        comicinfo_entry_count=len(comicinfo_entries),
+        comicinfo_error=comicinfo_error,
     )
 
 
@@ -448,7 +504,7 @@ def run_safety_checks(
     *,
     block_dangerous: bool,
     max_archive_size: int,
-) -> None:
+) -> FileSafetyInspection:
     """Run all file safety checks synchronously.
 
     This is a pure-sync function that performs filesystem I/O only (no
@@ -501,6 +557,8 @@ def run_safety_checks(
             )
         )
 
+    inspected_archives: list[ZipArchiveSafetyReport] = []
+    collect_evidence = download_path.is_file()
     for archive in archive_files:
         safety_report = inspect_zip_archive_safety(
             archive,
@@ -542,7 +600,11 @@ def run_safety_checks(
                 details=safety_report.dangerous_entries,
             )
 
+        if collect_evidence:
+            inspected_archives.append(safety_report)
+
     log.debug("file_safety_checks_passed")
+    return FileSafetyInspection(archives=tuple(inspected_archives))
 
 
 async def check_download_safety(

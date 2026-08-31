@@ -44,6 +44,7 @@ class ComicInfoData:
     genre: str | None = None
     web: str | None = None
     story_arc: str | None = None
+    story_arc_number: str | None = None
     series_group: str | None = None
     language: str | None = None
 
@@ -86,6 +87,7 @@ def parse_comicinfo(xml_string: str) -> ComicInfoData:
         genre=_text(root, "Genre"),
         web=_trusted_text(root, "Web"),
         story_arc=_text(root, "StoryArc"),
+        story_arc_number=_text(root, "StoryArcNumber"),
         series_group=_text(root, "SeriesGroup"),
         language=_text(root, "LanguageISO"),
     )

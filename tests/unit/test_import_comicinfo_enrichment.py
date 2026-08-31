@@ -250,6 +250,10 @@ async def test_locked_pending_file_does_not_stop_later_enrichment(
 
     completed: list[int] = []
 
+    async def job_is_completed(_factory: object, *, job_id: int) -> bool:
+        assert job_id == 7
+        return True
+
     async def mark_complete(
         _factory: object,
         *,
@@ -263,6 +267,7 @@ async def test_locked_pending_file_does_not_stop_later_enrichment(
         return True
 
     monkeypatch.setattr(enrichment_module, "_load_pending_imported_file_ids", load_pending_ids)
+    monkeypatch.setattr(enrichment_module, "_import_job_is_completed", job_is_completed)
     monkeypatch.setattr(
         enrichment_module,
         "_prepare_pending_imported_file_with_retry",
@@ -302,6 +307,10 @@ async def test_locked_pending_file_does_not_stop_later_enrichment(
 async def test_retryable_provider_error_stops_enrichment_and_leaves_queue_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def job_is_completed(_factory: object, *, job_id: int) -> bool:
+        assert job_id == 7
+        return True
+
     async def load_pending_ids(_factory: object, *, job_id: int) -> list[int]:
         assert job_id == 7
         return [101, 202]
@@ -326,6 +335,7 @@ async def test_retryable_provider_error_stops_enrichment_and_leaves_queue_pendin
         raise AssertionError("retryable enrichment must remain pending")
 
     monkeypatch.setattr(enrichment_module, "_load_pending_imported_file_ids", load_pending_ids)
+    monkeypatch.setattr(enrichment_module, "_import_job_is_completed", job_is_completed)
     monkeypatch.setattr(
         enrichment_module,
         "_prepare_pending_imported_file_with_retry",

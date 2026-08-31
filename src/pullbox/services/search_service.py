@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.issue import IssueType
 from pullbox.providers import base as _provider_base
 from pullbox.services import search_evaluation as _search_evaluation
@@ -196,7 +197,7 @@ def _format_query_label(query: SearchQuery) -> str:
 
     if query.issue_number is None:
         return query.series_title
-    issue = f"{query.issue_number:g}"
+    issue = format_issue_number(query.issue_number)
     return f"{query.series_title} {issue}"
 
 

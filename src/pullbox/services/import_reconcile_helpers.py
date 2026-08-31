@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
@@ -316,7 +317,7 @@ def build_reconcile_file_rows(
     for option in issue_options:
         issue_cv_id = int(option["issue_cv_id"])
         issue_number = float(option["issue_number"])
-        label = f"#{issue_number:g}"
+        label = f"#{format_issue_number(issue_number)}"
         if option.get("title"):
             label = f"{label} - {option['title']}"
         issue_label_by_cv_id[issue_cv_id] = label

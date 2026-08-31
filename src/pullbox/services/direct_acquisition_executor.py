@@ -84,6 +84,7 @@ from pullbox.services.intervention_service import InterventionService
 from pullbox.services.post_processing_operation_progress import (
     project_post_processing_operation_progress,
 )
+from pullbox.services.story_arc_sync_queue import request_story_arc_sync_now
 from pullbox.tasks.post_processing_progress import (
     PostProcessingPhase,
     _clear_post_processing,
@@ -681,6 +682,16 @@ class DirectAcquisitionExecutor:
             force=True,
             final_path=str(processed.final_path),
         )
+        try:
+            request_story_arc_sync_now()
+        except Exception:
+            # The completed progress write committed canonical state. Automatic
+            # arc placement is durable, optional follow-up work.
+            logger.warning(
+                "story_arc_sync_trigger_failed_after_direct_completion",
+                acquisition_id=acquisition_id,
+                exc_info=True,
+            )
         return _result(attempt, artifact)
 
     async def _pause(

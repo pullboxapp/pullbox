@@ -118,6 +118,50 @@ async def test_pause_job_marks_job_paused_and_logs_event(db_session: AsyncSessio
     assert log.message == "Scan is paused."
 
 
+async def test_pause_job_rejects_story_arc_placement_wait(db_session: AsyncSession) -> None:
+    service = _make_service()
+    job = await _create_job_row(
+        db_session,
+        status=ImportJobStatus.IMPORTING,
+        import_started_at=datetime.now(UTC),
+        progress_snapshot={
+            "mode": "import",
+            "phase": "story_arc_placements",
+            "progress": 99,
+        },
+    )
+
+    with pytest.raises(ValidationError, match="cannot be paused"):
+        await service.pause_job(db_session, job.id)
+
+    assert job.status is ImportJobStatus.IMPORTING
+
+
+async def test_cancel_story_arc_placement_wait_enters_rollback_immediately(
+    db_session: AsyncSession,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(
+        db_session,
+        status=ImportJobStatus.IMPORTING,
+        import_started_at=datetime.now(UTC),
+        progress_snapshot={
+            "mode": "import",
+            "phase": "story_arc_placements",
+            "progress": 99,
+        },
+    )
+    job.story_arc_placement_followup_pending = True
+
+    updated = await service.request_cancel(db_session, job.id)
+
+    assert updated.status is ImportJobStatus.ROLLING_BACK
+    assert updated.control_request is ImportControlRequest.CANCEL
+    assert updated.story_arc_placement_followup_pending is False
+    assert updated.progress_snapshot["mode"] == "rollback"
+    assert updated.progress_snapshot["phase"] == "queued"
+
+
 async def test_pause_scanning_job_requests_safe_checkpoint(db_session: AsyncSession) -> None:
     service = _make_service()
     job = await _create_job_row(
@@ -254,6 +298,72 @@ async def test_resume_stalled_job_uses_progress_snapshot_phase(db_session: Async
     assert updated.progress_snapshot["message"] == "Import resume requested."
 
 
+async def test_resume_rejects_stalled_story_arc_placement_wait(
+    db_session: AsyncSession,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(
+        db_session,
+        status=ImportJobStatus.STALLED,
+        progress_snapshot={
+            "mode": "import",
+            "phase": "story_arc_placements",
+            "progress": 99,
+            "message": "One or more Story Arc placements failed.",
+        },
+        import_started_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="Retry the failed Story Arc placement work or cancel the import",
+    ):
+        await service.resume_job(db_session, job.id)
+
+    assert job.status is ImportJobStatus.STALLED
+    assert job.progress_snapshot["phase"] == "story_arc_placements"
+
+
+async def test_retry_story_arc_placements_delegates_and_logs_requeued_count(
+    db_session: AsyncSession,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(
+        db_session,
+        status=ImportJobStatus.STALLED,
+        progress_snapshot={
+            "mode": "import",
+            "phase": "story_arc_placements",
+            "progress": 99,
+        },
+        import_started_at=datetime.now(UTC),
+    )
+    retry = AsyncMock(return_value=(job, 2))
+
+    with patch(
+        "pullbox.services.import_service_job_lifecycle.retry_import_story_arc_placements",
+        retry,
+    ):
+        updated, retrying_count = await service.retry_story_arc_placements(
+            db_session,
+            job.id,
+        )
+
+    assert updated is job
+    assert retrying_count == 2
+    retry.assert_awaited_once_with(db_session, job.id)
+    log = (
+        await db_session.execute(
+            select(ImportJobLog).where(
+                ImportJobLog.import_job_id == job.id,
+                ImportJobLog.event == "import_story_arc_placements_retry_requested",
+            )
+        )
+    ).scalar_one()
+    assert log.message == "Retrying 2 failed or cancelled Story Arc placements."
+    assert log.data["retrying_count"] == 2
+
+
 async def test_resume_job_rejects_rolled_back_history_row(db_session: AsyncSession) -> None:
     service = _make_service()
     job = await _create_job_row(
@@ -375,10 +485,12 @@ async def test_request_rollback_marks_job_and_logs_event(db_session: AsyncSessio
         status=ImportJobStatus.COMPLETED,
         import_started_at=datetime.now(UTC),
     )
+    job.story_arc_placement_followup_pending = True
 
     updated = await service.request_rollback(db_session, job.id)
 
     assert updated.status == ImportJobStatus.ROLLING_BACK
+    assert updated.story_arc_placement_followup_pending is False
     assert updated.progress_snapshot["status"] == ImportJobStatus.ROLLING_BACK.value
     assert updated.progress_snapshot["phase"] == "queued"
     assert updated.progress_snapshot["message"] == "Rolling back import actions..."

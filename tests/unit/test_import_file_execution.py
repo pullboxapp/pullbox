@@ -20,13 +20,19 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
     ImportSourceType,
 )
 from pullbox.models.issue import Issue, IssueStatus, IssueType
-from pullbox.models.library import LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 from pullbox.schemas.import_job import (
@@ -54,6 +60,30 @@ def _make_service(
         metadata_service=metadata_service or AsyncMock(),
         event_bus=event_bus or AsyncMock(),
     )
+
+
+def test_placeholder_issue_target_preserves_only_base_compatible_exact_text() -> None:
+    from pullbox.services.import_file_execution import (
+        _placeholder_issue_target_from_diagnostics,
+    )
+
+    imp_file = ImportedFile(
+        issue_number_raw="4au",
+        diagnostics={
+            "kind": "provider_missing_issue_placeholder",
+            "target_issue_number": 4.0,
+            "target_issue_type": IssueType.ISSUE.value,
+        },
+    )
+
+    compatible = _placeholder_issue_target_from_diagnostics(imp_file)
+    assert compatible is not None
+    assert compatible.issue_number_text == "4AU"
+
+    imp_file.issue_number_raw = "5AU"
+    incompatible = _placeholder_issue_target_from_diagnostics(imp_file)
+    assert incompatible is not None
+    assert incompatible.issue_number_text is None
 
 
 async def _setup_full_scenario(
@@ -184,6 +214,8 @@ def _mock_register_library_file() -> AsyncMock:
             match_confidence=confidence,
             issue_id=issue.id,  # type: ignore[union-attr]
             library_root_id=root_id,
+            storage_mode=kwargs.get("storage_mode", LibraryFileStorageMode.MANAGED),
+            source_signature=dict(kwargs.get("expected_source_signature") or {}),
         )
         session.add(lf)
         await session.flush()  # type: ignore[attr-defined]
@@ -433,6 +465,7 @@ class TestFileStatusUpdatedOnSuccess:
             file_format="cbr",
             parsed_series="King Dracula",
             parsed_issue_number=4.0,
+            issue_number_raw="4au",
             parsed_year=2026,
             status=ImportedFileStatus.MATCHED,
             match_confidence="manual",
@@ -530,6 +563,7 @@ class TestFileStatusUpdatedOnSuccess:
         assert created_issue is not None
         assert created_issue.series_id == series.id
         assert created_issue.issue_number == 4.0
+        assert created_issue.issue_number_text == "4AU"
         assert created_issue.comicvine_id is None
         assert created_issue.issue_type == IssueType.ISSUE
         assert created_issue.metadata_source == "provisional_import"
@@ -564,6 +598,55 @@ class TestFileStatusSetToFailedOnError:
         await db_session.refresh(imp_files[0])
         assert imp_files[0].status == ImportedFileStatus.FAILED
         assert "Source file missing" in (imp_files[0].error_message or "")
+
+    @pytest.mark.asyncio
+    async def test_referenced_source_change_records_retryable_diagnostics(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        from pullbox.core.library_file_ownership import ReferencedFileValidationError
+
+        job, _imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+        job.move_to_library = False
+        job.effective_transfer_method = "leave_in_place"
+        await db_session.flush()
+        mock_register = AsyncMock(
+            side_effect=ReferencedFileValidationError(
+                "source_changed",
+                "Referenced file changed after it was scanned.",
+            )
+        )
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        await db_session.refresh(imp_files[0])
+        assert imp_files[0].status == ImportedFileStatus.FAILED
+        assert imp_files[0].include_in_import is False
+        assert imp_files[0].diagnostics["source_revalidation"] == {
+            "kind": "source_revalidation",
+            "category": "source_changed",
+            "code": "source_changed",
+            "reason": (
+                "The source changed or became unavailable after scanning. Rescan before retrying."
+            ),
+            "sanitized_reason": (
+                "The source changed or became unavailable after scanning. Rescan before retrying."
+            ),
+            "source": "source_revalidation",
+            "retryable": True,
+            "overrideable": False,
+        }
 
     @pytest.mark.asyncio
     async def test_resource_safety_failure_sets_safety_blocked_not_failed(
@@ -2033,6 +2116,26 @@ class TestImportExecutionAutoflushDiscipline:
         failed_artifact_cleanup.assert_not_called()
 
 
+def test_failed_referenced_registration_cleanup_never_unlinks_source(tmp_path: Path) -> None:
+    from pullbox.services.import_file_execution import _cleanup_failed_library_artifact
+
+    source_path = tmp_path / "library" / "Existing Series" / "Issue 001.cbz"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("user-owned comic", encoding="utf-8")
+
+    _cleanup_failed_library_artifact(
+        destination_path=source_path,
+        original_source=source_path,
+        original_trash_path=None,
+        transfer_method="leave_in_place",
+        storage_mode="referenced",
+        created_series_folder=False,
+        created_series_folder_path=None,
+    )
+
+    assert source_path.read_text(encoding="utf-8") == "user-owned comic"
+
+
 class TestOneFileFailsOthersContinue:
     """One file fails but others in the series still get processed."""
 
@@ -2290,6 +2393,49 @@ class TestMoveToLibraryPassedThrough:
         # Default is move_to_library=True
         call_kwargs = mock_register.call_args_list[0].kwargs
         assert call_kwargs.get("move_to_library") is True
+
+    @pytest.mark.asyncio
+    async def test_in_place_execution_passes_typed_referenced_contract(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        job, _imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        signature = {
+            "schema_version": 1,
+            "resolved_path": imp_files[0].file_path,
+            "size": 1024,
+            "mtime_ns": 123,
+            "device": 1,
+            "inode": 2,
+        }
+        imp_files[0].source_signature = signature
+        job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+        job.move_to_library = False
+        job.effective_transfer_method = "leave_in_place"
+        job.convert_to_preferred_format = False
+        job.update_embedded_comicinfo_from_match = False
+        await db_session.flush()
+        mock_register = _mock_register_library_file()
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        call_kwargs = mock_register.call_args_list[0].kwargs
+        assert call_kwargs["move_to_library"] is False
+        assert call_kwargs["storage_mode"] == LibraryFileStorageMode.REFERENCED
+        assert call_kwargs["expected_source_signature"] == signature
+        assert call_kwargs["transfer_method"] == "leave_in_place"
+        assert call_kwargs["normalize_to_cbz"] is False
+        assert call_kwargs["update_embedded_comicinfo_from_match"] is False
 
     @pytest.mark.asyncio
     async def test_import_execution_disables_nested_normalization_but_keeps_metadata_update(
@@ -2835,10 +2981,10 @@ class TestConfirmImportAddsMoveToLibrary:
         assert updated_job.move_to_library is True
 
     @pytest.mark.asyncio
-    async def test_run_import_passes_job_move_to_library_false(
+    async def test_legacy_move_boolean_does_not_override_typed_managed_mode(
         self, db_session: AsyncSession
     ) -> None:
-        """run_import() passes job.move_to_library=False to register_library_file."""
+        """Typed handling mode remains authoritative over a stale compatibility boolean."""
         job, _imp_series, _imp_files, series, _issues = await _setup_full_scenario(
             db_session, num_issues=1
         )
@@ -2857,4 +3003,5 @@ class TestConfirmImportAddsMoveToLibrary:
             await svc.run_import(db_session, job.id)
 
         call_kwargs = mock_register.call_args_list[0].kwargs
-        assert call_kwargs.get("move_to_library") is False
+        assert call_kwargs.get("move_to_library") is True
+        assert call_kwargs.get("storage_mode") == LibraryFileStorageMode.MANAGED
