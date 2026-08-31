@@ -65,6 +65,15 @@ _SECURE_DIR_FD_SUPPORTED = (
 Fingerprint = dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class _PublishedTarget:
+    """Ephemeral ownership evidence captured from the artifact being published."""
+
+    stat: os.stat_result
+    sha256: str | None = None
+    link_target: str | None = None
+
+
 class StoryArcPlacementError(RuntimeError):
     """Base class for a categorized placement failure."""
 
@@ -1045,6 +1054,7 @@ def execute_story_arc_placement(
                     source_path,
                     target_path.name,
                     secure_parent,
+                    source_fingerprint,
                 )
             elif mode is StoryArcPlacementMode.SYMLINK:
                 if symlink_style is None:  # pragma: no cover - validated above
@@ -1865,7 +1875,7 @@ def _publish_copy_at(
     parent: _SecureParentDirectory,
     source_fingerprint: Fingerprint,
     cancellation_requested: CancellationRequested | None,
-) -> tuple[int, int]:
+) -> _PublishedTarget:
     source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         source_fd = os.open(source_path, source_flags)
@@ -1877,7 +1887,7 @@ def _publish_copy_at(
     temporary_fd = -1
     temporary_name = ""
     published = False
-    published_identity: tuple[int, int] | None = None
+    published_stat: os.stat_result | None = None
     try:
         source_stat = os.fstat(source_fd)
         if not stat.S_ISREG(source_stat.st_mode) or not _stat_matches_fingerprint(
@@ -1931,45 +1941,56 @@ def _publish_copy_at(
                 "Story-arc destination appeared before atomic copy publish",
             ) from exc
         published = True
-        published_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
     finally:
-        if temporary_fd >= 0:
-            os.close(temporary_fd)
-        os.close(source_fd)
-        if temporary_name:
-            try:
-                os.unlink(temporary_name, dir_fd=parent.parent_fd)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                if not published:
-                    raise
-    if published_identity is None:  # pragma: no cover - publish or raise
+        try:
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent.parent_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    if not published:
+                        raise
+            if published:
+                # Removing the temporary hardlink changes ctime. Capture from
+                # the still-open descriptor, never a potentially replaced path.
+                published_stat = os.fstat(temporary_fd)
+        finally:
+            if temporary_fd >= 0:
+                os.close(temporary_fd)
+            os.close(source_fd)
+    if published_stat is None:  # pragma: no cover - publish or raise
         raise StoryArcPlacementSafetyError(
             "publish_validation_failed",
             "Atomic story-arc copy publication produced no filesystem identity",
         )
-    return published_identity
+    return _PublishedTarget(published_stat, sha256=digest.hexdigest())
 
 
 def _publish_hardlink_at(
     source_path: Path,
     target_name: str,
     parent: _SecureParentDirectory,
-) -> tuple[int, int]:
-    source_stat = source_path.stat()
-    if source_stat.st_dev != os.fstat(parent.parent_fd).st_dev:
-        raise StoryArcPlacementSafetyError(
-            "cross_device",
-            "Hardlink source and story-arc destination are on different filesystems",
-        )
+    source_fingerprint: Fingerprint,
+) -> _PublishedTarget:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source_path, flags)
     try:
+        source_stat = os.fstat(descriptor)
+        if not _stat_matches_fingerprint(source_stat, source_fingerprint):
+            raise StoryArcPlacementSafetyError("source_changed", "Canonical source changed")
+        if source_stat.st_dev != os.fstat(parent.parent_fd).st_dev:
+            raise StoryArcPlacementSafetyError(
+                "cross_device",
+                "Hardlink source and story-arc destination are on different filesystems",
+            )
         os.link(
             source_path,
             target_name,
             dst_dir_fd=parent.parent_fd,
             follow_symlinks=False,
         )
+        return _PublishedTarget(os.fstat(descriptor), sha256=str(source_fingerprint["sha256"]))
     except OSError as exc:
         if exc.errno == errno.EXDEV:
             raise StoryArcPlacementSafetyError(
@@ -1977,7 +1998,8 @@ def _publish_hardlink_at(
                 "Hardlink source and story-arc destination are on different filesystems",
             ) from exc
         raise
-    return source_stat.st_dev, source_stat.st_ino
+    finally:
+        os.close(descriptor)
 
 
 def _publish_symlink_at(
@@ -1986,7 +2008,7 @@ def _publish_symlink_at(
     target_parent: Path,
     parent: _SecureParentDirectory,
     symlink_style: StoryArcSymlinkStyle,
-) -> tuple[int, int]:
+) -> _PublishedTarget:
     link_target = (
         str(source_path)
         if symlink_style is StoryArcSymlinkStyle.ABSOLUTE
@@ -2007,7 +2029,7 @@ def _publish_symlink_at(
             "publish_validation_failed",
             "Published story-arc symlink changed before it could be validated",
         )
-    return created.st_dev, created.st_ino
+    return _PublishedTarget(created, link_target=link_target)
 
 
 def _validate_published_target_at(
@@ -2053,18 +2075,45 @@ def _remove_created_target_at(
     parent: _SecureParentDirectory,
     target_name: str,
     *,
-    expected_identity: tuple[int, int],
+    expected_identity: _PublishedTarget,
 ) -> None:
     try:
         current = _entry_lstat_at(parent.parent_fd, target_name)
-        if (current.st_dev, current.st_ino) != expected_identity:
+        if _publication_stat_identity(current) != _publication_stat_identity(
+            expected_identity.stat
+        ):
+            return
+        if expected_identity.link_target is not None:
+            if os.readlink(target_name, dir_fd=parent.parent_fd) != expected_identity.link_target:
+                return
+        elif (
+            _fingerprint_regular_at(parent.parent_fd, target_name)["sha256"]
+            != expected_identity.sha256
+        ):
+            return
+        # Hashing may take time. Recheck metadata before removal, including
+        # ctime so a recycled inode or an in-place edit does not prove ownership.
+        current = _entry_lstat_at(parent.parent_fd, target_name)
+        if _publication_stat_identity(current) != _publication_stat_identity(
+            expected_identity.stat
+        ):
             return
         os.unlink(target_name, dir_fd=parent.parent_fd)
         _fsync_directory(parent.parent_fd)
-    except FileNotFoundError:
+    except (OSError, StoryArcPlacementError):
+        # If ownership cannot be proven, preserve the entry and original error.
         pass
-    except OSError:
-        pass
+
+
+def _publication_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _stat_matches_fingerprint(current: os.stat_result, fingerprint: Fingerprint) -> bool:

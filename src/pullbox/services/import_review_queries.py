@@ -22,7 +22,7 @@ from pullbox.models.issue import Issue
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy.sql.selectable import Subquery
+    from sqlalchemy.sql.selectable import CTE, Subquery
 
 
 CONFLICT_GROUP_COMPATIBILITY_PAGE_SIZE = 500
@@ -198,14 +198,14 @@ def _conflict_group_keys(job_id: int) -> Subquery:
             literal("series_conflict").label("kind"),
             ImportedSeries.id.label("group_key"),
             cast(ImportedSeries.id, String).label("sort_key"),
-            _normalized_sort_expression(series_label).label("series_sort"),
+            series_label.label("series_sort"),
             literal(1).label("issue_null_order"),
             literal(0.0).label("issue_sort"),
             sa_func.coalesce(series_file_counts.c.file_count, 0).label("file_count"),
             literal(0).label("has_preferred"),
-            _normalized_sort_expression(
-                sa_func.coalesce(selected_candidate_title, "candidate needs review")
-            ).label("signal_sort"),
+            sa_func.coalesce(selected_candidate_title, "candidate needs review").label(
+                "signal_sort"
+            ),
             literal("series match conflict").label("status_sort"),
             ImportedSeries.id.label("series_id"),
             cast(null(), Integer).label("matched_issue_id"),
@@ -253,7 +253,7 @@ def _conflict_group_keys(job_id: int) -> Subquery:
             literal("file_conflict").label("kind"),
             file_aggregates.c.group_key,
             cast(file_aggregates.c.group_key, String).label("sort_key"),
-            _normalized_sort_expression(file_series_label).label("series_sort"),
+            file_series_label.label("series_sort"),
             case((issue_sort.is_(None), 1), else_=0).label("issue_null_order"),
             sa_func.coalesce(issue_sort, 0.0).label("issue_sort"),
             file_aggregates.c.file_count,
@@ -274,7 +274,7 @@ def _conflict_group_keys(job_id: int) -> Subquery:
         .join(file_series, file_series.id == first_file.import_series_id)
         .outerjoin(Issue, Issue.id == first_file.matched_issue_id)
     )
-    return union_all(series_keys, file_keys).subquery()
+    return _normalized_sort_keys(union_all(series_keys, file_keys).subquery())
 
 
 def _series_label_expression(name: Any, year: Any) -> Any:
@@ -284,22 +284,63 @@ def _series_label_expression(name: Any, year: Any) -> Any:
     )
 
 
-def _normalized_sort_expression(value: Any) -> Any:
-    """Approximate NameMatcher normalization with portable SQL functions."""
-    normalized: Any = sa_func.lower(sa_func.trim(sa_func.coalesce(value, "")))
-    normalized = case(
-        (normalized.like("the %"), sa_func.substr(normalized, 5)),
-        (normalized.like("an %"), sa_func.substr(normalized, 4)),
-        (normalized.like("a %"), sa_func.substr(normalized, 3)),
-        else_=normalized,
+def _sort_key_stage(keys: CTE | Subquery, expressions: dict[str, Any]) -> CTE:
+    """Name intermediate expressions without nesting their SQL text."""
+    return sa_select(
+        *(
+            expressions[column.key].label(column.key) if column.key in expressions else column
+            for column in keys.c
+        )
+    ).cte()
+
+
+def _normalized_sort_keys(keys: Subquery) -> Subquery:
+    """Keep portable, server-side normalization within fixed SQLite parser stacks."""
+    names = ("series_sort", "signal_sort")
+    stage = _sort_key_stage(
+        keys,
+        {name: sa_func.lower(sa_func.trim(sa_func.coalesce(keys.c[name], ""))) for name in names},
     )
-    normalized = sa_func.replace(normalized, "&", " and ")
-    normalized = sa_func.replace(normalized, "'s", "s")
-    for punctuation in ("-", "_", ".", ",", ":", ";", "!", "?", "'", '"', "(", ")"):
-        normalized = sa_func.replace(normalized, punctuation, " ")
-    for _ in range(4):
-        normalized = sa_func.replace(normalized, "  ", " ")
-    return sa_func.trim(normalized)
+    stage = _sort_key_stage(
+        stage,
+        {
+            name: case(
+                (stage.c[name].like("the %"), sa_func.substr(stage.c[name], 5)),
+                (stage.c[name].like("an %"), sa_func.substr(stage.c[name], 4)),
+                (stage.c[name].like("a %"), sa_func.substr(stage.c[name], 3)),
+                else_=stage.c[name],
+            )
+            for name in names
+        },
+    )
+    replacements = [("&", " and "), ("'s", "s")]
+    replacements.extend(
+        (char, " ") for char in ("-", "_", ".", ",", ":", ";", "!", "?", "'", '"', "(", ")")
+    )
+    replacements.extend([("  ", " ")] * 4)
+    # CTEs are hoisted rather than nesting SELECTs. Four replacements per stage
+    # leave parser headroom for CASE, JSON extraction, UNION, and page/count SQL.
+    for offset in range(0, len(replacements), 4):
+        expressions: dict[str, Any] = {}
+        for name in names:
+            value: Any = stage.c[name]
+            for old, new in replacements[offset : offset + 4]:
+                value = sa_func.replace(value, old, new)
+            expressions[name] = value
+        stage = _sort_key_stage(stage, expressions)
+    stage = _sort_key_stage(
+        stage,
+        {
+            "series_sort": sa_func.trim(stage.c.series_sort),
+            # File-conflict signal labels historically equal status_sort and
+            # are not title-normalized (notably the hyphen in auto-selected).
+            "signal_sort": case(
+                (stage.c.kind_order == 1, stage.c.status_sort),
+                else_=sa_func.trim(stage.c.signal_sort),
+            ),
+        },
+    )
+    return sa_select(stage).subquery()
 
 
 async def _count_conflict_groups(

@@ -481,7 +481,7 @@ async def test_conflict_review_context_keeps_page_enrichment_query_constant(
         _context: object,
         _executemany: bool,
     ) -> None:
-        if statement.lstrip().upper().startswith("SELECT"):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
             selects.append(statement)
 
     event.listen(async_engine.sync_engine, "before_cursor_execute", record_select)

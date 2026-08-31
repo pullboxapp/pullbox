@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   import review and matching without silently overriding stronger identities.
 - Rechecked arc search eligibility after provider waits so newly skipped or
   removed members cannot be queued from stale search results.
+- Fixed import-conflict review queries overflowing the parser stack on older
+  SQLite builds while retaining server-side sorting and bounded pagination.
+- Preserved replaced or edited Story Arc files during failed-publication
+  cleanup instead of relying only on filesystem device and inode identifiers.
 
 ### Performance
 

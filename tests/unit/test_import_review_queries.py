@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
+from sqlalchemy.dialects import postgresql, sqlite
 
 from pullbox.core.exceptions import NotFoundError
 from pullbox.core.name_matcher import NameMatcher
@@ -21,6 +22,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.services.import_review_queries import (
     MAX_CONFLICT_GROUP_FILES,
+    _conflict_group_keys,
     get_conflict_groups,
     get_conflict_groups_page,
     get_files_for_series,
@@ -28,7 +30,51 @@ from pullbox.services.import_review_queries import (
 from pullbox.services.import_service import ImportService
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Dialect
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
+def test_conflict_sort_query_has_bounded_parser_nesting(dialect: Dialect) -> None:
+    # Older SQLite builds have a fixed parser stack. Keep each SQL expression
+    # shallow even when the local SQLite build accepts deeper expressions.
+    statement = str(select(_conflict_group_keys(1)).compile(dialect=dialect))
+    depth = peak = 0
+    for character in statement:
+        if character == "(":
+            depth += 1
+            peak = max(peak, depth)
+        elif character == ")":
+            depth -= 1
+    assert peak <= 12, f"Conflict SQL nests {peak} levels; fixed-stack SQLite rejects it"
+
+
+async def test_conflict_sort_keys_preserve_normalization_and_file_signal_labels(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job_row(db_session)
+    series = await _create_series_row(
+        db_session,
+        job,
+        name="  The Spider-Man's: Friends & Foes!  ",
+        status=ImportSeriesStatus.NO_MATCH,
+        diagnostics={"kind": "series_conflict", "selected_candidate": {"title": 'An X.Y_"Z"?'}},
+    )
+    series.raw_year = 2026
+    files = await _create_series_row(db_session, job, name="A Batman (Special)")
+    conflict_file = _make_file(
+        job, files, name="variant.cbz", status=ImportedFileStatus.CONFLICT, conflict_group_id=77
+    )
+    conflict_file.is_preferred = True
+    db_session.add(conflict_file)
+    await db_session.flush()
+
+    keys = _conflict_group_keys(job.id)
+    rows = (await db_session.execute(select(keys).order_by(keys.c.kind_order))).mappings().all()
+    assert [(row["series_sort"], row["signal_sort"]) for row in rows] == [
+        ("spider mans friends and foes 2026", "x y z"),
+        ("batman special", "auto-selected"),
+    ]
 
 
 async def _create_job_row(session: AsyncSession) -> ImportJob:
@@ -222,7 +268,7 @@ async def test_get_conflict_groups_page_is_bounded_stable_and_query_constant(
         _context: object,
         _executemany: bool,
     ) -> None:
-        if statement.lstrip().upper().startswith("SELECT"):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
             selects.append(statement)
 
     observed_group_ids: list[object] = []

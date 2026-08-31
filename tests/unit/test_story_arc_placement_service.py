@@ -386,6 +386,90 @@ def test_failed_publish_cleanup_preserves_a_replacement_user_artifact(
     assert source.read_bytes() == b"canonical"
 
 
+def test_failed_publish_cleanup_preserves_same_inode_same_size_user_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.cbz"
+    source.write_bytes(b"canonical")
+    root = tmp_path / "arcs"
+    root.mkdir()
+    target = root / "Court of Owls" / "001 - Batman 1 - The Court of Owls.cbz"
+
+    def edit_before_validation(parent: placement_service._SecureParentDirectory) -> None:
+        before = target.stat()
+        target.write_bytes(b"user edit")
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        assert target.stat().st_ino == before.st_ino
+        assert target.stat().st_size == before.st_size
+        raise StoryArcPlacementSafetyError("parent_changed", "Simulated post-publication failure")
+
+    monkeypatch.setattr(placement_service, "_assert_parent_path_stable", edit_before_validation)
+    with pytest.raises(StoryArcPlacementSafetyError, match="Simulated post-publication failure"):
+        execute_story_arc_placement(_plan(source, root))
+
+    assert target.read_bytes() == b"user edit"
+    assert source.read_bytes() == b"canonical"
+
+
+@pytest.mark.parametrize("change", ["before_hash", "after_hash", "unreadable"])
+def test_failed_publish_cleanup_rechecks_content_and_preserves_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    source = tmp_path / "source.cbz"
+    source.write_bytes(b"canonical")
+    root = tmp_path / "arcs"
+    root.mkdir()
+    target = root / "Court of Owls" / "001 - Batman 1 - The Court of Owls.cbz"
+    real_fingerprint = placement_service._fingerprint_regular_at
+
+    def fail_validation(parent: placement_service._SecureParentDirectory) -> None:
+        raise StoryArcPlacementSafetyError("parent_changed", "Original publication failure")
+
+    def change_during_cleanup(parent_fd: int, name: str) -> dict[str, object]:
+        if change == "unreadable":
+            raise StoryArcPlacementSafetyError("fingerprint_mismatch", "Cannot verify ownership")
+        if change == "before_hash":
+            target.write_bytes(b"user edit")
+        fingerprint = real_fingerprint(parent_fd, name)
+        if change == "after_hash":
+            target.write_bytes(b"user edit")
+        return fingerprint
+
+    monkeypatch.setattr(placement_service, "_assert_parent_path_stable", fail_validation)
+    monkeypatch.setattr(placement_service, "_fingerprint_regular_at", change_during_cleanup)
+    with pytest.raises(StoryArcPlacementSafetyError, match="Original publication failure"):
+        execute_story_arc_placement(_plan(source, root))
+
+    assert target.read_bytes() == (b"canonical" if change == "unreadable" else b"user edit")
+    assert source.read_bytes() == b"canonical"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [StoryArcPlacementMode.COPY, StoryArcPlacementMode.HARDLINK, StoryArcPlacementMode.SYMLINK],
+)
+def test_failed_publish_cleans_up_unchanged_owned_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: StoryArcPlacementMode
+) -> None:
+    source = tmp_path / "source.cbz"
+    source.write_bytes(b"canonical")
+    root = tmp_path / "arcs"
+    root.mkdir()
+    target = root / "Court of Owls" / "001 - Batman 1 - The Court of Owls.cbz"
+
+    def fail_validation(parent: placement_service._SecureParentDirectory) -> None:
+        raise StoryArcPlacementSafetyError("parent_changed", "Original publication failure")
+
+    monkeypatch.setattr(placement_service, "_assert_parent_path_stable", fail_validation)
+    style = StoryArcSymlinkStyle.ABSOLUTE if mode is StoryArcPlacementMode.SYMLINK else None
+    with pytest.raises(StoryArcPlacementSafetyError, match="Original publication failure"):
+        execute_story_arc_placement(_plan(source, root, mode=mode, style=style))
+
+    assert not target.exists()
+    assert not target.is_symlink()
+    assert source.read_bytes() == b"canonical"
+
+
 def test_retry_of_unchanged_managed_copy_is_idempotent(tmp_path: Path) -> None:
     source = tmp_path / "source.cbz"
     source.write_bytes(b"canonical")
