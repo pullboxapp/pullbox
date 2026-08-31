@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from typing import Annotated
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlencode, urlsplit
 
 import structlog
 from fastapi import APIRouter, Query, Request
@@ -26,6 +26,7 @@ from pullbox.core.page_sources import SUPPORTED_READER_FORMATS
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
+from pullbox.models.story_arc import IssueStoryArc, StoryArc
 from pullbox.services.airdcpp_route_tokens import get_airdcpp_route_token_store
 from pullbox.services.airdcpp_search_types import AirDcppSearchProgress
 from pullbox.services.reader_state_service import load_reader_state
@@ -287,11 +288,32 @@ async def issue_detail(
     user: AuthenticatedUser,
     session: DbSession,
     read: str | None = Query(None),
+    source: str | None = Query(None, max_length=50),
+    story_arc_id: Annotated[int | None, Query(ge=1)] = None,
+    story_arc_page: Annotated[int, Query(ge=1)] = 1,
+    story_arc_per_page: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> Response:
     """Render the issue detail page, fetching metadata on-demand if missing."""
     issue = await _load_issue_detail_record(session, issue_id)
     if issue is None:
         return RedirectResponse(url="/series", status_code=302)
+
+    story_arc_origin = None
+    if source == "story-arc" and story_arc_id is not None:
+        story_arc_origin = await session.scalar(
+            select(StoryArc)
+            .join(IssueStoryArc, IssueStoryArc.story_arc_id == StoryArc.id)
+            .where(
+                StoryArc.id == story_arc_id,
+                IssueStoryArc.issue_id == issue.id,
+            )
+        )
+    issue_detail_back_url = (
+        f"/story-arcs/{story_arc_origin.id}?"
+        f"{urlencode({'page': story_arc_page, 'per_page': story_arc_per_page})}"
+        if story_arc_origin is not None
+        else f"/series/{issue.series_id}"
+    )
 
     # On-demand metadata enrichment: fetch description from ComicVine if missing.
     if issue.comicvine_id and not issue.description:
@@ -344,6 +366,8 @@ async def issue_detail(
             request,
             user,
             issue=issue,
+            issue_story_arc_origin=story_arc_origin,
+            issue_detail_back_url=issue_detail_back_url,
             reader_enabled=reader_enabled,
             issue_reading=issue_reading,
             open_reader_on_load=open_reader_on_load,

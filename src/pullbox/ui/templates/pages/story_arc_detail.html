@@ -7,11 +7,23 @@
 
 {% block content %}
 <main data-testid="story-arc-detail-page" class="mx-auto max-w-7xl space-y-6">
-  <nav aria-label="Breadcrumb" class="text-sm text-pb-text-sec">
-    <a href="/story-arcs" class="text-pb-interactive hover:underline">Story Arcs</a>
-    <span aria-hidden="true" class="px-1">/</span>
-    <span aria-current="page">{{ story_arc.name }}</span>
-  </nav>
+  <div class="series-domain-breadcrumb-row">
+    <a
+      href="/story-arcs"
+      data-testid="story-arc-detail-back-link"
+      class="series-domain-back-link"
+    >
+      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+      </svg>
+      Back to story arcs
+    </a>
+    <nav data-testid="story-arc-detail-breadcrumbs" class="series-domain-breadcrumbs" aria-label="Breadcrumb">
+      <a href="/story-arcs">All Story Arcs</a>
+      <span class="series-domain-breadcrumb-sep">›</span>
+      <span class="current" aria-current="page">{{ story_arc.name }}</span>
+    </nav>
+  </div>
 
   <div role="status" aria-live="polite" class="min-h-0">
     {% if notice_message %}
@@ -253,7 +265,7 @@
                   <p class="mt-1 text-sm text-pb-text-sec">
                     Canonical state: <span class="font-medium text-pb-text">{{ membership.canonical_state }}</span>
                   </p>
-                  {% if membership.issue_id %}<a href="/issues/{{ membership.issue_id }}" class="mt-2 inline-block text-sm text-pb-interactive hover:underline">Open issue / manual search</a>{% endif %}
+                  {% if membership.issue_id %}<a href="/issues/{{ membership.issue_id }}?source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}" data-testid="story-arc-open-issue-{{ membership.issue_id }}" class="mt-2 inline-block text-sm text-pb-interactive hover:underline">Open issue / manual search</a>{% endif %}
                 </div>
 
                 {% if story_arc.active %}

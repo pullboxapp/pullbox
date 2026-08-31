@@ -671,6 +671,10 @@ class TestStoryArcManagementUI:
 
         assert response.status_code == 200
         assert 'data-testid="story-arc-detail-page"' in response.text
+        assert 'data-testid="story-arc-detail-back-link"' in response.text
+        assert 'data-testid="story-arc-detail-breadcrumbs"' in response.text
+        assert "Back to story arcs" in response.text
+        assert "All Story Arcs" in response.text
         assert "DC Numbering" in response.text
         assert 'data-exact-issue-number="1000000"' in response.text
         assert 'data-exact-issue-number="1AU"' in response.text
@@ -701,6 +705,37 @@ class TestStoryArcManagementUI:
         assert "Canonical files stay in their current folders." in response.text
         assert "Monitoring and automation will be disabled." in response.text
         assert "pbConfirm" in response.text
+        assert (
+            f"/issues/{ids['million_issue']}?source=story-arc&amp;story_arc_id={ids['arc']}"
+            "&amp;story_arc_page=1&amp;story_arc_per_page=2"
+        ) in response.text
+
+        issue_from_arc = await authenticated_client.get(
+            f"/issues/{ids['million_issue']}",
+            params={
+                "source": "story-arc",
+                "story_arc_id": ids["arc"],
+                "story_arc_page": 1,
+                "story_arc_per_page": 2,
+            },
+        )
+        assert issue_from_arc.status_code == 200
+        assert 'data-testid="issue-detail-back-link"' in issue_from_arc.text
+        assert 'data-testid="issue-detail-breadcrumbs"' in issue_from_arc.text
+        assert 'data-breadcrumb-origin="story-arc"' in issue_from_arc.text
+        assert "Back to story arc" in issue_from_arc.text
+        assert "All Story Arcs" in issue_from_arc.text
+        assert f'href="/story-arcs/{ids["arc"]}?page=1&amp;per_page=2"' in issue_from_arc.text
+        assert "DC Numbering" in issue_from_arc.text
+
+        invalid_arc_origin = await authenticated_client.get(
+            f"/issues/{ids['million_issue']}",
+            params={"source": "story-arc", "story_arc_id": ids["arc"] + 10_000},
+        )
+        assert invalid_arc_origin.status_code == 200
+        assert 'data-breadcrumb-origin="series"' in invalid_arc_origin.text
+        assert "Back to series" in invalid_arc_origin.text
+        assert "All Story Arcs" not in invalid_arc_origin.text
 
         second_page = await authenticated_client.get(f"/story-arcs/{ids['arc']}?page=2&per_page=2")
         assert second_page.status_code == 200
