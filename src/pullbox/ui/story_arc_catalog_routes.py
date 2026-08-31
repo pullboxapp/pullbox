@@ -86,6 +86,9 @@ def _render(request: Request, username: str, template: str, **values: object) ->
 def _redirect(request: Request, url: str) -> Response:
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": url})
+    # All callers build /story-arcs routes from integer IDs or the numeric
+    # _ProviderId validator; no request value supplies an origin or URL prefix.
+    # codeql[py/url-redirection]
     return RedirectResponse(url, status_code=303)
 
 

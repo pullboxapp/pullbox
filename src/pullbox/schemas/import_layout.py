@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from pullbox.core.filesystem_policy import resolve_preview_source
 from pullbox.core.library_layout import (
     ImportLayoutMode,
     LayoutClassification,
@@ -67,12 +67,10 @@ class LayoutPreviewRequest(BaseModel):
     @classmethod
     def validate_source_directory(cls, value: str) -> str:
         """Resolve an existing directory without accepting a file as a scan root."""
-        path = Path(value).expanduser()
-        if not path.exists():
-            raise ValueError(f"Path does not exist: {value}")
+        path = resolve_preview_source(value)
         if not path.is_dir():
             raise ValueError("Layout preview source must be a directory")
-        return str(path.resolve())
+        return str(path)
 
     @model_validator(mode="after")
     def validate_supported_source_type(self) -> LayoutPreviewRequest:

@@ -96,7 +96,7 @@ async def build_comicinfo_payload_for_issue(
 
     payload: dict[str, Any] = {
         "Series": series.title,
-        "Number": format_comicinfo_issue_number(issue.issue_number),
+        "Number": issue.effective_issue_number_text,
         "Title": issue.title,
         "Summary": issue.description,
         "Publisher": publisher_name,

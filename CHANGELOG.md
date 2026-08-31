@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   titles embedded in filenames without treating the title as a new series.
 - Preserved exact issue-number identity for large and special issue numbers
   instead of allowing floating-point or scientific-notation drift.
+- Preserved exact issue numbers in managed filenames, embedded ComicInfo, and
+  the reader, including suffixes and fractional padded filenames.
+- Preserved other series' in-place files when deleting or trashing a shared
+  folder, without treating literal folder-name characters as SQL wildcards.
+- Applied sensitive-directory restrictions to import previews and preserved
+  literal special characters when opening Mylar databases read-only.
 - Preserved Mylar, ComicInfo, and supported series sidecar evidence through
   import review and matching without silently overriding stronger identities.
 - Rechecked arc search eligibility after provider waits so newly skipped or

@@ -405,7 +405,7 @@ class Mylar3Reader:
     def _read_snapshot_sync(self) -> Mylar3CollectionSnapshot:
         """Read every supported Mylar source domain through one connection."""
         try:
-            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn = sqlite3.connect(f"{self._db_path.resolve().as_uri()}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"
@@ -456,7 +456,7 @@ class Mylar3Reader:
     def _read_import_metadata_sync(self) -> Mylar3ImportMetadataSnapshot:
         """Read bounded source-wide inventory in one explicit read transaction."""
         try:
-            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn = sqlite3.connect(f"{self._db_path.resolve().as_uri()}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"
@@ -491,7 +491,7 @@ class Mylar3Reader:
     ) -> tuple[tuple[DiscoveredSeries, ...], int]:
         """Read and normalize one bounded rowid-keyset Comic cohort."""
         try:
-            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn = sqlite3.connect(f"{self._db_path.resolve().as_uri()}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"
@@ -560,7 +560,7 @@ class Mylar3Reader:
     ) -> tuple[tuple[Mylar3StoryArcSnapshot, ...], tuple[str, str] | None]:
         """Read one keyset page of complete Story Arc identity cohorts."""
         try:
-            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn = sqlite3.connect(f"{self._db_path.resolve().as_uri()}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"
@@ -653,7 +653,7 @@ class Mylar3Reader:
     ) -> Mylar3StoryArcPreflightSnapshot:
         """Read exact aggregate counts and a bounded row sample in one RO transaction."""
         try:
-            conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            conn = sqlite3.connect(f"{self._db_path.resolve().as_uri()}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"

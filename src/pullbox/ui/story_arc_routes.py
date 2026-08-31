@@ -155,6 +155,9 @@ def _redirect(request: Request, url: str) -> Response:
     """Redirect both progressive-enhancement and plain form submissions."""
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": url})
+    # All callers use fixed local routes with integer IDs; _detail_url and
+    # _list_url encode query values so they cannot replace the destination.
+    # codeql[py/url-redirection]
     return RedirectResponse(url=url, status_code=303)
 
 

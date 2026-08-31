@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 
 from pullbox.core.events import EventBus, IssueWanted, SeriesAdded
 from pullbox.core.exceptions import NotFoundError, ValidationError
+from pullbox.core.library_file_ownership import referenced_library_files_for_target
 from pullbox.core.library_policy import load_library_naming_policy
 from pullbox.core.naming import format_series_folder
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
@@ -859,11 +860,10 @@ class SeriesService:
         moved_folder_keys: set[str] = set()
         if delete_folder:
             for folder_path in folder_paths:
-                folder_contains_reference = any(
-                    is_relative_to(Path(library_file.file_path), folder_path)
-                    for library_file in referenced_files
+                folder_references = await referenced_library_files_for_target(
+                    session, folder_path, include_descendants=True
                 )
-                if folder_contains_reference:
+                if folder_references:
                     logger.info(
                         "referenced_folder_preserved",
                         series_id=series_id,

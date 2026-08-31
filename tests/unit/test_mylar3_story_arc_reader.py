@@ -316,7 +316,7 @@ async def test_read_collection_uses_one_read_only_connection(
     snapshot = await Mylar3Reader(db).read_collection()
 
     assert isinstance(snapshot, Mylar3CollectionSnapshot)
-    assert connections == [(f"file:{db}?mode=ro", True)]
+    assert connections == [(f"{db.resolve().as_uri()}?mode=ro", True)]
 
 
 @pytest.mark.asyncio

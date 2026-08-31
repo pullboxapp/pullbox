@@ -555,6 +555,53 @@ class TestFolderDeletion:
         assert not managed.exists()
         assert await session.get(Series, series.id) is None
 
+    @pytest.mark.parametrize("use_trash", [False, True])
+    @pytest.mark.parametrize("shared", [False, True])
+    @pytest.mark.asyncio
+    async def test_delete_shared_folder_preserves_other_series_reference(
+        self,
+        session: AsyncSession,
+        library_root: LibraryRoot,
+        tmp_path: Path,
+        use_trash: bool,
+        shared: bool,
+    ) -> None:
+        folder = tmp_path / "Shared_% Library"
+        folder.mkdir()
+        other_folder = folder if shared else tmp_path / "Shared_AB Library"
+        other_folder.mkdir(exist_ok=True)
+        referenced = other_folder / "other.cbz"
+        referenced.write_bytes(b"user-owned")
+        managed = folder / "managed.cbz"
+        managed.write_bytes(b"managed")
+        series = await _seed_series(session, path=str(folder))
+        other = Series(title="Other Series", sort_title="other series", path=str(other_folder))
+        session.add(other)
+        await session.flush()
+        owned_issue = await _seed_issue(session, series.id)
+        other_issue = await _seed_issue(session, other.id)
+        await _seed_library_file(session, owned_issue.id, library_root.id, file_path=str(managed))
+        reference = await _seed_library_file(
+            session,
+            other_issue.id,
+            library_root.id,
+            file_path=str(referenced),
+            storage_mode=LibraryFileStorageMode.REFERENCED,
+        )
+        await SeriesService.delete(
+            session,
+            series.id,
+            delete_folder=True,
+            trash_dir=tmp_path / "trash" if use_trash else None,
+        )
+        await session.flush()
+        assert folder.is_dir() is shared
+        assert referenced.read_bytes() == b"user-owned"
+        assert not managed.exists()
+        assert await session.get(Series, series.id) is None
+        assert await session.get(Series, other.id) is other
+        assert await session.get(LibraryFile, reference.id) is reference
+
     @pytest.mark.asyncio
     async def test_delete_folder_resolves_expected_folder_when_series_path_missing(
         self, session: AsyncSession, tmp_path: Path

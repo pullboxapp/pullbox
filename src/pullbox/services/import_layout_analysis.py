@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from pullbox.core.collection_scanner import COMIC_EXTENSIONS, IGNORE_DIRS
+from pullbox.core.filesystem_policy import is_sensitive_path, resolve_preview_source
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_layout import (
     CompiledSourceLayout,
@@ -157,7 +158,7 @@ class ImportLayoutAnalyzer:
         cancel_event: asyncio.Event | None = None,
     ) -> LayoutAnalysisResult:
         """Return a deterministic, bounded source-layout analysis."""
-        root = Path(root_path).expanduser().resolve(strict=True)
+        root = resolve_preview_source(root_path)
         if not root.is_dir():
             raise ValueError("Layout analysis root must be a directory")
 
@@ -177,6 +178,7 @@ class ImportLayoutAnalyzer:
         files_ambiguous = 0
         files_outside_root = 0
         partial = False
+        sensitive_skipped = False
 
         self._raise_if_cancelled(cancel_event)
         if self._deadline_reached(deadline):
@@ -215,6 +217,10 @@ class ImportLayoutAnalyzer:
                 if candidate.is_symlink():
                     partial = True
                     _append_once(warnings, "symlink_directory_skipped")
+                    continue
+                if is_sensitive_path(candidate):
+                    sensitive_skipped = True
+                    _append_once(warnings, "sensitive_directory_skipped")
                     continue
                 safe_dir_names.append(name)
             dir_names[:] = safe_dir_names
@@ -268,6 +274,7 @@ class ImportLayoutAnalyzer:
         if walk_errors:
             partial = True
 
+        partial = partial or sensitive_skipped
         summaries = self._summaries(clusters)
         classification = _overall_classification(summaries)
         can_keep_in_place = files_outside_root == 0 and not walk_errors
@@ -506,7 +513,7 @@ def _is_within_root(path: Path, root: Path) -> bool:
         resolved = path.resolve(strict=True)
     except OSError:
         return False
-    return resolved == root or resolved.is_relative_to(root)
+    return not is_sensitive_path(resolved) and (resolved == root or resolved.is_relative_to(root))
 
 
 def _overall_classification(

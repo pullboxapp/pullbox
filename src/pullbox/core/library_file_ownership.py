@@ -58,7 +58,7 @@ async def referenced_library_files_for_target(
             conditions.extend(
                 (
                     LibraryFile.file_path == target_path,
-                    LibraryFile.file_path.like(f"{target_path}/%"),
+                    LibraryFile.file_path.startswith(f"{target_path}/", autoescape=True),
                 )
             )
         query = query.where(or_(*conditions))
@@ -192,7 +192,11 @@ async def resolve_referenced_source_root(
         )
 
     try:
+        # These probes only normalize the candidate. Both lexical and resolved
+        # enabled-root containment are required below before accepting a source.
+        # codeql[py/path-injection]
         lexical_source = source_path.expanduser().absolute()
+        # codeql[py/path-injection]
         resolved_source = source_path.expanduser().resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
         raise ReferencedFileValidationError(

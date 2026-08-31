@@ -15,7 +15,6 @@ import anyio
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
-from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
 from pullbox.core.page_sources import (
     SUPPORTED_READER_FORMATS,
@@ -151,7 +150,7 @@ async def load_reader_source_record(session: AsyncSession, issue_id: int) -> Rea
     return ReaderSourceRecord(
         issue_id=issue.id,
         issue_title=issue.title,
-        issue_number=format_issue_number(issue.issue_number),
+        issue_number=issue.effective_issue_number_text,
         issue_number_value=issue.issue_number,
         series_id=issue.series_id,
         series_title=issue.series.title,

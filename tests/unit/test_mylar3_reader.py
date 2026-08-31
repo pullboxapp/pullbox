@@ -32,6 +32,24 @@ def _create_mylar_db(
     )
 
 
+@pytest.mark.parametrize("file_name", ["mylar#export.db", "mylar%23export.db"])
+async def test_mylar_reader_preserves_literal_uri_characters(
+    tmp_path: Path, file_name: str
+) -> None:
+    source = tmp_path / file_name
+    _create_mylar_db(source)
+    before = source.read_bytes()
+    reader = Mylar3Reader(source)
+    snapshot = await reader.read_story_arc_preflight()
+    assert snapshot.arcs_count == 0
+    assert await reader.read_series() == []
+    assert not (await reader.read_import_metadata()).storyarcs_present
+    assert [page async for page in reader.iter_import_series_pages()] == []
+    assert [page async for page in reader.iter_import_story_arc_pages()] == []
+    assert source.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == [file_name]
+
+
 @pytest.mark.asyncio
 async def test_selected_layout_applies_to_mapped_mylar_paths_without_overriding_identity(
     tmp_path: Path,

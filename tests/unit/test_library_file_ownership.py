@@ -11,6 +11,7 @@ from pullbox.core.library_file_ownership import (
     ReferencedFileValidationError,
     build_file_identity_signature,
     resolve_referenced_library_root,
+    resolve_referenced_source_root,
     validate_file_identity_signature,
 )
 from pullbox.models.library import LibraryRoot
@@ -46,6 +47,39 @@ async def test_referenced_root_rejects_sibling_prefix(
 
     with pytest.raises(ConfigurationError, match="inside an enabled library root"):
         await resolve_referenced_library_root(db_session, sibling_file, None)
+
+
+@pytest.mark.parametrize("escape", ["sibling", "symlink", "disabled"])
+async def test_referenced_source_directory_rejects_root_escapes(
+    db_session: AsyncSession, tmp_path: Path, escape: str
+) -> None:
+    root_path = tmp_path / "comics"
+    await _add_root(db_session, root_path, name="Comics", enabled=escape != "disabled")
+    source = root_path
+    if escape in {"sibling", "symlink"}:
+        outside = tmp_path / "comics-old"
+        outside.mkdir()
+        source = outside
+        if escape == "symlink":
+            source = root_path / "escape"
+            source.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ReferencedFileValidationError) as exc:
+        await resolve_referenced_source_root(db_session, source, None)
+    assert exc.value.reason == "source_outside_root"
+
+
+async def test_referenced_source_directory_accepts_deepest_enabled_root(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    root = await _add_root(db_session, tmp_path / "comics", name="Comics")
+    nested = await _add_root(db_session, tmp_path / "comics" / "nested", name="Nested")
+    selected, path = await resolve_referenced_source_root(
+        db_session, tmp_path / "comics" / "nested", None
+    )
+    assert selected.id == nested.id
+    assert path == (tmp_path / "comics" / "nested").resolve()
+    explicit, _ = await resolve_referenced_source_root(db_session, path, root.id)
+    assert explicit.id == root.id
 
 
 async def test_referenced_root_rejects_symlink_escape(

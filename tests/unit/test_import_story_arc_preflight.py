@@ -104,6 +104,21 @@ def _add_mylar_story_arc_tables(db_path: Path, existing_arc_file: Path) -> None:
         connection.close()
 
 
+async def test_mylar_database_symlink_preserves_selected_folder_settings(tmp_path: Path) -> None:
+    database = tmp_path / "actual.db"
+    create_mylar3_db(database)
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    (selected / "mylar.db").symlink_to(database)
+    (selected / "config.ini").write_text("[General]\nREAD2FILENAME = true\n")
+    result = await StoryArcPreflightAnalyzer().analyze(
+        selected, source_type=ImportSourceType.MYLAR3
+    )
+    assert any(
+        setting.key == "READ2FILENAME" and setting.value is True for setting in result.settings
+    )
+
+
 @pytest.mark.asyncio
 async def test_mylar_preflight_reports_counts_settings_and_sanitized_examples(
     tmp_path: Path,

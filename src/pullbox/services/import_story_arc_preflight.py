@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from pullbox.core.collection_scanner import COMIC_EXTENSIONS, IGNORE_DIRS
+from pullbox.core.filesystem_policy import is_sensitive_path, resolve_preview_source
 from pullbox.core.mylar3_reader import Mylar3Reader
 from pullbox.core.mylar_story_arc_policy import build_mylar_story_arc_policy_draft
 from pullbox.core.naming import parse_filename
@@ -57,9 +58,11 @@ class StoryArcPreflightAnalyzer:
         budget: StoryArcPreflightBudget | None = None,
     ) -> StoryArcPreflightResponse:
         """Return a typed Mylar or folder preflight response."""
-        path = Path(source_path).expanduser().resolve(strict=True)
+        path = resolve_preview_source(source_path)
         if source_type is ImportSourceType.MYLAR3:
             database = path / "mylar.db" if path.is_dir() else path
+            # Validate the target without relocating the selected folder's config.ini.
+            resolve_preview_source(database)
             return await self._analyze_mylar(database)
         if not path.is_dir():
             raise ValueError("Filesystem Story Arc analysis requires a directory")
@@ -216,12 +219,21 @@ class StoryArcPreflightAnalyzer:
                 warnings.append("directory_limit_reached")
                 break
             current = Path(current_root)
+            if is_sensitive_path(current):
+                dir_names.clear()
+                partial = True
+                warnings.append("sensitive_directory_skipped")
+                continue
+            if any(is_sensitive_path(current / name) for name in dir_names):
+                partial = True
+                warnings.append("sensitive_directory_skipped")
             dir_names[:] = [
                 name
                 for name in sorted(dir_names)
                 if name not in IGNORE_DIRS
                 and not name.startswith(".")
                 and not (current / name).is_symlink()
+                and not is_sensitive_path(current / name)
             ]
             directories += 1
             relative_folder = current.relative_to(root).as_posix()

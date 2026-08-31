@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -65,3 +66,21 @@ async def test_story_arc_preview_requires_authentication(
     )
 
     assert response.status_code == 401
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sensitive-directory policy")
+@pytest.mark.parametrize("endpoint", ["layout-preview", "story-arc-preview"])
+@pytest.mark.parametrize("source", ["/etc", "/var/log", "/var/../etc"])
+async def test_import_preview_rejects_sensitive_paths_at_api_boundary(
+    authenticated_client: AsyncClient, endpoint: str, source: str
+) -> None:
+    from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
+
+    token = authenticated_client.cookies.get(SESSION_COOKIE_NAME) or ""
+    csrf = AuthService.get_csrf_token_from_session(token) or ""
+    response = await authenticated_client.post(
+        f"/api/v1/import/{endpoint}",
+        json={"source_path": source, "source_type": "filesystem"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 422

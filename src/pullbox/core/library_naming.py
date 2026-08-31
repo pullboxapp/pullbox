@@ -120,6 +120,7 @@ def build_naming_snapshot(
             "id": issue.id,
             "comicvine_id": issue.comicvine_id,
             "issue_number": issue.issue_number,
+            "issue_number_text": issue.effective_issue_number_text,
             "title": issue.title,
             "raw_issue_type": raw_issue_type,
             "effective_issue_type": effective_issue_type,
@@ -358,7 +359,7 @@ def compute_target_filename(
     return format_comic_file(
         series=title,
         year=year,
-        issue=issue.issue_number,
+        issue=issue.effective_issue_number_text,
         volume=volume_number,
         issue_type=issue_type,
         title=issue.title,

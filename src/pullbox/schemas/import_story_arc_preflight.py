@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pullbox.core.filesystem_policy import resolve_preview_source
 from pullbox.models.import_job import ImportSourceType
 
 
@@ -18,16 +17,15 @@ class StoryArcPreflightRequest(BaseModel):
     @model_validator(mode="after")
     def validate_source(self) -> StoryArcPreflightRequest:
         """Resolve a source without broadening the import source contract."""
-        path = Path(self.source_path).expanduser()
-        if not path.exists():
-            raise ValueError(f"Path does not exist: {self.source_path}")
+        path = resolve_preview_source(self.source_path)
         if self.source_type is ImportSourceType.FILESYSTEM and not path.is_dir():
             raise ValueError("Filesystem Story Arc analysis requires a directory")
         if self.source_type is ImportSourceType.MYLAR3:
             database = path / "mylar.db" if path.is_dir() else path
+            resolve_preview_source(database)
             if not database.is_file():
                 raise ValueError("Mylar Story Arc analysis requires a mylar.db file")
-        self.source_path = str(path.resolve())
+        self.source_path = str(path)
         return self
 
 
