@@ -1,7 +1,7 @@
 {% set story_arc_title_parts = story_arc.name.split(" ", 1) %}
 
 <section data-testid="story-arc-detail-hero" class="detail-hero-shell">
-  <div class="series-domain-hero-inner">
+  <div class="series-domain-hero-inner story-arc-detail-hero-inner">
     <div class="series-domain-cover-column">
       <div data-testid="story-arc-detail-cover-frame" class="series-domain-cover-frame">
         {% if story_arc.cover_src %}
@@ -62,10 +62,10 @@
 
     <aside
       data-testid="story-arc-detail-hero-actions-panel"
-      class="series-domain-actions-panel"
+      class="series-domain-actions-panel series-domain-actions-panel-wide"
       aria-labelledby="story-arc-detail-actions-title"
     >
-      <p id="story-arc-detail-actions-title" class="series-domain-actions-title">Manage <span>story arc</span></p>
+      <p id="story-arc-detail-actions-title" data-testid="story-arc-detail-actions-title" class="series-domain-actions-title">Manage <span>story arc</span></p>
       <div class="series-domain-actions-buttons">
         <form
           action="/story-arcs/{{ story_arc.id }}/edit"
@@ -97,7 +97,14 @@
           </label>
         </form>
 
-        <form action="/story-arcs/{{ story_arc.id }}/search" method="post" hx-post="/story-arcs/{{ story_arc.id }}/search" hx-swap="none">
+        <form
+          action="/story-arcs/{{ story_arc.id }}/search"
+          method="post"
+          hx-post="/story-arcs/{{ story_arc.id }}/search"
+          hx-swap="none"
+          data-testid="story-arc-action-search-form"
+          class="series-domain-action-form"
+        >
           <button data-testid="story-arc-action-search" type="submit" class="btn-primary"{% if not story_arc.active %} disabled{% endif %}>
             <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
               <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
@@ -113,7 +120,7 @@
         {% endif %}
 
         {% if story_arc.active %}
-          <form action="/story-arcs/{{ story_arc.id }}/archive" method="post" hx-post="/story-arcs/{{ story_arc.id }}/archive" hx-swap="none" x-data="{}">
+          <form action="/story-arcs/{{ story_arc.id }}/archive" method="post" hx-post="/story-arcs/{{ story_arc.id }}/archive" hx-swap="none" x-data="{}" class="series-domain-action-form">
             <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
             <div id="story-arc-archive-safety" class="sr-only">
               Canonical issues stay in your library. Canonical files stay in their current folders.
@@ -154,8 +161,11 @@
       </p>
     </div>
     <div class="series-domain-info-box">
-      <p class="series-domain-info-label">Placement policy</p>
-      <p class="series-domain-info-value">{{ placement_ui.policy.layout_label }}</p>
+      <p class="series-domain-info-label">Arc files</p>
+      <div data-testid="story-arc-arc-files-summary">
+        <p class="series-domain-info-value">{{ placement_ui.policy.summary_label }}</p>
+        <p class="mt-1 text-xs text-pb-text-dim">{{ placement_ui.policy.synchronization_label }}</p>
+      </div>
     </div>
   </div>
 </section>

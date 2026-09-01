@@ -119,8 +119,7 @@ class StoryArcMembershipView:
     issue_title: str
     resolution_state: str
     resolution_label: str
-    canonical_state: str
-    canonical_file_available: bool
+    issue_status: str | None
     reading: IssueReadingView | None
     can_resolve: bool
     local_search_query: str
@@ -206,6 +205,8 @@ class StoryArcPlacementPolicyView:
     mode: str
     mode_label: str
     layout_label: str
+    summary_label: str
+    synchronization_label: str
     target_library_root_id: int | None
     destination_root: str
     folder_template: str
@@ -689,16 +690,6 @@ def _resolution_label(state: StoryArcResolutionState) -> str:
     }[state]
 
 
-def _canonical_state(issue: Issue | None) -> str:
-    if issue is None:
-        return "Not matched"
-    if issue.library_file is not None:
-        return "File available"
-    if issue.status.value == "owned":
-        return "Owned record; file unavailable"
-    return issue.status.value.replace("_", " ").title()
-
-
 def _present_membership(
     membership: IssueStoryArc,
     *,
@@ -732,8 +723,11 @@ def _present_membership(
         issue_title=issue_title or "Untitled issue",
         resolution_state=membership.resolution_state.value,
         resolution_label=_resolution_label(membership.resolution_state),
-        canonical_state=_canonical_state(issue),
-        canonical_file_available=issue is not None and issue.library_file is not None,
+        issue_status=(
+            issue.status.value
+            if issue is not None and membership.resolution_state is StoryArcResolutionState.RESOLVED
+            else None
+        ),
         reading=reading,
         can_resolve=(
             membership.issue_id is None
@@ -1049,6 +1043,13 @@ def _placement_mode_label(mode: str) -> str:
 
 
 def _placement_policy_view(policy: StoryArcPlacementPolicy) -> StoryArcPlacementPolicyView:
+    summary_label = {
+        StoryArcPlacementPolicyMode.LOGICAL: "No separate folder",
+        StoryArcPlacementPolicyMode.COPY: "Copied to arc folder",
+        StoryArcPlacementPolicyMode.HARDLINK: "Hardlinked into arc folder",
+        StoryArcPlacementPolicyMode.SYMLINK: "Symlinked into arc folder",
+        StoryArcPlacementPolicyMode.REFERENCE_ONLY: "Existing files referenced",
+    }[policy.mode]
     return StoryArcPlacementPolicyView(
         configured=policy.configured,
         revision=policy.revision,
@@ -1058,6 +1059,14 @@ def _placement_policy_view(policy: StoryArcPlacementPolicy) -> StoryArcPlacement
             "Logical only"
             if policy.mode is StoryArcPlacementPolicyMode.LOGICAL
             else "Separate Story Arc folder"
+        ),
+        summary_label=summary_label,
+        synchronization_label=(
+            "No file synchronization"
+            if policy.mode is StoryArcPlacementPolicyMode.LOGICAL
+            else "Synchronized"
+            if policy.synchronize
+            else "Manual"
         ),
         target_library_root_id=policy.target_library_root_id,
         destination_root=policy.destination_root or "",

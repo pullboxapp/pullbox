@@ -394,7 +394,8 @@ async def test_refresh_reviews_additions_and_preserves_removed_members_and_order
     detail = await authenticated_client.get(f"/story-arcs/{arc_id}")
     assert "Confirm this member" in detail.text
     assert "1 no longer listed by Comic Vine but preserved here" in detail.text
-    assert "Open issue / manual search" in detail.text
+    assert 'data-tip="Open issue"' in detail.text
+    assert "Open issue / manual search" not in detail.text
 
 
 async def test_manual_arc_search_is_authenticated_csrf_protected_and_active_only(

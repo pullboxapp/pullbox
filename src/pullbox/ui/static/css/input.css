@@ -3876,6 +3876,9 @@
     align-items: start;
     gap: 1.25rem;
   }
+  .story-arc-detail-hero-inner {
+    grid-template-columns: 130px minmax(0, 1fr) minmax(18rem, 19rem);
+  }
   .issue-domain-hero-inner {
     grid-template-columns: 120px minmax(0, 1fr) minmax(13rem, 16rem);
   }
@@ -4100,6 +4103,9 @@
     padding-left: 1.25rem;
     border-left: 1px solid var(--pb-border-subtle);
   }
+  .series-domain-actions-panel-wide {
+    min-width: 18rem;
+  }
   .series-domain-actions-title {
     font-family: "Syne", sans-serif;
     font-size: 0.88rem;
@@ -4142,6 +4148,13 @@
   }
   .series-domain-actions-panel .series-domain-actions-buttons .series-domain-inline-toggle {
     justify-content: space-between;
+  }
+  .series-domain-action-form {
+    width: 100%;
+  }
+  .series-domain-action-form > button {
+    width: 100%;
+    justify-content: center;
   }
   .series-domain-inline-toggle {
     display: inline-flex;

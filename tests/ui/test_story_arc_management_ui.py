@@ -34,6 +34,7 @@ from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkStat
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from pullbox.services.story_arc_managed_reorder import StoryArcManagedReorderService
 from pullbox.services.story_arc_placement_integration import (
+    StoryArcPlacementPolicy,
     StoryArcPlacementPolicyInput,
     StoryArcPlacementPolicyMode,
     StoryArcPlacementSyncService,
@@ -84,6 +85,61 @@ def _copy_policy_form(
         "symlink_style": "",
         "synchronize": "true",
     }
+
+
+@pytest.mark.parametrize(
+    ("mode", "synchronize", "summary_label", "synchronization_label"),
+    [
+        (
+            StoryArcPlacementPolicyMode.LOGICAL,
+            False,
+            "No separate folder",
+            "No file synchronization",
+        ),
+        (StoryArcPlacementPolicyMode.COPY, True, "Copied to arc folder", "Synchronized"),
+        (StoryArcPlacementPolicyMode.COPY, False, "Copied to arc folder", "Manual"),
+        (
+            StoryArcPlacementPolicyMode.HARDLINK,
+            True,
+            "Hardlinked into arc folder",
+            "Synchronized",
+        ),
+        (
+            StoryArcPlacementPolicyMode.SYMLINK,
+            True,
+            "Symlinked into arc folder",
+            "Synchronized",
+        ),
+        (
+            StoryArcPlacementPolicyMode.REFERENCE_ONLY,
+            True,
+            "Existing files referenced",
+            "Synchronized",
+        ),
+    ],
+)
+def test_placement_policy_summary_names_the_effective_file_behavior(
+    mode: StoryArcPlacementPolicyMode,
+    synchronize: bool,
+    summary_label: str,
+    synchronization_label: str,
+) -> None:
+    view = story_arc_presenters._placement_policy_view(
+        StoryArcPlacementPolicy(
+            configured=mode is not StoryArcPlacementPolicyMode.LOGICAL,
+            revision=1,
+            mode=mode,
+            target_library_root_id=None,
+            destination_root=None,
+            folder_template="{StoryArc}",
+            file_template="{ReadingOrder:03d} - {OriginalFilename}",
+            symlink_style=None,
+            synchronize=synchronize,
+        )
+    )
+
+    assert view.summary_label == summary_label
+    assert view.synchronization_label == synchronization_label
 
 
 async def _seed_list_arcs(factory: async_sessionmaker[AsyncSession]) -> dict[str, int]:
@@ -524,6 +580,7 @@ class TestStoryArcManagementUI:
         assert '<main data-testid="story-arc-detail-page"' not in response.text
         assert 'data-testid="story-arc-detail-hero"' in response.text
         assert 'class="detail-hero-shell"' in response.text
+        assert 'class="series-domain-hero-inner story-arc-detail-hero-inner"' in response.text
         assert 'data-testid="story-arc-detail-cover-frame"' in response.text
         assert f'src="/api/v1/story-arcs/{arc_id}/cover?v=' in response.text
         assert 'data-testid="story-arc-detail-title-link"' in response.text
@@ -533,9 +590,17 @@ class TestStoryArcManagementUI:
         assert 'data-testid="story-arc-detail-meta-grid"' in response.text
         assert "Source" in response.text
         assert "ComicVine" in response.text
-        assert "Placement policy" in response.text
+        assert "Arc files" in response.text
+        assert 'data-testid="story-arc-arc-files-summary"' in response.text
+        assert "No separate folder" in response.text
+        assert "No file synchronization" in response.text
         assert 'data-testid="story-arc-detail-hero-actions-panel"' in response.text
+        assert (
+            'class="series-domain-actions-panel series-domain-actions-panel-wide"' in response.text
+        )
         assert 'data-testid="story-arc-action-monitor-control"' in response.text
+        assert 'data-testid="story-arc-action-search-form"' in response.text
+        assert 'class="series-domain-action-form"' in response.text
         assert 'data-testid="story-arc-action-search"' in response.text
         assert 'data-testid="story-arc-action-provider-review"' in response.text
         assert 'data-testid="story-arc-action-archive"' in response.text
@@ -553,6 +618,11 @@ class TestStoryArcManagementUI:
         assert "Reading" in response.text
         assert "Status" in response.text
         assert "Actions" in response.text
+        assert 'data-status-kind="issue" data-status-value="owned"' in response.text
+        assert 'data-status-kind="issue" data-status-value="wanted"' in response.text
+        assert 'data-status-kind="match" data-status-value="ambiguous"' in response.text
+        assert 'data-tip="Open issue"' in response.text
+        assert "Open issue / manual search" not in response.text
         assert 'data-testid="story-arc-membership-review-toggle-' in response.text
         assert "Find an issue in this library" in response.text
         assert 'data-testid="story-arc-detail-footer-dock"' in response.text
@@ -565,6 +635,13 @@ class TestStoryArcManagementUI:
         assert "31" in response.text
         assert 'data-testid="story-arc-edit-form"' in response.text
         assert 'data-testid="story-arc-add-membership-form"' in response.text
+
+        input_css = Path("src/pullbox/ui/static/css/input.css").read_text(encoding="utf-8")
+        assert ".series-domain-actions-panel-wide" in input_css
+        assert "min-width: 18rem;" in input_css
+        assert ".story-arc-detail-hero-inner" in input_css
+        assert "grid-template-columns: 130px minmax(0, 1fr) minmax(18rem, 19rem);" in input_css
+        assert ".series-domain-action-form" in input_css
 
     async def test_detail_batches_reader_state_queries_at_the_supported_limit(
         self,
@@ -801,7 +878,8 @@ class TestStoryArcManagementUI:
         assert "1e+06" not in response.text
         assert "DC One Million" in response.text
         assert "The Final Hour" in response.text
-        assert "File available" in response.text
+        assert 'data-status-kind="issue" data-status-value="owned"' in response.text
+        assert ">\n  Owned\n</span>" in response.text
         assert 'data-resolution-state="resolved"' in response.text
         assert 'data-resolution-state="missing"' in response.text
         assert 'role="status" aria-live="polite"' in response.text

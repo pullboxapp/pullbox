@@ -1,3 +1,5 @@
+{% from "components/status_badge.html" import status_badge %}
+
 <section data-testid="story-arc-detail-reading-order-section" aria-labelledby="story-arc-order-heading" class="series-domain-issues-wrap">
   <div class="series-domain-section-card series-domain-issues-card">
     <div class="series-domain-issues-toolbar">
@@ -30,7 +32,7 @@
               <th class="table-head-cell table-head-cell-tight w-28">Order</th>
               <th class="table-head-cell table-head-cell-tight">Issue</th>
               <th class="table-head-cell table-head-cell-tight hidden sm:table-cell">Reading</th>
-              <th class="table-head-cell table-head-cell-tight hidden md:table-cell">Status</th>
+              <th class="table-head-cell table-head-cell-tight">Status</th>
               <th class="series-domain-table-head r hidden sm:table-cell">Actions</th>
             </tr>
           </thead>
@@ -99,11 +101,16 @@
                   {% endif %}
                   {% if membership.reading and membership.reading.want_to_read %}<span class="series-domain-reading-queue">Want to Read</span>{% endif %}
                 </td>
-                <td class="hidden md:table-cell">
-                  <div class="flex flex-col items-start gap-1">
-                    <span class="pill {{ 'pill-success' if membership.resolution_state == 'resolved' else 'pill-warning' if membership.can_resolve else 'pill-neutral' }}">{{ membership.resolution_label }}</span>
-                    <span class="text-xs text-pb-text-sec">{{ membership.canonical_state }}</span>
-                  </div>
+                <td
+                  data-testid="story-arc-membership-status-{{ membership.id }}"
+                  data-status-kind="{{ 'issue' if membership.issue_status else 'match' }}" data-status-value="{{ membership.issue_status or membership.resolution_state }}"
+                  class="series-domain-issue-status"
+                >
+                  {% if membership.issue_status %}
+                    {{ status_badge(membership.issue_status) }}
+                  {% else %}
+                    <span class="pill {{ 'pill-warning' if membership.can_resolve else 'pill-neutral' }}">{{ membership.resolution_label }}</span>
+                  {% endif %}
                 </td>
                 <td class="series-domain-issue-actions-cell hidden sm:table-cell">
                   <div class="series-domain-issue-actions">
@@ -112,8 +119,9 @@
                         href="/issues/{{ membership.issue_id }}?source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}"
                         class="series-domain-issue-action-btn"
                         aria-label="Open issue {{ membership.exact_issue_number }}"
-                        data-tip="Open issue / manual search"
+                        data-tip="Open issue"
                         data-tip-pos="left"
+                        data-tip-size="narrow"
                       >
                         <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H18m0 0v4.5M18 6l-7.5 7.5M10.5 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4.5" /></svg>
                       </a>
@@ -128,6 +136,7 @@
                         aria-label="Review issue {{ membership.exact_issue_number }} match"
                         data-tip="Review match"
                         data-tip-pos="left"
+                        data-tip-size="narrow"
                       >
                         <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
                       </button>
@@ -136,7 +145,7 @@
                       <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/remove" method="post" hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/remove" hx-swap="none" x-data="{}" data-testid="story-arc-remove-membership-{{ membership.id }}">
                         <input type="hidden" name="return_page" value="{{ story_arc.page }}">
                         <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                        <button type="button" class="series-domain-issue-action-btn text-pb-error" aria-label="Remove issue {{ membership.exact_issue_number }} from Story Arc" data-tip="Remove" data-tip-pos="left" @click="pbConfirm({ title: 'Remove issue from Story Arc?', message: 'The canonical issue and its file will stay in your library.', confirmLabel: 'Remove', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })">
+                        <button type="button" class="series-domain-issue-action-btn text-pb-error" aria-label="Remove issue {{ membership.exact_issue_number }} from Story Arc" data-tip="Remove from Story Arc" data-tip-pos="left" data-tip-size="narrow" @click="pbConfirm({ title: 'Remove issue from Story Arc?', message: 'The canonical issue and its file will stay in your library.', confirmLabel: 'Remove', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })">
                           <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
                       </form>
