@@ -1510,6 +1510,12 @@ class CollectionScanner:
 
         for discovered_file in discovered_files:
             embedded_series_id = discovered_file.comicvine_series_id
+            sidecar_folder_identity = (
+                folder_is_series_boundary
+                and embedded_series_id is not None
+                and discovered_file.metadata_signals.get("comicvine_series_id")
+                == MetadataSignal.SIDECAR.value
+            )
             belongs_to_trusted_folder = folder_cv_id is not None and embedded_series_id in {
                 None,
                 folder_cv_id,
@@ -1529,7 +1535,9 @@ class CollectionScanner:
                 )
                 classified.setdefault(identity_key, []).append(discovered_file)
 
-                if belongs_to_trusted_folder:
+                if belongs_to_trusted_folder or (
+                    sidecar_folder_identity and discovered_file.parsed_issue_number is not None
+                ):
                     discovered_file.parsed_series = folder_name
                     label_name = folder_name
                     label_year = folder_year

@@ -1386,6 +1386,24 @@ class TestMetadataGrouping:
         assert archive_read_count == 0
 
     @pytest.mark.asyncio
+    async def test_folder_sidecar_identity_keeps_files_on_folder_series_name(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        folder = tmp_path / "Saga (2012)"
+        folder.mkdir()
+        (folder / "series.json").write_text('{"comicid": 42692}')
+        _touch(folder / "Saga #001.cbz")
+        _touch(folder / "Saga 001 dup.cbz")
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Saga"
+        assert results[0].comicinfo_cv_id == 42692
+        assert {file.parsed_series for file in results[0].files} == {"Saga"}
+
+    @pytest.mark.asyncio
     async def test_ambiguous_files_still_load_archive_metadata(
         self,
         tmp_path: Path,
