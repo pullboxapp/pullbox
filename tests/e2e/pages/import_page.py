@@ -289,8 +289,8 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-progress-eta']").first
 
     @property
-    def progress_recent_log(self) -> Locator:
-        return self.page.locator("[data-testid='import-progress-recent-log']").first
+    def progress_log_download(self) -> Locator:
+        return self.page.locator("[data-testid='import-progress-log-download']").first
 
     @property
     def progress_continue_button(self) -> Locator:

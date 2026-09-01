@@ -973,7 +973,7 @@ class TestImportCollectionTab:
         assert import_page.progress_phase_label.text_content() == "Complete"
         assert "Preparing to scan" not in (import_page.progress_summary.text_content() or "")
         assert import_page.progress_continue_button.is_visible()
-        assert import_page.progress_recent_log.is_visible()
+        assert import_page.progress_log_download.is_visible()
         assert authed_page.locator("[data-testid='page-dock-pagination']").count() == 0
         assert authed_page.locator("[data-testid='import-review-pagination']").count() == 0
         assert authed_page.locator("[data-testid='import-conflicts-pagination']").count() == 0
@@ -1118,30 +1118,22 @@ class TestImportCollectionTab:
         state["terminal"] = True
         authed_page.wait_for_url(re.compile(r"/import\?tab=collection$"), timeout=5000)
 
-    def test_import_collection_progress_log_viewer_renders_entries(
+    def test_import_collection_progress_offers_log_download_without_loading_entries(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
-        self._goto_review_step(import_page, authed_page, seeded_server)
+        review_job_id = self._goto_review_step(import_page, authed_page, seeded_server)
 
         import_page.review_back_button.click()
         import_page.progress_panel.wait_for(state="visible", timeout=5000)
 
-        body = authed_page.locator("[data-testid='import-progress-recent-log-body']").first
-        body.wait_for(state="visible", timeout=5000)
-        authed_page.wait_for_function(
-            """() => {
-                const body = document.querySelector("[data-testid='import-progress-recent-log-body']");
-                return !!body && body.textContent && body.textContent.trim().length > 0 && !body.textContent.includes("Loading...");
-            }""",
-            timeout=5000,
-        )
-
-        body_text = body.text_content() or ""
-        assert "No log entries yet." not in body_text
-        assert "INFO" in body_text or "WARN" in body_text or "ERROR" in body_text
+        download = import_page.progress_log_download
+        download.wait_for(state="visible", timeout=5000)
+        assert download.text_content() and "Download full log" in download.text_content()
+        assert download.get_attribute("href") == (f"/api/v1/import/{review_job_id}/logs/download")
+        assert authed_page.locator("[data-testid='import-progress-recent-log']").count() == 0
 
     def test_import_collection_active_progress_hydrates_without_stream(
         self,
@@ -1171,7 +1163,7 @@ class TestImportCollectionTab:
         )
         assert (import_page.progress_phase_detail.text_content() or "").strip() != ""
         assert import_page.progress_eta.is_visible()
-        assert import_page.progress_recent_log.is_visible()
+        assert import_page.progress_log_download.is_visible()
 
     def test_import_collection_progress_navigation_does_not_pause_or_resume_runs(
         self,
