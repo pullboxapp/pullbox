@@ -2918,7 +2918,17 @@ function importCollectionFooterData(config) {
 function importSourceData(config) {
   var cfg = config || {};
   var libraryRoots = Array.isArray(cfg.libraryRoots) ? cfg.libraryRoots : [];
-  var initialTargetRootId = libraryRoots.length ? Number(libraryRoots[0].id) : null;
+  var defaultManagedRoot = libraryRoots.find(function (root) {
+    return !!(
+      root &&
+      root.enabled !== false &&
+      root.allow_managed_writes !== false &&
+      root.available !== false &&
+      root.writable !== false &&
+      root.is_default_managed_destination
+    );
+  });
+  var initialTargetRootId = defaultManagedRoot ? Number(defaultManagedRoot.id) : null;
   var emptyStoryArcPreview = function () {
     return {
       evidence_detected: false,
@@ -2973,6 +2983,17 @@ function importSourceData(config) {
     layoutPreviewTimer: null,
     layoutPreviewController: null,
     layoutPreviewRequestId: 0,
+    libraryRootsRefreshing: false,
+    mylarPathMappings: [],
+    mylarPathPreview: null,
+    mylarPathPreviewLoading: false,
+    mylarPathPreviewError: "",
+    mylarPathPreviewTimer: null,
+    mylarPathPreviewController: null,
+    mylarPathPreviewRequestId: 0,
+    mylarPathMappingId: 0,
+    mylarPathAutoDetect: true,
+    mylarPathConfirmed: false,
     storyArcPreview: emptyStoryArcPreview(),
     storyArcPreviewLoading: false,
     storyArcPreviewError: "",
@@ -3007,25 +3028,135 @@ function importSourceData(config) {
       this.clearFuturePolicy();
       this.clearLayoutPreview();
       this.clearStoryArcPreview();
+      this.clearMylarPathPreview(true);
       if (sourceType === "filesystem") {
         this.scheduleLayoutPreview();
+      } else if (sourceType === "mylar3") {
+        this.scheduleMylarPathPreview();
       }
       this.scheduleStoryArcPreview();
     },
 
     selectImportSource: function (selection) {
       this.sourcePath = selection && selection.path ? String(selection.path) : "";
+      this.clearMylarPathPreview(true);
       this.scheduleLayoutPreview();
+      this.scheduleMylarPathPreview();
       this.scheduleStoryArcPreview();
       this.closeFileBrowser();
     },
 
+    importSourcePathChanged: function () {
+      this.clearMylarPathPreview(true);
+      this.scheduleLayoutPreview();
+      this.scheduleMylarPathPreview();
+      this.scheduleStoryArcPreview();
+    },
+
     setFileHandlingMode: function (mode) {
+      var previousMode = this.fileHandlingMode;
       this.fileHandlingMode = mode === "in_place" ? "in_place" : "managed_copy";
       this.scanError = "";
+      if (this.fileHandlingMode === "in_place" && previousMode !== "in_place") {
+        // A future managed destination is optional for in-place adoption and
+        // must be an explicit choice rather than an inherited default.
+        this.targetLibraryRootId = null;
+      } else if (
+        this.fileHandlingMode === "managed_copy" &&
+        !this.hasSelectedManagedDestination()
+      ) {
+        var defaultRoot = this.managedLibraryRoots().find(function (root) {
+          return !!root.is_default_managed_destination;
+        });
+        this.targetLibraryRootId = defaultRoot ? Number(defaultRoot.id) : null;
+      }
       if (this.fileHandlingMode === "in_place") {
         this.scheduleLayoutPreview();
       }
+      if (this.sourceType === "mylar3") {
+        this.scheduleMylarPathPreview();
+      }
+    },
+
+    managedLibraryRoots: function () {
+      return this.libraryRoots.filter(function (root) {
+        return !!(
+          root &&
+          root.enabled !== false &&
+          root.allow_managed_writes !== false &&
+          root.available !== false &&
+          root.writable !== false
+        );
+      });
+    },
+
+    refreshImportLibraryRoots: async function () {
+      if (this.libraryRootsRefreshing) {
+        return;
+      }
+      this.libraryRootsRefreshing = true;
+      this.scanError = "";
+      try {
+        var response = await fetch("/api/v1/config/library-roots");
+        var payload = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok || !Array.isArray(payload)) {
+          throw new Error(
+            (payload.error && payload.error.message) || "Could not refresh library roots."
+          );
+        }
+        this.libraryRoots = payload
+          .filter(function (root) {
+            return !!(root && root.enabled !== false);
+          })
+          .sort(function (left, right) {
+            if (!!left.is_default_managed_destination !== !!right.is_default_managed_destination) {
+              return left.is_default_managed_destination ? -1 : 1;
+            }
+            return String(left.name || "").localeCompare(String(right.name || ""));
+          });
+        if (!this.hasSelectedManagedDestination()) {
+          var defaultRoot = this.managedLibraryRoots().find(function (root) {
+            return !!root.is_default_managed_destination;
+          });
+          this.targetLibraryRootId =
+            this.fileHandlingMode === "managed_copy" && defaultRoot
+              ? Number(defaultRoot.id)
+              : null;
+        }
+        if (this.sourceType === "mylar3") {
+          this.clearMylarPathPreview(false);
+          this.scheduleMylarPathPreview();
+        }
+      } catch (err) {
+        this.scanError =
+          err && err.message ? err.message : "Could not refresh library roots.";
+      } finally {
+        this.libraryRootsRefreshing = false;
+      }
+    },
+
+    referenceLibraryRoots: function () {
+      return this.libraryRoots.filter(function (root) {
+        return !!(
+          root &&
+          root.enabled !== false &&
+          root.allow_referenced_registrations !== false &&
+          root.available !== false
+        );
+      });
+    },
+
+    requiresManagedDestination: function () {
+      return this.fileHandlingMode === "managed_copy";
+    },
+
+    hasSelectedManagedDestination: function () {
+      var selectedRootId = Number(this.targetLibraryRootId);
+      return this.managedLibraryRoots().some(function (root) {
+        return Number(root.id) === selectedRootId && selectedRootId > 0;
+      });
     },
 
     setLayoutChoice: function (choice) {
@@ -3276,6 +3407,19 @@ function importSourceData(config) {
       return !!(this.sourceType && this.sourcePath.trim());
     },
 
+    canAnalyzeMylarPaths: function () {
+      if (this.sourceType !== "mylar3" || !this.sourcePath.trim()) {
+        return false;
+      }
+      return this.mylarPathMappings.every(function (mapping) {
+        return !!(
+          mapping &&
+          String(mapping.stored_prefix || "").trim() &&
+          String(mapping.pullbox_prefix || "").trim()
+        );
+      });
+    },
+
     toggleStoryArcImport: function () {
       if (!this.storyArcImportRequested) {
         this.storyArcMaterializationRequested = false;
@@ -3286,19 +3430,23 @@ function importSourceData(config) {
       if (!this.sourcePath.trim() || this.scanning) {
         return false;
       }
+      if (this.requiresManagedDestination() && !this.hasSelectedManagedDestination()) {
+        return false;
+      }
+      if (
+        this.sourceType === "mylar3" &&
+        (!this.mylarPathPreview ||
+          !this.mylarPathPreview.can_confirm ||
+          (this.mylarPathPreview.requires_confirmation && !this.mylarPathConfirmed))
+      ) {
+        return false;
+      }
       if (this.fileHandlingMode === "in_place") {
-        if (this.sourceType === "mylar3") {
-          var selectedRootId = Number(this.targetLibraryRootId);
-          if (!this.libraryRoots.some(function (root) {
-            return Number(root.id) === selectedRootId && selectedRootId > 0;
-          })) {
-            return false;
-          }
-        } else if (
+        if (this.sourceType !== "mylar3" && (
           this.sourceType !== "filesystem" ||
           !this.layoutPreview ||
           !this.layoutPreview.can_keep_in_place
-        ) {
+        )) {
           return false;
         }
       }
@@ -3312,6 +3460,166 @@ function importSourceData(config) {
         return false;
       }
       return this.layoutChoice !== "custom" || !!this.customSeriesPathTemplate.trim();
+    },
+
+    clearMylarPathPreview: function (resetMappings) {
+      if (this.mylarPathPreviewTimer) {
+        clearTimeout(this.mylarPathPreviewTimer);
+        this.mylarPathPreviewTimer = null;
+      }
+      if (this.mylarPathPreviewController) {
+        this.mylarPathPreviewController.abort();
+        this.mylarPathPreviewController = null;
+      }
+      this.mylarPathPreviewRequestId += 1;
+      this.mylarPathPreview = null;
+      this.mylarPathPreviewLoading = false;
+      this.mylarPathPreviewError = "";
+      this.mylarPathConfirmed = false;
+      if (resetMappings) {
+        this.mylarPathMappings = [];
+        this.mylarPathAutoDetect = true;
+      }
+    },
+
+    scheduleMylarPathPreview: function () {
+      if (this.sourceType !== "mylar3") {
+        return;
+      }
+      if (this.mylarPathPreviewTimer) {
+        clearTimeout(this.mylarPathPreviewTimer);
+      }
+      if (!this.canAnalyzeMylarPaths()) {
+        return;
+      }
+      var self = this;
+      this.mylarPathPreviewTimer = setTimeout(function () {
+        self.mylarPathPreviewTimer = null;
+        self.previewMylarPaths();
+      }, 650);
+    },
+
+    mylarPathMappingChanged: function () {
+      this.mylarPathAutoDetect = false;
+      this.clearMylarPathPreview(false);
+      this.scheduleMylarPathPreview();
+    },
+
+    addMylarPathMapping: function () {
+      this.mylarPathAutoDetect = false;
+      this.clearMylarPathPreview(false);
+      this.mylarPathMappings.push({
+        id: ++this.mylarPathMappingId,
+        stored_prefix: "",
+        pullbox_prefix: "",
+      });
+    },
+
+    removeMylarPathMapping: function (index) {
+      this.mylarPathAutoDetect = false;
+      this.clearMylarPathPreview(false);
+      this.mylarPathMappings.splice(index, 1);
+      this.scheduleMylarPathPreview();
+    },
+
+    resetAutomaticMylarPaths: function () {
+      this.clearMylarPathPreview(true);
+      this.previewMylarPaths();
+    },
+
+    previewMylarPaths: async function () {
+      if (!this.canAnalyzeMylarPaths()) {
+        return;
+      }
+      if (this.mylarPathPreviewTimer) {
+        clearTimeout(this.mylarPathPreviewTimer);
+        this.mylarPathPreviewTimer = null;
+      }
+      if (this.mylarPathPreviewController) {
+        this.mylarPathPreviewController.abort();
+      }
+      var requestId = ++this.mylarPathPreviewRequestId;
+      var controller = new AbortController();
+      this.mylarPathPreviewController = controller;
+      this.mylarPathPreviewLoading = true;
+      this.mylarPathPreviewError = "";
+      this.mylarPathPreview = null;
+      this.mylarPathConfirmed = false;
+      try {
+        var response = await fetch("/api/v1/import/mylar-path-preview", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": this.csrfToken(),
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            source_path: this.sourcePath.trim(),
+            source_type: "mylar3",
+            file_handling_mode: this.fileHandlingMode,
+            auto_detect: this.mylarPathAutoDetect,
+            mappings: this.mylarPathMappings.map(function (mapping) {
+              return {
+                stored_prefix: String(mapping.stored_prefix || "").trim(),
+                pullbox_prefix: String(mapping.pullbox_prefix || "").trim(),
+              };
+            }),
+          }),
+        });
+        var payload = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          var detail = payload.detail;
+          if (Array.isArray(detail)) {
+            detail = detail
+              .map(function (item) {
+                return item && item.msg ? item.msg : "";
+              })
+              .filter(Boolean)
+              .join(" ");
+          }
+          throw new Error(
+            detail ||
+              (payload.error && payload.error.message) ||
+              "Pullbox could not analyze the Mylar paths.",
+          );
+        }
+        if (requestId !== this.mylarPathPreviewRequestId) {
+          return;
+        }
+        this.mylarPathPreview = payload;
+        this.mylarPathMappings = (payload.mappings || []).map(
+          function (mapping) {
+            return {
+              id: ++this.mylarPathMappingId,
+              stored_prefix: mapping.stored_prefix,
+              pullbox_prefix: mapping.pullbox_prefix,
+            };
+          }.bind(this),
+        );
+        this.mylarPathConfirmed = !!(payload.can_confirm && !payload.requires_confirmation);
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          return;
+        }
+        if (requestId === this.mylarPathPreviewRequestId) {
+          this.mylarPathPreviewError =
+            err && err.message ? err.message : "Pullbox could not analyze the Mylar paths.";
+        }
+      } finally {
+        if (requestId === this.mylarPathPreviewRequestId) {
+          this.mylarPathPreviewLoading = false;
+          this.mylarPathPreviewController = null;
+        }
+      }
+    },
+
+    mylarPathMappingEvidence: function (index) {
+      if (!this.mylarPathPreview || !Array.isArray(this.mylarPathPreview.mappings)) {
+        return null;
+      }
+      return this.mylarPathPreview.mappings[index] || null;
     },
 
     clearLayoutPreview: function () {
@@ -3594,14 +3902,17 @@ function importSourceData(config) {
             file_formats: this.fileFormats.trim() || null,
             file_handling_mode: this.fileHandlingMode,
             source_layout: this.sourceLayoutPayload(),
-            target_library_root_id: this.futureLayoutRequested ||
-              (this.sourceType === "mylar3" && this.fileHandlingMode === "in_place")
+            target_library_root_id: this.targetLibraryRootId
               ? Number(this.targetLibraryRootId)
               : null,
             future_layout_requested: this.futureLayoutRequested,
             future_root_policy: this.futureLayoutRequested ? this.futureRootPolicy : null,
             story_arc_import_requested: this.storyArcImportRequested,
             story_arc_materialization_requested: this.storyArcMaterializationRequested,
+            mylar3_path_map: this.sourceType === "mylar3"
+              ? Object.assign({}, this.mylarPathPreview.path_map || {})
+              : {},
+            mylar3_path_map_confirmed: this.sourceType === "mylar3",
           }),
         });
 
@@ -3633,6 +3944,14 @@ function importJobLogViewerData(config) {
   var cfg = config || {};
   var _REQUEST_TIMEOUT_MS =
     Number(cfg.requestTimeoutMs || 0) > 0 ? Number(cfg.requestTimeoutMs) : 12000;
+  var requestedMaxEntries = Number(cfg.maxEntries || 500);
+  var _MAX_RETAINED_ENTRIES = Math.max(
+    250,
+    Math.min(
+      500,
+      Number.isFinite(requestedMaxEntries) ? Math.floor(requestedMaxEntries) : 500,
+    ),
+  );
 
   return {
     jobId: Number(cfg.jobId || 0),
@@ -3827,9 +4146,19 @@ function importJobLogViewerData(config) {
         return "0 entries";
       }
       if (!this.levelFilter && !this.searchQuery) {
+        if (this.totalCount > this.entries.length) {
+          return this.entries.length + " recent of " + this.totalCount + " entries";
+        }
         return this.totalCount + " entries";
       }
-      return this.filteredCount + " entries (filtered from " + this.totalCount + ")";
+      return (
+        this.filteredCount +
+        " recent matches (" +
+        this.entries.length +
+        " recent of " +
+        this.totalCount +
+        " entries)"
+      );
     },
 
     get downloadHref() {
@@ -3918,6 +4247,17 @@ function importJobLogViewerData(config) {
       };
     },
 
+    _trimRetainedEntries: function () {
+      var overflow = this.entries.length - _MAX_RETAINED_ENTRIES;
+      if (overflow <= 0) {
+        return;
+      }
+      this.entries.splice(0, overflow);
+      if (this.currentPage > this.totalPages) {
+        this.currentPage = this.totalPages;
+      }
+    },
+
     _appendStreamEntry: function (event) {
       if (!event || !event.data) {
         return;
@@ -3936,6 +4276,7 @@ function importJobLogViewerData(config) {
         var shouldFollowTail = this._shouldFollowLiveTail();
         this.entries.push(this._normalizeStreamEntry(payload));
         this.totalCount += 1;
+        this._trimRetainedEntries();
         if (shouldFollowTail) {
           this.currentPage = this.totalPages;
         } else if (this.currentPage > this.totalPages) {
@@ -4023,11 +4364,12 @@ function importJobLogViewerData(config) {
           }
           if (incrementalData) {
             var newItems = Array.isArray(incrementalData.items) ? incrementalData.items : [];
-            this.totalCount = Number(incrementalData.total || this.totalCount || this.entries.length) || this.entries.length;
             if (newItems.length) {
               for (var n = 0; n < newItems.length; n++) {
                 this.entries.push(this._normalizeEntry(newItems[n]));
               }
+              this.totalCount += newItems.length;
+              this._trimRetainedEntries();
               if (this.currentPage > this.totalPages) {
                 this.currentPage = this.totalPages;
               }
@@ -4036,34 +4378,24 @@ function importJobLogViewerData(config) {
           }
         }
 
-        var page = 1;
-        var pageSize = 500;
-        var allEntries = [];
-        var total = 0;
-
-        while (true) {
-          var data = await this._fetchJson(
-            "/api/v1/import/" + this.jobId + "/logs?page=" + page + "&page_size=" + pageSize + "&order=asc",
-            request,
-          );
-          if (request.token !== this._requestToken) {
-            return;
-          }
-          if (!data) {
-            break;
-          }
-          var items = Array.isArray(data.items) ? data.items : [];
-          if (page === 1) {
-            total = Number(data.total || items.length) || 0;
-          }
-          for (var i = 0; i < items.length; i++) {
-            allEntries.push(this._normalizeEntry(items[i]));
-          }
-          if (!items.length || allEntries.length >= total) {
-            break;
-          }
-          page += 1;
+        var data = await this._fetchJson(
+          "/api/v1/import/" +
+            this.jobId +
+            "/logs?page=1&page_size=" +
+            _MAX_RETAINED_ENTRIES +
+            "&order=desc",
+          request,
+        );
+        if (request.token !== this._requestToken) {
+          return;
         }
+        if (!data) {
+          return;
+        }
+
+        var items = Array.isArray(data.items) ? data.items : [];
+        var allEntries = items.slice().reverse().map(this._normalizeEntry.bind(this));
+        var total = Number(data.total || items.length) || 0;
 
         var shouldFollowTail = this._shouldFollowLiveTail();
         this.entries = allEntries;
@@ -6310,6 +6642,11 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     showCancelModal: false,
     cancelling: false,
     reviewToken: typeof cfg.reviewToken === "string" ? cfg.reviewToken : "",
+    preferredRootId:
+      cfg.preferredRootId === null || typeof cfg.preferredRootId === "undefined"
+        ? null
+        : Number(cfg.preferredRootId),
+    splitSeriesRequiresPreferredRoot: Boolean(cfg.splitSeriesRequiresPreferredRoot),
 
     init: function () {
       this.rehydrateAfterShellSwap();
@@ -6371,6 +6708,14 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       return Number(this.selectedItemCount) || 0;
     },
 
+    hasRequiredPreferredRoot: function () {
+      if (!this.splitSeriesRequiresPreferredRoot) {
+        return true;
+      }
+      var rootId = Number(this.preferredRootId);
+      return Number.isFinite(rootId) && rootId > 0;
+    },
+
     importSelectionLabel: function () {
       var total = this.totalSelectionCount();
       return total + " items selected for import";
@@ -6410,7 +6755,8 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
       var importButton = root.querySelector("[data-import-review-import-button]");
       if (importButton) {
-        importButton.disabled = total === 0 || this.confirming;
+        importButton.disabled =
+          total === 0 || this.confirming || !this.hasRequiredPreferredRoot();
       }
     },
 
@@ -7156,6 +7502,12 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       if (this.totalSelectionCount() === 0) {
         return;
       }
+      if (!this.hasRequiredPreferredRoot()) {
+        this.confirmError =
+          "Choose a preferred managed destination for future acquisitions before importing this split series.";
+        this.syncSelectionSummaryUi();
+        return;
+      }
 
       this.confirming = true;
       this.confirmError = "";
@@ -7171,6 +7523,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
             series_ids: [],
             story_arc_ids: [],
             story_arc_decisions: [],
+            target_library_root_id: this.preferredRootId,
           }),
         });
 

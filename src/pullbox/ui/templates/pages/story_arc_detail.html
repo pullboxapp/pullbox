@@ -3,15 +3,34 @@
 
 {% block title %}{{ story_arc.name }} — Story Arcs — {{ instance_name() }}{% endblock %}
 {% block page_title %}{{ story_arc.name }}{% endblock %}
-{% block content_container_classes %}px-4 sm:px-6 py-5{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 pt-5 sm:pt-7{% endblock %}
 
 {% block content %}
-<main data-testid="story-arc-detail-page" class="mx-auto max-w-7xl space-y-6">
-  <nav aria-label="Breadcrumb" class="text-sm text-pb-text-sec">
-    <a href="/story-arcs" class="text-pb-interactive hover:underline">Story Arcs</a>
-    <span aria-hidden="true" class="px-1">/</span>
-    <span aria-current="page">{{ story_arc.name }}</span>
-  </nav>
+<div
+  data-testid="story-arc-detail-page"
+  class="series-domain-page space-y-4"
+  hx-history="false"
+  x-data="{ coverModalOpen: false, coverModalUrl: '' }"
+>
+  <div class="series-domain-breadcrumb-row">
+    <a
+      href="/story-arcs"
+      data-testid="story-arc-detail-back-link"
+      class="series-domain-back-link"
+    >
+      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+      </svg>
+      Back to story arcs
+    </a>
+    <nav data-testid="story-arc-detail-breadcrumbs" class="series-domain-breadcrumbs" aria-label="Breadcrumb">
+      <a href="/story-arcs">All Story Arcs</a>
+      <span class="series-domain-breadcrumb-sep">›</span>
+      <span class="current" aria-current="page">{{ story_arc.name }}</span>
+    </nav>
+  </div>
+
+  {% include "partials/story_arc_detail_hero.html" %}
 
   <div role="status" aria-live="polite" class="min-h-0">
     {% if notice_message %}
@@ -24,6 +43,14 @@
       </div>
     {% endif %}
   </div>
+
+  {% if story_arc.catalog_removed_count or story_arc.catalog_added_review_count %}
+    <p role="status" class="rounded-lg border border-pb-border bg-pb-card px-4 py-3 text-sm text-pb-text-sec">
+      At last provider refresh: {{ story_arc.catalog_added_review_count }} new members added for review;
+      {{ story_arc.catalog_removed_count }} no longer listed by Comic Vine but preserved here.
+      Review pending members below before synchronization.
+    </p>
+  {% endif %}
 
   {% if reorder_preview %}
     <section
@@ -147,57 +174,6 @@
     </section>
   {% endif %}
 
-  <header class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-    <div>
-      <div class="flex flex-wrap items-center gap-2">
-        <h1 class="text-2xl font-bold tracking-tight text-pb-text">{{ story_arc.name }}</h1>
-        <span class="pill {{ 'pill-success' if story_arc.active else 'pill-neutral' }}">
-          {{ story_arc.lifecycle|title }}
-        </span>
-        {% if story_arc.monitored %}<span class="pill pill-info">Monitored</span>{% endif %}
-      </div>
-      {% if story_arc.description %}
-        <p class="mt-2 max-w-3xl text-sm text-pb-text-sec">{{ story_arc.description }}</p>
-      {% endif %}
-      <p class="mt-2 text-xs text-pb-text-dim">
-        Pullbox logical Story Arc · revision {{ story_arc.revision }}
-      </p>
-    </div>
-    <dl class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-      <div class="rounded-lg border border-pb-border bg-pb-card px-4 py-3">
-        <dt class="text-xs text-pb-text-dim">Issues</dt>
-        <dd class="mt-1 text-lg font-semibold text-pb-text">{{ story_arc.membership_count }}</dd>
-      </div>
-      <div class="rounded-lg border border-pb-border bg-pb-card px-4 py-3">
-        <dt class="text-xs text-pb-text-dim">Resolved</dt>
-        <dd class="mt-1 text-lg font-semibold text-pb-text">{{ story_arc.resolved_count }}</dd>
-      </div>
-      <div class="rounded-lg border border-pb-border bg-pb-card px-4 py-3">
-        <dt class="text-xs text-pb-text-dim">Missing</dt>
-        <dd class="mt-1 text-lg font-semibold text-pb-text">{{ story_arc.missing_count }}</dd>
-      </div>
-      <div class="rounded-lg border border-pb-border bg-pb-card px-4 py-3">
-        <dt class="text-xs text-pb-text-dim">Conflicts</dt>
-        <dd class="mt-1 text-lg font-semibold text-pb-text">{{ story_arc.conflict_count }}</dd>
-      </div>
-    </dl>
-  </header>
-
-  {% if story_arc.active %}
-    <section class="space-y-3" aria-label="Story Arc acquisition and provider changes">
-      <div class="flex flex-wrap gap-3">
-        <form action="/story-arcs/{{ story_arc.id }}/search" method="post" hx-post="/story-arcs/{{ story_arc.id }}/search" hx-swap="none">
-          <button type="submit" class="btn-primary">Search missing issues</button>
-        </form>
-        {% if story_arc.comicvine_id %}<a href="/story-arcs/{{ story_arc.id }}/catalog-refresh" class="btn-secondary">Review provider changes</a>{% endif %}
-      </div>
-      <p class="text-sm text-pb-text-sec">Search uses resolved canonical issues in this arc, respects explicit skips, and doesn't change series monitoring. Open an issue to choose a release manually.</p>
-      {% if story_arc.catalog_removed_count or story_arc.catalog_added_review_count %}
-        <p role="status" class="text-sm text-pb-text-sec">At last provider refresh: {{ story_arc.catalog_added_review_count }} new members added for review; {{ story_arc.catalog_removed_count }} no longer listed by Comic Vine but preserved here. Review pending members below before synchronization.</p>
-      {% endif %}
-    </section>
-  {% endif %}
-
   {% if story_arc.initial_placements %}
     <section data-testid="story-arc-initial-placements" aria-labelledby="initial-placements-heading" class="space-y-3 rounded-lg border border-pb-border bg-pb-card p-4">
       <h2 id="initial-placements-heading" class="text-lg font-semibold text-pb-text">Initial arc files</h2>
@@ -211,205 +187,10 @@
     </section>
   {% endif %}
 
+  {% include "partials/story_arc_reading_order.html" %}
+
   <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
-    <section aria-labelledby="story-arc-order-heading" class="space-y-4">
-      <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 id="story-arc-order-heading" class="text-lg font-semibold text-pb-text">Reading order</h2>
-          <p class="text-sm text-pb-text-sec">Issue numbers are shown exactly as stored by their source.</p>
-        </div>
-        {% if story_arc.membership_count %}
-          <p class="text-sm text-pb-text-sec">
-            Page {{ story_arc.page }} of {{ story_arc.total_pages }}
-          </p>
-        {% endif %}
-      </div>
-
-      {% if story_arc.memberships %}
-        <ol class="space-y-3" start="{{ ((story_arc.page - 1) * story_arc.per_page) + 1 }}">
-          {% for membership in story_arc.memberships %}
-            <li
-              value="{{ membership.position }}"
-              data-membership-id="{{ membership.id }}"
-              data-exact-issue-number="{{ membership.exact_issue_number }}"
-              data-resolution-state="{{ membership.resolution_state }}"
-              class="rounded-lg border border-pb-border bg-pb-card p-4"
-            >
-              <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                <div class="min-w-0">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-pb-bg px-2 text-xs font-semibold text-pb-text-sec">
-                      {{ membership.position }}
-                    </span>
-                    <span class="text-lg font-semibold text-pb-text">{{ membership.series_name }}</span>
-                    <span class="pill {{ 'pill-success' if membership.resolution_state == 'resolved' else 'pill-warning' if membership.resolution_state in ['missing', 'ambiguous', 'conflict'] else 'pill-neutral' }}">
-                      {{ membership.resolution_label }}
-                    </span>
-                  </div>
-                  <p class="mt-2 text-sm text-pb-text">
-                    Issue <span class="font-mono font-semibold">{{ membership.exact_issue_number }}</span>
-                    <span class="text-pb-text-sec">· {{ membership.issue_title }}</span>
-                  </p>
-                  <p class="mt-1 text-sm text-pb-text-sec">
-                    Canonical state: <span class="font-medium text-pb-text">{{ membership.canonical_state }}</span>
-                  </p>
-                  {% if membership.issue_id %}<a href="/issues/{{ membership.issue_id }}" class="mt-2 inline-block text-sm text-pb-interactive hover:underline">Open issue / manual search</a>{% endif %}
-                </div>
-
-                {% if story_arc.active %}
-                  <div class="flex shrink-0 flex-wrap items-center gap-2" aria-label="Reading order controls">
-                    {% if not membership.is_first %}
-                      <form
-                        action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move"
-                        method="post"
-                      >
-                        <input type="hidden" name="direction" value="up">
-                        <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
-                        <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                        <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                        <button type="submit" class="btn-secondary btn-sm" aria-label="Move issue {{ membership.exact_issue_number }} up">
-                          Preview move up
-                        </button>
-                      </form>
-                    {% endif %}
-                    {% if not membership.is_last %}
-                      <form
-                        action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move"
-                        method="post"
-                      >
-                        <input type="hidden" name="direction" value="down">
-                        <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
-                        <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                        <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                        <button type="submit" class="btn-secondary btn-sm" aria-label="Move issue {{ membership.exact_issue_number }} down">
-                          Preview move down
-                        </button>
-                      </form>
-                    {% endif %}
-                  </div>
-                {% endif %}
-              </div>
-
-              {% if story_arc.active %}
-                <div class="mt-4 grid gap-3 border-t border-pb-border pt-4 lg:grid-cols-[minmax(0,1fr)_auto]">
-                  {% if membership.can_resolve %}
-                    <div class="space-y-3">
-                      {% if membership.issue_id and membership.resolution_state == 'pending' %}
-                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" class="space-y-2">
-                          <input type="hidden" name="issue_id" value="{{ membership.issue_id }}">
-                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                          <p class="text-sm text-pb-text-sec">Added by provider refresh; review its identity and reading order before enabling synchronization.</p>
-                          <button type="submit" class="btn-secondary">Confirm this member</button>
-                        </form>
-                      {% endif %}
-                      <form
-                        action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/local-issues"
-                        method="get"
-                        hx-get="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/local-issues"
-                        hx-target="#story-arc-local-issue-results-{{ membership.id }}"
-                        hx-swap="innerHTML"
-                        data-testid="story-arc-local-issue-search-{{ membership.id }}"
-                        class="flex flex-col gap-2 sm:flex-row sm:items-end"
-                      >
-                        <div class="min-w-0 flex-1">
-                          <label for="story-arc-local-issue-query-{{ membership.id }}" class="mb-1 block text-sm font-medium text-pb-text">
-                            Find an issue in this library
-                          </label>
-                          <input
-                            id="story-arc-local-issue-query-{{ membership.id }}"
-                            name="q"
-                            type="search"
-                            maxlength="500"
-                            required
-                            value="{{ membership.local_search_query }}"
-                            autocomplete="off"
-                            class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-                          >
-                        </div>
-                        <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                        <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                        <button type="submit" class="btn-secondary">Search local issues</button>
-                      </form>
-
-                      <div id="story-arc-local-issue-results-{{ membership.id }}"></div>
-
-                      <p class="text-xs text-pb-text-sec">
-                        Not in this library?
-                        <a href="{{ membership.metadata_add_url }}" class="text-pb-interactive hover:underline">
-                          Open Add Series with this evidence
-                        </a>.
-                      </p>
-
-                      <details class="text-sm text-pb-text-sec">
-                        <summary class="cursor-pointer">Resolve by known issue ID</summary>
-                        <form
-                          action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve"
-                          method="post"
-                          hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve"
-                          hx-swap="none"
-                          data-testid="story-arc-resolve-membership-{{ membership.id }}"
-                          class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end"
-                        >
-                          <div class="min-w-0 flex-1">
-                            <label for="story-arc-resolve-issue-{{ membership.id }}" class="mb-1 block text-sm font-medium text-pb-text">
-                              Existing issue ID
-                            </label>
-                            <input
-                              id="story-arc-resolve-issue-{{ membership.id }}"
-                              name="issue_id"
-                              type="number"
-                              min="1"
-                              required
-                              inputmode="numeric"
-                              class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-                            >
-                          </div>
-                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                          <button type="submit" class="btn-secondary">Resolve</button>
-                        </form>
-                      </details>
-                    </div>
-                  {% else %}
-                    <p class="self-center text-sm text-pb-text-sec">Matched to canonical issue ID {{ membership.issue_id }}.</p>
-                  {% endif %}
-
-                  <form
-                    action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/remove"
-                    method="post"
-                    hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/remove"
-                    hx-swap="none"
-                    x-data="{}"
-                    data-testid="story-arc-remove-membership-{{ membership.id }}"
-                    class="self-end"
-                  >
-                    <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                    <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                    <button
-                      type="button"
-                      class="btn-secondary text-pb-error"
-                      @click="pbConfirm({ title: 'Remove issue from Story Arc?', message: 'The canonical issue and its file will stay in your library.', confirmLabel: 'Remove', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })"
-                    >
-                      Remove
-                    </button>
-                  </form>
-                </div>
-              {% endif %}
-            </li>
-          {% endfor %}
-        </ol>
-
-        <div class="py-2">
-          {{ pagination(story_arc.page, story_arc.total_pages, pagination_base_url) }}
-        </div>
-      {% else %}
-        <div class="rounded-lg border border-dashed border-pb-border bg-pb-card px-6 py-10 text-center">
-          <h3 class="font-semibold text-pb-text">This Story Arc is empty</h3>
-          <p class="mt-2 text-sm text-pb-text-sec">Add a canonical issue or an unresolved exact issue number to start the reading order.</p>
-        </div>
-      {% endif %}
-
+    <section aria-label="Story Arc placement and issue management" class="space-y-6">
       {% if story_arc.active %}
         <section aria-labelledby="story-arc-add-heading" class="rounded-lg border border-pb-border bg-pb-card p-4">
           <h3 id="story-arc-add-heading" class="font-semibold text-pb-text">Add issue</h3>
@@ -505,6 +286,7 @@
           method="post"
           data-testid="story-arc-placement-policy-form"
           class="mt-4 space-y-4"
+          x-data='{ placementMode: {{ placement_ui.policy.mode|tojson }} }'
         >
           <input type="hidden" name="expected_revision" value="{{ placement_ui.policy.revision }}">
           <fieldset class="space-y-4"{% if not story_arc.active %} disabled{% endif %}>
@@ -515,6 +297,7 @@
               <select
                 id="story-arc-placement-mode"
                 name="mode"
+                x-model="placementMode"
                 class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
               >
                 <option value="logical"{% if placement_ui.policy.mode == 'logical' %} selected{% endif %}>Logical only</option>
@@ -536,8 +319,9 @@
                 >
                   <option value=""{% if placement_ui.policy.target_library_root_id is none %} selected{% endif %}>Select an approved root</option>
                   {% for root in placement_ui.roots %}
-                    <option value="{{ root.id }}"{% if placement_ui.policy.target_library_root_id == root.id %} selected{% endif %}>
-                      {{ root.name }} — {{ root.path }}{% if not root.enabled %} (disabled; current policy){% endif %}
+                    <option value="{{ root.id }}"{% if placement_ui.policy.target_library_root_id == root.id %} selected{% endif %}{% if not root.enabled %} disabled{% endif %}
+                      :disabled="placementMode === 'reference_only' ? {{ 'false' if root.can_reference else 'true' }} : (placementMode === 'logical' ? false : {{ 'false' if root.can_manage else 'true' }})">
+                      {{ root.name }} — {{ root.path }}{% if root.can_manage and root.can_reference %}{% elif root.can_manage %} (managed only){% elif root.can_reference %} (reference only){% else %} (unavailable; current policy){% endif %}
                     </option>
                   {% endfor %}
                 </select>
@@ -906,37 +690,13 @@
         </form>
       </section>
 
-      <section class="rounded-lg border border-pb-border bg-pb-card p-4">
-        <h2 class="font-semibold text-pb-text">Archive Story Arc</h2>
-        <div class="mt-2 space-y-1 text-sm text-pb-text-sec">
-          <p>Canonical issues stay in your library.</p>
-          <p>Canonical files stay in their current folders.</p>
-          <p>Story Arc memberships and reading order are retained.</p>
-          <p>Monitoring and automation will be disabled.</p>
-        </div>
-        {% if story_arc.active %}
-          <form
-            action="/story-arcs/{{ story_arc.id }}/archive"
-            method="post"
-            hx-post="/story-arcs/{{ story_arc.id }}/archive"
-            hx-swap="none"
-            x-data="{}"
-            class="mt-4"
-          >
-            <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
-            <button
-              type="button"
-              class="btn-secondary text-pb-error"
-              @click="pbConfirm({ title: 'Archive Story Arc?', message: 'Monitoring and automation will stop. Canonical issues and files will be preserved.', confirmLabel: 'Archive', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })"
-            >
-              Archive Story Arc
-            </button>
-          </form>
-        {% else %}
-          <p class="mt-4 text-sm font-medium text-pb-text">This Story Arc is archived.</p>
-        {% endif %}
-      </section>
     </aside>
   </div>
-</main>
+
+  {% include "components/cover_modal.html" %}
+</div>
+{% endblock %}
+
+{% block footer_dock %}
+  {% include "partials/story_arc_detail_footer_dock.html" %}
 {% endblock %}

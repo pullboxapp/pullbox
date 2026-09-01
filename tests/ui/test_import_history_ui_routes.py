@@ -21,6 +21,7 @@ async def _seed_import_history_job(
     status: str = "scanning",
     source_path: str = "/tmp/import-history-contract",
     source_type: str = "filesystem",
+    progress_snapshot: dict[str, object] | None = None,
 ) -> int:  # type: ignore[no-untyped-def]
     from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 
@@ -33,6 +34,7 @@ async def _seed_import_history_job(
             series_imported=0,
             series_failed=0,
             series_no_match=2,
+            progress_snapshot=progress_snapshot or {},
         )
         session.add(job)
         await session.commit()
@@ -146,6 +148,26 @@ class TestImportHistoryTabRouteContracts:
         assert 'class="downloads-led ' in response.text
         assert 'class="downloads-action-btn import-history-action-btn' in response.text
         assert 'class="downloads-error-row table-detail-row"' in response.text
+
+    async def test_import_history_labels_incomplete_rollback_truthfully(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        await _seed_import_history_job(
+            sec_db,
+            status="failed",
+            progress_snapshot={
+                "mode": "rollback",
+                "phase": "rollback_incomplete",
+                "rollback_manual_recovery_count": 1,
+            },
+        )
+
+        response = await authenticated_client.get("/import?tab=history")
+
+        assert response.status_code == 200
+        assert "Rollback Incomplete" in response.text
 
     async def test_import_history_toolbar_matches_downloads_history_search_contract(
         self,

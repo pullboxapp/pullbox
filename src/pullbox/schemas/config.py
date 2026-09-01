@@ -24,6 +24,120 @@ class ConfigUpdate(BaseModel):
     values: dict[str, str] = Field(..., min_length=1, description="Key-value pairs to update")
 
 
+class LibraryRootCreate(BaseModel):
+    """Create an explicit persistent container-visible library root."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=255)
+    path: str = Field(..., min_length=1, max_length=1000)
+    allow_referenced_registrations: bool = True
+    allow_managed_writes: bool = True
+    is_default_managed_destination: bool = False
+
+
+class LibraryRootUpdate(BaseModel):
+    """Update mutable root metadata without rebinding its path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(None, min_length=1, max_length=255)
+    enabled: bool | None = None
+    allow_referenced_registrations: bool | None = None
+    allow_managed_writes: bool | None = None
+    is_default_managed_destination: bool | None = None
+
+
+class LibraryRootState(BaseModel):
+    """Persisted root configuration plus a live capability snapshot."""
+
+    id: int
+    name: str
+    path: str
+    enabled: bool
+    allow_referenced_registrations: bool
+    allow_managed_writes: bool
+    is_default_managed_destination: bool
+    available: bool
+    readable: bool
+    writable: bool
+    free_bytes: int | None
+    status: Literal["ready", "read_only", "low_capacity", "unavailable"]
+    warnings: list[str]
+    can_disable: bool
+
+
+class LibraryRootPreviewResponse(BaseModel):
+    """Non-persisting validation result for a proposed root."""
+
+    name: str
+    path: str
+    allow_referenced_registrations: bool
+    allow_managed_writes: bool
+    is_default_managed_destination: bool
+    available: bool
+    readable: bool
+    writable: bool
+    free_bytes: int | None
+    status: Literal["ready", "read_only", "low_capacity", "unavailable"]
+    warnings: list[str]
+    blocking_reasons: list[str]
+    can_create: bool
+
+
+class LibraryRootRebindPreviewRequest(BaseModel):
+    """Request a write-free preview for an established root path replacement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    replacement_path: str = Field(..., min_length=1, max_length=1000)
+
+
+class LibraryRootRebindImpact(BaseModel):
+    """Aggregate persisted associations affected by changing one root identity path."""
+
+    library_file_count: int = Field(..., ge=0)
+    series_count: int = Field(..., ge=0)
+    preferred_series_count: int = Field(..., ge=0)
+    story_arc_placement_count: int = Field(..., ge=0)
+    library_file_blocking_count: int = Field(..., ge=0)
+    series_blocking_count: int = Field(..., ge=0)
+    story_arc_placement_blocking_count: int = Field(..., ge=0)
+    affects_default_destination: bool
+    affects_preferred_series: bool
+
+
+class LibraryRootRebindPreviewResponse(BaseModel):
+    """Signed, non-persisting root path rebind preview."""
+
+    library_root_id: int
+    root_name: str
+    current_path: str
+    replacement_path: str
+    available: bool
+    readable: bool
+    writable: bool
+    free_bytes: int | None
+    status: Literal["ready", "read_only", "low_capacity", "unavailable"]
+    warnings: list[str]
+    blocking_reasons: list[str]
+    same_physical_directory: bool
+    overlaps_current_path: bool
+    impact: LibraryRootRebindImpact
+    can_rebind: bool
+    preview_token: str | None
+
+
+class LibraryRootRebindConfirmRequest(BaseModel):
+    """Explicit confirmation bound to one signed rebind preview."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    replacement_path: str = Field(..., min_length=1, max_length=1000)
+    preview_token: str = Field(..., min_length=1, max_length=4096)
+    confirmation: Literal["REBIND"]
+
+
 class NamingPreview(BaseModel):
     """Preview of file naming convention applied to sample data."""
 

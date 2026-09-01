@@ -155,6 +155,34 @@ class TestSetComicsDirectory:
         assert root_b.path == str(dir_b)
 
     @pytest.mark.asyncio
+    async def test_promoting_an_existing_root_preserves_its_unique_name(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
+        primary_path = tmp_path / "primary"
+        archive_path = tmp_path / "archive"
+        primary_path.mkdir()
+        archive_path.mkdir()
+        await set_comics_directory(db_session, primary_path)
+        archive = LibraryRoot(
+            name="Archive",
+            path=str(archive_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+        )
+        db_session.add(archive)
+        await db_session.flush()
+
+        promoted = await set_comics_directory(db_session, archive_path)
+
+        assert promoted.id == archive.id
+        assert promoted.name == "Archive"
+        assert promoted.is_default_managed_destination is True
+        row = await db_session.get(SystemConfig, "comics_directory")
+        assert row is not None
+        assert row.value == str(archive_path)
+
+    @pytest.mark.asyncio
     async def test_returns_library_root(self, db_session: AsyncSession, tmp_path: Path) -> None:
         comics_dir = tmp_path / "comics"
         comics_dir.mkdir()
@@ -164,7 +192,7 @@ class TestSetComicsDirectory:
 
 
 class TestReconcileRuntimeLibraryPaths:
-    """Test rewriting persisted library paths to the active runtime root."""
+    """Test safe runtime-root bootstrap without implicit path rebinding."""
 
     @pytest.mark.asyncio
     async def test_seeds_runtime_root_for_fresh_install(
@@ -176,6 +204,7 @@ class TestReconcileRuntimeLibraryPaths:
         result = await reconcile_runtime_library_paths(db_session, comics_dir)
 
         assert result is not None
+        assert result["status"] == "bootstrapped"
         assert result["old_root"] == ""
         assert result["new_root"] == str(comics_dir)
         assert result["series_updated"] == 0
@@ -192,7 +221,7 @@ class TestReconcileRuntimeLibraryPaths:
         assert root.enabled is True
 
     @pytest.mark.asyncio
-    async def test_rewrites_primary_library_prefix_everywhere(
+    async def test_established_runtime_mismatch_requires_rebind_without_mutation(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
         old_root_path = (tmp_path / "old-runtime" / "comics").resolve()
@@ -233,20 +262,27 @@ class TestReconcileRuntimeLibraryPaths:
         result = await reconcile_runtime_library_paths(db_session, new_root_path)
 
         assert result is not None
+        assert result["status"] == "rebind_required"
         assert result["old_root"] == str(old_root_path)
         assert result["new_root"] == str(new_root_path)
-        assert result["series_updated"] == 1
-        assert result["library_files_updated"] == 1
+        assert result["series_updated"] == 0
+        assert result["library_files_updated"] == 0
 
         comics_directory = await db_session.get(SystemConfig, "comics_directory")
         assert comics_directory is not None
-        assert comics_directory.value == str(new_root_path)
-        assert old_root.path == str(new_root_path)
-        assert series.path == str(new_root_path / "Absolute Batman (2024) [160294]")
+        assert comics_directory.value == str(old_root_path)
+        assert old_root.path == str(old_root_path)
+        assert series.path == str(old_root_path / "Absolute Batman (2024) [160294]")
         assert library_file.file_path == str(
-            new_root_path / "Absolute Batman (2024) [160294]" / "Absolute Batman 001.cbz"
+            old_root_path / "Absolute Batman (2024) [160294]" / "Absolute Batman 001.cbz"
         )
         assert library_file.file_name == "Absolute Batman 001.cbz"
+        assert (
+            await db_session.scalar(
+                select(LibraryRoot.id).where(LibraryRoot.path == str(new_root_path))
+            )
+            is None
+        )
 
     @pytest.mark.asyncio
     async def test_noops_when_runtime_root_already_matches(

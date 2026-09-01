@@ -11,10 +11,12 @@ from pullbox.core.library_policy import (
     load_search_on_add_default,
 )
 from pullbox.models.import_job import ImportFileHandlingMode
+from pullbox.models.library import LibraryRoot
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
 from pullbox.services.import_root_policy_activation import (
     apply_future_root_policy_to_ingest_policy,
 )
+from pullbox.services.library_root_management import validate_managed_library_root
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +42,10 @@ async def apply_confirm_import_policy(
             raise ValidationError(
                 "The target library root cannot change after future layout setup."
             )
+        requested_root = await session.get(LibraryRoot, request.target_library_root_id)
+        if requested_root is None:
+            raise ValidationError("The selected managed library root does not exist.")
+        await validate_managed_library_root(requested_root)
         job.target_library_root_id = request.target_library_root_id
 
     ingest_policy = (

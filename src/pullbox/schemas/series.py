@@ -67,6 +67,10 @@ class SeriesResponse(BaseModel):
     publisher_id: int | None = None
     path: str | None = Field(None, description="Absolute path to series folder")
     library_root_id: int | None = Field(None, description="Library root this series belongs to")
+    preferred_library_root_id: int | None = Field(
+        None,
+        description="Managed library root selected for future acquisitions",
+    )
     alternate_names: list[str] = Field(default_factory=list, description="Alternate series names")
     publisher_name: str | None = Field(
         None, description="Publisher name, resolved from relationship"
@@ -136,6 +140,7 @@ class SeriesListResponse(BaseModel):
     publisher_name: str | None = None
     path: str | None = None
     library_root_id: int | None = None
+    preferred_library_root_id: int | None = None
     owned_count: int = Field(0, description="Issues in library")
     wanted_count: int = Field(0, description="Issues actively wanted")
     cover_path: str | None = None

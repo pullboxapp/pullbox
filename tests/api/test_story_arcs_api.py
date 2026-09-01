@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -10,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from pullbox.api.v1 import story_arcs as story_arcs_api
 from pullbox.models import Base
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
@@ -19,6 +21,16 @@ from pullbox.services.auth_service import AuthService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+
+
+@pytest.fixture(autouse=True)
+def _enable_manual_story_arc_creation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        story_arcs_api,
+        "get_settings",
+        lambda: SimpleNamespace(story_arc_manual_create_enabled=True),
+        raising=False,
+    )
 
 
 @pytest.fixture
@@ -155,12 +167,36 @@ async def test_story_arc_routes_require_auth_and_keep_existing_routes(
     assert existing.json()["items"] == []
 
 
+async def test_manual_create_is_unreachable_when_feature_flag_is_off(
+    client: AsyncClient,
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        story_arcs_api,
+        "get_settings",
+        lambda: SimpleNamespace(story_arc_manual_create_enabled=False),
+        raising=False,
+    )
+
+    response = await client.post(
+        "/api/v1/story-arcs",
+        json={"name": "Hidden API arc"},
+    )
+
+    assert response.status_code == 404
+    async with db_factory() as session:
+        assert await session.scalar(select(func.count(StoryArc.id))) == 0
+
+
 async def test_create_read_patch_and_safe_archive_use_optimistic_revision(
     client: AsyncClient,
     db_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     created = await _create_arc(client, "  Absolute   Power ")
     arc_id = created["id"]
+    assert created["cover_path"] is None
+    assert created["cover_url"] is None
     assert created == {
         **created,
         "name": "Absolute Power",

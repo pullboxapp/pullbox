@@ -46,7 +46,12 @@ async def seeded_series_ui_data(sec_db) -> None:  # type: ignore[no-untyped-def]
 
         dc = Publisher(name="DC Comics")
         image = Publisher(name="Image Comics")
-        root = LibraryRoot(name="UI Test Library", path="/tmp/series-ui", enabled=True)
+        root = LibraryRoot(
+            name="UI Test Library",
+            path="/tmp/series-ui",
+            enabled=True,
+            is_default_managed_destination=True,
+        )
         session.add_all([dc, image, root])
         await session.flush()
 
@@ -817,6 +822,100 @@ class TestSeriesRouteContracts:
         assert 'data-testid="add-series-root-select"' not in response.text
         assert 'data-testid="add-series-search-on-add-control"' not in response.text
         assert '<select x-model="libraryRootId"' not in response.text
+
+    async def test_add_series_uses_only_managed_roots_and_orders_default_first(
+        self,
+        authenticated_client,
+        sec_db,
+        tmp_path: Path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.library import LibraryRoot
+
+        default_path = tmp_path / "default"
+        managed_path = tmp_path / "managed"
+        reference_path = tmp_path / "reference"
+        disabled_path = tmp_path / "disabled"
+        default_path.mkdir()
+        managed_path.mkdir()
+        reference_path.mkdir()
+        disabled_path.mkdir()
+        async with sec_db() as session:
+            default = LibraryRoot(
+                name="Zulu default managed",
+                path=str(default_path),
+                enabled=True,
+                allow_managed_writes=True,
+                is_default_managed_destination=True,
+            )
+            managed = LibraryRoot(
+                name="Alpha managed",
+                path=str(managed_path),
+                enabled=True,
+                allow_managed_writes=True,
+            )
+            reference_only = LibraryRoot(
+                name="Reference only",
+                path=str(reference_path),
+                enabled=True,
+                allow_referenced_registrations=True,
+                allow_managed_writes=False,
+            )
+            disabled = LibraryRoot(
+                name="Disabled managed",
+                path=str(disabled_path),
+                enabled=False,
+                allow_managed_writes=True,
+            )
+            offline = LibraryRoot(
+                name="Offline managed",
+                path=str(tmp_path / "offline"),
+                enabled=True,
+                allow_managed_writes=True,
+            )
+            session.add_all([default, managed, reference_only, disabled, offline])
+            await session.commit()
+            default_id = default.id
+            managed_id = managed.id
+            reference_only_id = reference_only.id
+            disabled_id = disabled.id
+            offline_id = offline.id
+
+        response = await authenticated_client.get("/series/add")
+
+        assert response.status_code == 200
+        assert f"libraryRootId: {default_id}" in response.text
+        root_paths = re.search(r"rootPaths: \{(.*?)\n    \},", response.text, re.S)
+        assert root_paths is not None
+        rendered = root_paths.group(1)
+        assert rendered.index(f"{default_id}:") < rendered.index(f"{managed_id}:")
+        assert f"{reference_only_id}:" not in rendered
+        assert f"{disabled_id}:" not in rendered
+        assert f"{offline_id}:" not in rendered
+
+    async def test_add_series_does_not_fall_back_when_no_managed_default_exists(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.library import LibraryRoot
+
+        async with sec_db() as session:
+            session.add(
+                LibraryRoot(
+                    name="Managed but not default",
+                    path="/tmp/series-selector-no-default",
+                    enabled=True,
+                    allow_managed_writes=True,
+                    is_default_managed_destination=False,
+                )
+            )
+            await session.commit()
+
+        response = await authenticated_client.get("/series/add")
+
+        assert response.status_code == 200
+        assert "libraryRootId: null" in response.text
+        assert "/tmp/series-selector-no-default" not in response.text
 
     async def test_add_series_search_results_return_bundle_with_oob_header_and_footer(
         self,

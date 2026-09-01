@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.config import get_settings
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
@@ -48,6 +49,7 @@ from pullbox.services.story_arc_service import (
 from pullbox.ui import story_arc_catalog_routes
 from pullbox.ui.story_arc_local_issue_search import search_story_arc_local_issues
 from pullbox.ui.story_arc_presenters import (
+    StoryArcPlacementRootView,
     load_story_arc_detail,
     load_story_arc_list_page,
     load_story_arc_placement_context,
@@ -65,6 +67,7 @@ _build_context: _BuildContext | None = None
 _story_arc_service = StoryArcService()
 _placement_service = StoryArcPlacementSyncService()
 _managed_reorder_service = StoryArcManagedReorderService()
+_STORY_ARC_VIEW_MODES = {"list", "grid"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +192,12 @@ def _list_url(*, error: str | None = None) -> str:
     return f"/story-arcs?{urlencode({'error': error})}" if error is not None else "/story-arcs"
 
 
+def _add_url(*, error: str | None = None) -> str:
+    return (
+        f"/story-arcs/add?{urlencode({'error': error})}" if error is not None else "/story-arcs/add"
+    )
+
+
 def _error_code(
     exc: StoryArcServiceError | StoryArcPlacementIntegrationError | IntegrityError,
 ) -> str:
@@ -213,6 +222,14 @@ def _optional_issue_id(value: str) -> int | None:
     if issue_id < 1:
         raise StoryArcValidationError("Issue ID must be a positive integer")
     return issue_id
+
+
+def resolve_story_arc_view(request: Request, view_mode: str | None) -> str:
+    """Resolve the active registry view from the query or saved preference."""
+    if view_mode in _STORY_ARC_VIEW_MODES:
+        return view_mode
+    cookie_view = request.cookies.get("story_arc_view")
+    return cookie_view if cookie_view in _STORY_ARC_VIEW_MODES else "list"
 
 
 def _placement_policy_input(
@@ -259,6 +276,7 @@ async def _render_story_arc_detail(
     story_arc_id: int,
     request: Request,
     username: str,
+    user_id: int,
     session: DbSession,
     page: int,
     per_page: int,
@@ -284,6 +302,7 @@ async def _render_story_arc_detail(
         story_arc_id=story_arc_id,
         page=page,
         per_page=per_page,
+        user_id=user_id,
     )
     if detail is None:
         raise HTTPException(status_code=404, detail="Story arc not found")
@@ -348,44 +367,108 @@ async def story_arc_list(
     user: AuthenticatedUser,
     session: DbSession,
     q: Annotated[str | None, Query(max_length=500)] = None,
-    lifecycle: Annotated[StoryArcLifecycle | None, Query()] = None,
-    monitored: Annotated[bool | None, Query()] = None,
+    lifecycle: Annotated[str | None, Query(max_length=20)] = None,
+    monitored: Annotated[str | None, Query(max_length=5)] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 25,
+    view_mode: str | None = Query(None),
     error: str | None = Query(None),
 ) -> Response:
     """Render a bounded, searchable Story Arc registry."""
+    active_view = resolve_story_arc_view(request, view_mode)
+    lifecycle_value = (
+        StoryArcLifecycle(lifecycle)
+        if lifecycle in {item.value for item in StoryArcLifecycle}
+        else None
+    )
+    monitored_value = monitored == "true" if monitored in {"true", "false"} else None
     result = await load_story_arc_list_page(
         session,
         q=q,
-        lifecycle=lifecycle,
-        monitored=monitored,
+        lifecycle=lifecycle_value,
+        monitored=monitored_value,
         page=page,
         per_page=per_page,
+        user_id=user.id,
     )
-    base_params: list[tuple[str, str | int]] = [("per_page", per_page)]
+    base_params: list[tuple[str, str | int]] = [
+        ("per_page", per_page),
+        ("view_mode", active_view),
+    ]
     if q is not None and q.strip():
         base_params.append(("q", q.strip()))
-    if lifecycle is not None:
-        base_params.append(("lifecycle", lifecycle.value))
-    if monitored is not None:
-        base_params.append(("monitored", str(monitored).lower()))
-    placement_roots, placement_roots_truncated = await load_story_arc_placement_roots(
-        session, selected_root_id=None
-    )
+    if lifecycle_value is not None:
+        base_params.append(("lifecycle", lifecycle_value.value))
+    if monitored_value is not None:
+        base_params.append(("monitored", str(monitored_value).lower()))
     context = _ctx(
         request,
         user,
         story_arc_page=result,
         query=q or "",
-        lifecycle_filter=lifecycle.value if lifecycle is not None else "",
-        monitored_filter=(str(monitored).lower() if monitored is not None else ""),
+        lifecycle_filter=lifecycle_value.value if lifecycle_value is not None else "",
+        monitored_filter=(str(monitored_value).lower() if monitored_value is not None else ""),
+        active_view=active_view,
         pagination_base_url=f"/story-arcs?{urlencode(base_params)}",
         error_message=_ERROR_MESSAGES.get(error or "", ""),
+    )
+    template = (
+        "partials/story_arc_results_bundle.html"
+        if request.headers.get("HX-Request")
+        else "pages/story_arcs.html"
+    )
+    response = _templates().TemplateResponse(request, template, context)
+    if view_mode in _STORY_ARC_VIEW_MODES:
+        response.set_cookie(
+            "story_arc_view",
+            active_view,
+            max_age=31_536_000,
+            path="/",
+            samesite="lax",
+        )
+    return response
+
+
+@router.get("/story-arcs/add", response_class=HTMLResponse, include_in_schema=False)
+async def story_arc_add(
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    q: Annotated[str, Query(max_length=500)] = "",
+    page: Annotated[int, Query(ge=1, le=100)] = 1,
+    error: str | None = Query(None),
+) -> Response:
+    """Render provider-first Story Arc discovery on its own add page."""
+    manual_create_enabled = get_settings().story_arc_manual_create_enabled
+    placement_roots: tuple[StoryArcPlacementRootView, ...] = ()
+    placement_roots_truncated = False
+    if manual_create_enabled:
+        placement_roots, placement_roots_truncated = await load_story_arc_placement_roots(
+            session, selected_root_id=None
+        )
+    search_context = await story_arc_catalog_routes.load_story_arc_catalog_search_context(
+        session,
+        q=q,
+        page=page,
+        base_url="/story-arcs/add",
+    )
+    search_context["error_message"] = _ERROR_MESSAGES.get(error or "", "") or str(
+        search_context["error_message"]
+    )
+    context = _ctx(
+        request,
+        user,
+        **search_context,
         placement_roots=placement_roots,
         placement_roots_truncated=placement_roots_truncated,
+        story_arc_manual_create_enabled=manual_create_enabled,
     )
-    return _templates().TemplateResponse(request, "pages/story_arcs.html", context)
+    template = (
+        "partials/story_arc_add_results_bundle.html"
+        if request.headers.get("HX-Request")
+        else "pages/story_arc_add.html"
+    )
+    return _templates().TemplateResponse(request, template, context)
 
 
 @router.post("/story-arcs", include_in_schema=False)
@@ -410,6 +493,8 @@ async def story_arc_create(
     synchronize: bool = Form(False),
 ) -> Response:
     """Create an empty arc with an optional validated, source-preserving storage policy."""
+    if not get_settings().story_arc_manual_create_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         if filename_style == "original":
             file_template = ORIGINAL_STORY_ARC_FILE_TEMPLATE
@@ -443,7 +528,7 @@ async def story_arc_create(
         await session.commit()
     except (StoryArcServiceError, StoryArcPlacementIntegrationError, IntegrityError) as exc:
         await session.rollback()
-        return _redirect(request, _list_url(error=_error_code(exc)))
+        return _redirect(request, _add_url(error=_error_code(exc)))
     return _redirect(request, _detail_url(story_arc_id, notice="created"))
 
 
@@ -464,6 +549,7 @@ async def story_arc_detail(
         story_arc_id=story_arc_id,
         request=request,
         username=user.username,
+        user_id=user.id,
         session=session,
         page=page,
         per_page=per_page,
@@ -493,7 +579,6 @@ async def story_arc_placement_policy_preview(
     synchronize: bool = Form(False),
 ) -> Response:
     """Render a bounded candidate preview without persisting policy or files."""
-    username = user.username
     del expected_revision  # Preview is deliberately write-free; save enforces the revision.
     try:
         proposal = _placement_policy_input(
@@ -508,7 +593,8 @@ async def story_arc_placement_policy_preview(
         return await _render_story_arc_detail(
             story_arc_id=story_arc_id,
             request=request,
-            username=username,
+            username=user.username,
+            user_id=user.id,
             session=session,
             page=1,
             per_page=25,
@@ -521,7 +607,8 @@ async def story_arc_placement_policy_preview(
         return await _render_story_arc_detail(
             story_arc_id=story_arc_id,
             request=request,
-            username=username,
+            username=user.username,
+            user_id=user.id,
             session=session,
             page=1,
             per_page=25,
@@ -811,6 +898,7 @@ async def story_arc_move_membership(
             story_arc_id=story_arc_id,
             request=request,
             username=user.username,
+            user_id=user.id,
             session=session,
             page=return_page or 1,
             per_page=return_per_page or 25,
@@ -846,6 +934,7 @@ async def story_arc_move_membership(
                     story_arc_id=story_arc_id,
                     request=request,
                     username=user.username,
+                    user_id=user.id,
                     session=session,
                     page=return_page or 1,
                     per_page=return_per_page or 25,

@@ -90,6 +90,11 @@ class ImportServiceJobLifecycleMixin:
                 return "rollback_pending"
             reloaded = await session.get(ImportJob, job_id)
             if reloaded is not None:
+                if (
+                    reloaded.status == ImportJobStatus.FAILED
+                    and dict(reloaded.progress_snapshot or {}).get("mode") == "rollback"
+                ):
+                    return "rollback_incomplete"
                 self._log_job_deleted(job_id, reloaded.status)
                 await session.delete(reloaded)
                 await session.flush()

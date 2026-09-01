@@ -214,6 +214,10 @@ async def test_run_import_comicinfo_enrichment_rewrites_pending_library_file(
         issue = await session.get(Issue, issue_id)
         assert imported_file is not None
         assert issue is not None
+        assert imported_file.library_file_id is not None
+        library_file = await session.get(LibraryFile, imported_file.library_file_id)
+        assert library_file is not None
+        assert library_file.has_comicinfo is True
         assert imported_file.diagnostics["comicinfo_enrichment"]["status"] == "complete"
         assert imported_file.diagnostics["comicinfo_enrichment"]["library_file_id"] is not None
         assert issue.description == "Refreshed ComicVine summary."

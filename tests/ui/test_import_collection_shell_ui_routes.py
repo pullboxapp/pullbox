@@ -728,6 +728,32 @@ class TestImportShellRouteContracts:
         assert "!this.levelFilter &&" in viewer_controller
         assert "!this.searchQuery &&" in viewer_controller
 
+    async def test_import_log_viewer_retains_only_a_bounded_recent_window(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        import_log_viewer_template = Path(
+            "src/pullbox/ui/templates/components/import_log_viewer.html"
+        ).read_text()
+        start = script.index("function importJobLogViewerData")
+        end = script.index("function importProgressData")
+        viewer_controller = script[start:end]
+
+        assert "var _MAX_RETAINED_ENTRIES" in viewer_controller
+        assert "_trimRetainedEntries: function () {" in viewer_controller
+        assert "this.entries.splice(0, overflow);" in viewer_controller
+        assert '"&order=desc"' in viewer_controller
+        assert "items.slice().reverse()" in viewer_controller
+        assert "while (true)" not in viewer_controller
+        assert '" recent of " + this.totalCount + " entries"' in viewer_controller
+        assert 'pagination_status_text_expr="footerStatusText"' in import_log_viewer_template
+
+    async def test_shared_log_viewer_keys_namespace_persisted_and_stream_rows(self) -> None:
+        template = Path("src/pullbox/ui/templates/components/log_viewer.html").read_text()
+
+        assert ':key="entry.id || idx"' not in template
+        assert "'persisted:' + entry.id" in template
+        assert "'stream:' + entry._streamToken" in template
+        assert "'synthetic:' + idx" in template
+
     async def test_import_review_shell_reprocesses_htmx_after_morph_swaps(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
         review_template = Path(
@@ -806,12 +832,36 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-collection-source-browse"' in response.text
         assert "Collection imports preserve source files." in response.text
         assert "Files and folders in the selected source stay untouched" in response.text
+        assert 'data-testid="import-mylar-path-section"' in response.text
+        assert 'data-testid="import-mylar-path-analyze"' in response.text
+        assert 'data-testid="import-mylar-path-mapping-row"' in response.text
+        assert 'data-testid="import-mylar-path-add"' in response.text
+        assert 'data-testid="import-mylar-path-confirm"' in response.text
+        assert 'data-testid="import-mylar-path-total"' in response.text
+        assert 'data-testid="import-mylar-path-unmapped"' in response.text
+        assert 'data-testid="import-mylar-path-invalid"' in response.text
+        assert 'data-testid="import-mylar-path-identity-groups"' in response.text
+        assert 'data-testid="import-mylar-path-mapping-blockers"' in response.text
+        assert 'data-testid="import-mylar-path-mapping-examples"' in response.text
+        assert 'data-testid="import-mylar-path-warnings"' in response.text
+        assert "Path stored in Mylar" in response.text
+        assert "Path visible inside Pullbox" in response.text
         assert 'data-testid="import-file-handling-section"' in response.text
         assert 'data-testid="import-file-handling-managed"' in response.text
         assert 'data-testid="import-file-handling-in-place"' in response.text
         assert "Copy into Pullbox library" in response.text
         assert "Keep files in place" in response.text
         assert "rename, convert, rewrite metadata, or change permissions on them." in response.text
+        assert 'data-testid="import-managed-library-root"' in response.text
+        assert 'data-testid="import-library-roots-manage"' in response.text
+        assert 'data-testid="import-library-roots-refresh"' in response.text
+        assert 'href="/settings?tab=media"' in response.text
+        assert "Managed destination" in response.text
+        assert "Preferred destination for future files" in response.text
+        assert (
+            "Each existing file remains associated with its containing library root"
+            in response.text
+        )
         assert 'data-testid="import-collection-layout-section"' in response.text
         assert 'data-testid="import-layout-auto"' in response.text
         assert 'data-testid="import-layout-series-folders"' in response.text
@@ -854,15 +904,30 @@ class TestImportShellRouteContracts:
         assert "source_layout: this.sourceLayoutPayload()" in source_controller
         assert 'fileHandlingMode: "managed_copy"' in source_controller
         assert "file_handling_mode: this.fileHandlingMode" in source_controller
+        assert "root.is_default_managed_destination" in source_controller
+        assert "root.allow_managed_writes" in source_controller
+        assert "root.allow_referenced_registrations" in source_controller
+        assert 'this.fileHandlingMode === "managed_copy"' in source_controller
         assert 'this.fileHandlingMode === "in_place"' in source_controller
         assert "this.layoutPreview.can_keep_in_place" in source_controller
         assert "futureLayoutRequested: false" in source_controller
         assert "this.layoutPreview.can_apply_future_policy" in source_controller
         assert "future_layout_requested: this.futureLayoutRequested" in source_controller
         assert "future_root_policy: this.futureLayoutRequested" in source_controller
-        assert "target_library_root_id: this.futureLayoutRequested" in source_controller
+        assert "target_library_root_id: this.targetLibraryRootId" in source_controller
+        assert "this.targetLibraryRootId = null;" in source_controller
         assert '"/api/v1/config/library-roots/"' in source_controller
+        assert 'fetch("/api/v1/config/library-roots"' in source_controller
+        assert "refreshImportLibraryRoots: async function" in source_controller
         assert 'fetch("/api/v1/import/story-arc-preview"' in source_controller
+        assert 'fetch("/api/v1/import/mylar-path-preview"' in source_controller
+        assert "mylarPathPreviewRequestId" in source_controller
+        assert "clearMylarPathPreview: function" in source_controller
+        assert "mylarPathMappingChanged: function" in source_controller
+        assert "this.mylarPathPreview.can_confirm" in source_controller
+        assert "this.mylarPathPreview.requires_confirmation" in source_controller
+        assert 'mylar3_path_map: this.sourceType === "mylar3"' in source_controller
+        assert 'mylar3_path_map_confirmed: this.sourceType === "mylar3"' in source_controller
         assert "storyArcImportRequested: false" in source_controller
         assert "storyArcMaterializationRequested: false" in source_controller
         assert "story_arc_import_requested: this.storyArcImportRequested" in source_controller
@@ -870,6 +935,21 @@ class TestImportShellRouteContracts:
             "story_arc_materialization_requested: this.storyArcMaterializationRequested"
             in source_controller
         )
+
+    async def test_split_series_review_requires_future_destination_without_relocation(self) -> None:
+        template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = script.index("function importReviewData")
+        end = script.index("function importResultsData", start)
+        review_controller = script[start:end]
+
+        assert 'data-testid="import-review-split-series"' in template
+        assert 'data-testid="import-review-split-series-item"' in template
+        assert 'data-testid="import-review-preferred-root"' in template
+        assert "Existing files remain in place" in template
+        assert "splitSeriesRequiresPreferredRoot" in review_controller
+        assert "hasRequiredPreferredRoot" in review_controller
+        assert "target_library_root_id: this.preferredRootId" in review_controller
 
     async def test_import_collection_exposes_stable_step_mounts(
         self,
@@ -941,6 +1021,38 @@ class TestImportShellRouteContracts:
         assert "resumeStep: 4" in response.text
         assert f"resumeJobId: {job_id}" in response.text
         assert "resumeJobStatus: &#34;importing&#34;" in response.text
+
+    async def test_import_collection_resumes_preparation_stall_from_import_snapshot(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+
+        async with sec_db() as session:
+            job = ImportJob(
+                source_path="/tmp/import-preparation-stall",
+                source_type=ImportSourceType.FILESYSTEM,
+                status=ImportJobStatus.STALLED,
+                progress_snapshot={
+                    "mode": "import",
+                    "phase": "queued",
+                    "progress": 0,
+                    "message": "Import stalled because the database was busy.",
+                },
+            )
+            session.add(job)
+            await session.commit()
+            job_id = job.id
+
+        response = await authenticated_client.get(
+            f"/import?tab=collection&resume_job_id={job_id}&resume_step=4"
+        )
+
+        assert response.status_code == 200
+        assert "resumeStep: 4" in response.text
+        assert f"resumeJobId: {job_id}" in response.text
+        assert "resumeJobStatus: &#34;stalled&#34;" in response.text
 
     async def test_import_tabs_preserve_active_matching_job_when_returning_to_collection(
         self,
@@ -1030,8 +1142,10 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-progress-current-file-stage"' in response.text
         assert 'data-testid="import-progress-current-file-detail"' in response.text
         assert "Current item" in response.text
-        assert 'data-testid="import-progress-recent-log"' in response.text
-        assert 'data-log-viewer-contract="v1"' in response.text
+        assert 'data-testid="import-progress-recent-log"' not in response.text
+        assert 'data-log-viewer-contract="v1"' not in response.text
+        assert 'data-testid="import-progress-log-download"' in response.text
+        assert f'href="/api/v1/import/{job_id}/logs/download"' in response.text
 
     async def test_import_progress_partial_hydrates_review_snapshot(
         self,
@@ -1114,7 +1228,8 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         assert 'data-testid="import-progress-view-history"' in response.text
-        assert "Rollback log" in response.text
+        assert 'data-testid="import-progress-log-download"' in response.text
+        assert "Rollback log" not in response.text
 
     async def test_import_results_partial_restores_collection_footer_dock(
         self,
@@ -1534,6 +1649,35 @@ class TestImportShellRouteContracts:
         assert "Mylar path review" in response.text
         assert "The mapped Mylar comic folder is not available to Pullbox." in response.text
         assert "Correct the Mylar path mapping and retry this import." in response.text
+
+    async def test_import_review_repeats_confirmed_mylar_mapping_snapshot(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportJob, ImportSourceType
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            job = await session.get(ImportJob, job_id)
+            assert job is not None
+            job.source_type = ImportSourceType.MYLAR3
+            job.mylar3_path_map = {
+                "/books/current": "/comics/current",
+                "/books/archive": "/comics/archive",
+            }
+            job.mylar3_path_map_confirmed = True
+            await session.commit()
+
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+
+        assert response.status_code == 200
+        assert 'data-testid="import-review-mylar-path-snapshot"' in response.text
+        assert "Confirmed Mylar path mapping" in response.text
+        assert "/books/current" in response.text
+        assert "/comics/current" in response.text
+        assert "/books/archive" in response.text
+        assert "/comics/archive" in response.text
 
     async def test_import_review_partial_renders_matched_file_target_tables(
         self,

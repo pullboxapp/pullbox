@@ -68,6 +68,31 @@ class TestSeriesPath:
         assert series.library_root_id == root.id
         assert series.library_root is root
 
+    async def test_series_preferred_library_root_relationship(self, db_session) -> None:
+        """A series can choose a future managed destination independently."""
+        current_root = LibraryRoot(name="Existing", path="/existing", enabled=True)
+        preferred_root = LibraryRoot(name="Future", path="/future", enabled=True)
+        db_session.add_all([current_root, preferred_root])
+        await db_session.flush()
+
+        series = Series(
+            title="Saga",
+            sort_title="Saga",
+            path="/existing/Saga (2012)",
+            library_root_id=current_root.id,
+            preferred_library_root_id=preferred_root.id,
+            status=SeriesStatus.CONTINUING,
+            issue_count=0,
+        )
+        db_session.add(series)
+        await db_session.flush()
+
+        assert series.library_root is current_root
+        assert series.preferred_library_root is preferred_root
+
+        await db_session.refresh(preferred_root, attribute_names=["preferred_series"])
+        assert preferred_root.preferred_series == [series]
+
     async def test_library_root_series_backref(self, db_session) -> None:
         """LibraryRoot.series returns all series in that root."""
         root = LibraryRoot(name="Comics", path="/comics", enabled=True)

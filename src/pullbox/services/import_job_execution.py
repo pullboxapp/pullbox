@@ -82,6 +82,11 @@ from pullbox.services.import_job_execution_types import (
 from pullbox.services.import_job_execution_types import (
     ExecutionItemPlan as _ExecutionItemPlan,
 )
+from pullbox.services.import_managed_copy_preflight import (
+    ManagedCopyPreflightError,
+    reopen_review_after_managed_copy_preflight_failure,
+    validate_managed_copy_preflight,
+)
 from pullbox.services.import_progress_runtime import (
     ImportProgressSettings,
     current_item_payload,
@@ -237,6 +242,30 @@ async def execute_import_job(
     if loaded_job is None:
         raise NotFoundError("ImportJob", job_id)
     job = loaded_job
+
+    try:
+        await validate_managed_copy_preflight(session, job, stage="execution")
+    except ManagedCopyPreflightError as exc:
+        await reopen_review_after_managed_copy_preflight_failure(session, job, exc)
+        capacity = exc.snapshot
+        await log_event(
+            session,
+            job_id,
+            "ERROR",
+            "managed_copy_preflight_blocked",
+            message=exc.message,
+            reason=exc.reason.value,
+            target_library_root_id=(
+                capacity.target_library_root_id
+                if capacity is not None
+                else job.target_library_root_id
+            ),
+            selected_source_bytes=(capacity.selected_source_bytes if capacity else None),
+            reserve_bytes=(capacity.reserve_bytes if capacity else None),
+            required_bytes=(capacity.required_bytes if capacity else None),
+            free_bytes=(capacity.free_bytes if capacity else None),
+        )
+        return
 
     if job.import_started_at is None:
         job.import_started_at = datetime.now(UTC)
@@ -478,6 +507,7 @@ async def execute_import_job(
                         job,
                         item,
                         process_series_files=process_series_files,
+                        record_action=record_action,
                         log_event=log_event,
                         report_file_progress=report_file_progress,
                     )

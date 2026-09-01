@@ -18,6 +18,14 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.issue import Issue
+from pullbox.services.import_managed_copy_preflight import (
+    ManagedCopyPreflightError,
+    reopen_review_after_managed_copy_preflight_failure,
+    validate_managed_copy_preflight,
+)
+from pullbox.services.import_split_series import (
+    require_preferred_managed_root_for_selected_split_series,
+)
 from pullbox.services.import_story_arc_review import confirm_import_story_arcs
 from pullbox.services.import_workflow_state import initialize_progress_snapshot
 
@@ -85,6 +93,16 @@ async def confirm_import_job(
 
     items = await _load_confirmed_series(session, job_id, request)
 
+    await require_preferred_managed_root_for_selected_split_series(
+        session,
+        job,
+        preferred_library_root_id=(
+            request.target_library_root_id
+            if request.target_library_root_id is not None
+            else job.target_library_root_id
+        ),
+    )
+
     for item in items:
         item.status = ImportSeriesStatus.CONFIRMED
         item.selected_for_import = False
@@ -121,9 +139,19 @@ async def confirm_import_job(
             "before importing"
         )
 
+    try:
+        capacity_snapshot = await validate_managed_copy_preflight(
+            session,
+            job,
+            stage="confirmation",
+        )
+    except ManagedCopyPreflightError as exc:
+        await reopen_review_after_managed_copy_preflight_failure(session, job, exc)
+        raise
+
     job.status = ImportJobStatus.IMPORTING
     job.control_request = ImportControlRequest.NONE
-    job.progress_snapshot = initialize_progress_snapshot(
+    progress_snapshot = initialize_progress_snapshot(
         job,
         mode="import",
         phase="queued",
@@ -131,6 +159,9 @@ async def confirm_import_job(
         message="Preparing the selected import items...",
         status=ImportJobStatus.IMPORTING,
     )
+    if capacity_snapshot is not None:
+        progress_snapshot["managed_copy_capacity"] = capacity_snapshot.as_dict()
+    job.progress_snapshot = progress_snapshot
     await session.flush()
 
     await log_event(

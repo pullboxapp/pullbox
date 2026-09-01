@@ -168,7 +168,10 @@ def scale_shape(profile: ImportTargetScaleProfile) -> ImportTargetScaleShape:
 def build_target_workload(config: ImportTargetConfig) -> ImportTargetWorkload:
     """Map a complete harness configuration to one shell-free child command."""
     failures: list[str] = []
-    if config.backend is ImportTargetBackend.POSTGRESQL:
+    if (
+        config.backend is ImportTargetBackend.POSTGRESQL
+        and config.source_lane is not ImportTargetSourceLane.METADATA
+    ):
         failures.append("postgresql_source_lane_not_instrumented")
     if config.injection_point != "none":
         failures.append("cancel_restart_injection_not_instrumented")
@@ -190,6 +193,13 @@ def build_target_workload(config: ImportTargetConfig) -> ImportTargetWorkload:
             "--story-arc-count",
             str(shape.story_arc_count),
         )
+        if config.backend is ImportTargetBackend.POSTGRESQL:
+            command = (
+                *command,
+                "--backend",
+                "postgresql",
+                "--reset-dedicated-database",
+            )
     elif config.source_lane is ImportTargetSourceLane.FOLDER:
         command = ("scripts/benchmark_import_scan.py", *common)
     elif config.source_lane is ImportTargetSourceLane.MYLAR3:
@@ -269,6 +279,13 @@ def run_target_command_sample(
 
 
 _NUMERIC_FIELDS = (
+    "represented_file_count",
+    "series_count",
+    "story_arc_count",
+    "confirmed_arc_count",
+    "final_matched_series_count",
+    "final_no_match_file_count",
+    "final_confirmed_arc_count",
     "elapsed_ms",
     "total_elapsed_ms",
     "seed_elapsed_ms",
@@ -301,6 +318,21 @@ _NUMERIC_FIELDS = (
     "rollback_recovery_ms",
     "orphan_discrepancy_count",
     "source_mutation_count",
+)
+
+_PARITY_SEMANTIC_METRICS = (
+    "represented_file_count",
+    "series_count",
+    "story_arc_count",
+    "confirmed_arc_count",
+    "final_matched_series_count",
+    "final_no_match_file_count",
+    "final_confirmed_arc_count",
+    "archive_payload_count",
+    "provider_call_count",
+    "filesystem_scan_count",
+    "confirm_select_count",
+    "rollback_select_count",
 )
 
 
@@ -633,3 +665,93 @@ def assert_comparable_target_reports(
     for key, left_values, right_values in comparisons:
         if left_values.get(key) != right_values.get(key):
             raise ValueError(f"target reports differ in {key}")
+
+
+def _report_mapping(report: Mapping[str, object], key: str) -> Mapping[str, object]:
+    value = report.get(key)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"target report is missing {key}")
+    return value
+
+
+def _metric_median(report: Mapping[str, object], metric: str) -> float | None:
+    workload = _report_mapping(report, "workload")
+    metrics = workload.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return None
+    summary = metrics.get(metric)
+    if not isinstance(summary, Mapping):
+        return None
+    median = summary.get("median")
+    if isinstance(median, int | float) and not isinstance(median, bool):
+        return float(median)
+    return None
+
+
+def build_import_database_parity_report(
+    left: Mapping[str, object],
+    right: Mapping[str, object],
+) -> dict[str, object]:
+    """Compare bounded SQLite/PostgreSQL reports for semantic parity."""
+    left_settings = _report_mapping(left, "settings")
+    right_settings = _report_mapping(right, "settings")
+    backends = sorted(
+        str(value) for value in (left_settings.get("backend"), right_settings.get("backend"))
+    )
+    failures: list[str] = []
+    warnings: list[str] = []
+    if backends != ["postgresql", "sqlite"]:
+        failures.append("sqlite_and_postgresql_reports_required")
+    for key in (
+        "seed",
+        "scale_profile",
+        "source_lane",
+        "cache_state",
+        "injection_point",
+        "samples",
+    ):
+        if left_settings.get(key) != right_settings.get(key):
+            failures.append(f"setting_mismatch_{key}")
+    left_shape = _report_mapping(left, "shape")
+    right_shape = _report_mapping(right, "shape")
+    if left_shape != right_shape:
+        failures.append("target_shape_mismatch")
+    for report in (left, right):
+        settings = _report_mapping(report, "settings")
+        workload = _report_mapping(report, "workload")
+        if (
+            workload.get("samples_completed") != settings.get("samples")
+            or workload.get("failure_count") != 0
+        ):
+            failures.append("source_workload_incomplete")
+        gates = _report_mapping(report, "gate_evaluation")
+        if gates.get("passed") is not True:
+            warnings.append("source_release_gates_not_complete")
+
+    semantic_metrics: dict[str, dict[str, float | None]] = {}
+    for metric in _PARITY_SEMANTIC_METRICS:
+        left_value = _metric_median(left, metric)
+        right_value = _metric_median(right, metric)
+        semantic_metrics[metric] = {
+            str(left_settings.get("backend")): left_value,
+            str(right_settings.get("backend")): right_value,
+        }
+        if left_value is None or right_value is None:
+            failures.append(f"semantic_metric_missing_{metric}")
+        elif left_value != right_value:
+            failures.append(f"semantic_metric_mismatch_{metric}")
+    hard_failures = list(dict.fromkeys(failures))[:_MAX_FAILURES]
+    return {
+        "schema_version": TARGET_REPORT_SCHEMA_VERSION,
+        "report_kind": "import_database_parity",
+        "backends": backends,
+        "scale_profile": left_settings.get("scale_profile"),
+        "shape": {
+            key: left_shape.get(key)
+            for key in ("file_count", "series_count", "story_arc_count", "files_per_series")
+        },
+        "semantic_metrics": semantic_metrics,
+        "passed": not hard_failures,
+        "hard_failures": hard_failures,
+        "warnings": list(dict.fromkeys(warnings))[:_MAX_FAILURES],
+    }

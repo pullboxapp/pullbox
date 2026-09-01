@@ -240,10 +240,18 @@ def test_codeql_branch_probe_is_manual_fallback_with_summary() -> None:
 
 def test_ci_and_local_full_ci_enforce_v1_coverage_gate() -> None:
     ci_workflow = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
+    ci_config = _load_yaml(WORKFLOW_DIR / "ci.yml")
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     ci_local_match = re.search(r"^ci-local:.*?(?=^\S|\Z)", makefile, re.MULTILINE | re.DOTALL)
 
-    assert "--cov-fail-under=90" in ci_workflow
+    test_job = ci_config["jobs"]["test"]
+    matrix_rows = test_job["strategy"]["matrix"]["include"]
+    assert matrix_rows == [
+        {"python-version": "3.12", "coverage_fail_under": 0},
+        {"python-version": "3.13", "coverage_fail_under": 0},
+        {"python-version": "3.14", "coverage_fail_under": 90},
+    ]
+    assert '--cov-fail-under="${COVERAGE_FAIL_UNDER}"' in ci_workflow
     assert "--cov-fail-under=60" not in ci_workflow
     assert ci_local_match is not None
     assert "--cov-fail-under=90 -v" in ci_local_match.group(0)

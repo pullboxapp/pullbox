@@ -2,30 +2,48 @@
   {% if error_message %}
     <p role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 p-3 text-sm text-pb-text">{{ error_message }}</p>
   {% elif query|length < 2 %}
-    <p class="text-sm text-pb-text-sec">Enter at least two characters to search Comic Vine.</p>
+    <div data-testid="story-arc-add-empty-state" class="add-series-empty-state">
+      <p class="add-series-empty-title">Search Comic Vine</p>
+      <p class="add-series-empty-copy">Enter at least two characters to search Comic Vine and review a reading order.</p>
+    </div>
   {% elif not results %}
-    <p class="text-sm text-pb-text-sec">No matching Story Arcs. Try another name.</p>
+    <div data-testid="story-arc-add-empty-state" class="add-series-empty-state">
+      <p class="add-series-empty-title">No Comic Vine matches</p>
+      <p class="add-series-empty-copy">Try another event name or a shorter search.</p>
+    </div>
   {% else %}
     <p class="text-sm text-pb-text-sec">{{ total }} matching Story Arc{{ '' if total == 1 else 's' }}</p>
-    <ul class="divide-y divide-pb-border" aria-label="Comic Vine Story Arcs">
+    <ul class="add-series-results-list" aria-label="Comic Vine Story Arcs">
       {% for result in results %}
-        <li class="flex flex-wrap items-center justify-between gap-3 py-3">
-          <div class="min-w-0">
-            <span class="font-semibold text-pb-text">{{ result.metadata.title }}</span>
-            <p class="text-sm text-pb-text-sec">{{ result.metadata.publisher or 'Publisher unknown' }} · {{ result.metadata.declared_issue_count if result.metadata.declared_issue_count is not none else 'Unknown' }} reported members</p>
+        <li class="add-series-result-card add-series-result-card-static">
+          <div class="add-series-result-cover" aria-hidden="true">
+            <div class="add-series-result-cover-empty">
+              <svg class="h-8 w-8" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 3.75h9m-9 16.5h9M6 6.75h12A2.25 2.25 0 0120.25 9v6A2.25 2.25 0 0118 17.25H6A2.25 2.25 0 013.75 15V9A2.25 2.25 0 016 6.75z"></path>
+              </svg>
+            </div>
           </div>
-          {% if result.existing_id %}
-            <a href="/story-arcs/{{ result.existing_id }}" class="btn-secondary">Already added — open arc</a>
-          {% else %}
-            <a href="/story-arcs/catalog/{{ result.metadata.provider_id }}" class="btn-secondary" aria-label="Preview {{ result.metadata.title }}">Preview members</a>
-          {% endif %}
+          <div class="add-series-result-main">
+            <h3 class="add-series-result-title">{{ result.metadata.title }}</h3>
+            <div class="add-series-result-meta">
+              <span>{{ result.metadata.publisher or 'Publisher unknown' }}</span>
+              <span>{{ result.metadata.declared_issue_count if result.metadata.declared_issue_count is not none else 'Unknown' }} reported members</span>
+            </div>
+          </div>
+          <div class="add-series-result-actions">
+            {% if result.existing_id %}
+              <a href="/story-arcs/{{ result.existing_id }}" class="btn-secondary btn-sm">Already added — open arc</a>
+            {% else %}
+              <a href="/story-arcs/catalog/{{ result.metadata.provider_id }}" class="btn-primary btn-sm add-series-result-add" aria-label="Preview {{ result.metadata.title }}">Preview members</a>
+            {% endif %}
+          </div>
         </li>
       {% endfor %}
     </ul>
     {% if previous_url or next_url %}
       <nav aria-label="Comic Vine result pages" class="flex gap-2">
-        {% if previous_url %}<a href="{{ previous_url }}" hx-get="{{ previous_url }}" hx-target="#story-arc-catalog-results" class="btn-secondary">Previous results</a>{% endif %}
-        {% if next_url %}<a href="{{ next_url }}" hx-get="{{ next_url }}" hx-target="#story-arc-catalog-results" class="btn-secondary">Next results</a>{% endif %}
+        {% if previous_url %}<a href="{{ previous_url }}" hx-get="{{ previous_url }}" hx-target="#story-arc-add-results" hx-swap="morph:outerHTML" class="btn-secondary">Previous results</a>{% endif %}
+        {% if next_url %}<a href="{{ next_url }}" hx-get="{{ next_url }}" hx-target="#story-arc-add-results" hx-swap="morph:outerHTML" class="btn-secondary">Next results</a>{% endif %}
       </nav>
     {% endif %}
   {% endif %}

@@ -326,7 +326,30 @@ async def _run_full_pipeline(
                 series_id = fixture_series_ids.get(series_name)
                 if isinstance(series_id, int):
                     sidecar_path.write_text(json.dumps({"comicid": series_id}))
-    request = ImportJobCreate(source_path=source_path, source_type=source_type)
+    target_root = await session.scalar(
+        sa_select(LibraryRoot).where(LibraryRoot.is_default_managed_destination.is_(True)).limit(1)
+    )
+    if target_root is None:
+        target_root = await session.scalar(sa_select(LibraryRoot).order_by(LibraryRoot.id).limit(1))
+    if target_root is None:
+        source = Path(source_path)
+        test_library = source.parent / f".{source.name}-pullbox-library"
+        test_library.mkdir(parents=True, exist_ok=True)
+        target_root = LibraryRoot(
+            name="Lifecycle managed destination",
+            path=str(test_library),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        session.add(target_root)
+        await session.flush()
+    request = ImportJobCreate(
+        source_path=source_path,
+        source_type=source_type,
+        target_library_root_id=target_root.id,
+    )
     job = await svc.create_job(session, request)
     await svc.start_scan(session, job.id)
     await session.refresh(job)
@@ -1200,6 +1223,28 @@ class TestImportLeaveInPlace:
         lf = lf_result.scalars().first()
         assert lf is not None
         assert str(comics_dir) in lf.file_path
+        registered_action = (
+            await db_session.scalars(
+                sa_select(ImportJobAction).where(
+                    ImportJobAction.import_job_id == job.id,
+                    ImportJobAction.action_type == "library_file_registered",
+                )
+            )
+        ).one()
+        assert registered_action.payload["destination_signature"] == lf.source_signature
+        assert registered_action.payload["destination_signature"]["schema_version"] == 1
+        placement_action = (
+            await db_session.scalars(
+                sa_select(ImportJobAction).where(
+                    ImportJobAction.import_job_id == job.id,
+                    ImportJobAction.action_type == "library_file_placement_started",
+                )
+            )
+        ).one()
+        assert placement_action.payload["placement_completed"] is True
+        assert placement_action.payload["destination_signature"] == lf.source_signature
+        assert placement_action.payload["temp_paths"]
+        assert all(not Path(path).exists() for path in placement_action.payload["temp_paths"])
 
         # Source file preserved for source-safe collection imports
         source_files = list((source / "Batman (2016)").glob("*.cbz"))
@@ -1302,7 +1347,10 @@ class TestImportLeaveInPlace:
                 source_type=source_type,
                 file_handling_mode=ImportFileHandlingMode.IN_PLACE,
                 target_library_root_id=root.id,
-                mylar3_path_map={"/comics": str(source)},
+                mylar3_path_map=(
+                    {"/comics": str(source)} if source_type == ImportSourceType.MYLAR3 else {}
+                ),
+                mylar3_path_map_confirmed=source_type == ImportSourceType.MYLAR3,
             ),
         )
         await svc.start_scan(db_session, job.id)
@@ -2002,6 +2050,7 @@ class TestPhase1Regression:
     ) -> None:
         """Attempting to confirm a non-REVIEW job raises ValidationError."""
         svc = _make_service()
+        await _setup_comics_directory(db_session, tmp_path / "managed-library")
         request = ImportJobCreate(
             source_path=str(tmp_path), source_type=ImportSourceType.FILESYSTEM
         )
@@ -2302,6 +2351,7 @@ class TestEdgeCases:
     ) -> None:
         """Confirming non-existent series IDs → ValidationError."""
         svc = _make_service()
+        await _setup_comics_directory(db_session, tmp_path / "managed-library")
 
         dir_a = tmp_path / "a"
         dir_a.mkdir()

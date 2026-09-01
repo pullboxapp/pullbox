@@ -97,7 +97,14 @@ _DANGEROUS_CODES = frozenset(
         "unsafe_path_mapping",
     }
 )
-_OUTSIDE_ROOT_CODES = frozenset({"outside_approved_root", "source_outside_root", "outside_root"})
+_OUTSIDE_ROOT_CODES = frozenset(
+    {
+        "outside_approved_root",
+        "source_outside_root",
+        "outside_root",
+        "source_root_ambiguous",
+    }
+)
 _UNSUPPORTED_CODES = frozenset({"unsupported_file_type", "unsupported_extension"})
 _SOURCE_CHANGED_CODES = frozenset(
     {
@@ -106,6 +113,8 @@ _SOURCE_CHANGED_CODES = frozenset(
         "source_signature_missing",
         "source_signature_unsupported",
         "source_unavailable",
+        "source_root_unconfirmed",
+        "source_root_changed",
     }
 )
 

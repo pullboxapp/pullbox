@@ -7,6 +7,7 @@ import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,6 +17,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.publisher import Publisher
+from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -23,17 +26,21 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcPlacement,
     StoryArcPlacementOwnership,
+    StoryArcPlacementState,
+    StoryArcResolutionState,
     StoryArcSymlinkStyle,
 )
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from pullbox.services.story_arc_managed_reorder import StoryArcManagedReorderService
 from pullbox.services.story_arc_placement_integration import (
+    StoryArcPlacementPolicy,
     StoryArcPlacementPolicyInput,
     StoryArcPlacementPolicyMode,
     StoryArcPlacementSyncService,
 )
 from pullbox.services.story_arc_service import StoryArcService
+from pullbox.ui import story_arc_presenters, story_arc_routes
 from pullbox.ui.story_arc_presenters import _load_sync_work_summary
 
 if TYPE_CHECKING:
@@ -43,6 +50,16 @@ if TYPE_CHECKING:
 pytest_plugins = ["conftest_security"]
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-story-arc-ui")
+
+
+@pytest.fixture(autouse=True)
+def _enable_manual_story_arc_creation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        story_arc_routes,
+        "get_settings",
+        lambda: SimpleNamespace(story_arc_manual_create_enabled=True),
+        raising=False,
+    )
 
 
 def _csrf_header_for(client: AsyncClient) -> dict[str, str]:
@@ -68,6 +85,106 @@ def _copy_policy_form(
         "symlink_style": "",
         "synchronize": "true",
     }
+
+
+async def test_story_arc_root_options_keep_reference_only_current_policy_visible(
+    sec_db: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    default_path = tmp_path / "default"
+    current_path = tmp_path / "current-reference-only"
+    default_path.mkdir()
+    current_path.mkdir()
+    async with sec_db() as session:
+        default = LibraryRoot(
+            name="Default managed",
+            path=str(default_path),
+            enabled=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        current = LibraryRoot(
+            name="Current reference-only policy",
+            path=str(current_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=False,
+        )
+        offline = LibraryRoot(
+            name="Offline managed",
+            path=str(tmp_path / "offline"),
+            enabled=True,
+            allow_managed_writes=True,
+        )
+        session.add_all([default, current, offline])
+        await session.flush()
+
+        roots, truncated = await story_arc_presenters.load_story_arc_placement_roots(
+            session,
+            selected_root_id=current.id,
+        )
+
+    assert truncated is False
+    assert [root.id for root in roots] == [default.id, current.id]
+    assert roots[0].can_manage is True
+    assert roots[1].enabled is True
+    assert roots[1].can_manage is False
+    assert roots[1].can_reference is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "synchronize", "summary_label", "synchronization_label"),
+    [
+        (
+            StoryArcPlacementPolicyMode.LOGICAL,
+            False,
+            "No separate folder",
+            "No file synchronization",
+        ),
+        (StoryArcPlacementPolicyMode.COPY, True, "Copied to arc folder", "Synchronized"),
+        (StoryArcPlacementPolicyMode.COPY, False, "Copied to arc folder", "Manual"),
+        (
+            StoryArcPlacementPolicyMode.HARDLINK,
+            True,
+            "Hardlinked into arc folder",
+            "Synchronized",
+        ),
+        (
+            StoryArcPlacementPolicyMode.SYMLINK,
+            True,
+            "Symlinked into arc folder",
+            "Synchronized",
+        ),
+        (
+            StoryArcPlacementPolicyMode.REFERENCE_ONLY,
+            True,
+            "Existing files referenced",
+            "Synchronized",
+        ),
+    ],
+)
+def test_placement_policy_summary_names_the_effective_file_behavior(
+    mode: StoryArcPlacementPolicyMode,
+    synchronize: bool,
+    summary_label: str,
+    synchronization_label: str,
+) -> None:
+    view = story_arc_presenters._placement_policy_view(
+        StoryArcPlacementPolicy(
+            configured=mode is not StoryArcPlacementPolicyMode.LOGICAL,
+            revision=1,
+            mode=mode,
+            target_library_root_id=None,
+            destination_root=None,
+            folder_template="{StoryArc}",
+            file_template="{ReadingOrder:03d} - {OriginalFilename}",
+            symlink_style=None,
+            synchronize=synchronize,
+        )
+    )
+
+    assert view.summary_label == summary_label
+    assert view.synchronization_label == synchronization_label
 
 
 async def _seed_list_arcs(factory: async_sessionmaker[AsyncSession]) -> dict[str, int]:
@@ -96,6 +213,96 @@ async def _seed_list_arcs(factory: async_sessionmaker[AsyncSession]) -> dict[str
             "brainiac": brainiac.id,
             "archived": archived.id,
         }
+
+
+async def _seed_registry_metrics_arc(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: int,
+    root_path: Path,
+) -> int:
+    service = StoryArcService()
+    async with factory() as session:
+        publisher = Publisher(name="DC Comics")
+        root = LibraryRoot(name="Registry library", path=str(root_path), enabled=True)
+        series = Series(title="Registry Series", sort_title="registry series")
+        session.add_all([publisher, root, series])
+        await session.flush()
+        owned = Issue(
+            series_id=series.id,
+            issue_number=1,
+            issue_number_text="1",
+            status=IssueStatus.OWNED,
+        )
+        wanted = Issue(
+            series_id=series.id,
+            issue_number=2,
+            issue_number_text="2",
+            status=IssueStatus.WANTED,
+        )
+        session.add_all([owned, wanted])
+        await session.flush()
+        library_file = LibraryFile(
+            issue_id=owned.id,
+            library_root_id=root.id,
+            file_path=str(root_path / "Registry Series 001.cbz"),
+            file_name="Registry Series 001.cbz",
+            file_size=1024,
+            file_format=FileFormat.CBZ,
+            file_modified_at=datetime.now(UTC),
+            match_confidence=MatchConfidence.MANUAL,
+        )
+        session.add(library_file)
+        session.add(
+            IssueReaderState(
+                user_id=user_id,
+                issue_id=owned.id,
+                completed_at=datetime.now(UTC),
+                completion_updated_at=datetime.now(UTC),
+            )
+        )
+        arc = await service.create(
+            session,
+            name="Registry Event",
+            monitored=True,
+            search_missing=True,
+        )
+        arc.publisher_id = publisher.id
+        arc.comicvine_id = 31
+        arc.comicvine_url = "https://comicvine.example/story-arc/31"
+        arc.cover_url = "https://comicvine.example/story-arc/31.jpg"
+        owned_membership = await service.add_membership(
+            session,
+            arc.id,
+            issue_id=owned.id,
+            sequence_number=1,
+        )
+        await service.add_membership(
+            session,
+            arc.id,
+            issue_id=wanted.id,
+            sequence_number=2,
+        )
+        ambiguous = await service.add_membership(
+            session,
+            arc.id,
+            issue_id=None,
+            sequence_number=3,
+            source_issue_number_text="3",
+        )
+        ambiguous.resolution_state = StoryArcResolutionState.AMBIGUOUS
+        session.add(
+            StoryArcPlacement(
+                issue_story_arc_id=owned_membership.id,
+                library_file_id=library_file.id,
+                library_root_id=root.id,
+                placement_path=str(root_path / "Story Arcs" / "Registry Event 001.cbz"),
+                ownership=StoryArcPlacementOwnership.REFERENCED,
+                state=StoryArcPlacementState.FAILED,
+            )
+        )
+        await session.commit()
+        return arc.id
 
 
 async def _seed_detail_arc(factory: async_sessionmaker[AsyncSession]) -> dict[str, int]:
@@ -300,18 +507,273 @@ class TestStoryArcManagementUI:
         assert 'data-testid="story-arcs-search-input"' in response.text
         assert 'value="absolute"' in response.text
         assert 'data-testid="story-arcs-filter-form"' in response.text
-        assert 'data-testid="story-arcs-create-form"' in response.text
-        assert '<label for="story-arc-create-name"' in response.text
-        assert '<label for="story-arc-create-description"' in response.text
+        assert 'data-testid="story-arcs-registry-header"' in response.text
+        assert 'data-testid="story-arcs-registry-title"' in response.text
+        assert "STORY ARC <span>REGISTRY</span>" in response.text
+        assert 'data-testid="story-arcs-add-link"' in response.text
+        assert 'href="/story-arcs/add"' in response.text
+        assert 'data-search-field-contract="baseline-v2"' in response.text
+        assert 'data-dropdown-select-contract="v1"' in response.text
+        assert 'data-testid="story-arcs-results-body"' in response.text
+        assert 'data-testid="story-arcs-mission-control-table"' in response.text
+        assert 'data-testid="story-arcs-footer-dock"' in response.text
+        assert 'data-testid="story-arcs-create-form"' not in response.text
+        assert 'data-testid="story-arc-catalog-search"' not in response.text
         assert f'data-story-arc-id="{ids["absolute"]}"' in response.text
         assert "Absolute Power" in response.text
         assert "House of Brainiac" not in response.text
         assert "Absolute Universe" not in response.text
-        assert 'data-testid="story-arc-missing-count">1<' in response.text
+        assert re.search(r'data-testid="story-arc-review-count"[^>]*>1<', response.text)
         assert "1 result" in response.text
 
         oversized = await authenticated_client.get("/story-arcs?per_page=101")
         assert oversized.status_code == 422
+
+    async def test_registry_matches_series_owned_read_acquisition_review_and_action_contract(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        sec_user,
+        tmp_path: Path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        arc_id = await _seed_registry_metrics_arc(
+            sec_db,
+            user_id=sec_user.id,
+            root_path=tmp_path,
+        )
+
+        response = await authenticated_client.get("/story-arcs?q=Registry")
+
+        assert response.status_code == 200
+        assert '<th class="c" style="width: 92px">Status</th>' in response.text
+        assert '<th class="c" style="width: 78px">Owned</th>' in response.text
+        assert '<th style="width: 220px">Acquisition</th>' in response.text
+        assert "Needs Review" in response.text
+        assert re.search(r'data-testid="story-arc-owned-count"[^>]*>1/3<', response.text)
+        assert 'data-testid="story-arc-list-reading"' in response.text
+        assert "Read 1/1" in response.text
+        assert re.search(r'data-testid="story-arc-acquisition"[^>]*>33%<', response.text)
+        assert re.search(r'data-testid="story-arc-review-count"[^>]*>2<', response.text)
+        assert "1 ambiguous" in response.text
+        assert "1 placement problem" in response.text
+        assert f'action="/story-arcs/{arc_id}/search"' in response.text
+        assert 'data-tip="Search missing"' in response.text
+        assert f'href="/story-arcs/{arc_id}"' in response.text
+        assert "DC Comics" in response.text
+
+    async def test_registry_grid_view_persists_and_uses_story_arc_cover_contract(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        sec_user,
+        tmp_path: Path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        arc_id = await _seed_registry_metrics_arc(
+            sec_db,
+            user_id=sec_user.id,
+            root_path=tmp_path,
+        )
+
+        response = await authenticated_client.get(
+            "/story-arcs",
+            params={
+                "q": "Registry",
+                "lifecycle": "",
+                "monitored": "",
+                "per_page": "25",
+                "view_mode": "grid",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.cookies.get("story_arc_view") == "grid"
+        assert 'data-testid="story-arcs-view-toggle"' in response.text
+        assert 'data-testid="story-arcs-collector-wall-view"' in response.text
+        assert 'data-testid="story-arcs-mission-control-view"' not in response.text
+        assert f'data-story-arc-id="{arc_id}"' in response.text
+        assert 'data-testid="story-arc-grid-card"' in response.text
+        assert f'src="/api/v1/story-arcs/{arc_id}/cover?v=' in response.text
+        assert 'data-testid="story-arc-grid-reading"' in response.text
+        assert "Read 1/1" in response.text
+        assert 'data-testid="story-arc-grid-review"' in response.text
+        assert "Search" in response.text
+        assert "Open" in response.text
+
+        authenticated_client.cookies.set("story_arc_view", "grid")
+        persisted = await authenticated_client.get("/story-arcs?q=Registry")
+        assert 'data-testid="story-arcs-collector-wall-view"' in persisted.text
+
+    async def test_detail_matches_series_hero_reading_order_and_footer_contract(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        sec_user,
+        tmp_path: Path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        arc_id = await _seed_registry_metrics_arc(
+            sec_db,
+            user_id=sec_user.id,
+            root_path=tmp_path,
+        )
+
+        response = await authenticated_client.get(f"/story-arcs/{arc_id}")
+
+        assert response.status_code == 200
+        assert 'data-testid="story-arc-detail-page"' in response.text
+        assert 'class="series-domain-page space-y-4"' in response.text
+        assert 'hx-history="false"' in response.text
+        assert '<main data-testid="story-arc-detail-page"' not in response.text
+        assert 'data-testid="story-arc-detail-hero"' in response.text
+        assert 'class="detail-hero-shell"' in response.text
+        assert 'class="series-domain-hero-inner story-arc-detail-hero-inner"' in response.text
+        assert 'data-testid="story-arc-detail-cover-frame"' in response.text
+        assert f'src="/api/v1/story-arcs/{arc_id}/cover?v=' in response.text
+        assert 'data-testid="story-arc-detail-title-link"' in response.text
+        assert 'href="https://comicvine.example/story-arc/31"' in response.text
+        assert "DC Comics" in response.text
+        assert "Monitored" in response.text
+        assert 'data-testid="story-arc-detail-meta-grid"' in response.text
+        assert "Source" in response.text
+        assert "ComicVine" in response.text
+        assert "Arc files" in response.text
+        assert 'data-testid="story-arc-arc-files-summary"' in response.text
+        assert "No separate folder" in response.text
+        assert "No file synchronization" in response.text
+        assert 'data-testid="story-arc-detail-hero-actions-panel"' in response.text
+        assert (
+            'class="series-domain-actions-panel series-domain-actions-panel-wide"' in response.text
+        )
+        assert 'data-testid="story-arc-action-monitor-control"' in response.text
+        assert 'data-testid="story-arc-action-search-form"' in response.text
+        assert 'class="series-domain-action-form"' in response.text
+        assert 'data-testid="story-arc-action-search"' in response.text
+        assert 'data-testid="story-arc-action-provider-review"' in response.text
+        assert 'data-testid="story-arc-action-archive"' in response.text
+        assert 'data-testid="story-arc-detail-reading-order-section"' in response.text
+        assert 'class="series-domain-section-card series-domain-issues-card"' in response.text
+        assert 'data-testid="story-arc-reading-order-summary"' in response.text
+        assert "3 total" in response.text
+        assert "1 owned" in response.text
+        assert "Read 1/1" in response.text
+        assert "2 review" in response.text
+        assert 'data-testid="story-arc-reading-order-progress"' in response.text
+        assert 'data-testid="story-arc-reading-order-table"' in response.text
+        assert "Order" in response.text
+        assert "Issue" in response.text
+        assert "Reading" in response.text
+        assert "Status" in response.text
+        assert "Actions" in response.text
+        assert 'data-status-kind="issue" data-status-value="owned"' in response.text
+        assert 'data-status-kind="issue" data-status-value="wanted"' in response.text
+        assert 'data-status-kind="match" data-status-value="ambiguous"' in response.text
+        assert 'data-tip="Open issue"' in response.text
+        assert "Open issue / manual search" not in response.text
+        assert 'data-testid="story-arc-membership-review-toggle-' in response.text
+        assert "Find an issue in this library" in response.text
+        assert 'data-testid="story-arc-detail-footer-dock"' in response.text
+        assert "acquisition" in response.text
+        assert "33%" in response.text
+        assert "owned" in response.text
+        assert "1/3" in response.text
+        assert "review" in response.text
+        assert "cvid" in response.text
+        assert "31" in response.text
+        assert 'data-testid="story-arc-edit-form"' in response.text
+        assert 'data-testid="story-arc-add-membership-form"' in response.text
+
+        input_css = Path("src/pullbox/ui/static/css/input.css").read_text(encoding="utf-8")
+        assert ".series-domain-actions-panel-wide" in input_css
+        assert "min-width: 18rem;" in input_css
+        assert ".story-arc-detail-hero-inner" in input_css
+        assert "grid-template-columns: 130px minmax(0, 1fr) minmax(18rem, 19rem);" in input_css
+        assert ".series-domain-action-form" in input_css
+
+    async def test_detail_batches_reader_state_queries_at_the_supported_limit(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async with sec_db() as session:
+            arc = StoryArc(name="Large reading order", normalized_name="large reading order")
+            series = Series(title="Batch Series", sort_title="batch series")
+            session.add_all([arc, series])
+            await session.flush()
+            issues = [
+                Issue(
+                    series_id=series.id,
+                    issue_number=index,
+                    issue_number_text=str(index),
+                    status=IssueStatus.WANTED,
+                )
+                for index in range(1, 52)
+            ]
+            session.add_all(issues)
+            await session.flush()
+            session.add_all(
+                IssueStoryArc(
+                    story_arc_id=arc.id,
+                    issue_id=issue.id,
+                    sequence_number=index,
+                    source_ordinal=index,
+                    resolution_state=StoryArcResolutionState.RESOLVED,
+                )
+                for index, issue in enumerate(issues, start=1)
+            )
+            await session.commit()
+            arc_id = arc.id
+
+        original_loader = story_arc_presenters.load_visible_issue_states
+        batch_sizes: list[int] = []
+
+        async def _recording_loader(session, *, user_id: int, issue_ids: tuple[int, ...]):
+            batch_sizes.append(len(issue_ids))
+            return await original_loader(session, user_id=user_id, issue_ids=issue_ids)
+
+        monkeypatch.setattr(story_arc_presenters, "load_visible_issue_states", _recording_loader)
+
+        response = await authenticated_client.get(
+            f"/story-arcs/{arc_id}",
+            params={"per_page": 100},
+        )
+
+        assert response.status_code == 200
+        assert batch_sizes == [50, 1]
+        assert "51 total" in response.text
+
+    async def test_manual_creation_is_hidden_and_unreachable_when_feature_flag_is_off(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            story_arc_routes,
+            "get_settings",
+            lambda: SimpleNamespace(story_arc_manual_create_enabled=False),
+            raising=False,
+        )
+
+        page = await authenticated_client.get("/story-arcs/add")
+
+        assert page.status_code == 200
+        assert 'data-testid="story-arc-add-page"' in page.text
+        assert 'data-testid="story-arc-catalog-search"' in page.text
+        assert 'data-testid="story-arcs-create-form"' not in page.text
+
+        response = await authenticated_client.post(
+            "/story-arcs",
+            data={"name": "Hidden empty arc"},
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 404
+        async with sec_db() as session:
+            assert (
+                await session.scalar(select(StoryArc.id).where(StoryArc.name == "Hidden empty arc"))
+                is None
+            )
 
     @pytest.mark.parametrize(
         ("prefix", "expected_template"),
@@ -362,7 +824,7 @@ class TestStoryArcManagementUI:
             assert (await session.scalars(select(StoryArcPlacement))).all() == []
         assert list(destination.iterdir()) == []
 
-        page = await authenticated_client.get("/story-arcs")
+        page = await authenticated_client.get("/story-arcs/add")
         assert 'data-testid="story-arc-create-storage"' in page.text
         assert 'name="prefix_reading_order"' in page.text
         assert 'name="filename_style"' in page.text
@@ -448,6 +910,10 @@ class TestStoryArcManagementUI:
 
         assert response.status_code == 200
         assert 'data-testid="story-arc-detail-page"' in response.text
+        assert 'data-testid="story-arc-detail-back-link"' in response.text
+        assert 'data-testid="story-arc-detail-breadcrumbs"' in response.text
+        assert "Back to story arcs" in response.text
+        assert "All Story Arcs" in response.text
         assert "DC Numbering" in response.text
         assert 'data-exact-issue-number="1000000"' in response.text
         assert 'data-exact-issue-number="1AU"' in response.text
@@ -457,7 +923,8 @@ class TestStoryArcManagementUI:
         assert "1e+06" not in response.text
         assert "DC One Million" in response.text
         assert "The Final Hour" in response.text
-        assert "File available" in response.text
+        assert 'data-status-kind="issue" data-status-value="owned"' in response.text
+        assert ">\n  Owned\n</span>" in response.text
         assert 'data-resolution-state="resolved"' in response.text
         assert 'data-resolution-state="missing"' in response.text
         assert 'role="status" aria-live="polite"' in response.text
@@ -478,9 +945,41 @@ class TestStoryArcManagementUI:
         assert "Canonical files stay in their current folders." in response.text
         assert "Monitoring and automation will be disabled." in response.text
         assert "pbConfirm" in response.text
+        assert (
+            f"/issues/{ids['million_issue']}?source=story-arc&amp;story_arc_id={ids['arc']}"
+            "&amp;story_arc_page=1&amp;story_arc_per_page=2"
+        ) in response.text
+
+        issue_from_arc = await authenticated_client.get(
+            f"/issues/{ids['million_issue']}",
+            params={
+                "source": "story-arc",
+                "story_arc_id": ids["arc"],
+                "story_arc_page": 1,
+                "story_arc_per_page": 2,
+            },
+        )
+        assert issue_from_arc.status_code == 200
+        assert 'data-testid="issue-detail-back-link"' in issue_from_arc.text
+        assert 'data-testid="issue-detail-breadcrumbs"' in issue_from_arc.text
+        assert 'data-breadcrumb-origin="story-arc"' in issue_from_arc.text
+        assert "Back to story arc" in issue_from_arc.text
+        assert "All Story Arcs" in issue_from_arc.text
+        assert f'href="/story-arcs/{ids["arc"]}?page=1&amp;per_page=2"' in issue_from_arc.text
+        assert "DC Numbering" in issue_from_arc.text
+
+        invalid_arc_origin = await authenticated_client.get(
+            f"/issues/{ids['million_issue']}",
+            params={"source": "story-arc", "story_arc_id": ids["arc"] + 10_000},
+        )
+        assert invalid_arc_origin.status_code == 200
+        assert 'data-breadcrumb-origin="series"' in invalid_arc_origin.text
+        assert "Back to series" in invalid_arc_origin.text
+        assert "All Story Arcs" not in invalid_arc_origin.text
 
         second_page = await authenticated_client.get(f"/story-arcs/{ids['arc']}?page=2&per_page=2")
         assert second_page.status_code == 200
+        assert f'src="/api/v1/issues/{ids["million_issue"]}/cover"' in second_page.text
         assert 'data-exact-issue-number="0.5"' in second_page.text
         assert f'data-membership-id="{ids["fractional_membership"]}"' in second_page.text
         assert f'data-membership-id="{ids["million_membership"]}"' not in second_page.text
@@ -540,6 +1039,7 @@ class TestStoryArcManagementUI:
         assert response.status_code == 200
         assert 'data-testid="story-arc-placement-policy"' in response.text
         assert 'data-testid="story-arc-placement-policy-form"' in response.text
+        assert "x-data='{ placementMode: \"logical\" }'" in response.text
         assert "<legend" in response.text
         assert "Logical only" in response.text
         assert "Separate Story Arc folder" in response.text

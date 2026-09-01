@@ -100,6 +100,33 @@ if TYPE_CHECKING:
             True,
             False,
         ),
+        (
+            "The file matches ambiguous nested library roots.",
+            "source_revalidation",
+            "source_root_ambiguous",
+            ImportSafetyCategory.OUTSIDE_APPROVED_ROOT,
+            "source_root_ambiguous",
+            True,
+            False,
+        ),
+        (
+            "The file is missing its confirmed library-root selection.",
+            "source_revalidation",
+            "source_root_unconfirmed",
+            ImportSafetyCategory.SOURCE_CHANGED,
+            "source_root_unconfirmed",
+            True,
+            False,
+        ),
+        (
+            "The file no longer resolves inside its scan-selected library root.",
+            "source_revalidation",
+            "source_root_changed",
+            ImportSafetyCategory.SOURCE_CHANGED,
+            "source_root_changed",
+            True,
+            False,
+        ),
     ],
 )
 def test_classify_import_safety_failure_returns_stable_typed_policy(

@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pullbox.models.library import MatchConfidence
+from pullbox.core.library_root_resolution import preferred_managed_root_id
+from pullbox.models.library import LibraryFileStorageMode, MatchConfidence
 from pullbox.tasks.post_processing_progress import PostProcessingPhase
 
 
@@ -50,11 +51,12 @@ async def build_destination_plan(
     # on the later recovery path to find an alternate existing extension.
     extension = comic_file.suffix.lstrip(".").lower() if comic_file else "cbz"
     destination_probe = comic_file or Path(f"{series.title} #probe.{extension}")
+    destination_root_id = preferred_managed_root_id(series)
     dest_path, _resolved_root = await resolve_library_destination(
         session,
         destination_probe,
         issue,
-        library_root_id=series.library_root_id,
+        library_root_id=destination_root_id,
     )
     dest_dir = dest_path.parent
     issue_filename = dest_path.name
@@ -75,7 +77,7 @@ async def build_destination_plan(
         "post_processing_transfer_plan",
         source=str(comic_file),
         destination=str(dest_path),
-        library_root_id=series.library_root_id,
+        library_root_id=destination_root_id,
     )
 
     return DestinationPlan(
@@ -159,8 +161,10 @@ async def register_existing_destination_file(
         issue,
         MatchConfidence.HIGH,
         move_to_library=False,
+        storage_mode=LibraryFileStorageMode.MANAGED,
+        recover_existing_managed_artifact=True,
         rename=False,
-        library_root_id=series.library_root_id,
+        library_root_id=preferred_managed_root_id(series),
     )
     trace.finalize_current_phase()
     log.info(

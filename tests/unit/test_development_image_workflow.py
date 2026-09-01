@@ -177,7 +177,11 @@ def test_required_job_and_step_names_exist_in_actual_workflows(validator: Any) -
             name = job["name"]
             steps = {step["name"] for step in job["steps"] if "name" in step}
             if "matrix.python-version" in name:
-                for version in job["strategy"]["matrix"]["python-version"]:
+                matrix = job["strategy"]["matrix"]
+                versions = matrix.get("python-version") or [
+                    entry["python-version"] for entry in matrix["include"]
+                ]
+                for version in versions:
                     actual[name.replace("${{ matrix.python-version }}", version)] = steps
             elif "matrix.browser" in name:
                 for entry in job["strategy"]["matrix"]["include"]:

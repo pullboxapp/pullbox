@@ -18,6 +18,30 @@ class TestImportCollectionTab:
     """Behavior-first E2E checks for the Import workspace collection tab."""
 
     @staticmethod
+    def _identity_mylar_path_response(locations: int = 1) -> dict[str, object]:
+        return {
+            "source_type": "mylar3",
+            "resolution": {
+                "locations": locations,
+                "identity_resolved": locations,
+                "mapped_existing": 0,
+                "mapped_missing": 0,
+                "unmapped": 0,
+                "outside_root": 0,
+                "unreadable": 0,
+                "ambiguous": 0,
+                "invalid": 0,
+            },
+            "identity_groups": [],
+            "mappings": [],
+            "path_map": {},
+            "requires_confirmation": False,
+            "can_confirm": True,
+            "partial": False,
+            "warnings": [],
+        }
+
+    @staticmethod
     def _active_review_job_id(page) -> int | None:  # type: ignore[no-untyped-def]
         return page.evaluate(
             """async () => {
@@ -949,7 +973,7 @@ class TestImportCollectionTab:
         assert import_page.progress_phase_label.text_content() == "Complete"
         assert "Preparing to scan" not in (import_page.progress_summary.text_content() or "")
         assert import_page.progress_continue_button.is_visible()
-        assert import_page.progress_recent_log.is_visible()
+        assert import_page.progress_log_download.is_visible()
         assert authed_page.locator("[data-testid='page-dock-pagination']").count() == 0
         assert authed_page.locator("[data-testid='import-review-pagination']").count() == 0
         assert authed_page.locator("[data-testid='import-conflicts-pagination']").count() == 0
@@ -1094,30 +1118,22 @@ class TestImportCollectionTab:
         state["terminal"] = True
         authed_page.wait_for_url(re.compile(r"/import\?tab=collection$"), timeout=5000)
 
-    def test_import_collection_progress_log_viewer_renders_entries(
+    def test_import_collection_progress_offers_log_download_without_loading_entries(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
-        self._goto_review_step(import_page, authed_page, seeded_server)
+        review_job_id = self._goto_review_step(import_page, authed_page, seeded_server)
 
         import_page.review_back_button.click()
         import_page.progress_panel.wait_for(state="visible", timeout=5000)
 
-        body = authed_page.locator("[data-testid='import-progress-recent-log-body']").first
-        body.wait_for(state="visible", timeout=5000)
-        authed_page.wait_for_function(
-            """() => {
-                const body = document.querySelector("[data-testid='import-progress-recent-log-body']");
-                return !!body && body.textContent && body.textContent.trim().length > 0 && !body.textContent.includes("Loading...");
-            }""",
-            timeout=5000,
-        )
-
-        body_text = body.text_content() or ""
-        assert "No log entries yet." not in body_text
-        assert "INFO" in body_text or "WARN" in body_text or "ERROR" in body_text
+        download = import_page.progress_log_download
+        download.wait_for(state="visible", timeout=5000)
+        assert download.text_content() and "Download full log" in download.text_content()
+        assert download.get_attribute("href") == (f"/api/v1/import/{review_job_id}/logs/download")
+        assert authed_page.locator("[data-testid='import-progress-recent-log']").count() == 0
 
     def test_import_collection_active_progress_hydrates_without_stream(
         self,
@@ -1147,7 +1163,7 @@ class TestImportCollectionTab:
         )
         assert (import_page.progress_phase_detail.text_content() or "").strip() != ""
         assert import_page.progress_eta.is_visible()
-        assert import_page.progress_recent_log.is_visible()
+        assert import_page.progress_log_download.is_visible()
 
     def test_import_collection_progress_navigation_does_not_pause_or_resume_runs(
         self,
@@ -2695,6 +2711,7 @@ class TestImportCollectionTab:
     ) -> None:
         created_requests: list[dict[str, object]] = []
         layout_preview_requests: list[dict[str, object]] = []
+        mylar_path_preview_requests: list[dict[str, object]] = []
 
         def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
             layout_preview_requests.append(route.request.post_data_json)
@@ -2708,7 +2725,19 @@ class TestImportCollectionTab:
                 body=json.dumps({"id": 322, "status": "pending"}),
             )
 
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            mylar_path_preview_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(self._identity_mylar_path_response(3)),
+            )
+
         authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
         authed_page.route("**/api/v1/import", fulfill_create)
         import_page = ImportPage(authed_page, seeded_server)
         import_page.goto(tab="collection")
@@ -2719,6 +2748,10 @@ class TestImportCollectionTab:
         import_page.source_layout_section.wait_for(state="visible", timeout=5000)
         import_page.source_layout_publisher_series.click()
         import_page.source_layout_fallback_checkbox.uncheck()
+        import_page.mylar_path_preview.get_by_text("No mapping is required.").wait_for(
+            state="visible",
+            timeout=5000,
+        )
 
         assert import_page.source_layout_analyze_button.is_hidden()
         assert import_page.start_scan_button.is_enabled()
@@ -2731,6 +2764,7 @@ class TestImportCollectionTab:
         authed_page.wait_for_timeout(100)
 
         assert layout_preview_requests == []
+        assert mylar_path_preview_requests
         assert created_requests
         assert created_requests[-1]["source_type"] == "mylar3"
         assert created_requests[-1]["source_layout"] == {
@@ -2739,8 +2773,10 @@ class TestImportCollectionTab:
             "preset": "publisher_series",
             "fallback_to_auto": False,
         }
+        assert created_requests[-1]["mylar3_path_map"] == {}
+        assert created_requests[-1]["mylar3_path_map_confirmed"] is True
 
-    def test_mylar_in_place_requires_library_root_without_folder_preview(
+    def test_mylar_in_place_allows_explicit_optional_future_root_without_folder_preview(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
@@ -2760,7 +2796,18 @@ class TestImportCollectionTab:
                 body=json.dumps({"id": 323, "status": "pending"}),
             )
 
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(self._identity_mylar_path_response()),
+            )
+
         authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
         authed_page.route("**/api/v1/import", fulfill_create)
         import_page = ImportPage(authed_page, seeded_server)
         import_page.goto(tab="collection")
@@ -2769,6 +2816,10 @@ class TestImportCollectionTab:
         import_page.source_path_input.fill("/imports/mylar.db")
         import_page.file_handling_in_place.wait_for(state="visible", timeout=5000)
         import_page.file_handling_in_place.click()
+        import_page.mylar_path_preview.get_by_text("No mapping is required.").wait_for(
+            state="visible",
+            timeout=5000,
+        )
 
         root_selector = authed_page.get_by_test_id("import-in-place-library-root")
         root_selector.wait_for(state="visible", timeout=5000)
@@ -2776,8 +2827,8 @@ class TestImportCollectionTab:
             "value"
         )
         assert root_value
-        root_selector.select_option("")
-        assert import_page.start_scan_button.is_disabled()
+        assert root_selector.input_value() == ""
+        assert import_page.start_scan_button.is_enabled()
         root_selector.select_option(root_value)
         assert import_page.start_scan_button.is_enabled()
         assert import_page.source_layout_analyze_button.is_hidden()
@@ -2798,6 +2849,119 @@ class TestImportCollectionTab:
         assert created_requests[-1]["file_handling_mode"] == "in_place"
         assert created_requests[-1]["target_library_root_id"] == int(root_value)
         assert created_requests[-1]["future_layout_requested"] is False
+        assert created_requests[-1]["mylar3_path_map"] == {}
+        assert created_requests[-1]["mylar3_path_map_confirmed"] is True
+
+    def test_mylar_mapping_preview_requires_confirmation_and_submits_frozen_map(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        preview_requests: list[dict[str, object]] = []
+        frozen_map = {
+            "/books/current": "/comics/current",
+            "/books/archive": "/comics/archive",
+        }
+
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            preview_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "source_type": "mylar3",
+                        "resolution": {
+                            "locations": 5,
+                            "identity_resolved": 1,
+                            "mapped_existing": 4,
+                            "mapped_missing": 0,
+                            "unmapped": 0,
+                            "outside_root": 0,
+                            "unreadable": 0,
+                            "ambiguous": 0,
+                            "invalid": 0,
+                        },
+                        "identity_groups": [],
+                        "mappings": [
+                            {
+                                "stored_prefix": stored,
+                                "pullbox_prefix": visible,
+                                "library_root_id": index + 1,
+                                "library_root_name": f"Library {index + 1}",
+                                "provenance": "automatic",
+                                "status": "ready",
+                                "resolution": {
+                                    "locations": 2,
+                                    "identity_resolved": 0,
+                                    "mapped_existing": 2,
+                                    "mapped_missing": 0,
+                                    "unmapped": 0,
+                                    "outside_root": 0,
+                                    "unreadable": 0,
+                                    "ambiguous": 0,
+                                    "invalid": 0,
+                                },
+                                "examples": [],
+                                "warnings": [],
+                                "blocking_reasons": [],
+                            }
+                            for index, (stored, visible) in enumerate(frozen_map.items())
+                        ],
+                        "path_map": frozen_map,
+                        "requires_confirmation": True,
+                        "can_confirm": True,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 324, "status": "pending"}),
+            )
+
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+
+        import_page.mylar_path_mapping_rows.first.wait_for(state="visible", timeout=5000)
+        assert import_page.mylar_path_mapping_rows.count() == 2
+        assert import_page.start_scan_button.is_disabled()
+        import_page.mylar_path_confirm.check()
+        assert import_page.start_scan_button.is_enabled()
+        assert_no_axe_violations(
+            authed_page,
+            name="Mylar path mapping controls",
+            include=["[data-testid='import-mylar-path-section']"],
+        )
+
+        first_visible_path = import_page.mylar_path_mapping_rows.first.get_by_label(
+            "Path visible inside Pullbox"
+        )
+        first_visible_path.fill("/comics/edited")
+        authed_page.wait_for_timeout(750)
+        assert import_page.start_scan_button.is_disabled()
+        import_page.mylar_path_confirm.check()
+        assert import_page.start_scan_button.is_enabled()
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert preview_requests
+        assert created_requests[-1]["mylar3_path_map"] == frozen_map
+        assert created_requests[-1]["mylar3_path_map_confirmed"] is True
 
     def test_import_collection_shows_story_arc_evidence_and_submits_independent_choices(
         self,
@@ -2879,6 +3043,17 @@ class TestImportCollectionTab:
                 body=json.dumps({"id": 323, "status": "pending"}),
             )
 
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(self._identity_mylar_path_response()),
+            )
+
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
         authed_page.route("**/api/v1/import/story-arc-preview", fulfill_arc_preview)
         authed_page.route("**/api/v1/import", fulfill_create)
         import_page = ImportPage(authed_page, seeded_server)
@@ -2887,6 +3062,10 @@ class TestImportCollectionTab:
 
         import_page.source_mylar3_card.click()
         import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.mylar_path_preview.get_by_text("No mapping is required.").wait_for(
+            state="visible",
+            timeout=5000,
+        )
         import_page.story_arc_section.wait_for(state="visible", timeout=5000)
 
         preview_text = import_page.story_arc_preview.text_content() or ""

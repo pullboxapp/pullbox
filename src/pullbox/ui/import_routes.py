@@ -28,7 +28,10 @@ from pullbox.services.import_safety_bulk_review import (
     preview_import_safety_category,
 )
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
-from pullbox.services.import_workflow_state import ACTIVE_IMPORT_JOB_STATUSES
+from pullbox.services.import_workflow_state import (
+    ACTIVE_IMPORT_JOB_STATUSES,
+    snapshot_mode_for_job,
+)
 from pullbox.tasks.import_task import trigger_import_safety_bulk_rematch
 from pullbox.ui import import_orphaned_routes
 from pullbox.ui.comicvine_series_search import (
@@ -139,7 +142,11 @@ def _can_resume_collection_job(job: ImportJob, requested_step: int | None) -> bo
             ImportJobStatus.ROLLING_BACK,
             ImportJobStatus.COMPLETED,
             ImportJobStatus.FAILED,
-        } and (job.status != ImportJobStatus.STALLED or job.import_started_at is not None)
+        } and (
+            job.status != ImportJobStatus.STALLED
+            or job.import_started_at is not None
+            or snapshot_mode_for_job(job) in {"import", "rollback"}
+        )
     if step == 3:
         return job.status == ImportJobStatus.REVIEW and job.import_started_at is None
     if step == 2:
@@ -241,6 +248,17 @@ async def _load_import_collection_context(session: AsyncSession) -> dict[str, ob
     """Load the collection import wizard context."""
     roots_result = await session.execute(select(LibraryRoot).order_by(LibraryRoot.name))
     library_roots = list(roots_result.scalars().all())
+    from pullbox.services.library_root_management import list_library_roots
+
+    enabled_root_options = [
+        root for root in await list_library_roots(session) if bool(root["enabled"])
+    ]
+    enabled_root_options.sort(
+        key=lambda root: (
+            not bool(root["is_default_managed_destination"]),
+            str(root["name"]).casefold(),
+        )
+    )
 
     jobs_result = await session.execute(
         select(ImportJob).order_by(ImportJob.created_at.desc()).limit(10)
@@ -249,11 +267,7 @@ async def _load_import_collection_context(session: AsyncSession) -> dict[str, ob
 
     return {
         "library_roots": library_roots,
-        "library_root_options": [
-            {"id": root.id, "name": root.name, "path": root.path}
-            for root in library_roots
-            if root.enabled
-        ],
+        "library_root_options": enabled_root_options,
         "recent_jobs": recent_jobs,
         "resume_step": None,
         "resume_job_id": None,

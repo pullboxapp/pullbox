@@ -18,10 +18,11 @@ def test_build_retry_import_request_copies_creation_fields(tmp_path) -> None:
     original = SimpleNamespace(
         source_path=str(source_dir),
         selected_file_paths=(str(explicit_file),),
-        source_type=ImportSourceType.FILESYSTEM,
+        source_type=ImportSourceType.MYLAR3,
         target_library_root_id=7,
         monitored=True,
-        mylar3_path_map={"container": "host"},
+        mylar3_path_map={"/container": "/host"},
+        mylar3_path_map_confirmed=True,
         cv_match_threshold=0.82,
         min_files_per_series=3,
         file_formats="CBZ, PDF",
@@ -45,10 +46,11 @@ def test_build_retry_import_request_copies_creation_fields(tmp_path) -> None:
 
     assert request.source_path == str(source_dir.resolve())
     assert request.file_paths == [str(explicit_file.resolve())]
-    assert request.source_type == ImportSourceType.FILESYSTEM
+    assert request.source_type == ImportSourceType.MYLAR3
     assert request.target_library_root_id == 7
     assert request.monitored is True
-    assert request.mylar3_path_map == {"container": "host"}
+    assert request.mylar3_path_map == {"/container": "/host"}
+    assert request.mylar3_path_map_confirmed is True
     assert request.cv_match_threshold == 0.82
     assert request.min_files_per_series == 3
     assert request.file_formats == "cbz, pdf"

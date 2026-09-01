@@ -121,7 +121,11 @@ class RegisterLibraryFileFunc(Protocol):
         | None = None,
         comicinfo_progress_callback: Callable[[str, int, int, str], Awaitable[None] | None]
         | None = None,
+        recovery_imported_file_id: int | None = None,
+        recovery_original_source_path: Path | None = None,
         placement_started_callback: Callable[..., Awaitable[None] | None] | None = None,
+        source_scan_root: Path | None = None,
+        strict_import_target: bool = False,
     ) -> LibraryFile | LibraryFileRegistrationOutcome: ...
 
 

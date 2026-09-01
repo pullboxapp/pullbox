@@ -1,0 +1,25 @@
+<details class="rounded-lg border border-pb-border bg-pb-card p-4">
+  <summary class="cursor-pointer font-medium text-pb-text">Create Story Arc</summary>
+  <p class="mt-2 text-sm text-pb-text-sec">Create an empty reading order only when the arc is not available from a metadata provider.</p>
+  <form action="/story-arcs" method="post" hx-post="/story-arcs" hx-swap="none"
+        data-testid="story-arcs-create-form" class="mt-4 space-y-4">
+    <div class="grid gap-4 md:grid-cols-2">
+      <div>
+        <label for="story-arc-create-name" class="mb-1 block text-sm font-medium text-pb-text">Name</label>
+        <input id="story-arc-create-name" name="name" type="text" maxlength="500" required autocomplete="off" class="input-pb w-full">
+      </div>
+      <div>
+        <label for="story-arc-create-description" class="mb-1 block text-sm font-medium text-pb-text">Description</label>
+        <textarea id="story-arc-create-description" name="description" rows="3" class="input-pb w-full"></textarea>
+      </div>
+    </div>
+    <fieldset class="space-y-2">
+      <legend class="text-sm font-medium text-pb-text">Monitoring</legend>
+      <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="monitored" value="true" class="mt-0.5"><span>Monitor this story arc</span></label>
+      <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="search_missing" value="true" class="mt-0.5"><span>Search for missing resolved issues</span></label>
+      <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="include_upcoming" value="true" class="mt-0.5"><span>Include upcoming issues</span></label>
+    </fieldset>
+    {% include "partials/story_arc_create_storage.html" %}
+    <button type="submit" class="btn-primary">Create empty Story Arc</button>
+  </form>
+</details>

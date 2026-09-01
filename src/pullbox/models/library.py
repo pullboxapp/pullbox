@@ -15,6 +15,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    text,
 )
 from sqlalchemy import (
     Enum as SQLAlchemyEnum,
@@ -118,10 +119,37 @@ class LibraryFile(Base, IdentityMixin, TimestampMixin):
 
 class LibraryRoot(Base, IdentityMixin, TimestampMixin):
     __tablename__ = "library_roots"
+    __table_args__ = (
+        Index(
+            "uq_library_roots_default_managed_destination",
+            "is_default_managed_destination",
+            unique=True,
+            sqlite_where=text("is_default_managed_destination = 1"),
+            postgresql_where=text("is_default_managed_destination"),
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     path: Mapped[str] = mapped_column(String(1000), nullable=False, unique=True)
-    enabled: Mapped[bool] = mapped_column(default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    allow_referenced_registrations: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="1",
+        nullable=False,
+    )
+    allow_managed_writes: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="1",
+        nullable=False,
+    )
+    is_default_managed_destination: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
     last_scan_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_scan_duration_seconds: Mapped[float | None] = mapped_column(Float)
     last_scan_files_found: Mapped[int | None] = mapped_column(Integer)
@@ -130,7 +158,14 @@ class LibraryRoot(Base, IdentityMixin, TimestampMixin):
     files: Mapped[list[LibraryFile]] = relationship(
         back_populates="library_root", cascade="all, delete-orphan"
     )
-    series: Mapped[list[Series]] = relationship(back_populates="library_root")
+    series: Mapped[list[Series]] = relationship(
+        back_populates="library_root",
+        foreign_keys="Series.library_root_id",
+    )
+    preferred_series: Mapped[list[Series]] = relationship(
+        back_populates="preferred_library_root",
+        foreign_keys="Series.preferred_library_root_id",
+    )
     naming_policy: Mapped[LibraryRootPolicy | None] = relationship(
         back_populates="library_root",
         cascade="all, delete-orphan",

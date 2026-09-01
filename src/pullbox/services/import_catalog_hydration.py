@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import select as sa_select
 
+from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.series import IssueCatalogState, Series
 
 if TYPE_CHECKING:
@@ -102,7 +103,7 @@ async def run_pending_catalog_hydration(
     async with catalog_hydration_gate():
         for request in pending:
             try:
-                await run_catalog_hydration(
+                hydrated = await run_catalog_hydration(
                     session_factory,
                     series_id=request.series_id,
                     search_on_add=request.search_on_add,
@@ -120,6 +121,9 @@ async def run_pending_catalog_hydration(
                     series_id=request.series_id,
                     error=str(exc),
                 )
+                continue
+
+            if not hydrated:
                 continue
 
             recovered += 1
@@ -192,20 +196,34 @@ async def run_catalog_hydration(
     search_on_add: bool,
     prefetch_comicvine_bundle: Callable[[int], Awaitable[tuple[Any, list[Any]]]],
     add_from_comicvine_prefetched: Callable[..., Awaitable[Series]],
-) -> None:
+) -> bool:
     plan = await load_catalog_hydration_plan(
         session_factory,
         series_id=series_id,
         search_on_add=search_on_add,
     )
     if plan is None:
-        return
+        return False
 
     # ComicVine can be slow for giant series. Fetch outside any DB session so
     # the UI and active import writer keep access to the pool while we wait.
     series_meta, issue_summaries = await prefetch_comicvine_bundle(plan.comicvine_id)
 
     async with session_factory() as hydrate_session:
+        # A cancellation rollback can delete the series while the provider
+        # request is in flight. Revalidate the exact row under the write
+        # transaction so the general ComicVine upsert path cannot recreate a
+        # series that the rollback already removed.
+        persisted_series_id = await hydrate_session.scalar(
+            sa_select(Series.id)
+            .where(
+                Series.id == series_id,
+                Series.comicvine_id == plan.comicvine_id,
+            )
+            .with_for_update()
+        )
+        if persisted_series_id is None:
+            return False
         await add_from_comicvine_prefetched(
             hydrate_session,
             comicvine_id=plan.comicvine_id,
@@ -215,6 +233,7 @@ async def run_catalog_hydration(
             issue_summaries=issue_summaries,
         )
         await hydrate_session.commit()
+    return True
 
 
 async def load_catalog_hydration_plan(
@@ -239,7 +258,7 @@ async def load_catalog_hydration_plan(
 
         return CatalogHydrationPlan(
             comicvine_id=int(series.comicvine_id),
-            library_root_id=series.library_root_id,
+            library_root_id=preferred_managed_root_id(series),
             search_on_add=search_on_add,
         )
 

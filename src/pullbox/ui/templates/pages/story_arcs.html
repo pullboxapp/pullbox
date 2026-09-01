@@ -1,193 +1,206 @@
 {% extends "base.html" %}
-{% from "components/pagination.html" import pagination %}
+{% from "components/dropdown_select.html" import dropdown_select %}
+{% from "components/mission_control_workspace.html" import mission_control_workspace %}
+{% from "components/search_field.html" import search_field %}
 
 {% block title %}Story Arcs — {{ instance_name() }}{% endblock %}
 {% block page_title %}Story Arcs{% endblock %}
-{% block content_container_classes %}px-4 sm:px-6 py-5{% endblock %}
+{% block head %}
+<script>
+  (function() {
+    var view = {{ active_view|tojson }};
+    document.documentElement.setAttribute("data-story-arc-view", view);
+    localStorage.setItem("story_arc_view", view);
+    document.cookie = "story_arc_view=" + encodeURIComponent(view) + "; path=/; max-age=31536000; SameSite=Lax";
+  })();
+</script>
+{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 pt-4 sm:pt-5{% endblock %}
 
 {% block content %}
-<main data-testid="story-arcs-page" class="mx-auto max-w-7xl space-y-6">
-  <header class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-    <div>
-      <h1 class="text-2xl font-bold tracking-tight text-pb-text">Story Arcs</h1>
-      <p class="mt-1 max-w-2xl text-sm text-pb-text-sec">
-        Keep event reading orders together without changing the canonical issues in your library.
-      </p>
-    </div>
-    <details class="rounded-lg border border-pb-border bg-pb-card p-4 sm:w-[28rem]">
-      <summary class="cursor-pointer font-medium text-pb-text">Create Story Arc</summary>
-      <form
-        action="/story-arcs"
-        method="post"
-        hx-post="/story-arcs"
-        hx-swap="none"
-        data-testid="story-arcs-create-form"
-        class="mt-4 space-y-4"
-      >
-        <div>
-          <label for="story-arc-create-name" class="mb-1 block text-sm font-medium text-pb-text">Name</label>
-          <input
-            id="story-arc-create-name"
-            name="name"
-            type="text"
-            maxlength="500"
-            required
-            autocomplete="off"
-            class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-          >
-        </div>
-        <div>
-          <label for="story-arc-create-description" class="mb-1 block text-sm font-medium text-pb-text">Description</label>
-          <textarea
-            id="story-arc-create-description"
-            name="description"
-            rows="3"
-            class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-          ></textarea>
-        </div>
-        <fieldset class="space-y-2">
-          <legend class="text-sm font-medium text-pb-text">Monitoring</legend>
-          <label class="flex items-start gap-2 text-sm text-pb-text-sec">
-            <input type="checkbox" name="monitored" value="true" class="mt-0.5">
-            <span>Monitor this story arc</span>
-          </label>
-          <label class="flex items-start gap-2 text-sm text-pb-text-sec">
-            <input type="checkbox" name="search_missing" value="true" class="mt-0.5">
-            <span>Search for missing resolved issues</span>
-          </label>
-          <label class="flex items-start gap-2 text-sm text-pb-text-sec">
-            <input type="checkbox" name="include_upcoming" value="true" class="mt-0.5">
-            <span>Include upcoming issues</span>
-          </label>
-        </fieldset>
-        {% include "partials/story_arc_create_storage.html" %}
-        <button type="submit" class="btn-primary">Create empty Story Arc</button>
-      </form>
-    </details>
-  </header>
+{% set registry = story_arc_page %}
+{% set gauge_circumference = 138.2 %}
+{% set active_pct = ((registry.active_count / registry.total) * 100)|round(0)|int if registry.total > 0 else 0 %}
+{% set monitored_pct = ((registry.monitored_count / registry.total) * 100)|round(0)|int if registry.total > 0 else 0 %}
+{% set attention_total = registry.review_count %}
+{% set attention_pct = ((attention_total / registry.membership_count) * 100)|round(0)|int if registry.membership_count > 0 else 0 %}
 
-  {% if error_message %}
-    <div role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 px-4 py-3 text-sm text-pb-text">
-      {{ error_message }}
-    </div>
-  {% endif %}
-
-  {% include "partials/story_arc_catalog_search.html" %}
-
-  <section aria-labelledby="story-arc-results-heading" class="space-y-4">
-    <form
-      action="/story-arcs"
-      method="get"
-      data-testid="story-arcs-filter-form"
-      class="grid gap-3 rounded-lg border border-pb-border bg-pb-card p-4 md:grid-cols-[minmax(15rem,1fr)_12rem_12rem_auto] md:items-end"
-    >
-      <div>
-        <label for="story-arcs-search" class="mb-1 block text-sm font-medium text-pb-text">Search story arcs</label>
-        <input
-          id="story-arcs-search"
-          name="q"
-          type="search"
-          value="{{ query }}"
-          maxlength="500"
-          placeholder="Search by name"
-          autocomplete="off"
-          data-testid="story-arcs-search-input"
-          class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-        >
-      </div>
-      <div>
-        <label for="story-arcs-lifecycle" class="mb-1 block text-sm font-medium text-pb-text">Lifecycle</label>
-        <select
-          id="story-arcs-lifecycle"
-          name="lifecycle"
-          class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-        >
-          <option value=""{% if not lifecycle_filter %} selected{% endif %}>All</option>
-          <option value="active"{% if lifecycle_filter == "active" %} selected{% endif %}>Active</option>
-          <option value="archived"{% if lifecycle_filter == "archived" %} selected{% endif %}>Archived</option>
-        </select>
-      </div>
-      <div>
-        <label for="story-arcs-monitored" class="mb-1 block text-sm font-medium text-pb-text">Monitoring</label>
-        <select
-          id="story-arcs-monitored"
-          name="monitored"
-          class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-        >
-          <option value=""{% if not monitored_filter %} selected{% endif %}>All</option>
-          <option value="true"{% if monitored_filter == "true" %} selected{% endif %}>Monitored</option>
-          <option value="false"{% if monitored_filter == "false" %} selected{% endif %}>Not monitored</option>
-        </select>
-      </div>
-      <div class="flex gap-2">
-        <input type="hidden" name="per_page" value="{{ story_arc_page.per_page }}">
-        <button type="submit" class="btn-primary">Apply</button>
-        <a href="/story-arcs" class="btn-secondary">Clear</a>
-      </div>
-    </form>
-
-    <div class="flex items-center justify-between gap-3">
-      <h2 id="story-arc-results-heading" class="text-lg font-semibold text-pb-text">Story Arcs</h2>
-      <p class="text-sm text-pb-text-sec">
-        {{ story_arc_page.total }} result{{ "" if story_arc_page.total == 1 else "s" }}
+<div class="series-page-shell" data-story-arc-active-view="{{ active_view }}" data-testid="story-arcs-page">
+  {% set header_left_html %}
+    <div class="series-registry-title-block">
+      <h2 data-testid="story-arcs-registry-title" class="series-registry-title">
+        STORY ARC <span>REGISTRY</span>
+      </h2>
+      <p class="series-registry-subtitle">
+        {{ registry.total }} result{{ "" if registry.total == 1 else "s" }} ·
+        {{ registry.active_count }} active arc{{ "" if registry.active_count == 1 else "s" }} ·
+        {{ attention_total }} issue{{ "" if attention_total == 1 else "s" }} need attention
       </p>
     </div>
 
-    {% if story_arc_page.items %}
-      <div class="overflow-x-auto rounded-lg border border-pb-border bg-pb-card">
-        <table class="w-full text-left text-sm">
-          <thead class="border-b border-pb-border text-xs uppercase tracking-wide text-pb-text-dim">
-            <tr>
-              <th scope="col" class="px-4 py-3">Story Arc</th>
-              <th scope="col" class="px-4 py-3">Progress</th>
-              <th scope="col" class="px-4 py-3">Attention</th>
-              <th scope="col" class="px-4 py-3">State</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-pb-border">
-            {% for item in story_arc_page.items %}
-              <tr data-story-arc-id="{{ item.id }}" class="hover:bg-pb-card-hover">
-                <td class="px-4 py-4 align-top">
-                  <a href="/story-arcs/{{ item.id }}" class="font-semibold text-pb-interactive hover:underline">
-                    {{ item.name }}
-                  </a>
-                  {% if item.description %}
-                    <p class="mt-1 max-w-xl text-pb-text-sec">{{ item.description }}</p>
-                  {% endif %}
-                </td>
-                <td class="px-4 py-4 align-top text-pb-text-sec">
-                  <span class="font-medium text-pb-text">{{ item.completion_label }}</span>
-                  <span class="mt-1 block">{{ item.membership_count }} issue{{ "" if item.membership_count == 1 else "s" }}</span>
-                </td>
-                <td class="px-4 py-4 align-top text-pb-text-sec">
-                  <span data-testid="story-arc-missing-count">{{ item.missing_count }}</span> missing
-                  <span class="mt-1 block">{{ item.conflict_count }} conflict{{ "" if item.conflict_count == 1 else "s" }}</span>
-                </td>
-                <td class="px-4 py-4 align-top">
-                  <span class="pill {{ 'pill-success' if item.lifecycle == 'active' else 'pill-neutral' }}">
-                    {{ item.lifecycle|title }}
-                  </span>
-                  {% if item.monitored %}
-                    <span class="pill pill-info mt-1">Monitored</span>
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+    <div class="series-registry-gauges" aria-label="Story Arc registry metrics">
+      <div class="series-registry-gauge">
+        <div class="series-registry-gauge-ring">
+          <svg viewBox="0 0 56 56" aria-hidden="true">
+            <circle class="series-registry-gauge-bg" cx="28" cy="28" r="22"></circle>
+            <circle class="series-registry-gauge-fill series-registry-gauge-fill-success" cx="28" cy="28" r="22"
+                    stroke-dasharray="{{ gauge_circumference }}"
+                    stroke-dashoffset="{{ (gauge_circumference * (100 - active_pct) / 100)|round(1) }}"></circle>
+          </svg>
+          <span class="series-registry-gauge-value text-pb-success">{{ registry.active_count }}</span>
+        </div>
+        <div class="series-registry-gauge-label">Active</div>
       </div>
+      <div class="series-registry-gauge">
+        <div class="series-registry-gauge-ring">
+          <svg viewBox="0 0 56 56" aria-hidden="true">
+            <circle class="series-registry-gauge-bg" cx="28" cy="28" r="22"></circle>
+            <circle class="series-registry-gauge-fill series-registry-gauge-fill-info" cx="28" cy="28" r="22"
+                    stroke-dasharray="{{ gauge_circumference }}"
+                    stroke-dashoffset="{{ (gauge_circumference * (100 - monitored_pct) / 100)|round(1) }}"></circle>
+          </svg>
+          <span class="series-registry-gauge-value text-pb-interactive">{{ registry.monitored_count }}</span>
+        </div>
+        <div class="series-registry-gauge-label">Monitored</div>
+      </div>
+      <div class="series-registry-gauge">
+        <div class="series-registry-gauge-ring">
+          <svg viewBox="0 0 56 56" aria-hidden="true">
+            <circle class="series-registry-gauge-bg" cx="28" cy="28" r="22"></circle>
+            <circle class="series-registry-gauge-fill series-registry-gauge-fill-warning" cx="28" cy="28" r="22"
+                    stroke-dasharray="{{ gauge_circumference }}"
+                    stroke-dashoffset="{{ (gauge_circumference * (100 - attention_pct) / 100)|round(1) }}"></circle>
+          </svg>
+          <span class="series-registry-gauge-value text-pb-warning">{{ attention_total }}</span>
+        </div>
+        <div class="series-registry-gauge-label">Attention</div>
+      </div>
+    </div>
+  {% endset %}
 
-      <div class="py-2">
-        {{ pagination(story_arc_page.page, story_arc_page.total_pages, pagination_base_url) }}
+  {% set header_actions_html %}
+    <a href="/story-arcs/add" data-testid="story-arcs-add-link" class="btn-primary btn-sm series-registry-primary">
+      <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"></path>
+      </svg>
+      Add story arc
+    </a>
+  {% endset %}
+
+  {% set browse_toolbar_html %}
+    <div class="series-toolbar-browse">
+      <div class="series-toolbar-primary">
+        {{ search_field(
+          name="q",
+          value=query,
+          placeholder="Search story arcs...",
+          input_testid="story-arcs-search-input",
+          clear_testid="story-arcs-search-clear",
+          panel_testid="story-arcs-search-history-panel",
+          root_testid="story-arcs-search-field",
+          mode="remote",
+          history_key="pullbox.searchHistory.storyArcs",
+          debounce_ms=250,
+          size="sm",
+          class_name="series-registry-search",
+          aria_label="Search story arcs"
+        ) }}
+
+        <div class="series-toolbar-field">
+          <span class="series-toolbar-label">Lifecycle</span>
+          {{ dropdown_select(
+            name="lifecycle",
+            value=lifecycle_filter,
+            size="sm",
+            options=[("", "All"), ("active", "Active"), ("archived", "Archived")],
+            root_testid="story-arcs-lifecycle-select",
+            hx_get="/story-arcs",
+            hx_target="#story-arcs-results-body",
+            hx_swap="outerHTML",
+            hx_push_url="true",
+            hx_include="#story-arcs-filter-form",
+            class_name="series-registry-dropdown",
+            fit_width=true
+          ) }}
+        </div>
+
+        <div class="series-toolbar-field">
+          <span class="series-toolbar-label">Monitored</span>
+          {{ dropdown_select(
+            name="monitored",
+            value=monitored_filter,
+            size="sm",
+            options=[("", "All"), ("true", "Monitored"), ("false", "Unmonitored")],
+            root_testid="story-arcs-monitored-select",
+            hx_get="/story-arcs",
+            hx_target="#story-arcs-results-body",
+            hx_swap="outerHTML",
+            hx_push_url="true",
+            hx_include="#story-arcs-filter-form",
+            class_name="series-registry-dropdown",
+            fit_width=true
+          ) }}
+        </div>
+
+        <div class="series-toolbar-field">
+          <span class="series-toolbar-label">Per Page</span>
+          {% set per_page_options = [("25", "25"), ("50", "50"), ("100", "100")] %}
+          {% if registry.per_page not in [25, 50, 100] %}
+            {% set per_page_options = [(registry.per_page|string, registry.per_page|string)] + per_page_options %}
+          {% endif %}
+          {{ dropdown_select(
+            name="per_page",
+            value=registry.per_page|string,
+            size="sm",
+            options=per_page_options,
+            root_testid="story-arcs-per-page-select",
+            hx_get="/story-arcs",
+            hx_target="#story-arcs-results-body",
+            hx_swap="outerHTML",
+            hx_push_url="true",
+            hx_include="#story-arcs-filter-form",
+            class_name="series-registry-dropdown",
+            fit_width=true
+          ) }}
+        </div>
       </div>
-    {% else %}
-      <div class="rounded-lg border border-dashed border-pb-border bg-pb-card px-6 py-12 text-center">
-        <h3 class="font-semibold text-pb-text">No Story Arcs found</h3>
-        <p class="mt-2 text-sm text-pb-text-sec">
-          Adjust the filters or create an empty Story Arc to build a reading order.
-        </p>
+      <div class="series-toolbar-actions">
+        <div class="series-toolbar-view-block">
+          <span class="series-toolbar-label">View</span>
+          <div data-testid="story-arcs-view-toggle" class="series-view-toggle">
+            <button type="submit" name="view_mode" value="list" data-testid="story-arcs-view-list" data-story-arc-view-option="list" data-tip="List view" data-tip-pos="top" data-tip-size="narrow" x-on:click="document.documentElement.setAttribute('data-story-arc-view', 'list'); localStorage.setItem('story_arc_view', 'list'); document.cookie='story_arc_view=list; path=/; max-age=31536000; SameSite=Lax'" class="series-view-toggle-item" aria-label="List view">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M8 6.75h12M8 12h12M8 17.25h12M4.75 6.75h.5M4.75 12h.5M4.75 17.25h.5"></path></svg>
+            </button>
+            <button type="submit" name="view_mode" value="grid" data-testid="story-arcs-view-grid" data-story-arc-view-option="grid" data-tip="Grid view" data-tip-pos="top" data-tip-size="narrow" x-on:click="document.documentElement.setAttribute('data-story-arc-view', 'grid'); localStorage.setItem('story_arc_view', 'grid'); document.cookie='story_arc_view=grid; path=/; max-age=31536000; SameSite=Lax'" class="series-view-toggle-item" aria-label="Grid view">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4.75 4.75h5.5v5.5h-5.5zm9 0h5.5v5.5h-5.5zm-9 9h5.5v5.5h-5.5zm9 0h5.5v5.5h-5.5"></path></svg>
+            </button>
+          </div>
+        </div>
       </div>
-    {% endif %}
-  </section>
-</main>
+    </div>
+  {% endset %}
+
+  {% set results_html %}{% include "partials/story_arc_results_body.html" %}{% endset %}
+
+  {{ mission_control_workspace(
+    header_testid="story-arcs-registry-header",
+    header_left_html=header_left_html,
+    header_actions_html=header_actions_html,
+    header_actions_testid="story-arcs-registry-actions",
+    toolbar_id="story-arcs-filter-form",
+    toolbar_testid="story-arcs-filter-form",
+    toolbar_frame_testid="story-arcs-toolbar-frame",
+    toolbar_attrs='autocomplete="off" action="/story-arcs" method="get" hx-get="/story-arcs" hx-target="#story-arcs-results-body" hx-swap="outerHTML" hx-push-url="true" hx-trigger="submit"',
+    browse_toolbar_html=browse_toolbar_html,
+    results_id="story-arcs-results",
+    results_testid="story-arcs-results",
+    results_body_id="story-arcs-results-body",
+    results_body_testid="story-arcs-results-body",
+    results_html=results_html
+  ) }}
+</div>
+{% endblock %}
+
+{% block footer_dock %}
+  {% include "partials/story_arc_pagination_mount.html" %}
 {% endblock %}

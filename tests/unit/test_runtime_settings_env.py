@@ -28,6 +28,18 @@ def test_reader_has_default_on_emergency_environment_gate(tmp_path, monkeypatch)
     assert PullboxSettings().reader_enabled is False
 
 
+def test_manual_story_arc_creation_defaults_off_and_uses_environment(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PULLBOX_STORY_ARC_MANUAL_CREATE_ENABLED", raising=False)
+    assert PullboxSettings().story_arc_manual_create_enabled is False
+
+    monkeypatch.setenv("PULLBOX_STORY_ARC_MANUAL_CREATE_ENABLED", "true")
+    assert PullboxSettings().story_arc_manual_create_enabled is True
+
+
 def test_reader_compression_ratio_minimum_is_configurable(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PULLBOX_READER_COMPRESSION_RATIO_MIN_MB", raising=False)

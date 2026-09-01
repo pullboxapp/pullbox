@@ -292,28 +292,40 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     mylar3_path_map: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}"
     )
+    mylar3_path_map_confirmed: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
 
     # Relationships
     series: Mapped[list[ImportedSeries]] = relationship(
-        back_populates="import_job", cascade="all, delete-orphan"
+        back_populates="import_job",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     files: Mapped[list[ImportedFile]] = relationship(
-        back_populates="import_job", cascade="all, delete-orphan"
+        back_populates="import_job",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     target_library_root: Mapped[LibraryRoot | None] = relationship()
     logs: Mapped[list[ImportJobLog]] = relationship(
         back_populates="import_job",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="ImportJobLog.logged_at",
     )
     actions: Mapped[list[ImportJobAction]] = relationship(
         back_populates="import_job",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="ImportJobAction.sequence_no",
     )
     story_arcs: Mapped[list[ImportedStoryArc]] = relationship(
         back_populates="import_job",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="ImportedStoryArc.id",
     )
 
@@ -444,7 +456,9 @@ class ImportedSeries(Base, IdentityMixin, TimestampMixin):
     import_job: Mapped[ImportJob] = relationship(back_populates="series")
     series: Mapped[Series | None] = relationship()
     files: Mapped[list[ImportedFile]] = relationship(
-        back_populates="import_series", cascade="all, delete-orphan"
+        back_populates="import_series",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -458,6 +472,9 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     __tablename__ = "import_files"
     __table_args__ = (
         Index("ix_import_files_job_series", "import_job_id", "import_series_id"),
+        Index("ix_import_files_import_series_id", "import_series_id"),
+        Index("ix_import_files_matched_issue_id", "matched_issue_id"),
+        Index("ix_import_files_duplicate_of_file_id", "duplicate_of_file_id"),
         Index(
             "ix_import_files_job_cohort_order",
             "import_job_id",

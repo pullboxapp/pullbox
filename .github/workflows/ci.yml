@@ -171,6 +171,8 @@ jobs:
 
   # ──────────────────────────────────────────────
   # Job 3: Tests + Coverage (matrix: 3.12, 3.13, 3.14)
+  # Every version runs the complete suite and publishes coverage. The blocking
+  # 90% release gate follows the production/default Python 3.14 runtime.
   # ──────────────────────────────────────────────
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -183,7 +185,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        include:
+          - python-version: "3.12"
+            coverage_fail_under: 0
+          - python-version: "3.13"
+            coverage_fail_under: 0
+          - python-version: "3.14"
+            coverage_fail_under: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -206,10 +214,11 @@ jobs:
             --cov=pullbox \
             --cov-report=xml \
             --cov-report=term-missing \
-            --cov-fail-under=90 \
+            --cov-fail-under="${COVERAGE_FAIL_UNDER}" \
             --junitxml=test-results.xml \
             -v
         env:
+          COVERAGE_FAIL_UNDER: ${{ matrix.coverage_fail_under }}
           PULLBOX_SECRET_KEY: test-ci-key
           PYTEST_WORKERS: ${{ env.PYTEST_WORKERS }}
 

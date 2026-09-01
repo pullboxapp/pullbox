@@ -16,12 +16,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
 
-from sqlalchemy import event, func, insert, select, update
+from sqlalchemy import event, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
@@ -47,6 +49,23 @@ from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEn
 from pullbox.performance.baseline import current_process_peak_rss_bytes
 from pullbox.services.import_rollback_state import restore_review_state_after_rollback
 from pullbox.services.import_story_arc_review import confirm_import_story_arcs
+
+_POSTGRESQL_URL_ENV = "PULLBOX_IMPORT_BENCHMARK_POSTGRESQL_URL"
+
+
+async def _prepare_database(
+    connection: AsyncConnection,
+    *,
+    backend: str,
+    reset_dedicated_database: bool,
+) -> None:
+    """Prepare an empty schema without attempting cyclic table-by-table drops."""
+    if reset_dedicated_database:
+        if backend != "postgresql":
+            raise ValueError("dedicated schema reset requires PostgreSQL")
+        await connection.execute(text("DROP SCHEMA public CASCADE"))
+        await connection.execute(text("CREATE SCHEMA public"))
+    await connection.run_sync(Base.metadata.create_all)
 
 
 def _positive_int(value: str) -> int:
@@ -163,9 +182,21 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     total_started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="pullbox-metadata-scale-") as tmp:
         db_path = Path(tmp) / "metadata-scale.db"
-        engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        if args.backend == "postgresql":
+            db_url = os.environ.get(_POSTGRESQL_URL_ENV, "")
+            if not db_url.startswith("postgresql+asyncpg://"):
+                raise RuntimeError(
+                    f"{_POSTGRESQL_URL_ENV} must contain a dedicated PostgreSQL async URL"
+                )
+        else:
+            db_url = f"sqlite+aiosqlite:///{db_path}"
+        engine = create_async_engine(db_url)
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await _prepare_database(
+                connection,
+                backend=args.backend,
+                reset_dedicated_database=args.reset_dedicated_database,
+            )
 
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         select_counts: dict[str, int] = {}
@@ -241,10 +272,17 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 .select_from(ImportedStoryArc)
                 .where(ImportedStoryArc.status == ImportedStoryArcStatus.CONFIRMED)
             )
+            if args.backend == "postgresql":
+                database_bytes = int(
+                    await session.scalar(text("SELECT pg_database_size(current_database())")) or 0
+                )
+            else:
+                database_bytes = db_path.stat().st_size
 
         await engine.dispose()
         return {
             "profile": "metadata_only",
+            "backend": args.backend,
             "series_count": args.series_count,
             "files_per_series": args.files_per_series,
             "represented_file_count": args.series_count * args.files_per_series,
@@ -266,18 +304,26 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "confirm_select_count": select_counts.get("confirm", 0),
             "rollback_select_count": select_counts.get("rollback", 0),
             "peak_rss_bytes": current_process_peak_rss_bytes(),
-            "database_bytes": db_path.stat().st_size,
+            "database_bytes": database_bytes,
         }
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--backend", choices=("sqlite", "postgresql"), default="sqlite")
+    parser.add_argument(
+        "--reset-dedicated-database",
+        action="store_true",
+        help="Drop and recreate all tables; only safe for a dedicated benchmark database",
+    )
     parser.add_argument("--series-count", type=_positive_int, default=50_000)
     parser.add_argument("--files-per-series", type=_positive_int, default=4)
     parser.add_argument("--story-arc-count", type=_positive_int, default=10_000)
     parser.add_argument("--insert-batch-size", type=_positive_int, default=2_000)
     parser.add_argument("--operation-batch-size", type=_positive_int, default=500)
     args = parser.parse_args()
+    if args.reset_dedicated_database and args.backend != "postgresql":
+        parser.error("--reset-dedicated-database requires --backend postgresql")
     print(json.dumps(await _run(args), indent=2, sort_keys=True))
 
 

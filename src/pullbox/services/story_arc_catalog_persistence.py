@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select
 
+from pullbox.core.exceptions import ValidationError
 from pullbox.core.issue_numbers import parse_issue_number_text
 from pullbox.core.library_naming import build_series_relative_path
 from pullbox.core.library_policy import load_effective_library_ingest_policy
@@ -17,6 +18,7 @@ from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, SeriesType
+from pullbox.services.library_root_management import validate_managed_library_root
 from pullbox.services.story_arc_catalog_types import StoryArcCatalogError, exact_provider_id
 
 if TYPE_CHECKING:
@@ -32,15 +34,16 @@ async def canonical_root(session: AsyncSession, root_id: int) -> LibraryRoot:
     if isinstance(root_id, bool) or not isinstance(root_id, int) or root_id < 1:
         raise StoryArcCatalogError("canonical_root_required", "Select a canonical library root")
     root = await session.get(LibraryRoot, root_id)
-    if (
-        root is None
-        or not root.enabled
-        or not Path(root.path).is_absolute()
-        or not Path(root.path).is_dir()
-    ):
+    if root is None:
         raise StoryArcCatalogError(
             "canonical_root_unavailable", "Canonical library root is unavailable"
         )
+    try:
+        await validate_managed_library_root(root)
+    except ValidationError as exc:
+        raise StoryArcCatalogError(
+            "canonical_root_unavailable", "Canonical library root is unavailable"
+        ) from exc
     return root
 
 

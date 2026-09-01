@@ -33,7 +33,7 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     page = authed_page
     errors: list[str] = []
     page.on("pageerror", lambda error: errors.append(str(error)))
-    page.goto(f"{seeded_server}/story-arcs", wait_until="domcontentloaded")
+    page.goto(f"{seeded_server}/story-arcs/add", wait_until="domcontentloaded")
     query = page.get_by_label("Comic Vine arc name")
     query.fill("Numbering")
     expect(page.get_by_role("link", name="Preview Numbering Event")).to_be_visible()
@@ -76,8 +76,8 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     expect(page.get_by_label("Issue file template")).to_have_value(
         "{ReadingOrder:02d} - {OriginalFilename}"
     )
-    expect(page.get_by_role("link", name="Open issue / manual search").first).to_have_attribute(
-        "href", re.compile(r"/issues/\d+$")
+    expect(page.get_by_role("link", name="Open issue 1AU")).to_have_attribute(
+        "href", re.compile(r"/issues/\d+\?source=story-arc&story_arc_id=\d+")
     )
     catalog_provider.metadata = replace(
         catalog_provider.metadata, issue_provider_ids=("101", "103")
@@ -91,8 +91,9 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     expect(page.locator("[data-membership-id]").nth(0)).to_have_attribute(
         "data-exact-issue-number", "1AU"
     )
+    page.get_by_role("button", name="Review issue 2 match").click()
     expect(page.get_by_role("button", name="Confirm this member")).to_be_visible()
-    page.goto(f"{seeded_server}/story-arcs")
+    page.goto(f"{seeded_server}/story-arcs/add")
     page.get_by_label("Comic Vine arc name").fill("Numbering")
     expect(page.get_by_role("link", name="Already added — open arc")).to_have_attribute(
         "href", arc_url.removeprefix(seeded_server)

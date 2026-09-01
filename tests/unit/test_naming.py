@@ -594,6 +594,12 @@ class TestGetNamingPreview:
         for r in results:
             assert not r["output"].endswith(".cbz")
 
+    def test_folder_preview_preserves_nested_path_segments(self) -> None:
+        results = get_naming_preview("{Publisher}/{Series} ({Year})", "folder")
+        outputs = [result["output"] for result in results]
+
+        assert "DC Comics/Absolute Batman (2024)" in outputs
+
     def test_non_standard_type_display(self) -> None:
         results = get_naming_preview("{Series} {Type} ({Year})", "non_standard")
         type_words = {

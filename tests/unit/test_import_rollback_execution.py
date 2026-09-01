@@ -109,7 +109,8 @@ async def test_rollback_reads_completed_actions_in_bounded_stable_pages(
     )
     assert completed is True
     assert observed == expected
-    assert len(action_selects) == 3
+    # Three completed-action pages plus one bounded retriable-failure lookup.
+    assert len(action_selects) == 4
     assert all("LIMIT" in statement for statement in action_selects)
 
 
@@ -143,6 +144,12 @@ async def test_rollback_checkpoints_pages_and_coalesces_durable_progress(
     )
     monkeypatch.setattr(
         import_rollback_execution,
+        "ROLLBACK_ACTION_CHECKPOINT_SIZE",
+        2,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        import_rollback_execution,
         "monotonic",
         lambda: 100.0,
         raising=False,
@@ -151,7 +158,8 @@ async def test_rollback_checkpoints_pages_and_coalesces_durable_progress(
 
     def record_commit(_session: object) -> None:
         nonlocal commit_count
-        commit_count += 1
+        if not _session.in_nested_transaction():
+            commit_count += 1
 
     async def reverse_action(_session: AsyncSession, plan: RollbackActionPlan) -> None:
         action = await db_session.get(ImportJobAction, plan.action_id)
@@ -190,9 +198,368 @@ async def test_rollback_checkpoints_pages_and_coalesces_durable_progress(
         event.remove(db_session.sync_session, "after_commit", record_commit)
 
     assert completed is True
-    assert commit_count == 3
-    assert emitted_progress == [100]
-    progress_callback.assert_awaited_once()
+    assert commit_count == 4
+    assert emitted_progress == [0, 100]
+    assert progress_callback.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rollback_publishes_started_state_before_first_action(
+    db_session: AsyncSession,
+) -> None:
+    job = ImportJob(
+        source_path="/imports/observable-rollback",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+        import_started_at=datetime.now(UTC),
+    )
+    action = ImportJobAction(
+        import_job=job,
+        sequence_no=1,
+        phase="files",
+        action_type="created_file",
+    )
+    db_session.add(action)
+    await db_session.flush()
+    emitted_progress: list[tuple[str, int, str]] = []
+    action_saw_started_state = False
+
+    async def emit_progress(
+        session: AsyncSession,
+        _job: ImportJob,
+        progress_event: ImportProgressEvent,
+        callback: AsyncMock | None,
+    ) -> None:
+        emitted_progress.append(
+            (
+                progress_event.phase,
+                int(progress_event.progress),
+                progress_event.message,
+            )
+        )
+        await session.commit()
+        if callback is not None:
+            await callback(progress_event)
+
+    async def reverse_action(session: AsyncSession, plan: RollbackActionPlan) -> None:
+        nonlocal action_saw_started_state
+        action_saw_started_state = emitted_progress[:1] == [
+            ("rollback", 0, "Rolling back 0/1 actions...")
+        ]
+        current = await session.get(ImportJobAction, plan.action_id)
+        assert current is not None
+        current.status = ImportJobActionStatus.ROLLED_BACK
+
+    completed = await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=reverse_action,
+        restore_review_state=AsyncMock(),
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=AsyncMock(),
+        emit_progress=emit_progress,
+        estimate_remaining_seconds=lambda *_args: None,
+        job_stats=lambda _job: {},
+        progress_callback=AsyncMock(),
+    )
+
+    assert completed is True
+    assert action_saw_started_state is True
+    assert emitted_progress == [
+        ("rollback", 0, "Rolling back 0/1 actions..."),
+        ("rollback", 100, "Rolling back 1/1 actions..."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rollback_with_one_handler_marked_failure_stays_truthfully_incomplete(
+    db_session: AsyncSession,
+) -> None:
+    job = ImportJob(
+        source_path="/imports/conflicted-library",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+        import_started_at=datetime.now(UTC),
+    )
+    action = ImportJobAction(
+        import_job=job,
+        sequence_no=1,
+        phase="files",
+        action_type="changed_file",
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    async def preserve_changed_file(session: AsyncSession, plan: RollbackActionPlan) -> None:
+        current = await session.get(ImportJobAction, plan.action_id)
+        assert current is not None
+        current.status = ImportJobActionStatus.ROLLBACK_FAILED
+        current.error_message = "Destination changed after import."
+
+    restore = AsyncMock()
+    completed = await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=preserve_changed_file,
+        restore_review_state=restore,
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=AsyncMock(),
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args: None,
+        job_stats=lambda _job: {},
+    )
+
+    assert completed is True
+    assert job.status is ImportJobStatus.FAILED
+    assert job.error_message == (
+        "Rollback incomplete: 1 action requires manual recovery. "
+        "Pullbox preserved the affected data."
+    )
+    assert job.progress_snapshot["mode"] == "rollback"
+    assert job.progress_snapshot["phase"] == "rollback_incomplete"
+    assert job.progress_snapshot["progress"] == 0
+    assert job.progress_snapshot["rollback_action_count"] == 1
+    assert job.progress_snapshot["rollback_actions_rolled_back"] == 0
+    assert job.progress_snapshot["rollback_manual_recovery_count"] == 1
+    assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
+    restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rollback_retries_incomplete_placement_after_earlier_owner_is_removed(
+    db_session: AsyncSession,
+) -> None:
+    """A collision start may become a safe no-op later in the reverse walk."""
+    job = ImportJob(
+        source_path="/imports/collision-library",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+        import_started_at=datetime.now(UTC),
+    )
+    owner = ImportJobAction(
+        import_job=job,
+        sequence_no=1,
+        phase="files",
+        action_type="library_file_registered",
+    )
+    collision = ImportJobAction(
+        import_job=job,
+        sequence_no=2,
+        phase="files",
+        action_type="library_file_placement_started",
+    )
+    db_session.add_all([owner, collision])
+    await db_session.flush()
+    owner_present = True
+    observed: list[int] = []
+
+    async def reverse_action(session: AsyncSession, plan: RollbackActionPlan) -> None:
+        nonlocal owner_present
+        observed.append(plan.sequence_no)
+        current = await session.get(ImportJobAction, plan.action_id)
+        assert current is not None
+        if plan.sequence_no == 2 and owner_present:
+            current.status = ImportJobActionStatus.ROLLBACK_FAILED
+            current.error_message = "Destination is still owned by an earlier import action."
+            return
+        if plan.sequence_no == 1:
+            owner_present = False
+        current.status = ImportJobActionStatus.ROLLED_BACK
+        current.error_message = None
+
+    restore = AsyncMock()
+    completed = await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=reverse_action,
+        restore_review_state=restore,
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=AsyncMock(),
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args: None,
+        job_stats=lambda _job: {},
+    )
+
+    assert completed is True
+    assert observed == [2, 1, 2]
+    assert collision.status is ImportJobActionStatus.ROLLED_BACK
+    assert job.status is ImportJobStatus.ROLLED_BACK
+    restore.assert_awaited_once_with(db_session, job.id)
+
+
+@pytest.mark.asyncio
+async def test_rollback_retry_keeps_unproven_placement_in_manual_recovery(
+    db_session: AsyncSession,
+) -> None:
+    job = ImportJob(
+        source_path="/imports/changed-library",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+        import_started_at=datetime.now(UTC),
+    )
+    action = ImportJobAction(
+        import_job=job,
+        sequence_no=1,
+        phase="files",
+        action_type="library_file_placement_started",
+    )
+    db_session.add(action)
+    await db_session.flush()
+    attempts = 0
+
+    async def preserve_unproven_placement(
+        session: AsyncSession,
+        plan: RollbackActionPlan,
+    ) -> None:
+        nonlocal attempts
+        attempts += 1
+        current = await session.get(ImportJobAction, plan.action_id)
+        assert current is not None
+        current.status = ImportJobActionStatus.ROLLBACK_FAILED
+        current.error_message = "Destination still lacks durable ownership evidence."
+
+    completed = await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=preserve_unproven_placement,
+        restore_review_state=AsyncMock(),
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=AsyncMock(),
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args: None,
+        job_stats=lambda _job: {},
+    )
+
+    assert completed is True
+    assert attempts == 2
+    assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
+    assert job.status is ImportJobStatus.FAILED
+    assert job.progress_snapshot["rollback_manual_recovery_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rollback_aggregates_mixed_successes_and_exceptions(
+    db_session: AsyncSession,
+) -> None:
+    job = ImportJob(
+        source_path="/imports/mixed-library",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+        import_started_at=datetime.now(UTC),
+    )
+    actions = [
+        ImportJobAction(
+            import_job=job,
+            sequence_no=sequence_no,
+            phase="files",
+            action_type=f"action_{sequence_no}",
+        )
+        for sequence_no in (1, 2, 3)
+    ]
+    db_session.add_all(actions)
+    await db_session.flush()
+    observed: list[int] = []
+
+    async def reverse_action(session: AsyncSession, plan: RollbackActionPlan) -> None:
+        observed.append(plan.sequence_no)
+        if plan.sequence_no == 2:
+            raise OSError("file became unavailable")
+        current = await session.get(ImportJobAction, plan.action_id)
+        assert current is not None
+        current.status = ImportJobActionStatus.ROLLED_BACK
+
+    log_event = AsyncMock()
+    completed = await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=reverse_action,
+        restore_review_state=AsyncMock(),
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=log_event,
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args: None,
+        job_stats=lambda _job: {},
+    )
+
+    assert completed is True
+    assert observed == [3, 2, 1]
+    assert [action.status for action in actions] == [
+        ImportJobActionStatus.ROLLED_BACK,
+        ImportJobActionStatus.ROLLBACK_FAILED,
+        ImportJobActionStatus.ROLLED_BACK,
+    ]
+    assert "2 actions were rolled back" in (job.error_message or "")
+    assert "1 requires manual recovery" in (job.error_message or "")
+    assert job.status is ImportJobStatus.FAILED
+    assert job.progress_snapshot["progress"] == 67
+    assert job.progress_snapshot["rollback_actions_rolled_back"] == 2
+    assert job.progress_snapshot["rollback_manual_recovery_count"] == 1
+    assert any(
+        len(call.args) >= 4 and call.args[3] == "import_rollback_incomplete"
+        for call in log_event.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_resumed_rollback_preserves_prior_manual_recovery_failure(
+    db_session: AsyncSession,
+) -> None:
+    job = ImportJob(
+        source_path="/imports/resumed-library",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+        import_started_at=datetime.now(UTC),
+    )
+    prior_failure = ImportJobAction(
+        import_job=job,
+        sequence_no=1,
+        phase="files",
+        action_type="changed_file",
+        status=ImportJobActionStatus.ROLLBACK_FAILED,
+        error_message="Destination changed after import.",
+    )
+    remaining_action = ImportJobAction(
+        import_job=job,
+        sequence_no=2,
+        phase="files",
+        action_type="safe_file",
+    )
+    db_session.add_all([prior_failure, remaining_action])
+    await db_session.flush()
+
+    async def reverse_action(session: AsyncSession, plan: RollbackActionPlan) -> None:
+        current = await session.get(ImportJobAction, plan.action_id)
+        assert current is not None
+        current.status = ImportJobActionStatus.ROLLED_BACK
+
+    restore = AsyncMock()
+    completed = await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=reverse_action,
+        restore_review_state=restore,
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=AsyncMock(),
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args: None,
+        job_stats=lambda _job: {},
+    )
+
+    assert completed is True
+    assert job.status is ImportJobStatus.FAILED
+    assert prior_failure.status is ImportJobActionStatus.ROLLBACK_FAILED
+    assert remaining_action.status is ImportJobActionStatus.ROLLED_BACK
+    assert job.progress_snapshot["rollback_action_count"] == 2
+    assert job.progress_snapshot["rollback_actions_rolled_back"] == 1
+    assert job.progress_snapshot["rollback_manual_recovery_count"] == 1
+    assert job.progress_snapshot["progress"] == 50
+    restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -327,3 +694,52 @@ async def test_completed_rollback_clears_deferred_followup_marker(
     assert job.status is ImportJobStatus.ROLLED_BACK
     assert job.story_arc_placement_followup_pending is False
     assert job.progress_snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_completed_integrated_cancellation_rollback_is_terminally_cancelled(
+    db_session: AsyncSession,
+) -> None:
+    job = ImportJob(
+        source_path="/imports/cancelled-library",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+        control_request=ImportControlRequest.CANCEL,
+        import_started_at=datetime.now(UTC),
+    )
+    action = ImportJobAction(
+        import_job=job,
+        sequence_no=1,
+        phase="files",
+        action_type="safe_file",
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    async def reverse_action(session: AsyncSession, plan: RollbackActionPlan) -> None:
+        current = await session.get(ImportJobAction, plan.action_id)
+        assert current is not None
+        current.status = ImportJobActionStatus.ROLLED_BACK
+
+    log_event = AsyncMock()
+    completed = await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=reverse_action,
+        restore_review_state=AsyncMock(),
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=log_event,
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args: None,
+        job_stats=lambda _job: {},
+    )
+
+    assert completed is True
+    assert job.status is ImportJobStatus.CANCELLED
+    assert job.control_request is ImportControlRequest.NONE
+    assert job.error_message == "Import cancelled by user."
+    assert any(
+        len(call.args) >= 4 and call.args[3] == "import_cancelled_after_rollback"
+        for call in log_event.await_args_list
+    )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,9 +14,16 @@ from sqlalchemy import func, select
 
 from pullbox.core.events import EventBus, IssueWanted, SeriesAdded
 from pullbox.core.exceptions import NotFoundError, ValidationError
-from pullbox.core.library_file_ownership import referenced_library_files_for_target
-from pullbox.core.library_policy import load_library_naming_policy
-from pullbox.core.naming import format_series_folder
+from pullbox.core.library_file_ownership import (
+    referenced_library_files_for_target,
+    require_mutable_library_target,
+)
+from pullbox.core.library_naming import build_series_relative_path
+from pullbox.core.library_policy import (
+    load_effective_library_ingest_policy,
+    load_library_naming_policy,
+)
+from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.import_job import ImportJob, ImportSourceType
 from pullbox.models.issue import Issue, IssueStatus
@@ -33,6 +41,7 @@ from pullbox.services.cover_cache_service import (
     find_imported_series_cover,
     purge_series_cover_cache,
 )
+from pullbox.services.library_root_management import validate_managed_library_root
 from pullbox.services.series_delete_targets import (
     SeriesDeleteContext as SeriesDeleteContext,
 )
@@ -57,6 +66,64 @@ if TYPE_CHECKING:
     from pullbox.services.metadata_service import MetadataService
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesFolderCreationResult:
+    """Exact directory ownership captured while assigning a Series path."""
+
+    folder_path: Path
+    ownership_boundary_path: Path
+    created_directory_paths: tuple[Path, ...]
+
+    def ownership_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "folder_path": str(self.folder_path),
+            "ownership_boundary_path": str(self.ownership_boundary_path),
+            "created_directory_paths": [str(path) for path in self.created_directory_paths],
+        }
+
+
+def _create_series_folder_directories(
+    folder_path: Path,
+    ownership_boundary_path: Path,
+) -> tuple[Path, ...]:
+    """Create and return only strict descendant directory segments created here."""
+    relative = folder_path.relative_to(ownership_boundary_path)
+    if not relative.parts:
+        raise ValueError("Series folder cannot be the library root")
+    boundary_resolved = ownership_boundary_path.resolve(strict=True)
+    if not boundary_resolved.is_dir():
+        raise NotADirectoryError(ownership_boundary_path)
+
+    created: list[Path] = []
+    current = ownership_boundary_path
+    try:
+        for segment in relative.parts:
+            current /= segment
+            current_created = False
+            try:
+                current.mkdir()
+            except FileExistsError:
+                if not current.is_dir():
+                    raise
+            else:
+                current_created = True
+            resolved_current = current.resolve(strict=True)
+            resolved_relative = resolved_current.relative_to(boundary_resolved)
+            if not resolved_relative.parts:
+                raise ValueError("Series folder segment cannot resolve to the library root")
+            if current_created:
+                created.append(resolved_current)
+    except (OSError, ValueError):
+        for directory in reversed(created):
+            try:
+                directory.rmdir()
+            except OSError:
+                continue
+        raise
+    return tuple(created)
 
 
 def _targeted_import_folder_type_hint(
@@ -210,14 +277,18 @@ class SeriesService:
         series.issue_catalog_last_checked_at = None
         series.metadata_source = "comicvine_partial"
 
+        diagnostics = dict(import_series.diagnostics or {})
+        diagnostics.pop("series_folder_ownership", None)
         if library_root_id is not None and not series.path:
-            await self._create_series_folder(
+            folder_creation = await self._create_series_folder(
                 session,
                 series,
                 library_root_id,
                 cv_id,
                 folder_series_type=_targeted_import_folder_type_hint(series, issue_summaries),
             )
+            diagnostics["series_folder_ownership"] = folder_creation.ownership_payload()
+        import_series.diagnostics = diagnostics
 
         local_cover = (
             find_imported_series_cover(Path(import_series.source_folder))
@@ -229,7 +300,25 @@ class SeriesService:
                 select(ImportJob.source_type).where(ImportJob.id == import_series.import_job_id)
             )
             if source_type == ImportSourceType.MYLAR3:
-                await cache_imported_series_cover(session, series, local_cover)
+                diagnostics = dict(import_series.diagnostics or {})
+                diagnostics.pop("cover_cache_ownership", None)
+                cached_cover = await cache_imported_series_cover(session, series, local_cover)
+                if (
+                    cached_cover is not None
+                    and cached_cover.artifact_created
+                    and cached_cover.artifact_signature is not None
+                ):
+                    diagnostics["cover_cache_ownership"] = {
+                        "schema_version": 1,
+                        "base_path": str(cached_cover.covers_base),
+                        "ownership_boundary_path": str(cached_cover.ownership_boundary_path),
+                        "created_directory_paths": [
+                            str(path) for path in cached_cover.created_directory_paths
+                        ],
+                        "artifact_path": str(cached_cover.path),
+                        "artifact_signature": dict(cached_cover.artifact_signature),
+                    }
+                import_series.diagnostics = diagnostics
 
         if issue_summaries:
             await self._metadata.upsert_issue_summaries(session, series, issue_summaries)
@@ -260,7 +349,7 @@ class SeriesService:
             hydrated = await self.add_from_comicvine_prefetched(
                 session,
                 comicvine_id=int(series.comicvine_id),
-                library_root_id=series.library_root_id,
+                library_root_id=preferred_managed_root_id(series),
                 search_on_add=series.monitored if search_on_add is None else search_on_add,
                 series_meta=series_meta,
                 issue_summaries=issue_summaries,
@@ -357,11 +446,19 @@ class SeriesService:
     # ── Folder creation ───────────────────────────────────────────────
 
     @staticmethod
-    async def _load_naming_config(session: AsyncSession) -> dict[str, str]:
+    async def _load_naming_config(
+        session: AsyncSession,
+        root: LibraryRoot | int | None = None,
+    ) -> dict[str, str]:
         """Load naming-related config keys from the database."""
-        policy = await load_library_naming_policy(session)
+        policy = (
+            await load_effective_library_ingest_policy(session, root)
+            if root is not None
+            else await load_library_naming_policy(session)
+        )
         return {
             "series_folder_template": policy.series_folder_template,
+            "series_path_template": policy.series_path_template,
             "replace_illegal_characters": "true" if policy.replace_illegal_characters else "false",
             "colon_replacement": policy.colon_replacement,
         }
@@ -374,47 +471,34 @@ class SeriesService:
         comicvine_id: int,
         *,
         folder_series_type: SeriesType | None = None,
-    ) -> None:
+    ) -> SeriesFolderCreationResult:
         """Create a series folder on disk inside the given library root.
 
-        Sets ``series.path`` and ``series.library_root_id``.  If a folder
-        with the same name already exists, appends ``[cv-{comicvine_id}]``
-        to disambiguate.
+        Sets the current and preferred series library roots. If a folder with
+        the same name already exists, appends ``[cv-{comicvine_id}]`` to
+        disambiguate.
         """
         root = await session.get(LibraryRoot, library_root_id)
         if root is None:
             raise ValidationError(f"Library root {library_root_id} not found")
-        if not root.enabled:
-            raise ValidationError(f"Library root '{root.name}' is disabled")
+        await validate_managed_library_root(root)
 
         # Load naming config
-        cfg = await self._load_naming_config(session)
-        template = cfg.get("series_folder_template", "{Series} ({Year})")
-        replace_illegal = cfg.get("replace_illegal_characters", "true") == "true"
-        colon_replacement = cfg.get("colon_replacement", "dash")
+        cfg = await self._load_naming_config(session, root)
 
         # Resolve publisher name for the template
-        publisher_name: str | None = None
         if series.publisher_id:
             await session.refresh(series, attribute_names=["publisher"])
-            publisher_name = series.publisher.name if series.publisher else None
 
-        # Format folder name
-        folder_name = format_series_folder(
-            title=series.title,
-            year=series.year_start,
-            publisher=publisher_name,
-            comicvine_id=comicvine_id,
-            series_type=(folder_series_type or series.series_type).value
-            if (folder_series_type or series.series_type)
-            else None,
-            template=template,
-            replace_illegal=replace_illegal,
-            colon_replacement=colon_replacement,
+        folder_relative = build_series_relative_path(
+            series,
+            cfg,
+            series_type_override=folder_series_type.value if folder_series_type else None,
+            comicvine_id_override=comicvine_id,
         )
 
         root_path = Path(root.path)
-        folder_path = root_path / folder_name
+        folder_path = root_path / folder_relative
 
         # Reclaim empty/progress-only collision folders left behind by prior interrupted work.
         if folder_path.exists():
@@ -428,26 +512,40 @@ class SeriesService:
 
         # Handle collision: append [cv-{id}] if folder already exists
         if folder_path.exists():
-            folder_name_cv = f"{folder_name} [cv-{comicvine_id}]"
-            folder_path = root_path / folder_name_cv
+            folder_name_cv = f"{folder_path.name} [cv-{comicvine_id}]"
+            folder_path = folder_path.with_name(folder_name_cv)
             logger.info(
                 "series_folder_collision",
-                original=folder_name,
+                original=str(folder_relative),
                 resolved=folder_name_cv,
                 comicvine_id=comicvine_id,
             )
 
-        # Create the directory (run in thread to avoid blocking event loop)
-        await asyncio.to_thread(folder_path.mkdir, parents=False, exist_ok=True)
+        # Create each missing segment independently so import rollback can
+        # distinguish directories created here from pre-existing user paths.
+        try:
+            created_directory_paths = await asyncio.to_thread(
+                _create_series_folder_directories,
+                folder_path,
+                root_path,
+            )
+        except (OSError, ValueError) as exc:
+            raise ValidationError("Series folder must be created inside its library root") from exc
 
         series.path = str(folder_path)
         series.library_root_id = library_root_id
+        series.preferred_library_root_id = library_root_id
 
         logger.info(
             "series_folder_created",
             path=str(folder_path),
             series_title=series.title,
             library_root=root.name,
+        )
+        return SeriesFolderCreationResult(
+            folder_path=folder_path.resolve(strict=True),
+            ownership_boundary_path=root_path.resolve(strict=True),
+            created_directory_paths=created_directory_paths,
         )
 
     @staticmethod
@@ -459,26 +557,15 @@ class SeriesService:
         if series.library_root_id is None:
             return None
 
-        cfg = await SeriesService._load_naming_config(session)
-        template = cfg.get("series_folder_template", "{Series} ({Year})")
-        replace_illegal = cfg.get("replace_illegal_characters", "true") == "true"
-        colon_replacement = cfg.get("colon_replacement", "dash")
+        root = await session.get(LibraryRoot, series.library_root_id)
+        if root is None:
+            return None
+        cfg = await SeriesService._load_naming_config(session, root)
 
-        publisher_name: str | None = None
         if series.publisher_id:
             await session.refresh(series, attribute_names=["publisher"])
-            publisher_name = series.publisher.name if series.publisher else None
 
-        return format_series_folder(
-            title=series.title,
-            year=series.year_start,
-            publisher=publisher_name,
-            comicvine_id=series.comicvine_id,
-            series_type=series.series_type.value if series.series_type else None,
-            template=template,
-            replace_illegal=replace_illegal,
-            colon_replacement=colon_replacement,
-        )
+        return str(build_series_relative_path(series, cfg))
 
     # ── Folder renaming ─────────────────────────────────────────────
 
@@ -502,38 +589,30 @@ class SeriesService:
         root = await session.get(LibraryRoot, series.library_root_id)
         if not root:
             return None
+        await validate_managed_library_root(root)
 
         # Load naming config
-        cfg = await self._load_naming_config(session)
-        template = cfg.get("series_folder_template", "{Series} ({Year})")
-        replace_illegal = cfg.get("replace_illegal_characters", "true") == "true"
-        colon_replacement = cfg.get("colon_replacement", "dash")
+        cfg = await self._load_naming_config(session, root)
 
         # Resolve publisher
-        publisher_name: str | None = None
         if series.publisher_id:
             await session.refresh(series, attribute_names=["publisher"])
-            publisher_name = series.publisher.name if series.publisher else None
-
-        # Compute expected folder name
-        expected_name = format_series_folder(
-            title=series.title,
-            year=series.year_start,
-            publisher=publisher_name,
-            comicvine_id=series.comicvine_id,
-            series_type=series.series_type.value if series.series_type else None,
-            template=template,
-            replace_illegal=replace_illegal,
-            colon_replacement=colon_replacement,
-        )
 
         root_path = Path(root.path)
         current_path = Path(series.path)
-        expected_path = root_path / expected_name
+        expected_path = root_path / build_series_relative_path(series, cfg)
+        expected_name = expected_path.name
 
         # No rename needed if already correct
         if current_path == expected_path:
             return None
+
+        await require_mutable_library_target(
+            session,
+            current_path,
+            include_descendants=True,
+            operation="renamed",
+        )
 
         # Don't overwrite an existing different folder
         if expected_path.exists() and expected_path != current_path:
@@ -548,7 +627,7 @@ class SeriesService:
         if expected_path.exists() and expected_path != current_path:
             if series.comicvine_id:
                 expected_name = f"{expected_name} [cv-{series.comicvine_id}]"
-                expected_path = root_path / expected_name
+                expected_path = expected_path.with_name(expected_name)
             if expected_path.exists() and expected_path != current_path:
                 logger.warning(
                     "series_folder_rename_collision",
@@ -561,6 +640,7 @@ class SeriesService:
         # Rename on disk
         if current_path.is_dir():
             try:
+                await asyncio.to_thread(expected_path.parent.mkdir, parents=True, exist_ok=True)
                 await asyncio.to_thread(current_path.rename, expected_path)
                 series.path = str(expected_path)
                 logger.info(

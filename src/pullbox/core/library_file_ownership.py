@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -26,6 +27,8 @@ _SIGNATURE_KEYS = (
     "device",
     "inode",
 )
+_MANAGED_PLACEMENT_DIGEST_ALGORITHM = "sha256"
+_MANAGED_PLACEMENT_DIGEST_CHUNK_BYTES = 1024 * 1024
 
 
 class ReferencedFileValidationError(ConfigurationError):
@@ -38,6 +41,37 @@ class ReferencedFileValidationError(ConfigurationError):
 
 class ReferencedFileMutationError(ValidationError):
     """Raised when an operation would mutate a user-owned referenced artifact."""
+
+
+async def _reference_capable_roots(
+    session: AsyncSession,
+    explicit_root_id: int | None,
+) -> list[LibraryRoot]:
+    """Load only enabled roots authorized to register referenced files."""
+    if explicit_root_id is not None:
+        root = await session.get(LibraryRoot, explicit_root_id)
+        if root is None:
+            raise ConfigurationError("Selected library root does not exist.")
+        if not root.enabled:
+            raise ConfigurationError("Selected library root is disabled.")
+        if not root.allow_referenced_registrations:
+            raise ConfigurationError(
+                "Selected library root does not allow referenced registrations."
+            )
+        return [root]
+
+    return list(
+        (
+            await session.execute(
+                select(LibraryRoot).where(
+                    LibraryRoot.enabled.is_(True),
+                    LibraryRoot.allow_referenced_registrations.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 async def referenced_library_files_for_target(
@@ -102,6 +136,39 @@ def build_file_identity_signature(path: Path) -> dict[str, int | str]:
     }
 
 
+def build_managed_placement_signature(path: Path) -> dict[str, int | str]:
+    """Capture identity plus content proof for one newly managed placement.
+
+    General library scans intentionally use the stat-only identity signature.
+    Import publication calls this narrower helper only after it has created a
+    managed destination whose later cleanup or rollback must prove ownership.
+    """
+    resolved = path.expanduser().resolve(strict=True)
+    digest = hashlib.sha256()
+    with resolved.open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        while chunk := stream.read(_MANAGED_PLACEMENT_DIGEST_CHUNK_BYTES):
+            digest.update(chunk)
+        after = os.fstat(stream.fileno())
+    identity_keys = ("st_size", "st_mtime_ns", "st_dev", "st_ino")
+    if any(getattr(before, key) != getattr(after, key) for key in identity_keys):
+        raise ConfigurationError("Managed placement changed while its ownership proof was built.")
+    final_stat = resolved.stat()
+    if any(getattr(after, key) != getattr(final_stat, key) for key in identity_keys):
+        raise ConfigurationError("Managed placement path changed while ownership was recorded.")
+    signature: dict[str, int | str] = {
+        "schema_version": 1,
+        "resolved_path": str(resolved),
+        "size": after.st_size,
+        "mtime_ns": after.st_mtime_ns,
+        "device": after.st_dev,
+        "inode": after.st_ino,
+    }
+    signature["content_digest_algorithm"] = _MANAGED_PLACEMENT_DIGEST_ALGORITHM
+    signature["content_digest"] = digest.hexdigest()
+    return signature
+
+
 def validate_file_identity_signature(
     expected: dict[str, object],
     current: dict[str, int | str],
@@ -129,7 +196,7 @@ async def resolve_referenced_library_root(
     source_path: Path,
     explicit_root_id: int | None,
 ) -> tuple[LibraryRoot, Path, dict[str, int | str]]:
-    """Resolve an existing file inside one enabled root without prefix guesses."""
+    """Resolve a file inside one unambiguous enabled reference-capable root."""
     raw_path = str(source_path)
     if _CONTROL_CHARACTER_RE.search(raw_path) or ".." in source_path.parts:
         raise ConfigurationError("Referenced library path contains unsafe path components.")
@@ -145,17 +212,9 @@ async def resolve_referenced_library_root(
     if not os.access(resolved_source, os.R_OK):
         raise ConfigurationError("Referenced library file is not readable by Pullbox.")
 
-    roots = list(
-        (await session.execute(select(LibraryRoot).where(LibraryRoot.enabled.is_(True))))
-        .scalars()
-        .all()
-    )
-    if explicit_root_id is not None:
-        roots = [root for root in roots if root.id == explicit_root_id]
-        if not roots:
-            raise ConfigurationError("Selected library root is missing or disabled.")
+    roots = await _reference_capable_roots(session, explicit_root_id)
 
-    candidates: list[tuple[int, LibraryRoot]] = []
+    candidates: list[LibraryRoot] = []
     for root in roots:
         try:
             lexical_root = Path(root.path).expanduser().absolute()
@@ -169,12 +228,20 @@ async def resolve_referenced_library_root(
             resolved_root
         )
         if lexical_inside and resolved_inside:
-            candidates.append((len(resolved_root.parts), root))
+            candidates.append(root)
 
     if not candidates:
-        raise ConfigurationError("Referenced files must be inside an enabled library root.")
+        raise ConfigurationError(
+            "Referenced files must be inside an enabled library root that allows "
+            "referenced registrations."
+        )
+    if len(candidates) != 1:
+        raise ReferencedFileValidationError(
+            "source_root_ambiguous",
+            "Referenced library file matches multiple enabled reference-capable library roots.",
+        )
 
-    _, root = max(candidates, key=lambda candidate: candidate[0])
+    root = candidates[0]
     return root, resolved_source, build_file_identity_signature(resolved_source)
 
 
@@ -183,7 +250,7 @@ async def resolve_referenced_source_root(
     source_path: Path,
     explicit_root_id: int | None,
 ) -> tuple[LibraryRoot, Path]:
-    """Resolve an import source directory inside one enabled library root."""
+    """Resolve a source directory inside one unambiguous reference-capable root."""
     raw_path = str(source_path)
     if _CONTROL_CHARACTER_RE.search(raw_path) or ".." in source_path.parts:
         raise ReferencedFileValidationError(
@@ -215,20 +282,12 @@ async def resolve_referenced_source_root(
             "In-place import source is not readable by Pullbox.",
         )
 
-    roots = list(
-        (await session.execute(select(LibraryRoot).where(LibraryRoot.enabled.is_(True))))
-        .scalars()
-        .all()
-    )
-    if explicit_root_id is not None:
-        roots = [root for root in roots if root.id == explicit_root_id]
-        if not roots:
-            raise ReferencedFileValidationError(
-                "source_outside_root",
-                "Selected library root is missing or disabled.",
-            )
+    try:
+        roots = await _reference_capable_roots(session, explicit_root_id)
+    except ConfigurationError as exc:
+        raise ReferencedFileValidationError("source_outside_root", exc.message) from exc
 
-    candidates: list[tuple[int, LibraryRoot]] = []
+    candidates: list[LibraryRoot] = []
     for root in roots:
         try:
             lexical_root = Path(root.path).expanduser().absolute()
@@ -242,13 +301,19 @@ async def resolve_referenced_source_root(
             resolved_root
         )
         if lexical_inside and resolved_inside:
-            candidates.append((len(resolved_root.parts), root))
+            candidates.append(root)
 
     if not candidates:
         raise ReferencedFileValidationError(
             "source_outside_root",
-            "In-place import source must be inside an enabled library root.",
+            "In-place import source must be inside an enabled library root that allows "
+            "referenced registrations.",
+        )
+    if len(candidates) != 1:
+        raise ReferencedFileValidationError(
+            "source_root_ambiguous",
+            "In-place import source matches multiple enabled reference-capable library roots.",
         )
 
-    _, root = max(candidates, key=lambda candidate: candidate[0])
+    root = candidates[0]
     return root, resolved_source

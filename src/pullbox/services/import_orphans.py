@@ -20,6 +20,7 @@ from pullbox.models.import_job import (
 from pullbox.models.series import Series
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
 from pullbox.services.import_file_resolution import load_issue_lookup_for_series
+from pullbox.services.import_job_actions import build_series_created_action_payload
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -268,7 +269,11 @@ async def recover_orphan(
                 job,
                 phase="import",
                 action_type="series_created",
-                payload={"series_id": series.id, "import_series_id": item.id},
+                payload=await build_series_created_action_payload(
+                    session,
+                    series_id=series.id,
+                    import_series_id=item.id,
+                ),
             )
 
     cv_id_to_issue, _, _ = await load_issue_lookup_for_series(session, series.id)

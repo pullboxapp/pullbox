@@ -110,6 +110,7 @@ def _enrich_series_list(
         "publisher_name": series.publisher.name if series.publisher else None,
         "path": series.path,
         "library_root_id": series.library_root_id,
+        "preferred_library_root_id": series.preferred_library_root_id,
         "owned_count": (
             int(owned_count)
             if owned_count is not None

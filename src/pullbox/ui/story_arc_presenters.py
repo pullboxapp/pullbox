@@ -6,19 +6,28 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.db_utils import escape_like
-from pullbox.models.issue import Issue
-from pullbox.models.library import LibraryRoot
+from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.publisher import Publisher
 from pullbox.models.story_arc import (
     IssueStoryArc,
     StoryArc,
     StoryArcLifecycle,
+    StoryArcPlacement,
+    StoryArcPlacementState,
     StoryArcResolutionState,
 )
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
+from pullbox.services.cover_url_service import build_story_arc_cover_url
+from pullbox.services.library_root_management import list_library_roots
+from pullbox.services.reading_query_service import (
+    ReadingStateProjection,
+    load_story_arc_reading_aggregates,
+    load_visible_issue_states,
+)
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicy,
     StoryArcPlacementPolicyInput,
@@ -27,6 +36,8 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementSyncService,
     StoryArcPlacementView,
 )
+from pullbox.services.story_arc_search_targets import load_story_arc_search_eligible_counts
+from pullbox.ui.reading_presenters import IssueReadingView, present_issue_reading
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,10 +57,29 @@ class StoryArcListItemView:
     monitored: bool
     sync_enabled: bool
     revision: int
+    publisher_name: str | None
+    cover_src: str | None
+    cover_loading: str
+    cover_fetchpriority: str
+    cover_decoding: str
     membership_count: int
     resolved_count: int
+    owned_count: int
+    readable_count: int
+    read_count: int
+    completion_pct: int
+    acquisition_tone: str
+    system_tone: str
+    pending_count: int
     missing_count: int
+    ambiguous_count: int
     conflict_count: int
+    placement_problem_count: int
+    sync_failure_count: int
+    review_count: int
+    review_tone: str
+    review_summary: str
+    search_eligible_count: int
     completion_label: str
 
 
@@ -62,6 +92,17 @@ class StoryArcListPageView:
     page: int
     per_page: int
     total_pages: int
+    active_count: int
+    archived_count: int
+    monitored_count: int
+    membership_count: int
+    resolved_count: int
+    owned_count: int
+    review_count: int
+    pending_count: int
+    missing_count: int
+    ambiguous_count: int
+    conflict_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,8 +119,8 @@ class StoryArcMembershipView:
     issue_title: str
     resolution_state: str
     resolution_label: str
-    canonical_state: str
-    canonical_file_available: bool
+    issue_status: str | None
+    reading: IssueReadingView | None
     can_resolve: bool
     local_search_query: str
     metadata_add_url: str
@@ -114,14 +155,27 @@ class StoryArcDetailView:
     revision: int
     membership_count: int
     resolved_count: int
+    owned_count: int
+    readable_count: int
+    read_count: int
+    acquisition_pct: int
+    pending_count: int
     missing_count: int
+    ambiguous_count: int
     conflict_count: int
+    placement_problem_count: int
+    sync_failure_count: int
+    review_count: int
+    review_summary: str
     memberships: tuple[StoryArcMembershipView, ...]
     page: int
     per_page: int
     total_pages: int
     next_sequence_number: int
     comicvine_id: int | None = None
+    comicvine_url: str | None = None
+    publisher_name: str | None = None
+    cover_src: str | None = None
     catalog_removed_count: int = 0
     catalog_added_review_count: int = 0
     initial_placements: StoryArcInitialPlacementView | None = None
@@ -140,6 +194,8 @@ class StoryArcPlacementRootView:
     name: str
     path: str
     enabled: bool
+    can_manage: bool
+    can_reference: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +207,8 @@ class StoryArcPlacementPolicyView:
     mode: str
     mode_label: str
     layout_label: str
+    summary_label: str
+    synchronization_label: str
     target_library_root_id: int | None
     destination_root: str
     folder_template: str
@@ -271,10 +329,32 @@ def _membership_counts_subquery() -> Subquery:
             ).label("resolved_count"),
             func.sum(
                 case(
+                    (
+                        (IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED)
+                        & (Issue.status == IssueStatus.OWNED),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("owned_count"),
+            func.sum(
+                case(
+                    (IssueStoryArc.resolution_state == StoryArcResolutionState.PENDING, 1),
+                    else_=0,
+                )
+            ).label("pending_count"),
+            func.sum(
+                case(
                     (IssueStoryArc.resolution_state == StoryArcResolutionState.MISSING, 1),
                     else_=0,
                 )
             ).label("missing_count"),
+            func.sum(
+                case(
+                    (IssueStoryArc.resolution_state == StoryArcResolutionState.AMBIGUOUS, 1),
+                    else_=0,
+                )
+            ).label("ambiguous_count"),
             func.sum(
                 case(
                     (IssueStoryArc.resolution_state == StoryArcResolutionState.CONFLICT, 1),
@@ -282,9 +362,69 @@ def _membership_counts_subquery() -> Subquery:
                 )
             ).label("conflict_count"),
         )
+        .outerjoin(Issue, Issue.id == IssueStoryArc.issue_id)
         .group_by(IssueStoryArc.story_arc_id)
         .subquery()
     )
+
+
+def _placement_problem_counts_subquery() -> Subquery:
+    return (
+        select(
+            IssueStoryArc.story_arc_id.label("story_arc_id"),
+            func.count(StoryArcPlacement.id).label("placement_problem_count"),
+        )
+        .join(StoryArcPlacement, StoryArcPlacement.issue_story_arc_id == IssueStoryArc.id)
+        .where(
+            StoryArcPlacement.state.in_(
+                (
+                    StoryArcPlacementState.MISSING,
+                    StoryArcPlacementState.DRIFTED,
+                    StoryArcPlacementState.FAILED,
+                )
+            )
+        )
+        .group_by(IssueStoryArc.story_arc_id)
+        .subquery()
+    )
+
+
+def _sync_failure_counts_subquery() -> Subquery:
+    return (
+        select(
+            IssueStoryArc.story_arc_id.label("story_arc_id"),
+            func.count(StoryArcSyncWork.id).label("sync_failure_count"),
+        )
+        .join(StoryArcSyncWork, StoryArcSyncWork.issue_story_arc_id == IssueStoryArc.id)
+        .where(StoryArcSyncWork.state == StoryArcSyncWorkState.FAILED)
+        .group_by(IssueStoryArc.story_arc_id)
+        .subquery()
+    )
+
+
+def _review_summary(
+    *,
+    pending: int,
+    missing: int,
+    ambiguous: int,
+    conflicts: int,
+    placements: int,
+    sync_failures: int,
+) -> str:
+    labels: tuple[tuple[int, str, str], ...] = (
+        (pending, "pending", "pending"),
+        (missing, "missing match", "missing matches"),
+        (ambiguous, "ambiguous", "ambiguous"),
+        (conflicts, "identity conflict", "identity conflicts"),
+        (placements, "placement problem", "placement problems"),
+        (sync_failures, "sync failure", "sync failures"),
+    )
+    parts = [
+        f"{count} {singular if count == 1 else plural}"
+        for count, singular, plural in labels
+        if count
+    ]
+    return " · ".join(parts) if parts else "No review needed"
 
 
 def _completion_label(*, total: int, resolved: int) -> str:
@@ -301,6 +441,7 @@ async def load_story_arc_list_page(
     monitored: bool | None,
     page: int,
     per_page: int,
+    user_id: int,
 ) -> StoryArcListPageView:
     """Load one stable Story Arc registry page with literal search semantics."""
     filters: list[ColumnElement[bool]] = []
@@ -311,30 +452,150 @@ async def load_story_arc_list_page(
     if monitored is not None:
         filters.append(StoryArc.monitored.is_(monitored))
 
-    total = int(await session.scalar(select(func.count(StoryArc.id)).where(*filters)) or 0)
+    counts = _membership_counts_subquery()
+    placement_counts = _placement_problem_counts_subquery()
+    sync_counts = _sync_failure_counts_subquery()
+    registry_counts = (
+        await session.execute(
+            select(
+                func.count(StoryArc.id),
+                func.coalesce(
+                    func.sum(case((StoryArc.lifecycle == StoryArcLifecycle.ACTIVE, 1), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(case((StoryArc.lifecycle == StoryArcLifecycle.ARCHIVED, 1), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(case((StoryArc.monitored.is_(True), 1), else_=0)),
+                    0,
+                ),
+                func.coalesce(func.sum(counts.c.membership_count), 0),
+                func.coalesce(func.sum(counts.c.resolved_count), 0),
+                func.coalesce(func.sum(counts.c.owned_count), 0),
+                func.coalesce(func.sum(counts.c.pending_count), 0),
+                func.coalesce(func.sum(counts.c.missing_count), 0),
+                func.coalesce(func.sum(counts.c.ambiguous_count), 0),
+                func.coalesce(func.sum(counts.c.conflict_count), 0),
+                func.coalesce(func.sum(placement_counts.c.placement_problem_count), 0),
+                func.coalesce(func.sum(sync_counts.c.sync_failure_count), 0),
+            )
+            .outerjoin(counts, counts.c.story_arc_id == StoryArc.id)
+            .outerjoin(placement_counts, placement_counts.c.story_arc_id == StoryArc.id)
+            .outerjoin(sync_counts, sync_counts.c.story_arc_id == StoryArc.id)
+            .where(*filters)
+        )
+    ).one()
+    (
+        total,
+        active_count,
+        archived_count,
+        monitored_count,
+        membership_count,
+        resolved_count,
+        owned_count,
+        pending_count,
+        missing_count,
+        ambiguous_count,
+        conflict_count,
+        placement_problem_count,
+        sync_failure_count,
+    ) = (int(value or 0) for value in registry_counts)
     total_pages = max(1, (total + per_page - 1) // per_page)
     safe_page = min(page, total_pages)
-    counts = _membership_counts_subquery()
+    first_issue_id = (
+        select(IssueStoryArc.issue_id)
+        .where(
+            IssueStoryArc.story_arc_id == StoryArc.id,
+            IssueStoryArc.issue_id.is_not(None),
+        )
+        .order_by(
+            IssueStoryArc.sequence_number,
+            IssueStoryArc.source_ordinal,
+            IssueStoryArc.id,
+        )
+        .limit(1)
+        .correlate(StoryArc)
+        .scalar_subquery()
+    )
     rows = (
         await session.execute(
             select(
                 StoryArc,
+                Publisher.name,
+                first_issue_id,
                 func.coalesce(counts.c.membership_count, 0),
                 func.coalesce(counts.c.resolved_count, 0),
+                func.coalesce(counts.c.owned_count, 0),
+                func.coalesce(counts.c.pending_count, 0),
                 func.coalesce(counts.c.missing_count, 0),
+                func.coalesce(counts.c.ambiguous_count, 0),
                 func.coalesce(counts.c.conflict_count, 0),
+                func.coalesce(placement_counts.c.placement_problem_count, 0),
+                func.coalesce(sync_counts.c.sync_failure_count, 0),
             )
             .outerjoin(counts, counts.c.story_arc_id == StoryArc.id)
+            .outerjoin(Publisher, Publisher.id == StoryArc.publisher_id)
+            .outerjoin(placement_counts, placement_counts.c.story_arc_id == StoryArc.id)
+            .outerjoin(sync_counts, sync_counts.c.story_arc_id == StoryArc.id)
             .where(*filters)
             .order_by(StoryArc.normalized_name.asc(), StoryArc.id.asc())
             .limit(per_page)
             .offset((safe_page - 1) * per_page)
         )
     ).all()
+    visible_arc_ids = tuple(int(row[0].id) for row in rows)
+    reading_aggregates = await load_story_arc_reading_aggregates(
+        session,
+        user_id=user_id,
+        story_arc_ids=visible_arc_ids,
+    )
+    search_eligible_counts = await load_story_arc_search_eligible_counts(
+        session,
+        visible_arc_ids,
+    )
     items: list[StoryArcListItemView] = []
-    for arc, membership_count, resolved_count, missing_count, conflict_count in rows:
-        membership_total = int(membership_count)
-        resolved_total = int(resolved_count)
+    for index, row in enumerate(rows):
+        (
+            arc,
+            publisher_name,
+            fallback_issue_id,
+            item_membership_count,
+            item_resolved_count,
+            item_owned_count,
+            item_pending_count,
+            item_missing_count,
+            item_ambiguous_count,
+            item_conflict_count,
+            item_placement_problem_count,
+            item_sync_failure_count,
+        ) = row
+        membership_total = int(item_membership_count)
+        resolved_total = int(item_resolved_count)
+        owned_total = int(item_owned_count)
+        completion_pct = round((owned_total / membership_total) * 100) if membership_total else 0
+        acquisition_tone = (
+            "green" if completion_pct >= 80 else "amber" if completion_pct >= 35 else "red"
+        )
+        pending_total = int(item_pending_count)
+        missing_total = int(item_missing_count)
+        ambiguous_total = int(item_ambiguous_count)
+        conflict_total = int(item_conflict_count)
+        placement_total = int(item_placement_problem_count)
+        sync_failure_total = int(item_sync_failure_count)
+        review_total = (
+            pending_total
+            + missing_total
+            + ambiguous_total
+            + conflict_total
+            + placement_total
+            + sync_failure_total
+        )
+        reading = reading_aggregates.get(arc.id)
+        cover_src = build_story_arc_cover_url(arc)
+        if cover_src is None and fallback_issue_id is not None:
+            cover_src = f"/api/v1/issues/{int(fallback_issue_id)}/cover"
         items.append(
             StoryArcListItemView(
                 id=arc.id,
@@ -345,10 +606,48 @@ async def load_story_arc_list_page(
                 monitored=arc.monitored,
                 sync_enabled=arc.sync_enabled,
                 revision=arc.revision,
+                publisher_name=publisher_name,
+                cover_src=cover_src,
+                cover_loading="eager" if index < 8 else "lazy",
+                cover_fetchpriority="high" if index < 4 else "auto",
+                cover_decoding="sync" if index < 2 else "async",
                 membership_count=membership_total,
                 resolved_count=resolved_total,
-                missing_count=int(missing_count),
-                conflict_count=int(conflict_count),
+                owned_count=owned_total,
+                readable_count=reading.readable_count if reading is not None else 0,
+                read_count=reading.completed_count if reading is not None else 0,
+                completion_pct=completion_pct,
+                acquisition_tone=acquisition_tone,
+                system_tone=(
+                    "off"
+                    if not arc.monitored or arc.lifecycle is StoryArcLifecycle.ARCHIVED
+                    else "green"
+                    if completion_pct >= 80
+                    else "amber"
+                ),
+                pending_count=pending_total,
+                missing_count=missing_total,
+                ambiguous_count=ambiguous_total,
+                conflict_count=conflict_total,
+                placement_problem_count=placement_total,
+                sync_failure_count=sync_failure_total,
+                review_count=review_total,
+                review_tone=(
+                    "error"
+                    if conflict_total or placement_total or sync_failure_total
+                    else "warning"
+                    if review_total
+                    else "success"
+                ),
+                review_summary=_review_summary(
+                    pending=pending_total,
+                    missing=missing_total,
+                    ambiguous=ambiguous_total,
+                    conflicts=conflict_total,
+                    placements=placement_total,
+                    sync_failures=sync_failure_total,
+                ),
+                search_eligible_count=search_eligible_counts.get(arc.id, 0),
                 completion_label=_completion_label(
                     total=membership_total,
                     resolved=resolved_total,
@@ -361,6 +660,24 @@ async def load_story_arc_list_page(
         page=safe_page,
         per_page=per_page,
         total_pages=total_pages,
+        active_count=active_count,
+        archived_count=archived_count,
+        monitored_count=monitored_count,
+        membership_count=membership_count,
+        resolved_count=resolved_count,
+        owned_count=owned_count,
+        review_count=(
+            pending_count
+            + missing_count
+            + ambiguous_count
+            + conflict_count
+            + placement_problem_count
+            + sync_failure_count
+        ),
+        pending_count=pending_count,
+        missing_count=missing_count,
+        ambiguous_count=ambiguous_count,
+        conflict_count=conflict_count,
     )
 
 
@@ -375,21 +692,12 @@ def _resolution_label(state: StoryArcResolutionState) -> str:
     }[state]
 
 
-def _canonical_state(issue: Issue | None) -> str:
-    if issue is None:
-        return "Not matched"
-    if issue.library_file is not None:
-        return "File available"
-    if issue.status.value == "owned":
-        return "Owned record; file unavailable"
-    return issue.status.value.replace("_", " ").title()
-
-
 def _present_membership(
     membership: IssueStoryArc,
     *,
     position: int,
     membership_total: int,
+    reading: IssueReadingView | None,
 ) -> StoryArcMembershipView:
     issue = membership.issue
     exact_issue_number = membership.source_issue_number_text
@@ -417,8 +725,12 @@ def _present_membership(
         issue_title=issue_title or "Untitled issue",
         resolution_state=membership.resolution_state.value,
         resolution_label=_resolution_label(membership.resolution_state),
-        canonical_state=_canonical_state(issue),
-        canonical_file_available=issue is not None and issue.library_file is not None,
+        issue_status=(
+            issue.status.value
+            if issue is not None and membership.resolution_state is StoryArcResolutionState.RESOLVED
+            else None
+        ),
+        reading=reading,
         can_resolve=(
             membership.issue_id is None
             or membership.resolution_state
@@ -444,11 +756,19 @@ async def load_story_arc_detail(
     story_arc_id: int,
     page: int,
     per_page: int,
+    user_id: int,
 ) -> StoryArcDetailView | None:
     """Load one arc and one bounded, relationship-complete membership page."""
-    arc = await session.get(StoryArc, story_arc_id)
-    if arc is None:
+    arc_row = (
+        await session.execute(
+            select(StoryArc, Publisher.name)
+            .outerjoin(Publisher, Publisher.id == StoryArc.publisher_id)
+            .where(StoryArc.id == story_arc_id)
+        )
+    ).one_or_none()
+    if arc_row is None:
         return None
+    arc, publisher_name = arc_row
 
     count_row = (
         await session.execute(
@@ -490,7 +810,46 @@ async def load_story_arc_detail(
                     ),
                     0,
                 ),
-            ).where(IssueStoryArc.story_arc_id == story_arc_id)
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                IssueStoryArc.resolution_state == StoryArcResolutionState.PENDING,
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                IssueStoryArc.resolution_state == StoryArcResolutionState.AMBIGUOUS,
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                (IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED)
+                                & (Issue.status == IssueStatus.OWNED),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            )
+            .outerjoin(Issue, Issue.id == IssueStoryArc.issue_id)
+            .where(IssueStoryArc.story_arc_id == story_arc_id)
         )
     ).one()
     membership_total = int(count_row[0])
@@ -516,14 +875,98 @@ async def load_story_arc_detail(
             )
         ).unique()
     )
+    issue_ids = tuple(
+        membership.issue_id for membership in memberships if membership.issue_id is not None
+    )
+    reading_states: dict[int, ReadingStateProjection] = {}
+    for batch_start in range(0, len(issue_ids), 50):
+        reading_states.update(
+            await load_visible_issue_states(
+                session,
+                user_id=user_id,
+                issue_ids=issue_ids[batch_start : batch_start + 50],
+            )
+        )
     membership_views = tuple(
         _present_membership(
             membership,
             position=offset + index,
             membership_total=membership_total,
+            reading=(
+                present_issue_reading(
+                    reading_states.get(membership.issue_id),
+                    readable=membership.issue is not None
+                    and membership.issue.library_file is not None,
+                )
+                if membership.issue_id is not None
+                else None
+            ),
         )
         for index, membership in enumerate(memberships, start=1)
     )
+    reading = (
+        await load_story_arc_reading_aggregates(
+            session,
+            user_id=user_id,
+            story_arc_ids=(story_arc_id,),
+        )
+    ).get(story_arc_id)
+    placement_problem_count = int(
+        await session.scalar(
+            select(func.count(StoryArcPlacement.id))
+            .join(IssueStoryArc, IssueStoryArc.id == StoryArcPlacement.issue_story_arc_id)
+            .where(
+                IssueStoryArc.story_arc_id == story_arc_id,
+                StoryArcPlacement.state.in_(
+                    (
+                        StoryArcPlacementState.MISSING,
+                        StoryArcPlacementState.DRIFTED,
+                        StoryArcPlacementState.FAILED,
+                    )
+                ),
+            )
+        )
+        or 0
+    )
+    sync_failure_count = int(
+        await session.scalar(
+            select(func.count(StoryArcSyncWork.id))
+            .join(IssueStoryArc, IssueStoryArc.id == StoryArcSyncWork.issue_story_arc_id)
+            .where(
+                IssueStoryArc.story_arc_id == story_arc_id,
+                StoryArcSyncWork.state == StoryArcSyncWorkState.FAILED,
+            )
+        )
+        or 0
+    )
+    pending_count = int(count_row[4])
+    ambiguous_count = int(count_row[5])
+    owned_count = int(count_row[6])
+    review_count = (
+        pending_count
+        + int(count_row[2])
+        + ambiguous_count
+        + int(count_row[3])
+        + placement_problem_count
+        + sync_failure_count
+    )
+    cover_src = build_story_arc_cover_url(arc)
+    if cover_src is None:
+        fallback_issue_id = await session.scalar(
+            select(IssueStoryArc.issue_id)
+            .where(
+                IssueStoryArc.story_arc_id == story_arc_id,
+                IssueStoryArc.issue_id.is_not(None),
+            )
+            .order_by(
+                IssueStoryArc.sequence_number,
+                IssueStoryArc.source_ordinal,
+                IssueStoryArc.id,
+            )
+            .limit(1)
+        )
+        if fallback_issue_id is not None:
+            cover_src = f"/api/v1/issues/{int(fallback_issue_id)}/cover"
     return StoryArcDetailView(
         id=arc.id,
         name=arc.name,
@@ -537,14 +980,41 @@ async def load_story_arc_detail(
         revision=arc.revision,
         membership_count=membership_total,
         resolved_count=int(count_row[1]),
+        owned_count=owned_count,
+        readable_count=reading.readable_count if reading is not None else 0,
+        read_count=reading.completed_count if reading is not None else 0,
+        acquisition_pct=(round((owned_count / membership_total) * 100) if membership_total else 0),
+        pending_count=pending_count,
         missing_count=int(count_row[2]),
+        ambiguous_count=ambiguous_count,
         conflict_count=int(count_row[3]),
+        placement_problem_count=placement_problem_count,
+        sync_failure_count=sync_failure_count,
+        review_count=review_count,
+        review_summary=_review_summary(
+            pending=pending_count,
+            missing=int(count_row[2]),
+            ambiguous=ambiguous_count,
+            conflicts=int(count_row[3]),
+            placements=placement_problem_count,
+            sync_failures=sync_failure_count,
+        ),
         memberships=membership_views,
         page=safe_page,
         per_page=per_page,
         total_pages=total_pages,
         next_sequence_number=membership_total + 1,
         comicvine_id=arc.comicvine_id,
+        comicvine_url=(
+            arc.comicvine_url
+            or (
+                f"https://comicvine.gamespot.com/story-arc/4045-{arc.comicvine_id}/"
+                if arc.comicvine_id is not None
+                else None
+            )
+        ),
+        publisher_name=publisher_name,
+        cover_src=cover_src,
         catalog_removed_count=_catalog_diagnostic_count(arc, "removed_issue_provider_ids"),
         catalog_added_review_count=_catalog_diagnostic_count(arc, "pending_membership_ids"),
         initial_placements=_initial_placement_view(arc),
@@ -584,6 +1054,13 @@ def _placement_mode_label(mode: str) -> str:
 
 
 def _placement_policy_view(policy: StoryArcPlacementPolicy) -> StoryArcPlacementPolicyView:
+    summary_label = {
+        StoryArcPlacementPolicyMode.LOGICAL: "No separate folder",
+        StoryArcPlacementPolicyMode.COPY: "Copied to arc folder",
+        StoryArcPlacementPolicyMode.HARDLINK: "Hardlinked into arc folder",
+        StoryArcPlacementPolicyMode.SYMLINK: "Symlinked into arc folder",
+        StoryArcPlacementPolicyMode.REFERENCE_ONLY: "Existing files referenced",
+    }[policy.mode]
     return StoryArcPlacementPolicyView(
         configured=policy.configured,
         revision=policy.revision,
@@ -593,6 +1070,14 @@ def _placement_policy_view(policy: StoryArcPlacementPolicy) -> StoryArcPlacement
             "Logical only"
             if policy.mode is StoryArcPlacementPolicyMode.LOGICAL
             else "Separate Story Arc folder"
+        ),
+        summary_label=summary_label,
+        synchronization_label=(
+            "No file synchronization"
+            if policy.mode is StoryArcPlacementPolicyMode.LOGICAL
+            else "Synchronized"
+            if policy.synchronize
+            else "Manual"
         ),
         target_library_root_id=policy.target_library_root_id,
         destination_root=policy.destination_root or "",
@@ -684,31 +1169,52 @@ async def load_story_arc_placement_roots(
     *,
     selected_root_id: int | None,
 ) -> tuple[tuple[StoryArcPlacementRootView, ...], bool]:
-    roots = list(
-        (
-            await session.scalars(
-                select(LibraryRoot)
-                .where(
-                    or_(
-                        LibraryRoot.enabled.is_(True),
-                        LibraryRoot.id == selected_root_id,
-                    )
-                )
-                .order_by(LibraryRoot.name.asc(), LibraryRoot.id.asc())
-                .limit(_PLACEMENT_ROOT_OPTION_LIMIT + 1)
-            )
-        ).all()
+    states = await list_library_roots(session)
+    usable = [
+        root
+        for root in states
+        if bool(root["enabled"])
+        and bool(root["available"])
+        and bool(root["readable"])
+        and (
+            (bool(root["allow_managed_writes"]) and bool(root["writable"]))
+            or bool(root["allow_referenced_registrations"])
+        )
+    ]
+    usable.sort(
+        key=lambda root: (
+            not bool(root["is_default_managed_destination"]),
+            str(root["name"]).casefold(),
+            int(root["id"]),
+        )
     )
-    truncated = len(roots) > _PLACEMENT_ROOT_OPTION_LIMIT
+    usable_ids = {int(root["id"]) for root in usable}
+    options = list(usable)
+    if selected_root_id is not None and selected_root_id not in usable_ids:
+        selected = next(
+            (root for root in states if int(root["id"]) == selected_root_id),
+            None,
+        )
+        if selected is not None:
+            options.append(selected)
+    truncated = len(options) > _PLACEMENT_ROOT_OPTION_LIMIT
     return (
         tuple(
             StoryArcPlacementRootView(
-                id=root.id,
-                name=root.name,
-                path=root.path,
-                enabled=root.enabled,
+                id=int(root["id"]),
+                name=str(root["name"]),
+                path=str(root["path"]),
+                enabled=int(root["id"]) in usable_ids,
+                can_manage=(
+                    int(root["id"]) in usable_ids
+                    and bool(root["allow_managed_writes"])
+                    and bool(root["writable"])
+                ),
+                can_reference=(
+                    int(root["id"]) in usable_ids and bool(root["allow_referenced_registrations"])
+                ),
             )
-            for root in roots[:_PLACEMENT_ROOT_OPTION_LIMIT]
+            for root in options[:_PLACEMENT_ROOT_OPTION_LIMIT]
         ),
         truncated,
     )

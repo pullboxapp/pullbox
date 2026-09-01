@@ -51,14 +51,14 @@ def _series(cv_id="21"):
     )
 
 
-def _provider(issues=None, *, complete=True):
+def _provider(issues=None, *, complete=True, cover_url=None):
     issues = issues if issues is not None else [_issue(), _issue("12", "22", "1000000")]
     metadata = StoryArcMetadata(
         provider_id="31",
         title="Remote Arc",
         description="Remote arc description",
         publisher="DC",
-        cover_url=None,
+        cover_url=cover_url,
         comicvine_url=None,
         issue_provider_ids=tuple(issue.provider_id for issue in issues),
         declared_issue_count=None,
@@ -158,6 +158,35 @@ async def test_add_reuses_existing_canonical_state_and_targets_only_new_members(
     assert arc.monitored and arc.search_missing
     provider.get_series.assert_awaited_once_with("22")
     assert await db_session.scalar(select(func.count(Issue.id))) == 2
+
+
+async def test_add_and_refresh_persist_the_provider_story_arc_cover(db_session, tmp_path):
+    from pullbox.services.story_arc_catalog import StoryArcCatalogService
+
+    root = await _root(db_session, tmp_path)
+    service = StoryArcCatalogService(
+        _provider(cover_url="https://comicvine.example/arcs/remote-arc.jpg")
+    )
+    arc = await service.add(
+        db_session,
+        await service.preview("31"),
+        ordered_issue_provider_ids=["11", "12"],
+        library_root_id=root.id,
+    )
+
+    assert arc.cover_url == "https://comicvine.example/arcs/remote-arc.jpg"
+
+    refreshed_service = StoryArcCatalogService(
+        _provider(cover_url="https://comicvine.example/arcs/remote-arc-updated.jpg")
+    )
+    result = await refreshed_service.refresh(
+        db_session,
+        arc.id,
+        await refreshed_service.preview("31"),
+        expected_revision=arc.revision,
+    )
+
+    assert result.story_arc.cover_url == ("https://comicvine.example/arcs/remote-arc-updated.jpg")
 
 
 @pytest.mark.parametrize("mode", ["partial", "hydration", "order", "conflict", "policy"])
@@ -618,3 +647,31 @@ async def test_imported_provider_arc_refresh_requires_explicit_new_parent_root(
         appended.sequence_number == 20
         and appended.resolution_state is StoryArcResolutionState.PENDING
     )
+
+
+async def test_add_rejects_reference_only_canonical_root_without_mutation(db_session, tmp_path):
+    from pullbox.services.story_arc_catalog import StoryArcCatalogError, StoryArcCatalogService
+
+    root = LibraryRoot(
+        name="Reference only",
+        path=str(tmp_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
+    db_session.add(root)
+    await db_session.flush()
+    service = StoryArcCatalogService(_provider())
+    preview = await service.preview("31")
+
+    with pytest.raises(StoryArcCatalogError) as error:
+        await service.add(
+            db_session,
+            preview,
+            ordered_issue_provider_ids=["11", "12"],
+            library_root_id=root.id,
+        )
+
+    assert error.value.code == "canonical_root_unavailable"
+    assert await db_session.scalar(select(func.count(StoryArc.id))) == 0
+    assert await db_session.scalar(select(func.count(Series.id))) == 0

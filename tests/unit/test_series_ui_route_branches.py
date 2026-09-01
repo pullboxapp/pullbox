@@ -19,6 +19,8 @@ from pullbox.providers.base import SeriesSearchResult
 from pullbox.ui import series_routes
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -337,8 +339,19 @@ async def test_add_series_page_and_htmx_search_routes_render_expected_templates(
     db_session: AsyncSession,
     configured_series_routes: RecordingTemplates,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    db_session.add(LibraryRoot(name="Main", path="/comics", enabled=True))
+    comics_dir = tmp_path / "comics"
+    comics_dir.mkdir()
+    db_session.add(
+        LibraryRoot(
+            name="Main",
+            path=str(comics_dir),
+            enabled=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+    )
     await db_session.flush()
     monkeypatch.setattr(series_routes, "get_request_session_factory", lambda _request: None)
 
@@ -352,7 +365,7 @@ async def test_add_series_page_and_htmx_search_routes_render_expected_templates(
         search_mode=None,
     )
     assert page.template_name == "pages/add_series.html"
-    assert page.context["roots"][0].name == "Main"  # type: ignore[index]
+    assert page.context["roots"][0]["name"] == "Main"  # type: ignore[index]
     assert "add_series_sort_options" in page.context
 
     htmx_page = await series_routes.add_series_page(

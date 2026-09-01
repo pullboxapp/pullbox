@@ -61,7 +61,7 @@
           <input
             type="text"
             x-model="sourcePath"
-            @input.debounce.600ms="scheduleLayoutPreview(); scheduleStoryArcPreview()"
+            @input.debounce.600ms="importSourcePathChanged()"
             :placeholder="sourceType === 'filesystem' ? '/imports' : '/imports/mylar.db'"
             class="input-pb flex-1 font-mono"
             data-testid="import-collection-source-path"
@@ -103,6 +103,274 @@
           </div>
         </div>
       </div>
+
+      <section
+        x-show="sourceType === 'mylar3'"
+        x-cloak
+        class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/40 p-4 sm:p-5"
+        data-testid="import-mylar-path-section"
+      >
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p class="downloads-section-label">How should Mylar paths map into Pullbox?</p>
+            <p class="mt-2 max-w-3xl text-xs leading-5 text-pb-text-sec">
+              Pullbox checks every stored series path unchanged first. If Mylar used a different
+              container path, map that prefix to the path visible inside this Pullbox container.
+              This preview reads the database and filesystem without changing either one.
+            </p>
+          </div>
+          <button
+            type="button"
+            @click="previewMylarPaths()"
+            :disabled="!canAnalyzeMylarPaths() || mylarPathPreviewLoading"
+            class="btn-secondary btn-sm inline-flex shrink-0 items-center gap-2 disabled:opacity-40"
+            data-testid="import-mylar-path-analyze"
+          >
+            <svg x-show="mylarPathPreviewLoading" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            <span x-text="mylarPathPreviewLoading ? 'Analyzing...' : 'Analyze Mylar paths'"></span>
+          </button>
+        </div>
+
+        <div class="grid gap-3 md:grid-cols-2">
+          <div>
+            <p class="text-xs font-medium text-pb-text-sec">Path stored in Mylar</p>
+            <p class="mt-1 font-mono text-[11px] text-pb-text-dim">Example: /mylar/comics</p>
+          </div>
+          <div>
+            <p class="text-xs font-medium text-pb-text-sec">Path visible inside Pullbox</p>
+            <p class="mt-1 font-mono text-[11px] text-pb-text-dim">Example: /comics</p>
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          <template x-for="(mapping, index) in mylarPathMappings" :key="mapping.id">
+            <div
+              class="rounded-xl border border-pb-border bg-pb-bg/40 p-4"
+              data-testid="import-mylar-path-mapping-row"
+            >
+              <div class="grid gap-3 md:grid-cols-[1fr_auto_1fr_auto] md:items-end">
+                <div>
+                  <label
+                    class="block text-xs font-medium text-pb-text-sec"
+                    :for="'mylar-stored-prefix-' + mapping.id"
+                  >
+                    Path stored in Mylar
+                  </label>
+                  <input
+                    type="text"
+                    x-model="mapping.stored_prefix"
+                    @input.debounce.600ms="mylarPathMappingChanged()"
+                    :id="'mylar-stored-prefix-' + mapping.id"
+                    class="input-pb mt-2 w-full font-mono"
+                    autocomplete="off"
+                  >
+                </div>
+                <svg class="hidden h-5 w-5 text-pb-text-dim md:block" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12h15m-6-6 6 6-6 6"/>
+                </svg>
+                <div>
+                  <label
+                    class="block text-xs font-medium text-pb-text-sec"
+                    :for="'mylar-pullbox-prefix-' + mapping.id"
+                  >
+                    Path visible inside Pullbox
+                  </label>
+                  <input
+                    type="text"
+                    x-model="mapping.pullbox_prefix"
+                    @input.debounce.600ms="mylarPathMappingChanged()"
+                    :id="'mylar-pullbox-prefix-' + mapping.id"
+                    class="input-pb mt-2 w-full font-mono"
+                    autocomplete="off"
+                  >
+                </div>
+                <button
+                  type="button"
+                  @click="removeMylarPathMapping(index)"
+                  class="btn-ghost btn-sm"
+                  :aria-label="'Remove mapping ' + (index + 1)"
+                >
+                  Remove
+                </button>
+              </div>
+              <template x-if="mylarPathMappingEvidence(index)">
+                <div class="mt-3 space-y-2">
+                  <div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-pb-text-sec">
+                    <span x-text="mylarPathMappingEvidence(index).library_root_name || 'No containing library root'"></span>
+                    <span x-text="mylarPathMappingEvidence(index).provenance === 'automatic' ? 'Automatic proposal' : 'Manual mapping'"></span>
+                    <span x-text="String(mylarPathMappingEvidence(index).resolution.mapped_existing) + ' existing'"></span>
+                    <span x-text="String(mylarPathMappingEvidence(index).resolution.mapped_missing) + ' missing'"></span>
+                    <span x-text="String(mylarPathMappingEvidence(index).resolution.outside_root) + ' outside root'"></span>
+                    <span x-text="String(mylarPathMappingEvidence(index).resolution.unreadable) + ' unreadable'"></span>
+                  </div>
+                  <ul
+                    x-show="mylarPathMappingEvidence(index).blocking_reasons.length"
+                    class="space-y-1 text-xs text-red-300"
+                    data-testid="import-mylar-path-mapping-blockers"
+                  >
+                    <template x-for="reason in mylarPathMappingEvidence(index).blocking_reasons" :key="reason">
+                      <li x-text="String(reason).split('_').join(' ')"></li>
+                    </template>
+                  </ul>
+                  <ul
+                    x-show="mylarPathMappingEvidence(index).examples.length"
+                    class="space-y-1 font-mono text-[11px] text-pb-text-dim"
+                    data-testid="import-mylar-path-mapping-examples"
+                  >
+                    <template x-for="example in mylarPathMappingEvidence(index).examples" :key="example.outcome + ':' + example.relative_path">
+                      <li>
+                        <span x-text="example.relative_path"></span>
+                        <span class="font-sans" x-text="' — ' + String(example.outcome).split('_').join(' ')"></span>
+                      </li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <div class="flex flex-wrap gap-2">
+          <button
+            type="button"
+            @click="addMylarPathMapping()"
+            :disabled="mylarPathMappings.length >= 16"
+            class="btn-ghost btn-sm disabled:opacity-40"
+            data-testid="import-mylar-path-add"
+          >
+            Add mapping
+          </button>
+          <button
+            type="button"
+            @click="resetAutomaticMylarPaths()"
+            :disabled="!sourcePath.trim() || mylarPathPreviewLoading"
+            class="btn-ghost btn-sm disabled:opacity-40"
+          >
+            Restore automatic proposals
+          </button>
+        </div>
+
+        <div
+          class="space-y-3"
+          aria-live="polite"
+          :aria-busy="mylarPathPreviewLoading"
+          data-testid="import-mylar-path-preview"
+        >
+          <div x-show="mylarPathPreviewError" x-cloak class="inline-alert inline-alert-danger" role="alert">
+            <span x-text="mylarPathPreviewError"></span>
+          </div>
+
+          <div
+            x-show="mylarPathPreview"
+            x-cloak
+            class="space-y-3 rounded-xl border border-pb-border bg-pb-bg/50 p-4"
+          >
+            <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+              <div data-testid="import-mylar-path-total">
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Locations</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.locations"></p>
+              </div>
+              <div>
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Identity</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.identity_resolved"></p>
+              </div>
+              <div>
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Mapped</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.mapped_existing"></p>
+              </div>
+              <div>
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Missing</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.mapped_missing"></p>
+              </div>
+              <div>
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Outside root</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.outside_root"></p>
+              </div>
+              <div>
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Unreadable</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.unreadable"></p>
+              </div>
+              <div>
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Ambiguous</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.ambiguous"></p>
+              </div>
+              <div data-testid="import-mylar-path-unmapped">
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Unmapped</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.unmapped"></p>
+              </div>
+              <div data-testid="import-mylar-path-invalid">
+                <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Invalid</p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.invalid"></p>
+              </div>
+            </div>
+
+            <div
+              x-show="mylarPathPreview && mylarPathPreview.identity_groups.length"
+              class="space-y-2 rounded-lg border border-pb-border/70 p-3"
+              data-testid="import-mylar-path-identity-groups"
+            >
+              <p class="text-xs font-semibold text-pb-text">Paths already visible to Pullbox</p>
+              <template x-for="group in (mylarPathPreview ? mylarPathPreview.identity_groups : [])" :key="group.library_root_id">
+                <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-pb-text-sec">
+                  <span x-text="group.library_root_name"></span>
+                  <span x-text="String(group.resolution.identity_resolved) + ' resolved without mapping'"></span>
+                </div>
+              </template>
+            </div>
+
+            <ul
+              x-show="mylarPathPreview && mylarPathPreview.warnings.length"
+              class="space-y-1 text-xs text-amber-200"
+              data-testid="import-mylar-path-warnings"
+            >
+              <template x-for="warning in (mylarPathPreview ? mylarPathPreview.warnings : [])" :key="warning">
+                <li x-text="String(warning).split('_').join(' ')"></li>
+              </template>
+            </ul>
+
+            <div
+              x-show="mylarPathPreview && !mylarPathPreview.can_confirm"
+              class="inline-alert inline-alert-warning"
+              role="alert"
+            >
+              Pullbox cannot safely use this mapping yet. Correct the blocked path or choose an
+              enabled library root, then analyze again.
+            </div>
+            <div
+              x-show="mylarPathPreview && mylarPathPreview.can_confirm && !mylarPathPreview.requires_confirmation"
+              class="inline-alert inline-alert-success"
+            >
+              Every available path resolves directly inside an enabled library root. No mapping
+              is required.
+            </div>
+          </div>
+        </div>
+
+        <label
+          x-show="mylarPathPreview && mylarPathPreview.can_confirm && mylarPathPreview.requires_confirmation"
+          x-cloak
+          class="flex cursor-pointer items-start gap-3 rounded-xl border border-pb-border bg-pb-bg/40 p-4"
+        >
+          <input
+            type="checkbox"
+            x-model="mylarPathConfirmed"
+            class="checkbox-pb mt-0.5 shrink-0"
+            data-testid="import-mylar-path-confirm"
+          >
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold text-pb-text">
+              I reviewed these path mappings
+            </span>
+            <span class="mt-1 block text-xs leading-5 text-pb-text-sec">
+              Pullbox will freeze and use this exact mapping for the import. Mylar and the source
+              files remain unchanged.
+            </span>
+          </span>
+        </label>
+      </section>
 
       <section
         x-show="sourceType === 'filesystem' || sourceType === 'mylar3'"
@@ -171,10 +439,41 @@
           This source cannot be kept in place yet. Review the layout warnings or choose a managed
           copy.
         </div>
-        <div x-show="sourceType === 'mylar3' && fileHandlingMode === 'in_place'" class="space-y-3">
+
+        <div x-show="fileHandlingMode === 'managed_copy'" x-cloak class="space-y-3">
+          <div class="space-y-2">
+            <label for="import-managed-library-root" class="block text-xs font-medium text-pb-text-sec">
+              Managed destination
+            </label>
+            <select
+              id="import-managed-library-root"
+              x-model.number="targetLibraryRootId"
+              class="input-pb w-full"
+              aria-describedby="import-managed-library-root-help"
+              data-testid="import-managed-library-root"
+            >
+              <option value="">Choose a writable managed destination</option>
+              <template x-for="root in managedLibraryRoots()" :key="root.id">
+                <option
+                  :value="root.id"
+                  x-text="root.name + ' — ' + root.path + (root.is_default_managed_destination ? ' (default)' : '')"
+                ></option>
+              </template>
+            </select>
+          </div>
+          <div id="import-managed-library-root-help" class="inline-alert inline-alert-info">
+            Pullbox copies source files into this library. Naming, archive, metadata, and
+            permission rules apply only to the managed copies it creates.
+          </div>
+          <div x-show="!managedLibraryRoots().length" class="inline-alert inline-alert-warning">
+            Configure an available, writable managed library destination before importing copies.
+          </div>
+        </div>
+
+        <div x-show="fileHandlingMode === 'in_place'" class="space-y-3">
           <div class="space-y-2">
             <label for="import-in-place-library-root" class="block text-xs font-medium text-pb-text-sec">
-              Existing library root
+              Preferred destination for future files — optional
             </label>
             <select
               id="import-in-place-library-root"
@@ -183,9 +482,12 @@
               aria-describedby="import-mylar-in-place-help"
               data-testid="import-in-place-library-root"
             >
-              <option value="">Choose a library root</option>
-              <template x-for="root in libraryRoots" :key="root.id">
-                <option :value="root.id" x-text="root.name + ' — ' + root.path"></option>
+              <option value="">No preferred destination</option>
+              <template x-for="root in managedLibraryRoots()" :key="root.id">
+                <option
+                  :value="root.id"
+                  x-text="root.name + ' — ' + root.path + (root.is_default_managed_destination ? ' (default)' : '')"
+                ></option>
               </template>
             </select>
           </div>
@@ -194,13 +496,31 @@
             class="inline-alert inline-alert-info"
             data-testid="import-mylar-in-place-review"
           >
-            Pullbox checks comic files after path mapping during the scan. Files outside this
-            root or missing on disk need review. Your Mylar database can be elsewhere;
-            the database and source files stay unchanged.
+            <span x-show="sourceType === 'mylar3'">Pullbox checks each comic after path mapping. </span>Each existing file remains associated with its containing library root; this selection controls only where Pullbox manages future files for imported series. Existing comics stay unchanged.
           </div>
-          <div x-show="!libraryRoots.length" class="inline-alert inline-alert-warning">
-            Configure an enabled library root before importing Mylar files in place.
+          <div x-show="!managedLibraryRoots().length" class="inline-alert inline-alert-warning">
+            Existing files can still be imported in place. Future managed downloads remain blocked
+            until an available, writable destination is configured.
           </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 border-t border-pb-border/70 pt-3">
+          <a
+            href="/settings?tab=media"
+            target="_blank"
+            rel="noopener"
+            class="btn-ghost btn-sm"
+            data-testid="import-library-roots-manage"
+          >Manage library roots</a>
+          <button
+            type="button"
+            class="btn-ghost btn-sm disabled:opacity-40"
+            :disabled="libraryRootsRefreshing"
+            @click="refreshImportLibraryRoots()"
+            data-testid="import-library-roots-refresh"
+            x-text="libraryRootsRefreshing ? 'Refreshing…' : 'Refresh roots'"
+          ></button>
+          <span class="text-xs text-pb-text-dim">Add a container-visible path in Settings, then refresh this list without losing your import choices.</span>
         </div>
       </section>
 
@@ -655,7 +975,7 @@
           </span>
         </label>
 
-        <div x-show="libraryRoots.length" x-cloak class="space-y-2">
+        <div x-show="managedLibraryRoots().length" x-cloak class="space-y-2">
           <label for="import-future-library-root" class="block text-xs font-medium text-pb-text-sec">
             Target library
           </label>
@@ -667,17 +987,20 @@
             class="input-pb max-w-2xl"
             data-testid="import-future-layout-root"
           >
-            <template x-for="root in libraryRoots" :key="root.id">
-              <option :value="root.id" x-text="root.name + ' — ' + root.path"></option>
+            <template x-for="root in managedLibraryRoots()" :key="root.id">
+              <option
+                :value="root.id"
+                x-text="root.name + ' — ' + root.path + (root.is_default_managed_destination ? ' (default)' : '')"
+              ></option>
             </template>
           </select>
         </div>
 
-        <div x-show="!libraryRoots.length" class="inline-alert inline-alert-warning">
-          Configure an enabled library root before saving a future layout.
+        <div x-show="!managedLibraryRoots().length" class="inline-alert inline-alert-warning">
+          Configure an available, writable managed destination before saving a future layout.
         </div>
         <div
-          x-show="libraryRoots.length && (!layoutPreview || !layoutPreview.can_apply_future_policy)"
+          x-show="managedLibraryRoots().length && (!layoutPreview || !layoutPreview.can_apply_future_policy)"
           class="inline-alert inline-alert-info"
         >
           Analyze a single, unambiguous folder pattern before enabling future organization.

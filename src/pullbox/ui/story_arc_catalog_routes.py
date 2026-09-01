@@ -126,6 +126,55 @@ async def _existing(session: DbSession, provider_id: str) -> int | None:
     return int(existing_id) if existing_id is not None else None
 
 
+async def load_story_arc_catalog_search_context(
+    session: DbSession,
+    *,
+    q: str,
+    page: int,
+    base_url: str,
+) -> dict[str, object]:
+    """Load one bounded Comic Vine arc result page for full or HTMX shells."""
+    query = q.strip()
+    results: list[dict[str, object]] = []
+    total = 0
+    error = ""
+    if len(query) >= 2:
+        try:
+            async with _catalog_service(session) as service:
+                found, total = await service.search(query, limit=20, offset=(page - 1) * 20)
+                existing = await service.find_existing(
+                    session, [item.provider_id for item in found]
+                )
+                results = [
+                    {"metadata": item, "existing_id": existing.get(item.provider_id)}
+                    for item in found
+                ]
+        except (ComicVineError, StoryArcServiceError):
+            await session.rollback()
+            error = "Comic Vine search failed. Check the provider settings and try again."
+            logger.warning("story_arc_catalog_search_failed")
+
+    total_pages = max(1, (total + 19) // 20)
+    return {
+        "query": query,
+        "catalog_query": query,
+        "results": results,
+        "total": total,
+        "page": page,
+        "total_pages": total_pages,
+        "shown_count": len(results),
+        "in_library_count": sum(1 for result in results if result["existing_id"]),
+        "error_message": error,
+        "pagination_base_url": (f"{base_url}?{urlencode({'q': query})}" if query else base_url),
+        "next_url": (
+            base_url + "?" + urlencode({"q": query, "page": page + 1}) if page * 20 < total else ""
+        ),
+        "previous_url": (
+            base_url + "?" + urlencode({"q": query, "page": page - 1}) if page > 1 else ""
+        ),
+    }
+
+
 def _members(preview: StoryArcCatalogPreview) -> list[dict[str, str]]:
     titles = {series.provider_id: series.title for series in preview.series}
     return [
@@ -150,42 +199,19 @@ async def story_arc_catalog_search(
     page: Annotated[int, Query(ge=1, le=100)] = 1,
 ) -> Response:
     username = user.username
-    query = q.strip()
-    results: list[dict[str, object]] = []
-    total = 0
-    error = ""
-    if len(query) >= 2:
-        try:
-            async with _catalog_service(session) as service:
-                found, total = await service.search(query, limit=20, offset=(page - 1) * 20)
-                existing = await service.find_existing(
-                    session, [item.provider_id for item in found]
-                )
-                results = [
-                    {"metadata": item, "existing_id": existing.get(item.provider_id)}
-                    for item in found
-                ]
-        except (ComicVineError, StoryArcServiceError):
-            await session.rollback()
-            error = "Comic Vine search failed. Check the provider settings and try again."
-            logger.warning("story_arc_catalog_search_failed")
+    context = await load_story_arc_catalog_search_context(
+        session,
+        q=q,
+        page=page,
+        base_url="/story-arcs/catalog",
+    )
     return _render(
         request,
         username,
         "partials/story_arc_catalog_results.html"
         if request.headers.get("HX-Request")
         else "pages/story_arc_catalog.html",
-        query=query,
-        results=results,
-        total=total,
-        page=page,
-        error_message=error,
-        next_url=("/story-arcs/catalog?" + urlencode({"q": query, "page": page + 1}))
-        if page * 20 < total
-        else "",
-        previous_url=("/story-arcs/catalog?" + urlencode({"q": query, "page": page - 1}))
-        if page > 1
-        else "",
+        **context,
     )
 
 
@@ -211,6 +237,7 @@ async def story_arc_catalog_preview(
         message = _ERRORS[_failure_code(exc)]
         logger.warning("story_arc_catalog_preview_failed", category=_failure_code(exc))
     roots, truncated = await load_story_arc_placement_roots(session, selected_root_id=None)
+    managed_roots = tuple(root for root in roots if root.can_manage)
     return _render(
         request,
         username,
@@ -220,6 +247,7 @@ async def story_arc_catalog_preview(
         provider_id=provider_id,
         error_message=message,
         placement_roots=roots,
+        managed_roots=managed_roots,
         placement_roots_truncated=truncated,
     )
 
@@ -347,6 +375,7 @@ async def story_arc_catalog_refresh_preview(
         await session.rollback()
         message = _ERRORS[_failure_code(exc)]
     roots, truncated = await load_story_arc_placement_roots(session, selected_root_id=None)
+    managed_roots = tuple(root for root in roots if root.can_manage)
     return _render(
         request,
         username,
@@ -358,7 +387,7 @@ async def story_arc_catalog_refresh_preview(
         error_message=message,
         members=_members(preview) if preview else [],
         needs_library_root=needs_library_root,
-        placement_roots=roots,
+        placement_roots=managed_roots,
         placement_roots_truncated=truncated,
     )
 

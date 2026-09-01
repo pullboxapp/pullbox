@@ -17,10 +17,12 @@ from pullbox.models.import_job import (
 from pullbox.models.library import LibraryRoot
 from pullbox.services.import_review_selection import load_import_review_selection_state
 from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
+from pullbox.services.import_split_series import load_selected_split_series_review
 from pullbox.services.import_story_arc_review import (
     ImportedStoryArcReviewRow,
     load_import_story_arc_review_page,
 )
+from pullbox.services.library_root_management import list_library_roots
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
 from pullbox.ui.import_review_summary import (
     load_import_review_summary,
@@ -180,6 +182,7 @@ async def _load_status_counts(
 
 async def _load_safety_blocked_files_by_series_id(
     session: AsyncSession,
+    job_id: int,
     visible_series_ids: list[int],
 ) -> dict[int, list[ImportedFile]]:
     safety_blocked_files_by_series_id: dict[int, list[ImportedFile]] = {
@@ -191,6 +194,7 @@ async def _load_safety_blocked_files_by_series_id(
     safety_files_result = await session.execute(
         select(ImportedFile)
         .where(
+            ImportedFile.import_job_id == job_id,
             ImportedFile.import_series_id.in_(visible_series_ids),
             ImportedFile.status.in_(
                 [ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED]
@@ -348,6 +352,7 @@ async def load_import_review_context(
         visible_series_ids = [item.id for item in series_items]
         safety_blocked_files_by_series_id = await _load_safety_blocked_files_by_series_id(
             session,
+            job_id,
             visible_series_ids,
         )
         safety_rematch_pending = any(
@@ -358,16 +363,31 @@ async def load_import_review_context(
         if visible_series_ids:
             matched_file_targets_by_series_id = await _load_import_review_matched_file_targets(
                 session,
+                job_id,
                 visible_series_ids,
             )
             review_file_groups_by_series_id = await _load_import_review_file_detail_groups(
                 session,
+                job_id,
                 series_items,
             )
         library_roots_result = await session.execute(
             select(LibraryRoot).where(LibraryRoot.enabled.is_(True)).order_by(LibraryRoot.id)
         )
         library_roots = list(library_roots_result.scalars().all())
+
+    split_series_review = await load_selected_split_series_review(session, job)
+    managed_library_root_options: list[dict[str, Any]] = []
+    if split_series_review.requires_preferred_destination:
+        managed_library_root_options = [
+            root
+            for root in await list_library_roots(session)
+            if bool(root["enabled"])
+            and bool(root["allow_managed_writes"])
+            and bool(root["available"])
+            and bool(root["readable"])
+            and bool(root["writable"])
+        ]
 
     template_ctx: dict[str, object] = {
         "job": job,
@@ -393,6 +413,8 @@ async def load_import_review_context(
         "sort": normalized_sort,
         "status_counts": await _load_status_counts(session, job_id),
         "review_summary": await load_import_review_summary(session, job),
+        "split_series_review": split_series_review,
+        "managed_library_root_options": managed_library_root_options,
         "safety_failure_summary": await load_import_safety_failure_summary(session, job),
         "selected_series_ids": await _load_selected_review_series_ids(session, job_id),
         "duplicate_selected_file_counts": await _load_duplicate_selected_file_counts(

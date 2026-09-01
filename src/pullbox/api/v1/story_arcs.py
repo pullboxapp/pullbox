@@ -9,6 +9,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 
 from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.config import get_settings
 from pullbox.models.story_arc import (
     IssueStoryArc,
     StoryArc,
@@ -92,6 +93,8 @@ def _arc_response(
             "description": arc.description,
             "comicvine_id": arc.comicvine_id,
             "comicvine_url": arc.comicvine_url,
+            "cover_path": arc.cover_path,
+            "cover_url": arc.cover_url,
             "source_kind": arc.source_kind,
             "lifecycle": arc.lifecycle,
             "monitored": arc.monitored,
@@ -252,6 +255,8 @@ async def create_story_arc(
     session: DbSession,
 ) -> StoryArcResponse:
     """Create and commit one Pullbox-owned logical story arc."""
+    if not get_settings().story_arc_manual_create_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     try:
         arc = await _story_arc_service.create(
             session,

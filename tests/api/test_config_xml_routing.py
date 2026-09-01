@@ -113,6 +113,214 @@ class TestGetConfig:
         assert "secret_key" not in keys
 
 
+class TestLibraryRootManagement:
+    """Authenticated root-management API exposes safe multi-root controls."""
+
+    @pytest.mark.asyncio
+    async def test_list_preview_create_and_patch_contract(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        assert (await client.get("/api/v1/config/library-roots")).json() == []
+
+        root_path = tmp_path / "api-library"
+        root_path.mkdir()
+        payload = {
+            "name": "Main Library",
+            "path": str(root_path),
+            "allow_referenced_registrations": True,
+            "allow_managed_writes": True,
+            "is_default_managed_destination": False,
+        }
+        preview = await client.post(
+            "/api/v1/config/library-roots/preview",
+            json=payload,
+            headers=_csrf_header_for(client),
+        )
+        assert preview.status_code == 200
+        assert preview.json()["can_create"] is True
+
+        created = await client.post(
+            "/api/v1/config/library-roots",
+            json=payload,
+            headers=_csrf_header_for(client),
+        )
+        assert created.status_code == 201
+        state = created.json()
+        assert state == {
+            "id": state["id"],
+            "name": "Main Library",
+            "path": str(root_path),
+            "enabled": True,
+            "allow_referenced_registrations": True,
+            "allow_managed_writes": True,
+            "is_default_managed_destination": True,
+            "available": True,
+            "readable": True,
+            "writable": True,
+            "free_bytes": state["free_bytes"],
+            "status": state["status"],
+            "warnings": state["warnings"],
+            "can_disable": False,
+        }
+
+        renamed = await client.patch(
+            f"/api/v1/config/library-roots/{state['id']}",
+            json={"name": "Primary Library"},
+            headers=_csrf_header_for(client),
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "Primary Library"
+        listed = (await client.get("/api/v1/config/library-roots")).json()
+        assert [item["name"] for item in listed] == ["Primary Library"]
+
+    @pytest.mark.asyncio
+    async def test_patch_rejects_path_and_root_delete_is_not_exposed(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        root_path = tmp_path / "immutable-path"
+        root_path.mkdir()
+        created = await client.post(
+            "/api/v1/config/library-roots",
+            json={
+                "name": "Immutable",
+                "path": str(root_path),
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": True,
+                "is_default_managed_destination": True,
+            },
+            headers=_csrf_header_for(client),
+        )
+        root_id = created.json()["id"]
+
+        path_patch = await client.patch(
+            f"/api/v1/config/library-roots/{root_id}",
+            json={"path": str(tmp_path)},
+            headers=_csrf_header_for(client),
+        )
+        assert path_patch.status_code == 422
+        deleted = await client.delete(
+            f"/api/v1/config/library-roots/{root_id}",
+            headers=_csrf_header_for(client),
+        )
+        assert deleted.status_code == 405
+
+    @pytest.mark.asyncio
+    async def test_preview_and_explicitly_confirm_library_root_rebind(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        current_path = tmp_path / "current-library"
+        replacement_path = tmp_path / "replacement-library"
+        current_path.mkdir()
+        replacement_path.mkdir()
+        created = await client.post(
+            "/api/v1/config/library-roots",
+            json={
+                "name": "Rebindable",
+                "path": str(current_path),
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": True,
+                "is_default_managed_destination": True,
+            },
+            headers=_csrf_header_for(client),
+        )
+        root_id = created.json()["id"]
+
+        preview_response = await client.post(
+            f"/api/v1/config/library-roots/{root_id}/rebind/preview",
+            json={"replacement_path": str(replacement_path)},
+            headers=_csrf_header_for(client),
+        )
+
+        assert preview_response.status_code == 200
+        preview = preview_response.json()
+        assert preview["can_rebind"] is True
+        assert preview["impact"] == {
+            "library_file_count": 0,
+            "series_count": 0,
+            "preferred_series_count": 0,
+            "story_arc_placement_count": 0,
+            "library_file_blocking_count": 0,
+            "series_blocking_count": 0,
+            "story_arc_placement_blocking_count": 0,
+            "affects_default_destination": True,
+            "affects_preferred_series": False,
+        }
+        confirmed = await client.post(
+            f"/api/v1/config/library-roots/{root_id}/rebind",
+            json={
+                "replacement_path": str(replacement_path),
+                "preview_token": preview["preview_token"],
+                "confirmation": "REBIND",
+            },
+            headers=_csrf_header_for(client),
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["path"] == str(replacement_path)
+        listed = (await client.get("/api/v1/config/library-roots")).json()
+        assert listed[0]["path"] == str(replacement_path)
+
+    @pytest.mark.asyncio
+    async def test_root_mutations_require_csrf(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        root_path = tmp_path / "csrf-root"
+        root_path.mkdir()
+        response = await client.post(
+            "/api/v1/config/library-roots",
+            json={
+                "name": "CSRF",
+                "path": str(root_path),
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": False,
+                "is_default_managed_destination": False,
+            },
+        )
+        assert response.status_code == 403
+
+        created = await client.post(
+            "/api/v1/config/library-roots",
+            json={
+                "name": "CSRF",
+                "path": str(root_path),
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": False,
+                "is_default_managed_destination": False,
+            },
+            headers=_csrf_header_for(client),
+        )
+        root_id = created.json()["id"]
+        replacement_path = tmp_path / "csrf-replacement"
+        replacement_path.mkdir()
+        preview_without_csrf = await client.post(
+            f"/api/v1/config/library-roots/{root_id}/rebind/preview",
+            json={"replacement_path": str(replacement_path)},
+        )
+        assert preview_without_csrf.status_code == 403
+
+        preview = await client.post(
+            f"/api/v1/config/library-roots/{root_id}/rebind/preview",
+            json={"replacement_path": str(replacement_path)},
+            headers=_csrf_header_for(client),
+        )
+        confirm_without_csrf = await client.post(
+            f"/api/v1/config/library-roots/{root_id}/rebind",
+            json={
+                "replacement_path": str(replacement_path),
+                "preview_token": preview.json()["preview_token"],
+                "confirmation": "REBIND",
+            },
+        )
+        assert confirm_without_csrf.status_code == 403
+
+
 def _root_policy_payload(*, expected_revision: int) -> dict[str, object]:
     return {
         "expected_revision": expected_revision,

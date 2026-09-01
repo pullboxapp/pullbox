@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,17 +12,28 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from sqlalchemy import func as sa_func
 from sqlalchemy import insert as sa_insert
+from sqlalchemy import or_
 from sqlalchemy import select as sa_select
 from sqlalchemy import update as sa_update
 
-from pullbox.core.exceptions import NotFoundError
+from pullbox.core.exceptions import ConfigurationError, NotFoundError
+from pullbox.core.library_file_ownership import build_managed_placement_signature
+from pullbox.models.blocklist import BlocklistEntry
+from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
+from pullbox.models.download import DownloadHistory
 from pullbox.models.import_job import (
     ImportedFile,
+    ImportedFileStatus,
+    ImportedSeries,
     ImportJob,
     ImportJobAction,
     ImportJobActionStatus,
 )
-from pullbox.models.library import LibraryFile
+from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode
+from pullbox.models.pending_match import PendingMatch
+from pullbox.models.reader import IssueReaderState
+from pullbox.models.search_log import SearchLog
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -38,7 +50,7 @@ from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkStat
 from pullbox.utilities.settings import restore_file_from_utility_trash
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,6 +119,182 @@ class DeleteSeriesForRollback(Protocol):
         delete_files: bool,
         delete_folder: bool,
     ) -> None: ...
+
+
+async def build_series_created_action_payload(
+    session: AsyncSession,
+    *,
+    series_id: int,
+    import_series_id: int,
+) -> dict[str, Any]:
+    """Capture the user-owned series state required for safe rollback.
+
+    Metadata hydration may legitimately update provider-owned fields after the
+    series is created, so this seal intentionally covers only user-owned
+    choices. Related files and activity are checked independently at rollback
+    time. Older journal rows without this seal are preserved for manual review.
+    """
+    await session.flush()
+    series = await session.get(Series, series_id)
+    if series is None:
+        raise NotFoundError("Series", series_id)
+    imported_series = await session.get(ImportedSeries, import_series_id)
+    if imported_series is None:
+        raise NotFoundError("ImportedSeries", import_series_id)
+    issue_rows = (
+        await session.execute(
+            sa_select(Issue.id, Issue.status, Issue.manual_skip)
+            .where(Issue.series_id == series_id)
+            .order_by(Issue.id)
+        )
+    ).all()
+    payload: dict[str, Any] = {
+        "series_id": series_id,
+        "import_series_id": import_series_id,
+        "series_ownership_snapshot": _series_user_owned_snapshot(series),
+        "issue_ownership_snapshot": {
+            str(issue_id): {
+                "status": status.value,
+                "manual_skip": bool(manual_skip),
+            }
+            for issue_id, status, manual_skip in issue_rows
+        },
+    }
+    cover_cache_ownership = _validated_cover_cache_ownership(
+        (imported_series.diagnostics or {}).get("cover_cache_ownership")
+    )
+    if cover_cache_ownership is not None:
+        payload["cover_cache_ownership"] = cover_cache_ownership
+    series_folder_ownership = _validated_series_folder_ownership(
+        (imported_series.diagnostics or {}).get("series_folder_ownership")
+    )
+    if series_folder_ownership is not None and _series_path_matches_folder_ownership(
+        series,
+        series_folder_ownership,
+    ):
+        payload["series_folder_ownership"] = _folder_ownership_with_installed_state(
+            series_folder_ownership,
+            series,
+        )
+    return payload
+
+
+async def build_series_cover_cache_action_payload(
+    session: AsyncSession,
+    *,
+    series_id: int,
+    import_series_id: int,
+    previous_cover_path: str | None,
+) -> dict[str, Any] | None:
+    """Build a rollback action only for a cover artifact this import created."""
+    await session.flush()
+    series = await session.get(Series, series_id)
+    imported_series = await session.get(ImportedSeries, import_series_id)
+    if series is None:
+        raise NotFoundError("Series", series_id)
+    if imported_series is None:
+        raise NotFoundError("ImportedSeries", import_series_id)
+    ownership = _validated_cover_cache_ownership(
+        (imported_series.diagnostics or {}).get("cover_cache_ownership")
+    )
+    if ownership is None:
+        return None
+    installed_cover_path = series.cover_path
+    if not isinstance(installed_cover_path, str) or not installed_cover_path:
+        return None
+    return {
+        "series_id": series_id,
+        "import_series_id": import_series_id,
+        "previous_cover_path": previous_cover_path,
+        "installed_cover_path": installed_cover_path,
+        "cover_cache_ownership": ownership,
+    }
+
+
+async def build_series_cover_path_updated_action_payload(
+    session: AsyncSession,
+    *,
+    series_id: int,
+    import_series_id: int,
+    previous_cover_path: str | None,
+) -> dict[str, Any] | None:
+    """Journal a DB-only cover-path mutation without claiming its artifact."""
+    await session.flush()
+    series = await session.get(Series, series_id)
+    imported_series = await session.get(ImportedSeries, import_series_id)
+    if series is None:
+        raise NotFoundError("Series", series_id)
+    if imported_series is None:
+        raise NotFoundError("ImportedSeries", import_series_id)
+    if series.cover_path == previous_cover_path:
+        return None
+    return {
+        "series_id": series_id,
+        "import_series_id": import_series_id,
+        "previous_cover_path": previous_cover_path,
+        "installed_cover_path": series.cover_path,
+    }
+
+
+async def build_series_monitoring_updated_action_payload(
+    session: AsyncSession,
+    *,
+    series_id: int,
+    import_series_id: int,
+    previous_monitored: bool,
+) -> dict[str, Any] | None:
+    """Journal an existing Series monitoring mutation made by search-on-add."""
+    await session.flush()
+    series = await session.get(Series, series_id)
+    imported_series = await session.get(ImportedSeries, import_series_id)
+    if series is None:
+        raise NotFoundError("Series", series_id)
+    if imported_series is None:
+        raise NotFoundError("ImportedSeries", import_series_id)
+    installed_monitored = bool(series.monitored)
+    if installed_monitored == previous_monitored:
+        return None
+    return {
+        "series_id": series_id,
+        "import_series_id": import_series_id,
+        "previous_monitored": previous_monitored,
+        "installed_monitored": installed_monitored,
+    }
+
+
+async def build_series_folder_created_action_payload(
+    session: AsyncSession,
+    *,
+    series_id: int,
+    import_series_id: int,
+    previous_series_path: str | None,
+    previous_library_root_id: int | None,
+    previous_preferred_library_root_id: int | None,
+) -> dict[str, Any] | None:
+    """Build the replay-safe state restoration for an existing pathless Series."""
+    await session.flush()
+    series = await session.get(Series, series_id)
+    imported_series = await session.get(ImportedSeries, import_series_id)
+    if series is None:
+        raise NotFoundError("Series", series_id)
+    if imported_series is None:
+        raise NotFoundError("ImportedSeries", import_series_id)
+    ownership = _validated_series_folder_ownership(
+        (imported_series.diagnostics or {}).get("series_folder_ownership")
+    )
+    if ownership is None or not _series_path_matches_folder_ownership(series, ownership):
+        return None
+    return {
+        "series_id": series_id,
+        "import_series_id": import_series_id,
+        "previous_series_path": previous_series_path,
+        "previous_library_root_id": previous_library_root_id,
+        "previous_preferred_library_root_id": previous_preferred_library_root_id,
+        "series_folder_ownership": _folder_ownership_with_installed_state(
+            ownership,
+            series,
+        ),
+    }
 
 
 async def next_action_sequence(session: AsyncSession, job_id: int) -> int:
@@ -273,6 +461,23 @@ def _action_sequence_cache(session: AsyncSession) -> dict[int, int]:
     return cached
 
 
+def _series_rollback_lock_statement(series_id: int) -> Any:
+    """Lock the candidate Series against concurrent user-owned changes."""
+    return (
+        sa_select(Series)
+        .where(Series.id == series_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+
+
+def _series_issue_rollback_lock_statement(series_id: int) -> Any:
+    """Lock every Issue before checking activity and deleting its Series."""
+    return (
+        sa_select(Issue.id).where(Issue.series_id == series_id).order_by(Issue.id).with_for_update()
+    )
+
+
 async def rollback_action(
     session: AsyncSession,
     *,
@@ -310,11 +515,48 @@ async def rollback_action(
         storage_mode = str(payload.get("storage_mode") or "")
         referenced_file = storage_mode == "referenced" or transfer_method == "leave_in_place"
         original_trash_path = str(payload.get("original_trash_path") or "")
-        created_series_folder = bool(payload.get("created_series_folder"))
-        created_series_folder_path_raw = str(payload.get("created_series_folder_path") or "")
         permission_restores = list(payload.get("permission_restores") or [])
 
         library_file = await session.get(LibraryFile, library_file_id)
+        source_reappeared = (
+            not referenced_file
+            and transfer_method == "move"
+            and os.path.lexists(original_source_path)
+            and (
+                (
+                    os.path.lexists(destination_path)
+                    and destination_path.resolve(strict=False)
+                    != original_source_path.resolve(strict=False)
+                )
+                or (bool(original_trash_path) and os.path.lexists(original_trash_path))
+            )
+        )
+        if source_reappeared:
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = (
+                "The original move source reappeared after import. Pullbox preserved both "
+                "the source and managed destination for review."
+            )
+            action.rolled_back_at = None
+            await session.flush()
+            return
+        if (
+            not referenced_file
+            and os.path.lexists(destination_path)
+            and not _managed_destination_matches_rollback_action(
+                destination_path,
+                library_file=library_file,
+                expected_signature=payload.get("destination_signature"),
+            )
+        ):
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = (
+                "Managed library file changed after import or no longer matches its "
+                "rollback ownership record. Pullbox preserved the file."
+            )
+            action.rolled_back_at = None
+            await session.flush()
+            return
         if library_file is not None:
             await session.delete(library_file)
 
@@ -322,12 +564,12 @@ async def rollback_action(
             if transfer_method == "move":
                 if original_trash_path:
                     restore_file_from_utility_trash(Path(original_trash_path), original_source_path)
-                    if destination_path.exists():
+                    if os.path.lexists(destination_path):
                         destination_path.unlink(missing_ok=True)
-                elif destination_path.exists():
+                elif os.path.lexists(destination_path):
                     original_source_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(destination_path), str(original_source_path))
-            elif destination_path.exists():
+            elif os.path.lexists(destination_path):
                 destination_path.unlink(missing_ok=True)
 
             for entry in permission_restores:
@@ -340,18 +582,10 @@ async def rollback_action(
                 except OSError:
                     continue
 
-            if created_series_folder and created_series_folder_path_raw:
-                created_series_folder_path = Path(created_series_folder_path_raw)
-            else:
-                created_series_folder_path = None
-
-            if created_series_folder_path is not None and created_series_folder_path.exists():
-                try:
-                    next(created_series_folder_path.iterdir())
-                except StopIteration:
-                    created_series_folder_path.rmdir()
-                except OSError:
-                    pass
+            _cleanup_import_created_directories(
+                payload,
+                destination_parent=destination_path.parent,
+            )
 
     elif action_type == "library_file_placement_started":
         destination_path_raw = str(payload.get("destination_path") or "")
@@ -365,13 +599,17 @@ async def rollback_action(
             Path(artifact_source_path_raw) if artifact_source_path_raw else None
         )
         transfer_method = str(payload.get("transfer_method") or "move")
-        created_series_folder = bool(payload.get("created_series_folder"))
-        created_series_folder_path_raw = str(payload.get("created_series_folder_path") or "")
         temp_paths = [Path(str(path)) for path in payload.get("temp_paths") or [] if str(path)]
-
-        for temp_path in temp_paths:
-            if temp_path.exists() and temp_path.is_file():
-                temp_path.unlink(missing_ok=True)
+        surviving_temp_paths = [path for path in temp_paths if os.path.lexists(path)]
+        if surviving_temp_paths:
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = (
+                "Import staging artifacts have no completed ownership signature. "
+                "Pullbox preserved them for review."
+            )
+            action.rolled_back_at = None
+            await session.flush()
+            return
 
         destination_is_original_source = (
             partial_destination_path is not None
@@ -381,46 +619,360 @@ async def rollback_action(
         )
         if (
             partial_destination_path is not None
-            and partial_destination_path.exists()
+            and os.path.lexists(partial_destination_path)
             and not destination_is_original_source
         ):
+            placement_completed = payload.get("placement_completed") is True
+            destination_signature = payload.get("destination_signature")
+            if not placement_completed or not _path_matches_signature(
+                partial_destination_path,
+                destination_signature,
+            ):
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "Import destination is incomplete, changed, or lacks durable ownership "
+                    "evidence. Pullbox preserved it for review."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
             can_restore_move = (
                 transfer_method == "move"
                 and partial_original_source_path is not None
                 and partial_artifact_source_path is not None
                 and partial_artifact_source_path == partial_original_source_path
-                and not partial_original_source_path.exists()
+                and not os.path.lexists(partial_original_source_path)
             )
             if can_restore_move:
                 assert partial_original_source_path is not None
                 partial_original_source_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(partial_destination_path), str(partial_original_source_path))
+            elif (
+                transfer_method == "move"
+                and partial_original_source_path is not None
+                and partial_artifact_source_path == partial_original_source_path
+                and os.path.lexists(partial_original_source_path)
+            ):
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The original move source reappeared after import. Pullbox preserved both "
+                    "the source and managed destination for review."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
             elif partial_destination_path.is_file() or partial_destination_path.is_symlink():
                 partial_destination_path.unlink(missing_ok=True)
 
-        if created_series_folder and created_series_folder_path_raw:
-            created_series_folder_path = Path(created_series_folder_path_raw)
-            if created_series_folder_path.exists():
-                try:
-                    next(created_series_folder_path.iterdir())
-                except StopIteration:
-                    created_series_folder_path.rmdir()
-                except OSError:
-                    pass
+        if partial_destination_path is not None:
+            _cleanup_import_created_directories(
+                payload,
+                destination_parent=partial_destination_path.parent,
+            )
+
+    elif action_type == "series_preferred_root_updated":
+        series_id = _positive_int(payload.get("series_id"), "series_id")
+        old_root_id = _optional_positive_int(
+            payload.get("old_preferred_library_root_id"),
+            "old_preferred_library_root_id",
+        )
+        new_root_id = _positive_int(
+            payload.get("new_preferred_library_root_id"),
+            "new_preferred_library_root_id",
+        )
+        series = await session.get(Series, series_id)
+        if series is not None:
+            if series.preferred_library_root_id != new_root_id:
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The series preferred destination changed after import. "
+                    "Pullbox preserved the current choice for review."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            series.preferred_library_root_id = old_root_id
+
+    elif action_type == "series_monitoring_updated":
+        series_id = _positive_int(payload.get("series_id"), "series_id")
+        import_series_id = _positive_int(
+            payload.get("import_series_id"),
+            "import_series_id",
+        )
+        previous_monitored = payload.get("previous_monitored")
+        installed_monitored = payload.get("installed_monitored")
+        if not isinstance(previous_monitored, bool) or not isinstance(
+            installed_monitored,
+            bool,
+        ):
+            raise ValueError("Monitoring rollback states must be booleans")
+        if previous_monitored == installed_monitored:
+            raise ValueError("Monitoring rollback states must differ")
+
+        series = await session.get(Series, series_id)
+        if series is not None:
+            imported_series = await session.get(ImportedSeries, import_series_id)
+            if (
+                imported_series is None
+                or imported_series.import_job_id != action.import_job_id
+                or imported_series.series_id not in {None, series_id}
+            ):
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The Series monitoring change is no longer owned by this import. "
+                    "Pullbox preserved the current setting."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            expected_monitoring_state = (
+                previous_monitored
+                if action.status == ImportJobActionStatus.ROLLED_BACK
+                else installed_monitored
+            )
+            if bool(series.monitored) != expected_monitoring_state:
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "Series monitoring changed after import. Pullbox preserved the current setting."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            series.monitored = previous_monitored
+
+    elif action_type == "series_folder_created":
+        series_id = _positive_int(payload.get("series_id"), "series_id")
+        import_series_id = _positive_int(
+            payload.get("import_series_id"),
+            "import_series_id",
+        )
+        previous_series_path = payload.get("previous_series_path")
+        if previous_series_path is not None and not isinstance(previous_series_path, str):
+            raise ValueError("previous_series_path must be a string or null")
+        previous_library_root_id = _optional_positive_int(
+            payload.get("previous_library_root_id"),
+            "previous_library_root_id",
+        )
+        previous_preferred_root_id = _optional_positive_int(
+            payload.get("previous_preferred_library_root_id"),
+            "previous_preferred_library_root_id",
+        )
+        ownership = _validated_series_folder_action_ownership(
+            payload.get("series_folder_ownership")
+        )
+        if ownership is None:
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = (
+                "The import journal does not contain valid series-folder ownership evidence. "
+                "Pullbox preserved the folder for manual recovery."
+            )
+            action.rolled_back_at = None
+            await session.flush()
+            return
+
+        series = await session.get(Series, series_id)
+        if series is not None:
+            imported_series = await session.get(ImportedSeries, import_series_id)
+            if (
+                imported_series is None
+                or imported_series.import_job_id != action.import_job_id
+                or imported_series.series_id not in {None, series_id}
+            ):
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The imported series folder is no longer owned by this import. "
+                    "Pullbox preserved it for manual recovery."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            installed_state = _series_matches_installed_folder_state(series, ownership)
+            restored_state = _series_matches_folder_state(
+                series,
+                path=previous_series_path,
+                library_root_id=previous_library_root_id,
+                preferred_library_root_id=previous_preferred_root_id,
+            )
+            if not installed_state and not restored_state:
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The series folder or storage selection changed after import. "
+                    "Pullbox preserved the current state."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+
+        folder_error = _series_folder_rollback_block_reason(
+            payload,
+            series=series,
+            require_installed_state=False,
+        )
+        if folder_error is not None:
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = folder_error
+            action.rolled_back_at = None
+            await session.flush()
+            return
+
+        _cleanup_owned_series_folder_directories(payload)
+        if series is not None:
+            series.path = previous_series_path
+            series.library_root_id = previous_library_root_id
+            series.preferred_library_root_id = previous_preferred_root_id
+
+    elif action_type == "series_cover_path_updated":
+        series_id = _positive_int(payload.get("series_id"), "series_id")
+        import_series_id = _positive_int(
+            payload.get("import_series_id"),
+            "import_series_id",
+        )
+        previous_cover_path = payload.get("previous_cover_path")
+        installed_cover_path = payload.get("installed_cover_path")
+        if previous_cover_path is not None and not isinstance(previous_cover_path, str):
+            raise ValueError("previous_cover_path must be a string or null")
+        if installed_cover_path is not None and not isinstance(installed_cover_path, str):
+            raise ValueError("installed_cover_path must be a string or null")
+        if previous_cover_path == installed_cover_path:
+            raise ValueError("Cover-path rollback states must differ")
+
+        series = await session.get(Series, series_id)
+        if series is not None:
+            imported_series = await session.get(ImportedSeries, import_series_id)
+            if (
+                imported_series is None
+                or imported_series.import_job_id != action.import_job_id
+                or imported_series.series_id not in {None, series_id}
+            ):
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The Series cover-path change is no longer owned by this import. "
+                    "Pullbox preserved the current value."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            expected_cover_path = (
+                previous_cover_path
+                if action.status == ImportJobActionStatus.ROLLED_BACK
+                else installed_cover_path
+            )
+            if series.cover_path != expected_cover_path:
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The Series cover path changed after import. Pullbox preserved the current "
+                    "value."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            series.cover_path = previous_cover_path
+
+    elif action_type == "series_cover_cache_created":
+        series_id = _positive_int(payload.get("series_id"), "series_id")
+        import_series_id = _positive_int(
+            payload.get("import_series_id"),
+            "import_series_id",
+        )
+        installed_cover_path = payload.get("installed_cover_path")
+        previous_cover_path = payload.get("previous_cover_path")
+        if not isinstance(installed_cover_path, str) or not installed_cover_path:
+            raise ValueError("installed_cover_path must be a non-empty string")
+        if previous_cover_path is not None and not isinstance(previous_cover_path, str):
+            raise ValueError("previous_cover_path must be a string or null")
+
+        cover_error = _cover_cache_rollback_block_reason(payload)
+        if cover_error is not None:
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = cover_error
+            action.rolled_back_at = None
+            await session.flush()
+            return
+
+        series = await session.get(Series, series_id)
+        if series is not None:
+            imported_series = await session.get(ImportedSeries, import_series_id)
+            if (
+                imported_series is None
+                or imported_series.import_job_id != action.import_job_id
+                or imported_series.series_id not in {None, series_id}
+            ):
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The imported cover is no longer owned by this import. "
+                    "Pullbox preserved it for manual recovery."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            artifact_missing = not os.path.lexists(
+                Path(payload["cover_cache_ownership"]["artifact_path"])
+            )
+            already_restored = series.cover_path == previous_cover_path and artifact_missing
+            if series.cover_path != installed_cover_path and not already_restored:
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The series cover changed after import. Pullbox preserved the current cover."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+
+        _remove_owned_cover_cache_artifact(payload)
+        if series is not None:
+            series.cover_path = previous_cover_path
 
     elif action_type == "series_created":
         series_id = int(payload.get("series_id") or 0)
         if series_id:
-            with contextlib.suppress(NotFoundError):
-                await delete_series(
+            series = await session.scalar(_series_rollback_lock_statement(series_id))
+            folder_error = _series_folder_rollback_block_reason(payload, series=series)
+            if folder_error is not None:
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = folder_error
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            cover_error = _cover_cache_rollback_block_reason(payload)
+            if cover_error is not None:
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = cover_error
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            if series is not None:
+                unsafe_reason = await _created_series_rollback_block_reason(
                     session,
-                    series_id,
-                    delete_files=False,
-                    delete_folder=True,
+                    action=action,
+                    series=series,
+                    payload=payload,
                 )
-                # A series-created action can be replayed after a partial rollback or
-                # after multiple import rows converged on the same real series. Missing
-                # here means the rollback objective is already satisfied.
+                if unsafe_reason is not None:
+                    action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                    action.error_message = unsafe_reason
+                    action.rolled_back_at = None
+                    await session.flush()
+                    return
+
+                with contextlib.suppress(NotFoundError):
+                    # SeriesService.delete has broader user-facing behavior: it can
+                    # cancel downloads and recursively delete a folder. The guards
+                    # above prove there are no related files/activity. Folder
+                    # ownership is not durably proven, so even an empty directory is
+                    # preserved rather than being inferred safe to remove.
+                    await delete_series(
+                        session,
+                        series_id,
+                        delete_files=False,
+                        delete_folder=False,
+                    )
+                    # A series-created action can be replayed after a partial rollback.
+                    # Missing here means the rollback objective is already satisfied.
+            # This cleanup is intentionally replayable. A prior rollback may have
+            # deleted the Series and its cover leaf before interruption, while the
+            # import-owned empty cache ancestors still need removal.
+            _remove_owned_cover_cache_artifact(payload)
+            _cleanup_owned_series_folder_directories(payload)
 
     elif action_type == "series_folder_renamed":
         series_id = int(payload.get("series_id") or 0)
@@ -466,6 +1018,559 @@ async def rollback_action(
     action.status = ImportJobActionStatus.ROLLED_BACK
     action.rolled_back_at = datetime.now(UTC)
     await session.flush()
+
+
+def _validated_series_folder_ownership(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return None
+    folder_path_raw = value.get("folder_path")
+    boundary_path_raw = value.get("ownership_boundary_path")
+    directory_paths_raw = value.get("created_directory_paths")
+    if not isinstance(folder_path_raw, str) or not folder_path_raw:
+        return None
+    if not isinstance(boundary_path_raw, str) or not boundary_path_raw:
+        return None
+    if not isinstance(directory_paths_raw, list):
+        return None
+
+    try:
+        folder_resolved = Path(folder_path_raw).resolve(strict=False)
+        boundary_resolved = Path(boundary_path_raw).resolve(strict=False)
+        folder_relative = folder_resolved.relative_to(boundary_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not folder_relative.parts:
+        return None
+
+    validated_paths: list[str] = []
+    for raw_path in directory_paths_raw:
+        if not isinstance(raw_path, str) or not raw_path:
+            return None
+        try:
+            path_resolved = Path(raw_path).resolve(strict=False)
+            relative = path_resolved.relative_to(boundary_resolved)
+            folder_resolved.relative_to(path_resolved)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not relative.parts:
+            return None
+        if raw_path not in validated_paths:
+            validated_paths.append(raw_path)
+    if validated_paths:
+        try:
+            last_resolved = Path(validated_paths[-1]).resolve(strict=False)
+        except (OSError, RuntimeError):
+            return None
+        if last_resolved != folder_resolved:
+            return None
+
+    return {
+        "schema_version": 1,
+        "folder_path": folder_path_raw,
+        "ownership_boundary_path": boundary_path_raw,
+        "created_directory_paths": validated_paths,
+    }
+
+
+def _series_path_matches_folder_ownership(
+    series: Series,
+    ownership: dict[str, Any],
+) -> bool:
+    if not series.path:
+        return False
+    try:
+        return Path(series.path).resolve(strict=False) == Path(ownership["folder_path"]).resolve(
+            strict=False
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
+def _folder_ownership_with_installed_state(
+    ownership: dict[str, Any],
+    series: Series,
+) -> dict[str, Any]:
+    return {
+        **ownership,
+        "installed_library_root_id": series.library_root_id,
+        "installed_preferred_library_root_id": series.preferred_library_root_id,
+    }
+
+
+def _validated_series_folder_action_ownership(value: object) -> dict[str, Any] | None:
+    ownership = _validated_series_folder_ownership(value)
+    if ownership is None or not isinstance(value, dict):
+        return None
+    if (
+        "installed_library_root_id" not in value
+        or "installed_preferred_library_root_id" not in value
+    ):
+        return None
+    installed_root_id = value.get("installed_library_root_id")
+    installed_preferred_root_id = value.get("installed_preferred_library_root_id")
+    if installed_root_id is not None and (
+        not isinstance(installed_root_id, int)
+        or isinstance(installed_root_id, bool)
+        or installed_root_id <= 0
+    ):
+        return None
+    if installed_preferred_root_id is not None and (
+        not isinstance(installed_preferred_root_id, int)
+        or isinstance(installed_preferred_root_id, bool)
+        or installed_preferred_root_id <= 0
+    ):
+        return None
+    return {
+        **ownership,
+        "installed_library_root_id": installed_root_id,
+        "installed_preferred_library_root_id": installed_preferred_root_id,
+    }
+
+
+def _series_matches_folder_state(
+    series: Series,
+    *,
+    path: str | None,
+    library_root_id: int | None,
+    preferred_library_root_id: int | None,
+) -> bool:
+    if series.library_root_id != library_root_id:
+        return False
+    if series.preferred_library_root_id != preferred_library_root_id:
+        return False
+    if series.path is None or path is None:
+        return series.path is path
+    try:
+        return Path(series.path).resolve(strict=False) == Path(path).resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _series_matches_installed_folder_state(
+    series: Series,
+    ownership: dict[str, Any],
+) -> bool:
+    return _series_matches_folder_state(
+        series,
+        path=ownership["folder_path"],
+        library_root_id=ownership["installed_library_root_id"],
+        preferred_library_root_id=ownership["installed_preferred_library_root_id"],
+    )
+
+
+def _series_folder_rollback_block_reason(
+    payload: dict[str, Any],
+    *,
+    series: Series | None,
+    require_installed_state: bool = True,
+) -> str | None:
+    raw_ownership = payload.get("series_folder_ownership")
+    if raw_ownership is None:
+        return None
+    ownership = _validated_series_folder_action_ownership(raw_ownership)
+    if ownership is None:
+        return (
+            "The import journal does not contain valid series-folder ownership evidence. "
+            "Pullbox preserved the folder for manual recovery."
+        )
+    if (
+        require_installed_state
+        and series is not None
+        and not _series_matches_installed_folder_state(series, ownership)
+    ):
+        return (
+            "The import-created series folder or storage selection changed after import. "
+            "Pullbox preserved the current state."
+        )
+    if not ownership["created_directory_paths"]:
+        return None
+
+    folder_path = Path(ownership["folder_path"])
+    if not os.path.lexists(folder_path):
+        return None
+    if folder_path.is_symlink() or not folder_path.is_dir():
+        return (
+            "The import-created series folder changed after import. Pullbox preserved the "
+            "current path for manual recovery."
+        )
+    try:
+        next(folder_path.iterdir())
+    except StopIteration:
+        return None
+    except OSError:
+        return (
+            "The import-created series folder could not be verified as empty. Pullbox "
+            "preserved it for manual recovery."
+        )
+    return (
+        "The import-created series folder contains later files. Pullbox preserved the series "
+        "and folder for manual recovery."
+    )
+
+
+def _cleanup_owned_series_folder_directories(payload: dict[str, Any]) -> None:
+    ownership = _validated_series_folder_action_ownership(payload.get("series_folder_ownership"))
+    if ownership is None:
+        return
+    _remove_empty_directories(Path(path) for path in ownership["created_directory_paths"])
+
+
+def _validated_cover_cache_ownership(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return None
+    base_path_raw = value.get("base_path")
+    boundary_path_raw = value.get("ownership_boundary_path")
+    directory_paths_raw = value.get("created_directory_paths")
+    artifact_path_raw = value.get("artifact_path")
+    artifact_signature = value.get("artifact_signature")
+    if not isinstance(base_path_raw, str) or not base_path_raw:
+        return None
+    if not isinstance(boundary_path_raw, str) or not boundary_path_raw:
+        return None
+    if not isinstance(directory_paths_raw, list):
+        return None
+    if not isinstance(artifact_path_raw, str) or not artifact_path_raw:
+        return None
+    if not isinstance(artifact_signature, dict) or not artifact_signature:
+        return None
+
+    base_path = Path(base_path_raw)
+    boundary_path = Path(boundary_path_raw)
+    try:
+        base_resolved = base_path.resolve(strict=False)
+        boundary_resolved = boundary_path.resolve(strict=False)
+        base_resolved.relative_to(boundary_resolved)
+        artifact_resolved = Path(artifact_path_raw).resolve(strict=False)
+        artifact_relative = artifact_resolved.relative_to(base_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not artifact_relative.parts:
+        return None
+    artifact_parent_resolved = artifact_resolved.parent
+    validated_paths: list[str] = []
+    for raw_path in directory_paths_raw:
+        if not isinstance(raw_path, str) or not raw_path:
+            return None
+        path = Path(raw_path)
+        try:
+            path_resolved = path.resolve(strict=False)
+            relative_path = path_resolved.relative_to(boundary_resolved)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not relative_path.parts:
+            return None
+        try:
+            artifact_parent_resolved.relative_to(path_resolved)
+        except ValueError:
+            return None
+        if raw_path not in validated_paths:
+            validated_paths.append(raw_path)
+    return {
+        "schema_version": 1,
+        "base_path": base_path_raw,
+        "ownership_boundary_path": boundary_path_raw,
+        "created_directory_paths": validated_paths,
+        "artifact_path": artifact_path_raw,
+        "artifact_signature": dict(artifact_signature),
+    }
+
+
+def _cover_cache_rollback_block_reason(payload: dict[str, Any]) -> str | None:
+    raw_ownership = payload.get("cover_cache_ownership")
+    if raw_ownership is None:
+        return None
+    ownership = _validated_cover_cache_ownership(raw_ownership)
+    if ownership is None:
+        return (
+            "The import journal does not contain valid cover ownership evidence. "
+            "Pullbox preserved the cover for manual recovery."
+        )
+    artifact_path = Path(ownership["artifact_path"])
+    if not os.path.lexists(artifact_path):
+        return None
+    if not artifact_path.is_file() or not _path_matches_signature(
+        artifact_path,
+        ownership["artifact_signature"],
+    ):
+        return (
+            "The imported cover changed after import. Pullbox preserved the current cover "
+            "for manual recovery."
+        )
+    return None
+
+
+def _remove_owned_cover_cache_artifact(payload: dict[str, Any]) -> None:
+    ownership = _validated_cover_cache_ownership(payload.get("cover_cache_ownership"))
+    if ownership is None:
+        return
+    artifact_path = Path(ownership["artifact_path"])
+    if os.path.lexists(artifact_path) and artifact_path.is_file():
+        artifact_path.unlink()
+    _remove_empty_directories(Path(path) for path in ownership["created_directory_paths"])
+
+
+def _cleanup_import_created_directories(
+    payload: dict[str, Any],
+    *,
+    destination_parent: Path,
+) -> None:
+    raw_paths = payload.get("created_directory_paths")
+    if raw_paths is None:
+        if not bool(payload.get("created_series_folder")):
+            return
+        legacy_path = str(payload.get("created_series_folder_path") or "")
+        if not legacy_path:
+            return
+        try:
+            if Path(legacy_path).resolve(strict=False) != destination_parent.resolve(strict=False):
+                return
+        except (OSError, RuntimeError):
+            return
+        _remove_empty_directories((Path(legacy_path),))
+        return
+    if not isinstance(raw_paths, list):
+        return
+
+    boundary_raw = payload.get("directory_ownership_boundary_path")
+    if not isinstance(boundary_raw, str) or not boundary_raw:
+        return
+    try:
+        boundary_resolved = Path(boundary_raw).resolve(strict=False)
+        destination_parent_resolved = destination_parent.resolve(strict=False)
+        destination_relative = destination_parent_resolved.relative_to(boundary_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return
+    if not destination_relative.parts:
+        return
+
+    owned_paths: list[Path] = []
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str) or not raw_path:
+            continue
+        path = Path(raw_path)
+        try:
+            path_resolved = path.resolve(strict=False)
+            relative = path_resolved.relative_to(boundary_resolved)
+            destination_parent_resolved.relative_to(path_resolved)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not relative.parts:
+            continue
+        owned_paths.append(path)
+    _remove_empty_directories(owned_paths)
+
+
+def _remove_empty_directories(paths: Iterable[Path]) -> None:
+    unique_paths = {Path(path) for path in paths}
+    for directory in sorted(unique_paths, key=lambda path: len(path.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except (FileNotFoundError, OSError):
+            continue
+
+
+def _series_user_owned_snapshot(series: Series) -> dict[str, Any]:
+    status_override = series.status_override
+    return {
+        "schema_version": 1,
+        "comicvine_id": series.comicvine_id,
+        "monitored": bool(series.monitored),
+        "status_override": status_override.value if status_override is not None else None,
+        "alternate_names": list(series.alternate_names or []),
+        "parent_series_id": series.parent_series_id,
+        "preferred_library_root_id": series.preferred_library_root_id,
+    }
+
+
+async def _created_series_rollback_block_reason(
+    session: AsyncSession,
+    *,
+    action: ImportJobAction,
+    series: Series,
+    payload: dict[str, Any],
+) -> str | None:
+    """Return why a job-created series is no longer safe to remove."""
+    # The locked Series row prevents concurrent Series changes and new rows
+    # that reference it. Locking its Issues also prevents concurrent issue
+    # state changes and new dependent activity until deletion completes.
+    await session.execute(_series_issue_rollback_lock_statement(series.id))
+
+    import_series_id = _optional_positive_int(payload.get("import_series_id"), "import_series_id")
+    expected_snapshot = payload.get("series_ownership_snapshot")
+    expected_issue_snapshot = payload.get("issue_ownership_snapshot")
+    if (
+        import_series_id is None
+        or not isinstance(expected_snapshot, dict)
+        or not isinstance(expected_issue_snapshot, dict)
+    ):
+        return (
+            "The import journal does not contain enough series ownership evidence. "
+            "Pullbox preserved the series for manual recovery."
+        )
+
+    imported_series = await session.get(ImportedSeries, import_series_id)
+    if (
+        imported_series is None
+        or imported_series.import_job_id != action.import_job_id
+        or imported_series.series_id not in {None, series.id}
+    ):
+        return (
+            "The import-created series is no longer owned exclusively by this import. "
+            "Pullbox preserved it for manual recovery."
+        )
+    if expected_snapshot != _series_user_owned_snapshot(series):
+        return (
+            "The import-created series changed after import. Pullbox preserved the current "
+            "series and its data for manual recovery."
+        )
+
+    issue_state_changed = await _created_series_issue_state_changed(
+        session,
+        action=action,
+        series=series,
+        import_series_id=import_series_id,
+        expected_snapshot=expected_issue_snapshot,
+        monitored=bool(expected_snapshot.get("monitored")),
+    )
+    if issue_state_changed:
+        return (
+            "An issue in the import-created series changed after import. Pullbox preserved "
+            "the series and its issue state for manual recovery."
+        )
+
+    other_import_reference = await session.scalar(
+        sa_select(ImportedSeries.id)
+        .where(
+            ImportedSeries.series_id == series.id,
+            ImportedSeries.import_job_id != action.import_job_id,
+        )
+        .limit(1)
+    )
+    child_series = await session.scalar(
+        sa_select(Series.id).where(Series.parent_series_id == series.id).limit(1)
+    )
+    issue_ids = sa_select(Issue.id).where(Issue.series_id == series.id)
+    related_activity_checks = (
+        sa_select(LibraryFile.id).where(LibraryFile.issue_id.in_(issue_ids)).limit(1),
+        sa_select(DownloadHistory.id).where(DownloadHistory.issue_id.in_(issue_ids)).limit(1),
+        sa_select(IssueReaderState.id).where(IssueReaderState.issue_id.in_(issue_ids)).limit(1),
+        sa_select(PendingMatch.id).where(PendingMatch.issue_id.in_(issue_ids)).limit(1),
+        sa_select(SearchLog.id).where(SearchLog.issue_id.in_(issue_ids)).limit(1),
+        sa_select(DirectAcquisitionAttempt.id)
+        .where(DirectAcquisitionAttempt.issue_id.in_(issue_ids))
+        .limit(1),
+        sa_select(IssueStoryArc.id).where(IssueStoryArc.issue_id.in_(issue_ids)).limit(1),
+        sa_select(BlocklistEntry.id)
+        .where(
+            or_(
+                BlocklistEntry.series_id == series.id,
+                BlocklistEntry.issue_id.in_(issue_ids),
+            )
+        )
+        .limit(1),
+        sa_select(Issue.id)
+        .where(Issue.series_id == series.id, Issue.manual_skip.is_(True))
+        .limit(1),
+    )
+    has_related_activity = False
+    for statement in related_activity_checks:
+        if await session.scalar(statement) is not None:
+            has_related_activity = True
+            break
+    if other_import_reference is not None or child_series is not None or has_related_activity:
+        return (
+            "The import-created series has later files or activity. Pullbox preserved the "
+            "series and related data for manual recovery."
+        )
+    return None
+
+
+async def _created_series_issue_state_changed(
+    session: AsyncSession,
+    *,
+    action: ImportJobAction,
+    series: Series,
+    import_series_id: int,
+    expected_snapshot: dict[str, Any],
+    monitored: bool,
+) -> bool:
+    """Detect user-owned issue-state changes while allowing import-owned OWNED state."""
+    imported_issue_ids = set(
+        (
+            await session.scalars(
+                sa_select(ImportedFile.matched_issue_id).where(
+                    ImportedFile.import_job_id == action.import_job_id,
+                    ImportedFile.import_series_id == import_series_id,
+                    ImportedFile.status == ImportedFileStatus.IMPORTED,
+                    ImportedFile.matched_issue_id.is_not(None),
+                )
+            )
+        ).all()
+    )
+    current_rows = (
+        await session.execute(
+            sa_select(Issue.id, Issue.status, Issue.manual_skip)
+            .where(Issue.series_id == series.id)
+            .order_by(Issue.id)
+        )
+    ).all()
+    current_ids = {str(issue_id) for issue_id, _status, _manual_skip in current_rows}
+    if not set(expected_snapshot).issubset(current_ids):
+        return True
+
+    default_status = IssueStatus.WANTED if monitored else IssueStatus.SKIPPED
+    for issue_id, status, manual_skip in current_rows:
+        expected = expected_snapshot.get(str(issue_id))
+        if expected is None:
+            if issue_id in imported_issue_ids:
+                if bool(manual_skip) or status != IssueStatus.OWNED:
+                    return True
+            elif bool(manual_skip) or status != default_status:
+                return True
+            continue
+        if not isinstance(expected, dict):
+            return True
+        expected_manual_skip = expected.get("manual_skip")
+        expected_status = expected.get("status")
+        if not isinstance(expected_manual_skip, bool) or not isinstance(expected_status, str):
+            return True
+        if bool(manual_skip) != expected_manual_skip:
+            return True
+        if issue_id in imported_issue_ids:
+            if status != IssueStatus.OWNED:
+                return True
+        elif status.value != expected_status:
+            return True
+    return False
+
+
+def _managed_destination_matches_rollback_action(
+    destination_path: Path,
+    *,
+    library_file: LibraryFile | None,
+    expected_signature: object,
+) -> bool:
+    """Require path, ownership, and creation signature before managed removal."""
+    if library_file is None or library_file.storage_mode != LibraryFileStorageMode.MANAGED:
+        return False
+    if Path(library_file.file_path).resolve(strict=False) != destination_path.resolve(strict=False):
+        return False
+    if not isinstance(expected_signature, dict) or not expected_signature:
+        return False
+    try:
+        current_signature = build_managed_placement_signature(destination_path)
+    except (ConfigurationError, OSError, RuntimeError, ValueError):
+        return False
+    return expected_signature == current_signature
+
+
+def _path_matches_signature(path: Path, expected_signature: object) -> bool:
+    if not isinstance(expected_signature, dict) or not expected_signature:
+        return False
+    try:
+        return build_managed_placement_signature(path) == expected_signature
+    except (ConfigurationError, OSError, RuntimeError, ValueError):
+        return False
 
 
 async def _rollback_import_managed_story_arc_placement(

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from pullbox.api.v1.import_job_control_actions import (
@@ -24,6 +25,11 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.schemas.import_job import ConfirmImportRequest, ImportPreviewResponse
+from pullbox.services.import_managed_copy_preflight import (
+    ManagedCopyCapacitySnapshot,
+    ManagedCopyPreflightError,
+    ManagedCopyPreflightFailure,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +70,8 @@ def _import_job(status: ImportJobStatus = ImportJobStatus.REVIEW) -> ImportJob:
         future_layout_requested=False,
         future_root_policy_snapshot=None,
         future_root_policy_applied_at=None,
+        mylar3_path_map={},
+        mylar3_path_map_confirmed=False,
         story_arc_import_requested=False,
         story_arc_materialization_requested=False,
         cv_match_threshold=0.70,
@@ -121,6 +129,41 @@ async def test_confirm_import_response_commits_and_triggers_execute() -> None:
     assert response.status == ImportJobStatus.IMPORTING
     session.commit.assert_awaited_once()
     trigger_execute.assert_called_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_confirm_import_response_commits_review_snapshot_on_capacity_block() -> None:
+    """A typed capacity block must be durable without scheduling execution."""
+    service = AsyncMock()
+    service.confirm_import.side_effect = ManagedCopyPreflightError(
+        ManagedCopyPreflightFailure.CAPACITY_INSUFFICIENT,
+        "The selected managed library root does not have enough free space for this import.",
+        snapshot=ManagedCopyCapacitySnapshot(
+            schema_version=1,
+            stage="confirmation",
+            target_library_root_id=9,
+            selected_source_bytes=20 * 1024**3,
+            reserve_bytes=2 * 1024**3,
+            required_bytes=22 * 1024**3,
+            free_bytes=22 * 1024**3 - 1,
+            status="insufficient",
+        ),
+    )
+    session = AsyncMock()
+    trigger_execute = MagicMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await confirm_import_response(
+            service,
+            session=session,
+            job_id=42,
+            body=ConfirmImportRequest(series_ids=[1]),
+            trigger_import_execute=trigger_execute,
+        )
+
+    assert exc_info.value.status_code == 409
+    session.commit.assert_awaited_once()
+    trigger_execute.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -202,5 +245,27 @@ async def test_cancel_response_keeps_runtime_state_while_rollback_is_pending() -
     assert response is not None
     assert response.status == "rollback_pending"
     assert "remains in history" in response.message
+    session.commit.assert_awaited_once()
+    purge_runtime_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_response_rejects_deleting_incomplete_rollback_evidence() -> None:
+    service = AsyncMock()
+    service.cancel_job.return_value = "rollback_incomplete"
+    session = AsyncMock()
+    purge_runtime_state = MagicMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await cancel_import_job_response(
+            service,
+            session=session,
+            job_id=42,
+            purge_import_runtime_state=purge_runtime_state,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "requires manual recovery" in str(exc_info.value.detail)
+    assert "remains in history" in str(exc_info.value.detail)
     session.commit.assert_awaited_once()
     purge_runtime_state.assert_not_called()

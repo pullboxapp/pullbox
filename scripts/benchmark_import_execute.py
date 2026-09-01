@@ -22,6 +22,7 @@ from typing import Any, cast
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.library_policy import LibraryIngestPolicy, serialize_library_ingest_policy
 from pullbox.models import config as _config_models  # noqa: F401
 from pullbox.models import import_job as _import_job_models  # noqa: F401
@@ -35,6 +36,7 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
@@ -407,6 +409,7 @@ async def main() -> None:
                     else {}
                 ),
                 target_library_root_id=root.id,
+                file_handling_mode=ImportFileHandlingMode.MANAGED_COPY,
             )
             session.add(job)
             await session.flush()
@@ -420,6 +423,7 @@ async def main() -> None:
                     status=ImportSeriesStatus.CONFIRMED,
                     cv_id=cv_id,
                     file_count=len(file_paths),
+                    selected_for_import=True,
                 )
                 session.add(imported_series)
                 await session.flush()
@@ -439,6 +443,8 @@ async def main() -> None:
                             matched_issue_cv_id=cv_id * 1000 + issue_idx,
                             match_confidence="high",
                             match_method="benchmark",
+                            include_in_import=True,
+                            source_signature=build_file_identity_signature(path),
                         )
                     )
             await session.commit()

@@ -21,7 +21,9 @@
   size="default",
   class_name="",
   input_class_name="",
-  root_style=""
+  root_style="",
+  input_id="",
+  aria_label=""
 ) %}
 {%- set normalized_size = namespace(value=size) -%}
 {%- if normalized_size.value == "default" -%}
@@ -61,6 +63,8 @@
 
   <input
     type="text"
+    {% if input_id %}id="{{ input_id }}"{% endif %}
+    {% if aria_label %}aria-label="{{ aria_label }}"{% endif %}
     {% if mode != "local" and name %}name="{{ name }}"{% endif %}
     {% if mode != "local" %}value="{{ value|default('', true) }}"{% endif %}
     placeholder="{{ placeholder }}"

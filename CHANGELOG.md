@@ -57,9 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spool, with bounded active workers, archive tasks, progress delivery, and
   cooperative cancellation cleanup.
 
-The v1.3 testing scope and remaining large-library and placement-policy limits
-are documented in [Import update testing](docs/features/import-update.md).
-
 ## [1.2.1] - 2026-08-28
 
 Patch release hardening AirDC++ acquisition recovery so retries, cancellation,

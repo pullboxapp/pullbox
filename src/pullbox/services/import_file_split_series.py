@@ -70,6 +70,15 @@ async def split_explicit_issue_series_mismatches(
             remaining_files.append(imp_file)
             continue
 
+        series_signal = metadata.signals.get("comicvine_series_id")
+        if (
+            metadata.comicvine_series_id == current_target_cv_id
+            and series_signal in {MetadataSignal.COMICINFO, MetadataSignal.SIDECAR}
+            and not metadata.diagnostics.get("identity_conflicts")
+        ):
+            remaining_files.append(imp_file)
+            continue
+
         try:
             issue_meta = await metadata_provider.get_issue(str(metadata.comicvine_issue_id))
         except Exception as exc:

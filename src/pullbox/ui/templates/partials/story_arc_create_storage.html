@@ -24,11 +24,14 @@
       <select id="story-arc-create-root" name="target_library_root_id" :required="storageMode !== 'logical'" class="input-pb w-full">
         <option value="">Choose a library root</option>
         {% for root in placement_roots %}
-          <option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>
+          <option
+            value="{{ root.id }}"
+            :disabled="storageMode === 'reference_only' ? {{ 'false' if root.can_reference else 'true' }} : {{ 'false' if root.can_manage else 'true' }}"
+          >{{ root.name }} — {{ root.path }}{% if root.can_manage and root.can_reference %}{% elif root.can_manage %} (managed only){% elif root.can_reference %} (reference only){% else %} (unavailable){% endif %}</option>
         {% endfor %}
       </select>
       {% if not placement_roots %}
-        <p class="mt-1 text-xs text-pb-text-sec">Configure an enabled library root before creating separate arc files.</p>
+        <p class="mt-1 text-xs text-pb-text-sec">Configure an available managed library root before creating separate arc files.</p>
       {% elif placement_roots_truncated %}
         <p class="mt-1 text-xs text-pb-text-sec">Only the first library roots are shown. Review your roots in Settings if one is missing.</p>
       {% endif %}

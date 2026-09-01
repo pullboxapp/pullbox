@@ -689,6 +689,120 @@ class TestDeepNesting:
             "comicvine_series_id": 162083,
         }
 
+    @pytest.mark.asyncio
+    async def test_pullbox_unknown_year_folder_supplies_trusted_comicvine_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _make_series_dir(
+            tmp_path,
+            "Asylum Ink (Unknown Year) [cv-36018]",
+            files=["Asylum Ink 001 (2005).cbz", "Asylum Ink 002 (2006).cbz"],
+        )
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Asylum Ink"
+        assert results[0].raw_year is None
+        assert results[0].file_count == 2
+        assert results[0].folder_cv_id == 36018
+        assert results[0].diagnostics["folder_identity"] == {
+            "kind": "pullbox_series_folder",
+            "comicvine_series_id": 36018,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("folder_name", "expected_name", "expected_year", "expected_cv_id"),
+        [
+            ("Comic Cuts (1890) [cv-39459]", "Comic Cuts", 1890, 39459),
+            ("Four Color (1942) [cv-927]", "Four Color", 1942, 927),
+        ],
+    )
+    async def test_pullbox_folder_accepts_historical_years_and_short_cv_ids(
+        self,
+        tmp_path: Path,
+        folder_name: str,
+        expected_name: str,
+        expected_year: int,
+        expected_cv_id: int,
+    ) -> None:
+        _make_series_dir(
+            tmp_path,
+            folder_name,
+            files=["Issue 1.cbz", "Issue 2.cbz"],
+        )
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == expected_name
+        assert results[0].raw_year == expected_year
+        assert results[0].folder_cv_id == expected_cv_id
+        assert results[0].diagnostics["folder_identity"] == {
+            "kind": "pullbox_series_folder",
+            "comicvine_series_id": expected_cv_id,
+        }
+
+    @pytest.mark.asyncio
+    async def test_trusted_series_identity_keeps_different_issue_years_in_one_group(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        series_dir = tmp_path / "2000 AD Free Comic Book Day (FCBD) (2011) [cv-40175]"
+        series_dir.mkdir()
+        _make_cbz(
+            series_dir / "Issue 4 - FCBD 2014 [cv-issue-452034].cbz",
+            "<ComicInfo>"
+            "<Series>2000 AD Free Comic Book Day (FCBD)</Series>"
+            "<Number>4</Number><Year>2014</Year><Publisher>Rebellion</Publisher>"
+            "<Notes>[cv_vol_id:40175] [cv_issue_id:452034]</Notes>"
+            "</ComicInfo>",
+        )
+        _make_cbz(
+            series_dir / "Issue 13 - 2023 [cv-issue-1040279].cbz",
+            "<ComicInfo>"
+            "<Series>2000 AD Free Comic Book Day (FCBD)</Series>"
+            "<Number>13</Number><Year>2023</Year>"
+            "<Notes>[cv_vol_id:40175] [cv_issue_id:1040279]</Notes>"
+            "</ComicInfo>",
+        )
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "2000 AD Free Comic Book Day (FCBD)"
+        assert results[0].raw_year == 2011
+        assert results[0].file_count == 2
+        assert results[0].folder_cv_id == 40175
+        assert results[0].comicinfo_cv_id == 40175
+
+    @pytest.mark.asyncio
+    async def test_embedded_series_identity_groups_files_without_folder_suffix(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        series_dir = tmp_path / "Remede Imperial"
+        series_dir.mkdir()
+        for issue_number, issue_year in ((1, 2023), (2, 2024)):
+            _make_cbz(
+                series_dir / f"Issue {issue_number} ({issue_year}).cbz",
+                "<ComicInfo>"
+                "<Series>Remède Impérial - L'Étrange Médecin de la Cour</Series>"
+                f"<Number>{issue_number}</Number><Year>{issue_year}</Year>"
+                "<Notes>[cv_vol_id:155371]</Notes>"
+                "</ComicInfo>",
+            )
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == ("Remède Impérial - L'Étrange Médecin de la Cour")
+        assert results[0].raw_year is None
+        assert results[0].file_count == 2
+        assert results[0].comicinfo_cv_id == 155371
+
 
 class TestMixedFormats:
     """Test 5: Mixed formats in same series folder."""
@@ -1270,6 +1384,24 @@ class TestMetadataGrouping:
         assert len(results) == 1
         assert results[0].comicinfo_cv_id == 168590
         assert archive_read_count == 0
+
+    @pytest.mark.asyncio
+    async def test_folder_sidecar_identity_keeps_files_on_folder_series_name(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        folder = tmp_path / "Saga (2012)"
+        folder.mkdir()
+        (folder / "series.json").write_text('{"comicid": 42692}')
+        _touch(folder / "Saga #001.cbz")
+        _touch(folder / "Saga 001 dup.cbz")
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        assert len(results) == 1
+        assert results[0].raw_series_name == "Saga"
+        assert results[0].comicinfo_cv_id == 42692
+        assert {file.parsed_series for file in results[0].files} == {"Saga"}
 
     @pytest.mark.asyncio
     async def test_ambiguous_files_still_load_archive_metadata(

@@ -148,10 +148,20 @@ class Series(Base, IdentityMixin, TimestampMixin):
     library_root_id: Mapped[int | None] = mapped_column(
         ForeignKey("library_roots.id", ondelete="SET NULL")
     )
+    preferred_library_root_id: Mapped[int | None] = mapped_column(
+        ForeignKey("library_roots.id", ondelete="SET NULL")
+    )
 
     # Relationships
     publisher: Mapped[Publisher | None] = relationship(back_populates="series")
-    library_root: Mapped[LibraryRoot | None] = relationship(back_populates="series")
+    library_root: Mapped[LibraryRoot | None] = relationship(
+        back_populates="series",
+        foreign_keys=[library_root_id],
+    )
+    preferred_library_root: Mapped[LibraryRoot | None] = relationship(
+        back_populates="preferred_series",
+        foreign_keys=[preferred_library_root_id],
+    )
     issues: Mapped[list[Issue]] = relationship(
         back_populates="series", cascade="all, delete-orphan"
     )

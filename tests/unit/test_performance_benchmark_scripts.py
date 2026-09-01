@@ -6,6 +6,39 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
+from scripts.benchmark_import_metadata_scale import _prepare_database
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self.sync_calls: list[str] = []
+
+    async def execute(self, statement: object) -> None:
+        self.statements.append(str(statement))
+
+    async def run_sync(self, callback: object) -> None:
+        self.sync_calls.append(getattr(callback, "__name__", repr(callback)))
+
+
+@pytest.mark.asyncio
+async def test_postgresql_metadata_benchmark_resets_the_dedicated_schema() -> None:
+    connection = _RecordingConnection()
+
+    await _prepare_database(  # type: ignore[arg-type]
+        connection,
+        backend="postgresql",
+        reset_dedicated_database=True,
+    )
+
+    assert connection.statements == [
+        "DROP SCHEMA public CASCADE",
+        "CREATE SCHEMA public",
+    ]
+    assert connection.sync_calls == ["create_all"]
+
 
 def _run_benchmark(
     repo_root: Path,
@@ -165,6 +198,7 @@ def test_import_metadata_scale_benchmark_uses_no_archive_payloads_or_providers()
     )
 
     assert report["profile"] == "metadata_only"
+    assert report["backend"] == "sqlite"
     assert report["represented_file_count"] == 1
     assert report["story_arc_count"] == 3
     assert report["archive_payload_count"] == 0

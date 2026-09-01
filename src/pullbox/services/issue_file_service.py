@@ -14,7 +14,7 @@ from pullbox.config import get_settings
 from pullbox.core.config_resolver import load_system_config_values
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import LibraryFile
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.services.series_delete_targets import trash_relative_path
 from pullbox.utilities.settings import move_file_to_utility_trash, resolve_trash_directory
 
@@ -72,7 +72,10 @@ async def delete_issue_library_file(
     file_deleted = False
     trashed = False
 
-    if await asyncio.to_thread(file_path.exists):
+    if (
+        library_file.storage_mode is not LibraryFileStorageMode.REFERENCED
+        and await asyncio.to_thread(file_path.exists)
+    ):
         if trash_dir is not None:
             trash_path = await asyncio.to_thread(
                 move_file_to_utility_trash,

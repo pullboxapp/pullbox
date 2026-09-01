@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from pullbox.core.mylar3_path_mapping import normalize_mylar3_path_map
 from pullbox.models.import_job import (
     ImportControlRequest,
     ImportedFileStatus,
@@ -58,7 +59,11 @@ class ImportJobCreate(BaseModel):
     )
     mylar3_path_map: dict[str, str] = Field(
         default_factory=dict,
-        description="Docker volume path mapping {container_prefix: host_prefix}",
+        description="Mylar stored prefix to Pullbox-visible container prefix mapping",
+    )
+    mylar3_path_map_confirmed: bool = Field(
+        False,
+        description="Whether Step 1 preview confirmation froze this exact mapping snapshot",
     )
     cv_match_threshold: float = Field(
         0.70, ge=0.50, le=1.00, description="Minimum CV match score to accept"
@@ -110,7 +115,19 @@ class ImportJobCreate(BaseModel):
             raise ValueError(
                 "Story arc materialization requires story_arc_import_requested to be true"
             )
+        if self.mylar3_path_map and self.source_type != ImportSourceType.MYLAR3:
+            raise ValueError("Mylar path mapping is only supported for Mylar imports.")
+        if self.mylar3_path_map_confirmed and self.source_type != ImportSourceType.MYLAR3:
+            raise ValueError("Mylar path mapping confirmation is only supported for Mylar imports.")
+        if self.source_type == ImportSourceType.MYLAR3 and not self.mylar3_path_map_confirmed:
+            raise ValueError("Review and confirm the Mylar path mapping before starting the scan.")
         return self
+
+    @field_validator("mylar3_path_map")
+    @classmethod
+    def validate_mylar3_path_map(cls, value: dict[str, str]) -> dict[str, str]:
+        """Normalize the frozen mapping with segment-aware overlap checks."""
+        return normalize_mylar3_path_map(value)
 
     @field_validator("file_formats")
     @classmethod
@@ -544,6 +561,8 @@ class ImportJobRead(BaseModel):
     future_root_policy_applied_at: datetime | None = None
     story_arc_import_requested: bool = False
     story_arc_materialization_requested: bool = False
+    mylar3_path_map: dict[str, str] = Field(default_factory=dict)
+    mylar3_path_map_confirmed: bool = False
     cv_match_threshold: float
     min_files_per_series: int
     file_formats: str | None

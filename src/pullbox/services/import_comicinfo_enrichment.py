@@ -402,6 +402,7 @@ async def _mark_pending_file_complete_with_retry(
                         artifact_stat.st_mtime,
                         tz=UTC,
                     )
+                library_file.has_comicinfo = True
                 _set_comicinfo_enrichment_status(
                     imported_file,
                     status="complete",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ from sqlalchemy import func, select
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+from pullbox.models.library import LibraryRoot
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
     IssueStoryArc,
@@ -20,6 +22,34 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.schemas.import_job import ConfirmImportRequest, StoryArcReviewDecision
+from pullbox.services import library_root_management
+
+
+@pytest.fixture
+async def managed_import_root(
+    db_session: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LibraryRoot:
+    """Provide the managed destination required by direct job fixtures."""
+    root_path = tmp_path / "story-arc-review-library"
+    root_path.mkdir()
+    root = LibraryRoot(
+        name="Story arc review library",
+        path=str(root_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=True,
+        is_default_managed_destination=True,
+    )
+    db_session.add(root)
+    await db_session.flush()
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024**3),
+    )
+    return root
 
 
 async def _stage_arc(
@@ -275,6 +305,7 @@ async def test_review_summary_keeps_story_arc_counts_out_of_series_totals(db_ses
 @pytest.mark.asyncio
 async def test_arc_only_confirmation_allows_canonical_issues_without_series_or_file_selection(
     db_session: Any,
+    managed_import_root: LibraryRoot,
 ) -> None:
     from pullbox.services.import_confirmation import confirm_import_job
 
@@ -282,6 +313,7 @@ async def test_arc_only_confirmation_allows_canonical_issues_without_series_or_f
         source_path="/tmp/mylar.db",
         source_type=ImportSourceType.MYLAR3,
         status=ImportJobStatus.REVIEW,
+        target_library_root_id=managed_import_root.id,
     )
     db_session.add(job)
     await db_session.flush()

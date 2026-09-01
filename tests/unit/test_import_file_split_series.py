@@ -86,6 +86,58 @@ def test_move_file_to_split_series_resets_match_state_and_updates_split_counts()
 
 
 @pytest.mark.asyncio
+async def test_trusted_comicinfo_series_identity_skips_collection_provider_lookup() -> None:
+    job = ImportJob(id=1)
+    parent_series = ImportedSeries(
+        id=10,
+        import_job_id=job.id,
+        raw_series_name="Konna Black Jack wa Iyada",
+        cv_id=100,
+        status=ImportSeriesStatus.MATCHED,
+    )
+    imp_file = ImportedFile(
+        id=20,
+        import_job_id=job.id,
+        import_series_id=parent_series.id,
+        file_path="/tmp/Issue 1 - Volume 1.cbz",
+        file_name="Issue 1 - Volume 1.cbz",
+        status=ImportedFileStatus.PENDING,
+    )
+    metadata = SourceMetadata(
+        original_title=imp_file.file_name,
+        series_name="Konna Black Jack wa Iyada",
+        comicvine_series_id=100,
+        comicvine_issue_id=501,
+        issue_type=IssueType.TPB,
+        signals={
+            "comicvine_series_id": MetadataSignal.COMICINFO,
+            "comicvine_issue_id": MetadataSignal.COMICINFO,
+        },
+    )
+    provider = SimpleNamespace(get_issue=AsyncMock())
+
+    remaining, split_ids = await import_file_split_series.split_explicit_issue_series_mismatches(
+        AsyncMock(),
+        job,
+        parent_series,
+        [imp_file],
+        metadata_provider=provider,
+        source_metadata_for_import_file=lambda _series, _file: metadata,
+        target_series=Series(
+            id=30,
+            title="Konna Black Jack wa Iyada",
+            sort_title="konna black jack wa iyada",
+            comicvine_id=100,
+        ),
+        log_event=AsyncMock(),
+    )
+
+    assert remaining == [imp_file]
+    assert split_ids == []
+    provider.get_issue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_page_split_waits_for_parent_file_count_before_marking_series_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

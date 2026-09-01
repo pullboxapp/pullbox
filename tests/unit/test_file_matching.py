@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from pullbox.core.exceptions import JobPausedError
-from pullbox.core.source_metadata import MetadataSignal
+from pullbox.core.source_metadata import MetadataSignal, SourceMetadata
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -2651,6 +2651,186 @@ class TestCvIdPriorityOverIssueNumber:
         await db_session.refresh(imp_files[0])
         assert imp_files[0].matched_issue_id == issues[1].id  # issue #2
         assert imp_files[0].match_method == "comicvine_id"
+
+
+class TestDeferredComicInfoIdentity:
+    """Deferred ComicInfo identity must participate in the retry match."""
+
+    @pytest.mark.asyncio
+    async def test_deferred_cv_issue_id_is_persisted_before_retry(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        series, issues = await _setup_series_with_issues(db_session)
+        job, _imp_series, imp_files = await _setup_import_job(
+            db_session,
+            series,
+            files=[
+                {
+                    "file_name": "Batman Volume 2.cbz",
+                    "parsed_issue_number": 99.0,
+                    "parsed_series": "Batman",
+                    "diagnostics": {
+                        "source_issue_type": IssueType.ISSUE.value,
+                        "source_metadata": {"archive_metadata_deferred": True},
+                    },
+                }
+            ],
+        )
+
+        async def load_deferred_metadata(
+            _imp_series: ImportedSeries,
+            imp_file: ImportedFile,
+        ) -> SourceMetadata:
+            return SourceMetadata(
+                original_title=imp_file.file_name,
+                source_path=imp_file.file_path,
+                series_name="Batman",
+                issue_number=2.0,
+                issue_number_text="2",
+                comicvine_issue_id=100002,
+                signals={
+                    "series_name": MetadataSignal.COMICINFO,
+                    "issue_number": MetadataSignal.COMICINFO,
+                    "comicvine_issue_id": MetadataSignal.COMICINFO,
+                },
+                diagnostics={
+                    "has_comicinfo": True,
+                    "comicinfo": {
+                        "series": "Batman",
+                        "number": "2",
+                        "notes": "[cv_issue_id:100002]",
+                    },
+                },
+            )
+
+        svc = _make_service()
+        monkeypatch.setattr(
+            svc,
+            "_load_deferred_source_metadata_for_import_file",
+            load_deferred_metadata,
+        )
+
+        await svc._run_file_matching(db_session, job)
+
+        await db_session.refresh(imp_files[0])
+        assert imp_files[0].comicvine_issue_id == 100002
+        assert imp_files[0].matched_issue_id == issues[1].id
+        assert imp_files[0].status == ImportedFileStatus.MATCHED
+        assert imp_files[0].match_method == "comicvine_id"
+
+    @pytest.mark.asyncio
+    async def test_deferred_cv_issue_id_rebuilds_new_series_target_index(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provider = AsyncMock()
+        provider.get_issues_for_series = AsyncMock(
+            return_value=[
+                IssueSummary(
+                    provider_id="100002",
+                    issue_number=2.0,
+                    title="I Am Gotham Part 2",
+                    release_date=None,
+                    cover_url=None,
+                    issue_type="issue",
+                )
+            ]
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = provider
+        svc = ImportService(
+            series_service=AsyncMock(),
+            metadata_service=metadata_service,
+            event_bus=AsyncMock(),
+        )
+
+        job = ImportJob(
+            source_path="/tmp/comics",
+            source_type=ImportSourceType.FILESYSTEM,
+            status=ImportJobStatus.FILE_MATCHING,
+        )
+        db_session.add(job)
+        await db_session.flush()
+        imp_series = ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name="Batman",
+            raw_year=2016,
+            status=ImportSeriesStatus.MATCHED,
+            cv_id=97508,
+            cv_title="Batman",
+            cv_year=2016,
+            cv_issue_count=3,
+            cv_match_score=0.95,
+            cv_match_method="exact_title_year",
+            file_count=1,
+            files_total=1,
+        )
+        db_session.add(imp_series)
+        await db_session.flush()
+        imp_file = ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imp_series.id,
+            file_path="/tmp/comics/Batman Volume 2.cbz",
+            file_name="Batman Volume 2.cbz",
+            file_size=1024,
+            file_format="cbz",
+            parsed_series="Batman",
+            parsed_issue_number=99.0,
+            status=ImportedFileStatus.PENDING,
+            diagnostics={
+                "source_issue_type": IssueType.ISSUE.value,
+                "source_metadata": {"archive_metadata_deferred": True},
+            },
+        )
+        db_session.add(imp_file)
+        await db_session.flush()
+
+        async def load_deferred_metadata(
+            _imp_series: ImportedSeries,
+            source_file: ImportedFile,
+        ) -> SourceMetadata:
+            return SourceMetadata(
+                original_title=source_file.file_name,
+                source_path=source_file.file_path,
+                series_name="Batman",
+                issue_number=2.0,
+                issue_number_text="2",
+                comicvine_series_id=97508,
+                comicvine_issue_id=100002,
+                signals={
+                    "series_name": MetadataSignal.COMICINFO,
+                    "issue_number": MetadataSignal.COMICINFO,
+                    "comicvine_series_id": MetadataSignal.COMICINFO,
+                    "comicvine_issue_id": MetadataSignal.COMICINFO,
+                },
+                diagnostics={
+                    "has_comicinfo": True,
+                    "comicinfo": {
+                        "series": "Batman",
+                        "number": "2",
+                        "notes": "[cv_vol_id:97508] [cv_issue_id:100002]",
+                    },
+                },
+            )
+
+        monkeypatch.setattr(
+            svc,
+            "_load_deferred_source_metadata_for_import_file",
+            load_deferred_metadata,
+        )
+
+        await svc._run_file_matching(db_session, job)
+
+        await db_session.refresh(imp_file)
+        assert imp_file.comicvine_issue_id == 100002
+        assert imp_file.matched_issue_id is None
+        assert imp_file.matched_issue_cv_id == 100002
+        assert imp_file.status == ImportedFileStatus.MATCHED
+        assert imp_file.match_method == "comicvine_id"
+        assert provider.get_issues_for_series.await_count == 1
 
 
 class TestCvIdNotInMapFallsThrough:

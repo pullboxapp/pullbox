@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,19 +16,30 @@ from sqlalchemy import func as sa_func
 from sqlalchemy import select as sa_select
 from sqlalchemy.orm import joinedload
 
-from pullbox.core.exceptions import JobCancelledError, JobPausedError
+from pullbox.core.exceptions import (
+    ConfigurationError,
+    ImportDestinationValidationError,
+    JobCancelledError,
+    JobPausedError,
+)
 from pullbox.core.file_ops import LibraryFileRegistrationOutcome
 from pullbox.core.file_safety import classify_resource_safety_exception
 from pullbox.core.issue_numbers import (
     issue_number_text_matches_numeric,
     normalize_issue_number_text,
 )
-from pullbox.core.library_file_ownership import ReferencedFileValidationError
+from pullbox.core.library_file_ownership import (
+    ReferencedFileValidationError,
+    build_file_identity_signature,
+    build_managed_placement_signature,
+    validate_file_identity_signature,
+)
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportFileHandlingMode,
     ImportJobAction,
+    ImportSourceType,
 )
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryFile, LibraryFileStorageMode, MatchConfidence
@@ -42,6 +54,10 @@ from pullbox.services.import_file_resolution import (
 )
 from pullbox.services.import_folder_adoption import apply_import_series_folder_adoption
 from pullbox.services.import_job_actions import seed_action_sequence_cache
+from pullbox.services.import_placement_recovery import (
+    has_completed_direct_move_placement_record,
+)
+from pullbox.services.import_referenced_sources import revalidate_mylar_in_place_file_root
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.utilities.settings import restore_file_from_utility_trash
 
@@ -99,42 +115,170 @@ def _cleanup_failed_library_artifact(
     storage_mode: str | None,
     created_series_folder: bool,
     created_series_folder_path: Path | None,
-) -> None:
+    expected_destination_signature: dict[str, object] | None,
+    created_directory_paths: tuple[Path, ...] = (),
+    directory_ownership_boundary_path: Path | None = None,
+) -> bool:
     """Best-effort cleanup when import fails after the library artifact was placed."""
     if storage_mode == "referenced" or transfer_method == "leave_in_place":
-        return
+        return False
+
+    destination_matches = _destination_matches_signature(
+        destination_path,
+        expected_destination_signature,
+    )
+    destination_exists = bool(destination_path is not None and os.path.lexists(destination_path))
+    destination_preserved = destination_exists and not destination_matches
+    source_reappeared = bool(
+        transfer_method == "move"
+        and original_source is not None
+        and os.path.lexists(original_source)
+        and (
+            (
+                destination_path is not None
+                and os.path.lexists(destination_path)
+                and original_source.resolve(strict=False) != destination_path.resolve(strict=False)
+            )
+            or (original_trash_path is not None and os.path.lexists(original_trash_path))
+        )
+    )
+    if source_reappeared:
+        # The source path may now contain a different user-owned artifact. Never
+        # let failure cleanup replace it or discard a proven destination/trash copy.
+        return True
 
     if (
         original_trash_path is not None
         and original_source is not None
-        and original_trash_path.exists()
+        and os.path.lexists(original_trash_path)
     ):
         restore_file_from_utility_trash(original_trash_path, original_source)
-        if destination_path is not None and destination_path.exists():
+        if (
+            destination_matches
+            and destination_path is not None
+            and os.path.lexists(destination_path)
+        ):
             destination_path.unlink(missing_ok=True)
     elif (
         transfer_method in {"move", "leave_in_place"}
+        and destination_matches
         and destination_path is not None
-        and destination_path.exists()
         and original_source is not None
         and destination_path != original_source
     ):
         original_source.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(destination_path), str(original_source))
-    elif destination_path is not None and destination_path.exists():
+    elif destination_matches and destination_path is not None:
         destination_path.unlink(missing_ok=True)
 
-    if (
-        created_series_folder
-        and created_series_folder_path is not None
-        and created_series_folder_path.exists()
-    ):
+    if not destination_preserved:
+        owned_directories: tuple[Path, ...] = ()
+        if created_directory_paths and directory_ownership_boundary_path is not None:
+            owned_directories = _validated_created_directory_paths(
+                created_directory_paths,
+                boundary_path=directory_ownership_boundary_path,
+                destination_parent=destination_path.parent
+                if destination_path is not None
+                else None,
+            )
+        elif (
+            created_series_folder
+            and created_series_folder_path is not None
+            and destination_path is not None
+        ):
+            try:
+                if created_series_folder_path.resolve(
+                    strict=False
+                ) == destination_path.parent.resolve(strict=False):
+                    owned_directories = (created_series_folder_path,)
+            except (OSError, RuntimeError):
+                owned_directories = ()
+        for directory in sorted(
+            set(owned_directories),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            try:
+                directory.rmdir()
+            except (FileNotFoundError, OSError):
+                continue
+    return destination_preserved
+
+
+def _validated_created_directory_paths(
+    paths: tuple[Path, ...],
+    *,
+    boundary_path: Path,
+    destination_parent: Path | None,
+) -> tuple[Path, ...]:
+    """Return only exact import-owned descendants on the destination chain."""
+    if destination_parent is None:
+        return ()
+    try:
+        boundary_resolved = boundary_path.resolve(strict=False)
+        destination_resolved = destination_parent.resolve(strict=False)
+        destination_relative = destination_resolved.relative_to(boundary_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return ()
+    if not destination_relative.parts:
+        return ()
+
+    validated: list[Path] = []
+    for path in paths:
         try:
-            next(created_series_folder_path.iterdir())
-        except StopIteration:
-            created_series_folder_path.rmdir()
-        except OSError:
-            pass
+            path_resolved = path.resolve(strict=False)
+            relative = path_resolved.relative_to(boundary_resolved)
+            destination_resolved.relative_to(path_resolved)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if relative.parts:
+            validated.append(path)
+    return tuple(validated)
+
+
+def _destination_matches_signature(
+    destination_path: Path | None,
+    expected_signature: dict[str, object] | None,
+) -> bool:
+    if destination_path is None or not os.path.lexists(destination_path) or not expected_signature:
+        return False
+    try:
+        return build_managed_placement_signature(destination_path) == expected_signature
+    except (ConfigurationError, OSError, RuntimeError, ValueError):
+        return False
+
+
+def _revalidate_managed_import_source(
+    source_path: Path,
+    expected_signature: dict[str, object],
+) -> None:
+    try:
+        current_signature = build_file_identity_signature(source_path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ReferencedFileValidationError(
+            "source_missing",
+            "Managed-copy source is missing or unavailable. Rescan before retrying.",
+        ) from exc
+    validate_file_identity_signature(expected_signature, current_signature)
+
+
+def _mylar_managed_source_boundary(source_path: Path, series_folder: str) -> Path:
+    """Use the series folder only when it actually contains this recorded issue."""
+    if not series_folder:
+        return source_path.parent
+    candidate = Path(series_folder)
+    try:
+        lexical_source = source_path.expanduser().absolute()
+        lexical_candidate = candidate.expanduser().absolute()
+        resolved_source = source_path.expanduser().resolve(strict=False)
+        resolved_candidate = candidate.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return source_path.parent
+    if lexical_source.is_relative_to(lexical_candidate) and resolved_source.is_relative_to(
+        resolved_candidate
+    ):
+        return candidate
+    return source_path.parent
 
 
 async def _load_issue_for_processing(
@@ -510,6 +654,7 @@ async def process_import_series_files(
     move_to_trash: MoveToTrashFunc,
     report_file_progress: ReportFileProgressFunc | None = None,
     defer_comicinfo_enrichment: bool = False,
+    revalidate_managed_sources: bool = False,
     file_worker_count: int = 1,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     _file_ids_override: list[int] | None = None,
@@ -654,6 +799,7 @@ async def process_import_series_files(
                     move_to_trash=move_to_trash,
                     report_file_progress=report_file_progress,
                     defer_comicinfo_enrichment=defer_comicinfo_enrichment,
+                    revalidate_managed_sources=revalidate_managed_sources,
                     file_worker_count=1,
                     session_factory=None,
                     _file_ids_override=[imp_file_id],
@@ -716,9 +862,7 @@ async def process_import_series_files(
 
     media_settings = await load_media_settings(session, job)
     skip_existing_enabled = media_settings["skip_existing_files"].lower() == "true"
-    trash_dir = await load_trash_dir(session, job)
     permission_policy = await load_permission_policy(session, job)
-    trash_dir.mkdir(parents=True, exist_ok=True)
     issue_ids = {
         issue.id
         for issue in [
@@ -747,10 +891,15 @@ async def process_import_series_files(
         )
         prepared: PreparedImportFile | None = None
         placed_destination_path: Path | None = None
+        placed_destination_signature: dict[str, object] | None = None
         placed_series_folder_created = False
         placed_series_folder_path: Path | None = None
+        placed_created_directory_paths: tuple[Path, ...] = ()
+        placed_directory_ownership_boundary_path: Path | None = None
         placed_storage_mode = "referenced" if not move_to_library else "managed"
         original_trash_path: Path | None = None
+        source_transfer_method = transfer_method
+        completed_placement_recovery_pending = False
         imp_file = await _load_imported_file_for_processing(session, imp_file_id)
         if imp_file is None:
             continue
@@ -759,8 +908,46 @@ async def process_import_series_files(
             raise ValueError("Import job disappeared during file processing")
         imp_file_name = imp_file.file_name
         imp_file_path = imp_file.file_path
+        registration_library_root_id = None if in_place else target_library_root_id
         try:
             await raise_if_cancelled(session, job_id)
+            if in_place and current_job.source_type == ImportSourceType.MYLAR3:
+                registration_library_root_id = await revalidate_mylar_in_place_file_root(
+                    session,
+                    Path(imp_file.file_path),
+                    dict(imp_file.source_signature or {}),
+                )
+            elif not in_place and revalidate_managed_sources:
+                try:
+                    await asyncio.to_thread(
+                        _revalidate_managed_import_source,
+                        Path(imp_file.file_path),
+                        dict(imp_file.source_signature or {}),
+                    )
+                except ReferencedFileValidationError as exc:
+                    can_reach_recovery = (
+                        exc.reason == "source_missing"
+                        and await has_completed_direct_move_placement_record(
+                            session,
+                            job_id=job_id,
+                            imported_file_id=int(imp_file.id),
+                            source_path=Path(imp_file.file_path),
+                        )
+                    )
+                    if not can_reach_recovery:
+                        raise
+                    completed_placement_recovery_pending = True
+
+            if in_place:
+                source_scan_root = None
+            elif current_job.source_type == ImportSourceType.FILESYSTEM:
+                source_scan_root = Path(current_job.source_path)
+            else:
+                source_folder = str(item.source_folder or "").strip()
+                source_scan_root = _mylar_managed_source_boundary(
+                    Path(imp_file.file_path),
+                    source_folder,
+                )
 
             def _build_current_file_reporter(
                 current_imp_file: ImportedFile,
@@ -903,6 +1090,10 @@ async def process_import_series_files(
                         source_path=imp_file.file_path,
                     )
                 if prepared.converted:
+                    if move_to_library and transfer_method == "move":
+                        # The moved artifact is a disposable conversion workspace;
+                        # Collection Import still preserves the original source.
+                        source_transfer_method = "copy"
                     await log_event(
                         session,
                         job_id,
@@ -914,7 +1105,7 @@ async def process_import_series_files(
                         source_file_name=Path(prepared.original_source).name,
                         prepared_file_name=Path(prepared.registration_source).name,
                     )
-                if effective_embedded_comicinfo:
+                if effective_embedded_comicinfo and not completed_placement_recovery_pending:
                     prepared_source_path = Path(prepared.registration_source)
                     comicinfo_payload_cache_key = (resolved_issue.id, str(prepared_source_path))
                     comicinfo_payload = comicinfo_payload_cache.get(comicinfo_payload_cache_key)
@@ -942,7 +1133,7 @@ async def process_import_series_files(
                     expected_source_signature=(
                         dict(imp_file.source_signature) if in_place else None
                     ),
-                    library_root_id=target_library_root_id,
+                    library_root_id=registration_library_root_id,
                     transfer_method=transfer_method,
                     normalize_to_cbz=False,
                     update_embedded_comicinfo_from_match=effective_embedded_comicinfo,
@@ -956,9 +1147,19 @@ async def process_import_series_files(
                     comicinfo_progress_callback=(
                         _report_current_file if report_file_progress else None
                     ),
+                    recovery_imported_file_id=int(imp_file.id),
+                    recovery_original_source_path=Path(imp_file.file_path),
+                    source_scan_root=source_scan_root,
+                    strict_import_target=not in_place,
                 )
             library_file, registration = _registration_outcome(registration_result)
+            library_file.has_comicinfo = bool(
+                library_file.has_comicinfo
+                or imp_file.has_comicinfo
+                or comicinfo_payload is not None
+            )
             placed_destination_path = Path(library_file.file_path)
+            placed_destination_signature = dict(library_file.source_signature or {})
             placed_storage_mode = library_file.storage_mode.value
             placed_series_folder_created = (
                 bool(registration.series_folder_created) if registration is not None else False
@@ -967,6 +1168,12 @@ async def process_import_series_files(
                 registration.series_folder_path
                 if registration is not None
                 else placed_destination_path.parent
+            )
+            placed_created_directory_paths = (
+                registration.created_directory_paths if registration is not None else ()
+            )
+            placed_directory_ownership_boundary_path = (
+                registration.directory_ownership_boundary_path if registration is not None else None
             )
             final_file_name = placed_destination_path.name
             if comicinfo_payload is not None:
@@ -992,13 +1199,6 @@ async def process_import_series_files(
                     total=4,
                     unit="steps",
                     live_only=True,
-                )
-            if prepared.converted and transfer_method == "move":
-                original_trash_path = await asyncio.to_thread(
-                    move_to_trash,
-                    prepared.original_source,
-                    trash_dir,
-                    relative_path=Path("imports") / prepared.original_source.name,
                 )
             if report_file_progress is not None:
                 await report_file_progress(
@@ -1062,8 +1262,11 @@ async def process_import_series_files(
                     "imported_file_id": imp_file.id,
                     "library_file_id": library_file.id,
                     "destination_path": library_file.file_path,
+                    "destination_signature": dict(library_file.source_signature or {}),
                     "original_source_path": str(prepared.original_source),
-                    "transfer_method": (transfer_method if move_to_library else "leave_in_place"),
+                    "transfer_method": (
+                        source_transfer_method if move_to_library else "leave_in_place"
+                    ),
                     "storage_mode": placed_storage_mode,
                     "original_trash_path": (
                         str(original_trash_path) if original_trash_path is not None else ""
@@ -1081,10 +1284,20 @@ async def process_import_series_files(
                         if registration is not None and registration.series_folder_path is not None
                         else ""
                     ),
+                    "created_directory_paths": [
+                        str(path) for path in placed_created_directory_paths
+                    ],
+                    "directory_ownership_boundary_path": (
+                        str(placed_directory_ownership_boundary_path)
+                        if placed_directory_ownership_boundary_path is not None
+                        else None
+                    ),
                     "permission_restores": _permission_restore_payload(
                         registration,
                         original_source=prepared.original_source,
-                        transfer_method=(transfer_method if move_to_library else "leave_in_place"),
+                        transfer_method=(
+                            source_transfer_method if move_to_library else "leave_in_place"
+                        ),
                     ),
                 },
             )
@@ -1164,16 +1377,20 @@ async def process_import_series_files(
                 await asyncio.to_thread(cleanup_prepared_file, prepared)
             await session.rollback()
             placeholder_progress_live_only = False
+            destination_preserved_for_review = False
             try:
-                await asyncio.to_thread(
+                destination_preserved_for_review = await asyncio.to_thread(
                     _cleanup_failed_library_artifact,
                     destination_path=placed_destination_path,
                     original_source=prepared.original_source if prepared is not None else None,
                     original_trash_path=original_trash_path,
-                    transfer_method=transfer_method,
+                    transfer_method=source_transfer_method,
                     storage_mode=placed_storage_mode,
                     created_series_folder=placed_series_folder_created,
                     created_series_folder_path=placed_series_folder_path,
+                    expected_destination_signature=placed_destination_signature,
+                    created_directory_paths=placed_created_directory_paths,
+                    directory_ownership_boundary_path=(placed_directory_ownership_boundary_path),
                 )
             except Exception:
                 logger.exception(
@@ -1192,11 +1409,48 @@ async def process_import_series_files(
             reloaded_item = await session.get(type(item), item_id)
             if reloaded_item is not None:
                 item = reloaded_item
+            if destination_preserved_for_review:
+                diagnostics = dict(imp_file.diagnostics or {})
+                diagnostics["destination_preservation"] = {
+                    "kind": "destination_preserved_for_review",
+                    "code": "destination_changed_after_placement",
+                    "retryable": False,
+                    "overrideable": False,
+                }
+                imp_file.diagnostics = diagnostics
             logger.debug(
                 "import_file_failed",
                 file_path=imp_file_path,
                 error=str(exc),
             )
+            if isinstance(exc, ImportDestinationValidationError):
+                diagnostics = dict(imp_file.diagnostics or {})
+                diagnostics["destination_review"] = {
+                    "kind": "managed_destination_review",
+                    "code": exc.reason,
+                    "reason": (
+                        "The planned managed-library destination is not a new, disjoint path. "
+                        "Review the existing artifact or choose another destination."
+                    ),
+                    "retryable": False,
+                    "overrideable": False,
+                }
+                imp_file.status = ImportedFileStatus.FAILED
+                imp_file.include_in_import = False
+                imp_file.error_message = str(exc)
+                imp_file.diagnostics = diagnostics
+                files_failed += 1
+                await log_event(
+                    session,
+                    job_id,
+                    "WARNING",
+                    "import_file_destination_review_required",
+                    message=f"Managed destination needs review: {imp_file_name}",
+                    source_path=imp_file_path,
+                    reason=exc.reason,
+                )
+                await session.commit()
+                continue
             if isinstance(exc, ReferencedFileValidationError):
                 diagnostics = dict(imp_file.diagnostics or {})
                 diagnostics["source_revalidation"] = build_import_safety_diagnostics(

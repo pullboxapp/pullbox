@@ -62,7 +62,46 @@ class TestNormalize:
 
     def test_diacritics_stripped(self) -> None:
         n = NameMatcher.normalize("Naïve New Beasts")
-        assert "nai" in n
+        assert n == "naive new beasts"
+
+    def test_french_diacritics_do_not_split_provider_query_tokens(self) -> None:
+        assert (
+            NameMatcher.normalize("Remède Impérial - L'Étrange Médecin de la Cour")
+            == "remede imperial l etrange medecin de la cour"
+        )
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Seishun♂Sobbat", "seishun male sobbat"),
+            ("Girl♀Power", "girl female power"),
+            ("Clamp ×××HOLiC", "clamp xxxholic"),  # noqa: RUF001
+            ("Yū☆Yū☆Hakusho", "yu yu hakusho"),
+            ("C++ Stories @ 100%", "c plus plus stories at 100 percent"),
+            ("Issue № 1 + 2 = 3", "issue number 1 plus 2 equals 3"),
+        ],
+    )
+    def test_common_title_symbols_have_stable_semantics(
+        self,
+        raw: str,
+        expected: str,
+    ) -> None:
+        assert NameMatcher.normalize(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Smørrebrød Straße Łódź", "smorrebrod strasse lodz"),
+            ("Æsir Œuvre Đorđe", "aesir oeuvre dorde"),
+            ("Þór Iðunn Kayıp Əli", "thor idunn kayip ali"),  # noqa: RUF001
+        ],
+    )
+    def test_common_latin_letters_without_nfkd_decompositions_are_transliterated(
+        self,
+        raw: str,
+        expected: str,
+    ) -> None:
+        assert NameMatcher.normalize(raw) == expected
 
     def test_lowercase(self) -> None:
         assert NameMatcher.normalize("BATMAN") == "batman"

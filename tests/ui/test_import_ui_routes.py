@@ -30,6 +30,7 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobLog,
     ImportJobStatus,
@@ -478,6 +479,101 @@ class TestImportReviewPartial:
                 assert ctx["selected_series_ids"] == [selected_series.id]
 
     @pytest.mark.asyncio
+    async def test_review_partial_exposes_selected_split_series_destination_requirement(
+        self,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from pullbox.ui.routes import import_review_partial
+
+        first_path = tmp_path / "main"
+        second_path = tmp_path / "archive"
+        first_path.mkdir()
+        second_path.mkdir()
+        async with _db_factory() as session:
+            first_root = LibraryRoot(name="Main", path=str(first_path), enabled=True)
+            second_root = LibraryRoot(name="Archive", path=str(second_path), enabled=True)
+            session.add_all([first_root, second_root])
+            await session.flush()
+            job = ImportJob(
+                source_path=str(tmp_path),
+                source_type=ImportSourceType.MYLAR3,
+                status=ImportJobStatus.REVIEW,
+                file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+            )
+            session.add(job)
+            await session.flush()
+            item = ImportedSeries(
+                import_job_id=job.id,
+                raw_series_name="Batman",
+                status=ImportSeriesStatus.MATCHED,
+                cv_id=796,
+                selected_for_import=True,
+                file_count=2,
+                files_total=2,
+                files_matched=2,
+            )
+            session.add(item)
+            await session.flush()
+            first_file = first_path / "Batman 001.cbz"
+            second_file = second_path / "Batman 002.cbz"
+            first_file.write_bytes(b"first")
+            second_file.write_bytes(b"second")
+            session.add_all(
+                [
+                    ImportedFile(
+                        import_job_id=job.id,
+                        import_series_id=item.id,
+                        file_path=str(first_file),
+                        file_name=first_file.name,
+                        file_size=first_file.stat().st_size,
+                        file_format="cbz",
+                        status=ImportedFileStatus.MATCHED,
+                    ),
+                    ImportedFile(
+                        import_job_id=job.id,
+                        import_series_id=item.id,
+                        file_path=str(second_file),
+                        file_name=second_file.name,
+                        file_size=second_file.stat().st_size,
+                        file_format="cbz",
+                        status=ImportedFileStatus.MATCHED,
+                    ),
+                ]
+            )
+            await session.commit()
+            job_id = job.id
+
+        request = MagicMock()
+        request.url.path = f"/import/{job_id}/review-partial"
+        request.state.csrf_token = "test"
+
+        async with _db_factory() as session:
+            with patch("pullbox.ui.routes.templates") as mock_templates:
+                mock_templates.TemplateResponse.return_value = MagicMock()
+                await import_review_partial(
+                    job_id,
+                    request,
+                    MagicMock(),
+                    session,
+                    status=None,
+                    page=1,
+                    sort=None,
+                )
+
+                ctx = mock_templates.TemplateResponse.call_args[0][2]
+                split_review = ctx["split_series_review"]
+                assert split_review.requires_preferred_destination is True
+                assert split_review.items[0].title == "Batman"
+                assert split_review.items[0].root_names == ("Main", "Archive")
+                assert [root["name"] for root in ctx["managed_library_root_options"]] == [
+                    "Main",
+                    "Archive",
+                ]
+
+    @pytest.mark.asyncio
     async def test_review_partial_with_status_filter(
         self,
         _db_factory: async_sessionmaker[AsyncSession],
@@ -699,6 +795,98 @@ class TestImportResultsPartial:
         assert "1 needs metadata retry" in html
         assert "Batman" in html
         assert "Daredevil" in html
+
+    def test_results_template_distinguishes_owned_artifacts_and_rollback_candidates(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        html = templates.env.get_template("partials/import_results.html").render(
+            job=SimpleNamespace(id=33, status=SimpleNamespace(value="completed")),
+            can_rollback=True,
+            imported_count=1,
+            failed_count=0,
+            duplicate_count=0,
+            no_match_count=0,
+            unmatched_queue_count=0,
+            failed_series=[],
+            files_total=4,
+            files_imported=3,
+            files_matched=3,
+            files_duplicate=0,
+            files_already_owned=1,
+            files_conflict=0,
+            files_no_match=0,
+            orphaned_file_no_match_count=0,
+            identified_series_file_no_match_count=0,
+            catalog_sync_pending_count=0,
+            catalog_sync_failed_count=0,
+            catalog_sync_attention_count=0,
+            catalog_sync_series=[],
+            files_failed=0,
+            failed_files=[],
+            files_safety_blocked=0,
+            safety_blocked_files=[],
+            managed_artifacts_created=2,
+            referenced_files_registered=1,
+            rollback_managed_candidates=2,
+            rollback_reference_candidates=1,
+            rollback_manual_recovery_count=0,
+            resume_step=5,
+            resume_job_id=33,
+            resume_progress_snapshot={},
+        )
+
+        assert 'data-testid="import-results-ownership-summary"' in html
+        assert "Managed artifacts" in html
+        assert "In-place references" in html
+        assert 'data-testid="import-results-rollback-summary"' in html
+        assert "2 managed artifacts will be fingerprint-checked" in html
+        assert "1 reference will be detached" in html
+
+    def test_results_template_identifies_incomplete_rollback(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        html = templates.env.get_template("partials/import_results.html").render(
+            job=SimpleNamespace(
+                id=34,
+                status=SimpleNamespace(value="failed"),
+                error_message="Rollback incomplete: 1 action requires manual recovery.",
+            ),
+            can_rollback=False,
+            rollback_incomplete=True,
+            rollback_actions_rolled_back=2,
+            rollback_manual_recovery_count=1,
+            imported_count=1,
+            failed_count=0,
+            duplicate_count=0,
+            no_match_count=0,
+            unmatched_queue_count=0,
+            failed_series=[],
+            files_total=0,
+            files_imported=0,
+            files_matched=0,
+            files_duplicate=0,
+            files_already_owned=0,
+            files_conflict=0,
+            files_no_match=0,
+            orphaned_file_no_match_count=0,
+            identified_series_file_no_match_count=0,
+            files_failed=0,
+            failed_files=[],
+            files_safety_blocked=0,
+            safety_blocked_files=[],
+        )
+
+        assert 'data-testid="import-results-rollback-incomplete"' in html
+        assert "Rollback is incomplete" in html
+        assert "2 actions rolled back safely" in html
+        assert "1 requires manual recovery" in html
+        assert 'data-testid="import-results-rollback-action"' not in html
 
     @pytest.mark.asyncio
     async def test_results_partial_rejects_non_result_status(

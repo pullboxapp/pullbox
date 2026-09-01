@@ -140,6 +140,7 @@ async def materialize_cbz_with_comicinfo_interruptible(
     data: dict[str, Any],
     *,
     transfer_method: str,
+    temp_path: Path | None = None,
     cancellation_check: ControlCheck | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> bool:
@@ -150,11 +151,12 @@ async def materialize_cbz_with_comicinfo_interruptible(
             target,
             data,
             transfer_method=transfer_method,
+            temp_path=temp_path,
             cancellation_check=cancellation_check,
             progress_callback=progress_callback,
         )
 
-    temp_path = target.with_name(f"{target.name}.pullbox-write.tmp")
+    temp_path = temp_path or target.with_name(f"{target.name}.pullbox-write.tmp")
     progress_state_path = _create_progress_state_path(target.parent)
     payload = {
         "source": str(source),
@@ -199,6 +201,7 @@ async def _materialize_cbz_with_comicinfo_inline(
     data: dict[str, Any],
     *,
     transfer_method: str,
+    temp_path: Path | None = None,
     cancellation_check: ControlCheck | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> bool:
@@ -227,6 +230,7 @@ async def _materialize_cbz_with_comicinfo_inline(
         target,
         data,
         transfer_method=transfer_method,
+        temp_path=temp_path,
         progress_callback=sync_progress_callback if progress_callback is not None else None,
     )
     for future in progress_futures:

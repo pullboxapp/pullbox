@@ -44,6 +44,21 @@ class FileMatchLogEvent:
     level: str = "DEBUG"
 
 
+_SOURCE_EVIDENCE_DIAGNOSTIC_KEYS = (
+    "source_issue_type",
+    "comicvine_series_id",
+    "series_status",
+    "issue_count_hint",
+    "metadata_signals",
+    "source_metadata",
+)
+
+
+def _source_evidence_diagnostics(imp_file: ImportedFile) -> dict[str, Any]:
+    diagnostics = dict(imp_file.diagnostics or {})
+    return {key: diagnostics[key] for key in _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS if key in diagnostics}
+
+
 def apply_matched_file_outcome(
     imp_file: ImportedFile,
     imp_series: ImportedSeries,
@@ -53,6 +68,7 @@ def apply_matched_file_outcome(
     duplicate_target_state: DuplicateTargetStateFunc,
 ) -> FileMatchLogEvent:
     """Apply accepted file-match status/diagnostics and return its log event."""
+    source_evidence = _source_evidence_diagnostics(imp_file)
     imp_file.matched_issue_id = match_candidate.matched_issue_id
     imp_file.matched_issue_cv_id = match_candidate.matched_issue_cv_id
     imp_file.match_confidence = match_candidate.confidence
@@ -63,10 +79,13 @@ def apply_matched_file_outcome(
         if match_candidate.has_library_file:
             imp_file.status = ImportedFileStatus.ALREADY_OWNED
             imp_file.include_in_import = False
-            imp_file.diagnostics = _duplicate_file_diagnostics(
-                matched_issue,
-                target_state="already_owned",
-            )
+            imp_file.diagnostics = {
+                **source_evidence,
+                **_duplicate_file_diagnostics(
+                    matched_issue,
+                    target_state="already_owned",
+                ),
+            }
             return FileMatchLogEvent(
                 name="import_duplicate_file_already_owned",
                 message=f"Duplicate file already owned: {imp_file.file_name}",
@@ -81,10 +100,13 @@ def apply_matched_file_outcome(
         target_state = duplicate_target_state(matched_issue)
         imp_file.status = ImportedFileStatus.MATCHED
         imp_file.include_in_import = False
-        imp_file.diagnostics = _duplicate_file_diagnostics(
-            matched_issue,
-            target_state=target_state,
-        )
+        imp_file.diagnostics = {
+            **source_evidence,
+            **_duplicate_file_diagnostics(
+                matched_issue,
+                target_state=target_state,
+            ),
+        }
         return FileMatchLogEvent(
             name="import_duplicate_file_importable_match",
             message=f"Duplicate file matched to {target_state} issue: {imp_file.file_name}",
@@ -109,6 +131,7 @@ def apply_matched_file_outcome(
     ):
         provisional = match_candidate.method == PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD
         imp_file.diagnostics = {
+            **source_evidence,
             "kind": (
                 PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND
                 if provisional
@@ -131,11 +154,14 @@ def apply_matched_file_outcome(
             ),
         }
     else:
-        imp_file.diagnostics = _target_issue_summary_diagnostics(
-            imp_file,
-            imp_series,
-            match_candidate,
-        )
+        imp_file.diagnostics = {
+            **source_evidence,
+            **_target_issue_summary_diagnostics(
+                imp_file,
+                imp_series,
+                match_candidate,
+            ),
+        }
     return FileMatchLogEvent(
         name="import_file_match_detail",
         message=f"File matched: {imp_file.file_name}",

@@ -488,6 +488,44 @@ class TestFilesystemCheck:
         assert "not writable" in outcomes[0].message.lower()
         assert any("not writable" in c["message"].lower() for c in outcomes[0].details["checks"])
 
+    @pytest.mark.asyncio
+    async def test_reference_only_root_requires_read_access_without_write_probe(
+        self, db_session: AsyncSession, tmp_path
+    ) -> None:
+        root_path = tmp_path / "reference-library"
+        root_path.mkdir()
+        root = LibraryRoot(
+            name="Reference Library",
+            path=str(root_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=False,
+        )
+        db_session.add(root)
+        await db_session.flush()
+
+        with patch("pullbox.services.health_service.tempfile.mkstemp") as write_probe:
+            service = _make_service()
+            outcomes = await service.run_check(db_session, "filesystem")
+
+        write_probe.assert_not_called()
+        assert outcomes[0].status == HealthStatus.HEALTHY
+        assert outcomes[0].message == "All paths meet configured access requirements"
+        assert outcomes[0].details["checks"] == [
+            {
+                "check_name": "Library Root: Reference Library",
+                "name": "Library Root: Reference Library",
+                "status": "healthy",
+                "message": "Readable (reference-only)",
+                "response_time_ms": outcomes[0].details["checks"][0]["response_time_ms"],
+                "details": {
+                    "path": str(root_path),
+                    "required_access": "read",
+                    "issue": "ok",
+                },
+            }
+        ]
+
 
 # ---------------------------------------------------------------------------
 # ComicVine check

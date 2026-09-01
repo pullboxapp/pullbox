@@ -35,7 +35,13 @@ _STORY_ARC_DOMAIN_REVISION = "a2b3c4d5e678"
 _STORY_ARC_MANAGED_PLACEMENT_REVISION = "b3c4d5e6f789"
 _STORY_ARC_IMPORT_SYNC_REVISION = "c4d5e6f7a890"
 _STORY_ARC_IMPORT_INTENT_REVISION = "d5e6f7a8b901"
-_EXACT_ISSUE_IDENTITY_REVISION = "e6f7a8b9c012"
+_STORY_ARC_COVER_REVISION = "f7a8b9c0d123"
+_MYLAR_PATH_CONFIRMATION_REVISION = "g8b9c0d1e234"
+_LIBRARY_ROOT_MANAGEMENT_REVISION = "h9c0d1e2f345"
+_SERIES_PREFERRED_ROOT_REVISION = "i0d1e2f3a456"
+_IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION = "j1e2f3a4b567"
+_IMPORT_FILE_SERIES_INDEX_REVISION = "k2f3a4b5c678"
+_IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION = "l3f4a5b6c789"
 
 
 @pytest.fixture
@@ -212,6 +218,17 @@ def _seed_story_arc_placement_parents(
         {"name": f"Root {slug}", "path": f"/fixture/root-{slug}"},
     )
     library_root_id = int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
+    root_columns = {column["name"] for column in inspect(conn).get_columns("library_roots")}
+    if "is_default_managed_destination" in root_columns:
+        conn.execute(
+            text(
+                "UPDATE library_roots SET is_default_managed_destination = true "
+                "WHERE id = :root_id AND NOT EXISTS ("
+                "SELECT 1 FROM library_roots "
+                "WHERE is_default_managed_destination = true)"
+            ),
+            {"root_id": library_root_id},
+        )
     return {
         "membership_id": membership_id,
         "import_job_id": import_job_id,
@@ -1581,36 +1598,318 @@ class TestMigrationChain:
         finally:
             engine.dispose()
 
-    def test_story_arc_import_intent_is_non_authorizing_and_the_single_head(
+    def test_library_root_management_backfills_and_constrains_one_default(
         self,
         alembic_cfg,
     ) -> None:
-        """Step 1 intent is durable, defaults off, and extends one migration head."""
+        """Legacy roots gain both roles and the configured managed default."""
         cfg, sync_url = alembic_cfg
-        script = ScriptDirectory.from_config(cfg)
-
-        assert script.get_heads() == [_EXACT_ISSUE_IDENTITY_REVISION]
+        command.upgrade(cfg, _MYLAR_PATH_CONFIRMATION_REVISION)
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO library_roots "
+                        "(name, path, enabled, created_at, updated_at) VALUES "
+                        "('First', '/library/first', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                        "('Configured', '/library/configured', 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                        "('Disabled', '/library/disabled', 0, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    )
+                )
+                updated = conn.execute(
+                    text(
+                        "UPDATE system_config SET value = '/library/configured', "
+                        "value_type = 'string' WHERE key = 'comics_directory'"
+                    )
+                )
+                if updated.rowcount == 0:
+                    conn.execute(
+                        text(
+                            "INSERT INTO system_config (key, value, value_type) VALUES "
+                            "('comics_directory', '/library/configured', 'string')"
+                        )
+                    )
+        finally:
+            engine.dispose()
 
         command.upgrade(cfg, "head")
         engine = create_engine(sync_url)
         try:
+            inspector = inspect(engine)
+            columns = {column["name"]: column for column in inspector.get_columns("library_roots")}
+            indexes = {index["name"]: index for index in inspector.get_indexes("library_roots")}
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT name, allow_referenced_registrations, "
+                        "allow_managed_writes, is_default_managed_destination "
+                        "FROM library_roots ORDER BY id"
+                    )
+                ).all()
+            assert [tuple(row) for row in rows] == [
+                ("First", 1, 1, 0),
+                ("Configured", 1, 1, 1),
+                ("Disabled", 1, 1, 0),
+            ]
+            assert columns["allow_referenced_registrations"]["nullable"] is False
+            assert columns["allow_managed_writes"]["nullable"] is False
+            assert columns["is_default_managed_destination"]["nullable"] is False
+            assert columns["enabled"]["default"] is None
+            assert indexes["uq_library_roots_default_managed_destination"]["unique"] == 1
+            with engine.begin() as conn, pytest.raises(IntegrityError):
+                conn.execute(
+                    text(
+                        "UPDATE library_roots SET is_default_managed_destination = 1 "
+                        "WHERE name = 'First'"
+                    )
+                )
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _MYLAR_PATH_CONFIRMATION_REVISION)
+        root_columns = _get_columns(sync_url, "library_roots")
+        assert "allow_referenced_registrations" not in root_columns
+        assert "allow_managed_writes" not in root_columns
+        assert "is_default_managed_destination" not in root_columns
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE system_config SET value = '/library/missing' "
+                        "WHERE key = 'comics_directory'"
+                    )
+                )
+        finally:
+            engine.dispose()
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        text(
+                            "SELECT name FROM library_roots "
+                            "WHERE is_default_managed_destination = 1"
+                        )
+                    ).scalar_one()
+                    == "First"
+                )
+        finally:
+            engine.dispose()
+
+    @pytest.mark.parametrize(
+        ("allow_referenced_registrations", "allow_managed_writes"),
+        [(False, True), (True, False)],
+    )
+    def test_library_root_management_downgrade_refuses_nonrepresentable_roles(
+        self,
+        alembic_cfg,
+        allow_referenced_registrations: bool,
+        allow_managed_writes: bool,
+    ) -> None:
+        """A downgrade cannot erase either explicit library-root restriction."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, _LIBRARY_ROOT_MANAGEMENT_REVISION)
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO library_roots "
+                        "(name, path, enabled, allow_referenced_registrations, "
+                        "allow_managed_writes, is_default_managed_destination, "
+                        "created_at, updated_at) VALUES "
+                        "('Managed', '/library/managed', 1, 1, 1, 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                        "('Restricted', '/library/restricted', 1, "
+                        ":allow_referenced_registrations, :allow_managed_writes, 0, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {
+                        "allow_referenced_registrations": allow_referenced_registrations,
+                        "allow_managed_writes": allow_managed_writes,
+                    },
+                )
+                updated = conn.execute(
+                    text(
+                        "UPDATE system_config SET value = '/library/managed', "
+                        "value_type = 'string' WHERE key = 'comics_directory'"
+                    )
+                )
+                if updated.rowcount == 0:
+                    conn.execute(
+                        text(
+                            "INSERT INTO system_config (key, value, value_type) VALUES "
+                            "('comics_directory', '/library/managed', 'string')"
+                        )
+                    )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="library-root capabilities"):
+            command.downgrade(cfg, _MYLAR_PATH_CONFIRMATION_REVISION)
+
+        assert "allow_managed_writes" in _get_columns(sync_url, "library_roots")
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                assert (
+                    conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                    == _LIBRARY_ROOT_MANAGEMENT_REVISION
+                )
+                conn.execute(
+                    text(
+                        "UPDATE library_roots SET allow_referenced_registrations = 1, "
+                        "allow_managed_writes = 1 WHERE name = 'Restricted'"
+                    )
+                )
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _MYLAR_PATH_CONFIRMATION_REVISION)
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT name, allow_referenced_registrations, allow_managed_writes, "
+                        "is_default_managed_destination FROM library_roots ORDER BY id"
+                    )
+                ).all()
+            assert [tuple(row) for row in rows] == [
+                ("Managed", 1, 1, 1),
+                ("Restricted", 1, 1, 0),
+            ]
+        finally:
+            engine.dispose()
+
+    def test_library_root_management_downgrade_refuses_unrepresentable_default(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """A downgrade cannot silently change the selected managed destination."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, _LIBRARY_ROOT_MANAGEMENT_REVISION)
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO library_roots "
+                        "(name, path, enabled, allow_referenced_registrations, "
+                        "allow_managed_writes, is_default_managed_destination, "
+                        "created_at, updated_at) VALUES "
+                        "('Configured', '/library/configured', 1, 1, 1, 0, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                        "('Selected', '/library/selected', 1, 1, 1, 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    )
+                )
+                updated = conn.execute(
+                    text(
+                        "UPDATE system_config SET value = '/library/configured', "
+                        "value_type = 'string' WHERE key = 'comics_directory'"
+                    )
+                )
+                if updated.rowcount == 0:
+                    conn.execute(
+                        text(
+                            "INSERT INTO system_config (key, value, value_type) VALUES "
+                            "('comics_directory', '/library/configured', 'string')"
+                        )
+                    )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="default managed destination"):
+            command.downgrade(cfg, _MYLAR_PATH_CONFIRMATION_REVISION)
+
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                assert (
+                    conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                    == _LIBRARY_ROOT_MANAGEMENT_REVISION
+                )
+                conn.execute(
+                    text(
+                        "UPDATE library_roots SET is_default_managed_destination = 0 "
+                        "WHERE name = 'Selected'"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE library_roots SET is_default_managed_destination = 1 "
+                        "WHERE name = 'Configured'"
+                    )
+                )
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _MYLAR_PATH_CONFIRMATION_REVISION)
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        text(
+                            "SELECT name FROM library_roots "
+                            "WHERE is_default_managed_destination = 1"
+                        )
+                    ).scalar_one()
+                    == "Configured"
+                )
+        finally:
+            engine.dispose()
+
+    def test_story_arc_cover_fields_extend_the_single_migration_head(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Story Arc covers are nullable and extend the existing migration graph."""
+        cfg, sync_url = alembic_cfg
+        script = ScriptDirectory.from_config(cfg)
+
+        assert script.get_heads() == [_IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION]
+
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            story_arc_columns = {
+                column["name"]: column for column in inspect(engine).get_columns("story_arcs")
+            }
+            assert story_arc_columns["cover_path"]["nullable"] is True
+            assert story_arc_columns["cover_url"]["nullable"] is True
             columns = {
                 column["name"]: column for column in inspect(engine).get_columns("import_jobs")
             }
             assert columns["story_arc_import_requested"]["nullable"] is False
             assert columns["story_arc_materialization_requested"]["nullable"] is False
+            assert columns["mylar3_path_map_confirmed"]["nullable"] is False
             with engine.begin() as conn:
                 job_id = _seed_minimal_import_job(conn, source_path="/fixture/intent-defaults")
                 defaults = conn.execute(
                     text(
                         "SELECT story_arc_import_requested, "
-                        "story_arc_materialization_requested FROM import_jobs WHERE id = :id"
+                        "story_arc_materialization_requested, mylar3_path_map_confirmed "
+                        "FROM import_jobs WHERE id = :id"
                     ),
                     {"id": job_id},
                 ).one()
-                assert tuple(defaults) == (0, 0)
+                assert tuple(defaults) == (0, 0, 0)
         finally:
             engine.dispose()
+
+        command.downgrade(cfg, _STORY_ARC_COVER_REVISION)
+        assert "mylar3_path_map_confirmed" not in _get_columns(sync_url, "import_jobs")
+        command.upgrade(cfg, "head")
 
         command.downgrade(cfg, _STORY_ARC_IMPORT_SYNC_REVISION)
         c4_columns = _get_columns(sync_url, "import_jobs")
@@ -1625,6 +1924,212 @@ class TestMigrationChain:
         assert "story_arc_rollback_waiting_work_id" not in b3_columns
 
         command.upgrade(cfg, "head")
+
+    def test_import_file_matched_issue_index_is_reversible(self, alembic_cfg) -> None:
+        """Issue rollback uses an indexed import-file foreign-key lookup."""
+        cfg, sync_url = alembic_cfg
+
+        command.upgrade(cfg, _SERIES_PREFERRED_ROOT_REVISION)
+        assert "ix_import_files_matched_issue_id" not in _get_indexes(sync_url, "import_files")
+
+        command.upgrade(cfg, _IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION)
+        assert _get_indexes(sync_url, "import_files")["ix_import_files_matched_issue_id"] == [
+            "matched_issue_id"
+        ]
+
+        command.downgrade(cfg, _SERIES_PREFERRED_ROOT_REVISION)
+        assert "ix_import_files_matched_issue_id" not in _get_indexes(sync_url, "import_files")
+
+    def test_import_file_series_index_is_reversible(self, alembic_cfg) -> None:
+        """Per-series matching and rollback use an indexed file lookup."""
+        cfg, sync_url = alembic_cfg
+
+        command.upgrade(cfg, _IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION)
+        assert "ix_import_files_import_series_id" not in _get_indexes(sync_url, "import_files")
+
+        command.upgrade(cfg, _IMPORT_FILE_SERIES_INDEX_REVISION)
+        assert _get_indexes(sync_url, "import_files")["ix_import_files_import_series_id"] == [
+            "import_series_id"
+        ]
+
+        command.downgrade(cfg, _IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION)
+        assert "ix_import_files_import_series_id" not in _get_indexes(sync_url, "import_files")
+
+    def test_import_file_delete_reference_indexes_are_reversible(self, alembic_cfg) -> None:
+        """Large staged-job deletes use indexed foreign-key reference checks."""
+        cfg, sync_url = alembic_cfg
+
+        command.upgrade(cfg, _IMPORT_FILE_SERIES_INDEX_REVISION)
+        assert "ix_import_files_duplicate_of_file_id" not in _get_indexes(sync_url, "import_files")
+        assert "ix_import_story_arc_entries_import_file_id" not in _get_indexes(
+            sync_url, "import_story_arc_entries"
+        )
+
+        command.upgrade(cfg, _IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION)
+        assert _get_indexes(sync_url, "import_files")["ix_import_files_duplicate_of_file_id"] == [
+            "duplicate_of_file_id"
+        ]
+        assert _get_indexes(sync_url, "import_story_arc_entries")[
+            "ix_import_story_arc_entries_import_file_id"
+        ] == ["import_file_id"]
+
+        command.downgrade(cfg, _IMPORT_FILE_SERIES_INDEX_REVISION)
+        assert "ix_import_files_duplicate_of_file_id" not in _get_indexes(sync_url, "import_files")
+        assert "ix_import_story_arc_entries_import_file_id" not in _get_indexes(
+            sync_url, "import_story_arc_entries"
+        )
+
+    def test_series_preferred_root_backfills_only_managed_destinations(
+        self,
+        alembic_cfg,
+    ) -> None:
+        """Existing managed series retain their root as the future destination."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, _LIBRARY_ROOT_MANAGEMENT_REVISION)
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO library_roots "
+                        "(name, path, enabled, allow_referenced_registrations, "
+                        "allow_managed_writes, is_default_managed_destination, "
+                        "created_at, updated_at) VALUES "
+                        "('Managed', '/library/managed', 1, 1, 1, 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                        "('Referenced', '/library/referenced', 1, 1, 0, 0, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    )
+                )
+                roots = dict(conn.execute(text("SELECT name, id FROM library_roots")).all())
+                conn.execute(
+                    text(
+                        "INSERT INTO series "
+                        "(title, sort_title, status, issue_count, monitored, series_type, "
+                        "alternate_names, library_root_id, created_at, updated_at) VALUES "
+                        "('Managed Series', 'managed series', 'CONTINUING', 0, 0, "
+                        "'STANDARD', '[]', :managed_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                        "('Referenced Series', 'referenced series', 'CONTINUING', 0, 0, "
+                        "'STANDARD', '[]', :referenced_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                        "('Unplaced Series', 'unplaced series', 'CONTINUING', 0, 0, "
+                        "'STANDARD', '[]', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {
+                        "managed_id": roots["Managed"],
+                        "referenced_id": roots["Referenced"],
+                    },
+                )
+        finally:
+            engine.dispose()
+
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            inspector = inspect(engine)
+            columns = {column["name"]: column for column in inspector.get_columns("series")}
+            preferred_fks = [
+                fk
+                for fk in inspector.get_foreign_keys("series")
+                if fk["constrained_columns"] == ["preferred_library_root_id"]
+            ]
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT title, preferred_library_root_id FROM series ORDER BY title")
+                ).all()
+            assert columns["preferred_library_root_id"]["nullable"] is True
+            assert len(preferred_fks) == 1
+            assert preferred_fks[0]["referred_table"] == "library_roots"
+            assert preferred_fks[0]["options"].get("ondelete") == "SET NULL"
+            assert [tuple(row) for row in rows] == [
+                ("Managed Series", roots["Managed"]),
+                ("Referenced Series", None),
+                ("Unplaced Series", None),
+            ]
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _LIBRARY_ROOT_MANAGEMENT_REVISION)
+        assert "preferred_library_root_id" not in _get_columns(sync_url, "series")
+        command.upgrade(cfg, "head")
+
+    @pytest.mark.parametrize("current_root_state", ["different", "missing"])
+    def test_series_preferred_root_downgrade_refuses_unrepresentable_choice(
+        self,
+        alembic_cfg,
+        current_root_state: str,
+    ) -> None:
+        """A downgrade cannot discard a preferred root not encoded by the old schema."""
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO library_roots "
+                        "(name, path, enabled, allow_referenced_registrations, "
+                        "allow_managed_writes, is_default_managed_destination, "
+                        "created_at, updated_at) VALUES "
+                        "('Preferred', '/library/preferred', 1, 1, 1, 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), "
+                        "('Current', '/library/current', 1, 1, 1, 0, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    )
+                )
+                roots = dict(conn.execute(text("SELECT name, id FROM library_roots")).all())
+                current_root_id = roots["Current"] if current_root_state == "different" else None
+                conn.execute(
+                    text(
+                        "INSERT INTO series "
+                        "(title, sort_title, status, issue_count, monitored, series_type, "
+                        "alternate_names, library_root_id, preferred_library_root_id, "
+                        "created_at, updated_at) VALUES "
+                        "('Split Series', 'split series', 'CONTINUING', 0, 0, "
+                        "'STANDARD', '[]', :current_root_id, :preferred_root_id, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {
+                        "current_root_id": current_root_id,
+                        "preferred_root_id": roots["Preferred"],
+                    },
+                )
+        finally:
+            engine.dispose()
+
+        with pytest.raises(RuntimeError, match="preferred managed destination"):
+            command.downgrade(cfg, _LIBRARY_ROOT_MANAGEMENT_REVISION)
+
+        assert "preferred_library_root_id" in _get_columns(sync_url, "series")
+        engine = create_engine(sync_url)
+        try:
+            with engine.begin() as conn:
+                assert (
+                    conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                    == _SERIES_PREFERRED_ROOT_REVISION
+                )
+                conn.execute(
+                    text(
+                        "UPDATE series SET preferred_library_root_id = library_root_id "
+                        "WHERE title = 'Split Series'"
+                    )
+                )
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, _LIBRARY_ROOT_MANAGEMENT_REVISION)
+        command.upgrade(cfg, "head")
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT library_root_id, preferred_library_root_id "
+                        "FROM series WHERE title = 'Split Series'"
+                    )
+                ).one()
+            assert tuple(row) == (current_root_id, current_root_id)
+        finally:
+            engine.dispose()
 
     def test_airdcpp_foundation_backfills_populated_history_and_source_order(
         self,
@@ -2284,8 +2789,11 @@ class TestMigrationChain:
                 conn.execute(
                     text(
                         "INSERT INTO library_roots "
-                        "(name, path, enabled, created_at, updated_at) "
-                        "VALUES ('Comics', '/library', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                        "(name, path, enabled, allow_referenced_registrations, "
+                        "allow_managed_writes, is_default_managed_destination, "
+                        "created_at, updated_at) "
+                        "VALUES ('Comics', '/library', 1, 1, 1, 1, "
+                        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                     )
                 )
                 root_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()

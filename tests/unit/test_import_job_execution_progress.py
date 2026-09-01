@@ -7,15 +7,26 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from sqlalchemy import event
 
 from pullbox.core.exceptions import JobPausedError
-from pullbox.models.import_job import ImportedFile, ImportJob, ImportJobStatus
+from pullbox.models.import_job import (
+    ImportedFile,
+    ImportedFileStatus,
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSeriesStatus,
+    ImportSourceType,
+)
 from pullbox.services.import_active_file_progress import ActiveFileProgressSettings
 from pullbox.services.import_job_execution_progress import (
     await_prefetch_with_metadata_progress,
+    build_import_group_progress_plans,
     build_report_file_progress_callback,
     build_series_metadata_progress_emitter,
 )
+from pullbox.services.import_job_execution_types import ExecutionItemPlan
 from pullbox.services.import_progress_runtime import (
     ImportProgressFileProfile,
     ImportProgressSettings,
@@ -98,6 +109,180 @@ def _callback_kwargs(**overrides: Any) -> dict[str, Any]:
     }
     kwargs.update(overrides)
     return kwargs
+
+
+@pytest.mark.asyncio
+async def test_build_import_group_progress_plans_batches_large_selections(
+    async_engine,
+    db_session,
+) -> None:  # type: ignore[no-untyped-def]
+    job = ImportJob(
+        source_path="/imports",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.IMPORTING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    series_items = [
+        ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name=f"Scale Series {index:04d}",
+            status=ImportSeriesStatus.CONFIRMED,
+        )
+        for index in range(600)
+    ]
+    db_session.add_all(series_items)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=item.id,
+                file_path=f"/imports/{item.raw_series_name}.cbz",
+                file_name=f"{item.raw_series_name}.cbz",
+                file_size=1024,
+                file_format="cbz",
+                status=ImportedFileStatus.MATCHED,
+            )
+            for item in series_items
+        ]
+    )
+    await db_session.flush()
+    execution_items = [
+        ExecutionItemPlan(
+            mode="new",
+            item_id=item.id,
+            raw_series_name=item.raw_series_name,
+            cv_id=None,
+            existing_series_id=None,
+        )
+        for item in series_items
+    ]
+
+    selects: list[str] = []
+
+    def record_select(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", record_select)
+    try:
+        plans = await build_import_group_progress_plans(
+            db_session,
+            execution_items,
+            ImportProgressSettings(
+                move_to_library=True,
+                convert_to_preferred_format=False,
+                update_embedded_comicinfo_from_match=False,
+            ),
+        )
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", record_select)
+
+    assert len(plans) == 600
+    assert all(len(plan.file_weights) == 1 for plan in plans.values())
+    assert len(selects) <= 2, f"progress preparation issued {len(selects)} SELECTs"
+
+
+@pytest.mark.asyncio
+async def test_build_import_group_progress_plans_preserves_file_selection_rules(
+    db_session,
+) -> None:  # type: ignore[no-untyped-def]
+    job = ImportJob(
+        source_path="/imports",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.IMPORTING,
+    )
+    new_item = ImportedSeries(
+        import_job=job,
+        raw_series_name="New Series",
+        status=ImportSeriesStatus.CONFIRMED,
+    )
+    duplicate_item = ImportedSeries(
+        import_job=job,
+        raw_series_name="Existing Series",
+        status=ImportSeriesStatus.DUPLICATE,
+    )
+    db_session.add_all([job, new_item, duplicate_item])
+    await db_session.flush()
+
+    new_match = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=new_item.id,
+        file_path="/imports/New 001.cbz",
+        file_name="New 001.cbz",
+        file_size=101,
+        file_format="cbz",
+        status=ImportedFileStatus.MATCHED,
+    )
+    new_preferred_conflict = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=new_item.id,
+        file_path="/imports/New 002 preferred.cbz",
+        file_name="New 002 preferred.cbz",
+        file_size=102,
+        file_format="cbz",
+        status=ImportedFileStatus.CONFLICT,
+        is_preferred=True,
+    )
+    duplicate_selected = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=duplicate_item.id,
+        file_path="/imports/Existing 001.cbz",
+        file_name="Existing 001.cbz",
+        file_size=201,
+        file_format="cbz",
+        status=ImportedFileStatus.CONFIRMED,
+        include_in_import=True,
+    )
+    duplicate_unselected = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=duplicate_item.id,
+        file_path="/imports/Existing 002.cbz",
+        file_name="Existing 002.cbz",
+        file_size=202,
+        file_format="cbz",
+        status=ImportedFileStatus.MATCHED,
+        include_in_import=False,
+    )
+    db_session.add_all(
+        [
+            new_match,
+            new_preferred_conflict,
+            duplicate_selected,
+            duplicate_unselected,
+        ]
+    )
+    await db_session.flush()
+
+    plans = await build_import_group_progress_plans(
+        db_session,
+        [
+            ExecutionItemPlan("new", new_item.id, "New Series", None, None),
+            ExecutionItemPlan("duplicate", duplicate_item.id, "Existing Series", None, None),
+        ],
+        ImportProgressSettings(
+            move_to_library=True,
+            convert_to_preferred_format=False,
+            update_embedded_comicinfo_from_match=False,
+        ),
+    )
+
+    assert [file_id for file_id, _weight in plans[new_item.id].file_weights] == [
+        new_match.id,
+        new_preferred_conflict.id,
+    ]
+    assert [file_id for file_id, _weight in plans[duplicate_item.id].file_weights] == [
+        duplicate_selected.id
+    ]
 
 
 @pytest.mark.asyncio

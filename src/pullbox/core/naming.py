@@ -772,13 +772,21 @@ def get_naming_preview(
         if template_type == "folder":
             # Map issue_type to series_type for folder preview
             folder_type = ex.issue_type if ex.issue_type != "issue" else "standard"
-            output = format_series_folder(
-                title=ex.series,
-                year=ex.year,
-                publisher=ex.publisher,
-                comicvine_id=ex.comicvine_id,
-                series_type=folder_type,
-                template=template,
+            # The runtime treats each slash-delimited component as a separate,
+            # sanitized directory. Preserve that contract in the global preview
+            # instead of sanitizing the whole path as one folder name.
+            from pullbox.core.library_naming import validate_series_path_template
+
+            output = "/".join(
+                format_series_folder(
+                    title=ex.series,
+                    year=ex.year,
+                    publisher=ex.publisher,
+                    comicvine_id=ex.comicvine_id,
+                    series_type=folder_type,
+                    template=segment,
+                )
+                for segment in validate_series_path_template(template)
             )
         else:
             output = format_comic_file(

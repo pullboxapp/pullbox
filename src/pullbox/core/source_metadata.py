@@ -34,6 +34,10 @@ _CV_ISSUE_NOTES_PATTERNS = (
     re.compile(r"\bissueid[:\s]+(\d+)\b", re.IGNORECASE),
 )
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+_EXPLICIT_STANDARD_ISSUE_RE = re.compile(
+    r"(?:^|[\s._-])issues?\s*(?:#|no\.?)?\s*[+-]?\d+(?:\.\d+)?[A-Za-z]?\b",
+    re.IGNORECASE,
+)
 _ORDINAL_SUFFIX_WORDS: dict[str, int] = {
     "one": 1,
     "two": 2,
@@ -396,12 +400,27 @@ class SourceMetadataExtractor:
         issue_type = IssueType.ISSUE
         if parsed is not None:
             issue_type = parsed.issue_type
-        if folder_issue_type is not None and (issue_type == IssueType.ISSUE or parsed is None):
+            if (
+                parsed.issue_number is not None
+                and _EXPLICIT_STANDARD_ISSUE_RE.search(Path(title).stem) is not None
+            ):
+                # ``Issue 2 - Special Selection`` describes a numbered issue
+                # whose title contains a type word; it is not a Special. A
+                # sidecar BookType can still explicitly override this later.
+                issue_type = IssueType.ISSUE
+        folder_issue_type_applies = folder_issue_type is not None and (
+            parsed is None or (issue_type == IssueType.ISSUE and parsed.issue_number is None)
+        )
+        if folder_issue_type_applies and folder_issue_type is not None:
             issue_type = folder_issue_type
         signals: dict[str, MetadataSignal] = {}
-        if parsed and parsed.issue_type != IssueType.ISSUE:
+        if parsed and issue_type != IssueType.ISSUE:
             signals["issue_type"] = MetadataSignal.RELEASE_TITLE
-        elif folder_issue_type is not None:
+        elif parsed and parsed.issue_number is not None:
+            # A numbered issue is stronger evidence than a type keyword embedded
+            # in the series-folder title (for example, "Should be Special").
+            signals["issue_type"] = MetadataSignal.RELEASE_TITLE
+        elif folder_issue_type_applies:
             signals["issue_type"] = MetadataSignal.FOLDER_HINT
 
         series_name = parsed.series_name if parsed is not None else None

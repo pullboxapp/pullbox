@@ -23,6 +23,57 @@ _PUNCTUATION_RE = re.compile(r"[^\w\s]")
 _WHITESPACE_RE = re.compile(r"\s+")
 _ARTICLES = frozenset({"the", "a", "an"})
 _PUBLICATION_FORM_SUFFIXES = frozenset({"magazine"})
+_TITLE_COMPAT_TRANSLATION = str.maketrans(
+    {
+        "Ø": "O",
+        "ø": "o",
+        "ẞ": "SS",
+        "ß": "ss",
+        "Ł": "L",
+        "ł": "l",
+        "Æ": "AE",
+        "æ": "ae",
+        "Œ": "OE",
+        "œ": "oe",
+        "Đ": "D",
+        "đ": "d",
+        "Ð": "D",
+        "ð": "d",
+        "Þ": "Th",
+        "þ": "th",
+        "ı": "i",  # noqa: RUF001 - intentional dotless i
+        "Ə": "A",
+        "ə": "a",
+        "Ǝ": "E",
+        "ǝ": "e",
+        "♂": " male ",
+        "♀": " female ",
+        "×": "x",  # noqa: RUF001 - intentional Unicode multiplication sign
+        "✕": "x",
+        "✖": "x",
+        "+": " plus ",
+        "@": " at ",
+        "%": " percent ",
+        "№": " number ",
+        "#": " number ",
+        "=": " equals ",
+        "$": " dollar ",
+        "€": " euro ",
+        "£": " pound ",
+        "¥": " yen ",
+        "∞": " infinity ",
+        "☆": " ",
+        "★": " ",
+        "●": " ",
+        "○": " ",
+        "•": " ",
+        "・": " ",
+        "·": " ",
+        "®": "",
+        "©": "",
+        "™": "",
+    }
+)
 
 
 def _compact_normalized(name: str) -> str:
@@ -62,8 +113,19 @@ class NameMatcher:
         # Step 1: HTML entity decode (&amp; → &)
         s = html.unescape(name)
 
+        # Preserve semantic title symbols before compatibility normalization
+        # can rewrite them (for example, ``№`` becomes ``No`` under NFKD).
+        s = s.translate(_TITLE_COMPAT_TRANSLATION)
+
         # Step 2: Unicode normalization (NFKD) — decomposes accented chars
         s = unicodedata.normalize("NFKD", s)
+        # Remove decomposed combining marks before punctuation normalization.
+        # Otherwise each accent becomes a space and splits provider-query words
+        # (for example, ``Remède`` became ``reme de``).
+        s = "".join(char for char in s if not unicodedata.combining(char))
+        # NFKD converts full-width operators to ASCII; give those the same
+        # stable semantics as their native-width forms.
+        s = s.translate(_TITLE_COMPAT_TRANSLATION)
 
         # Step 3: Replace unicode dashes with ASCII hyphen
         s = s.replace("\u2014", "-").replace("\u2013", "-").replace("\u2012", "-")

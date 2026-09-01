@@ -23,6 +23,8 @@ from pullbox.services.story_arc_catalog import StoryArcCatalogService
 from tests.story_arc_catalog_fixtures import CatalogProvider
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from httpx import AsyncClient
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -54,15 +56,31 @@ def _csrf(client: AsyncClient) -> dict[str, str]:
     return {"X-CSRF-Token": AuthService.get_csrf_token_from_session(token) or ""}
 
 
-async def test_registry_has_separate_inline_comicvine_search(authenticated_client: AsyncClient):
-    response = await authenticated_client.get("/story-arcs")
+async def test_registry_links_to_dedicated_comicvine_add_page(
+    authenticated_client: AsyncClient,
+):
+    registry = await authenticated_client.get("/story-arcs")
+
+    assert registry.status_code == 200
+    assert 'data-testid="story-arcs-add-link"' in registry.text
+    assert 'href="/story-arcs/add"' in registry.text
+    assert 'data-testid="story-arc-catalog-search"' not in registry.text
+
+    response = await authenticated_client.get("/story-arcs/add")
 
     assert response.status_code == 200
+    assert 'data-testid="story-arc-add-page"' in response.text
+    assert 'data-testid="story-arc-add-header"' in response.text
+    assert 'data-testid="story-arc-add-title"' in response.text
+    assert "ADD <span>STORY ARC</span>" in response.text
     assert 'data-testid="story-arc-catalog-search"' in response.text
-    assert 'hx-get="/story-arcs/catalog"' in response.text
-    assert 'hx-target="#story-arc-catalog-results"' in response.text
+    assert 'hx-get="/story-arcs/add"' in response.text
+    assert 'hx-target="#story-arc-add-results"' in response.text
+    assert 'data-search-field-contract="baseline-v2"' in response.text
+    assert 'data-testid="story-arc-add-results"' in response.text
+    assert 'data-testid="story-arc-add-footer-dock"' in response.text
     assert "Search Comic Vine" in response.text
-    assert 'data-testid="story-arcs-create-form"' in response.text
+    assert 'data-testid="story-arcs-create-form"' not in response.text
 
 
 async def test_catalog_empty_query_does_not_search_provider(authenticated_client: AsyncClient):
@@ -89,6 +107,7 @@ async def test_provider_arc_detail_offers_review_before_refresh(
     assert "Review provider changes" in response.text
     assert f'action="/story-arcs/{arc_id}/search"' in response.text
     assert "Search missing issues" in response.text
+    assert 'href="https://comicvine.gamespot.com/story-arc/4045-42/"' in response.text
 
 
 async def test_catalog_search_marks_already_added_and_does_not_create(
@@ -128,6 +147,67 @@ async def test_catalog_preview_requires_order_review_and_separate_canonical_root
     assert 'name="target_library_root_id"' in response.text
     assert "Keep the original filename" in response.text
     assert "Prefix arc filenames with the reading order" in response.text
+
+
+async def test_catalog_preview_lists_only_managed_roots_with_default_first(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    catalog_provider: CatalogProvider,
+    tmp_path: Path,
+):
+    default_path = tmp_path / "default"
+    managed_path = tmp_path / "managed"
+    reference_path = tmp_path / "reference"
+    disabled_path = tmp_path / "disabled"
+    default_path.mkdir()
+    managed_path.mkdir()
+    reference_path.mkdir()
+    disabled_path.mkdir()
+    async with sec_db() as session:
+        default = LibraryRoot(
+            name="Zulu default managed",
+            path=str(default_path),
+            enabled=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        managed = LibraryRoot(
+            name="Alpha managed",
+            path=str(managed_path),
+            enabled=True,
+            allow_managed_writes=True,
+        )
+        reference_only = LibraryRoot(
+            name="Reference only",
+            path=str(reference_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=False,
+        )
+        disabled = LibraryRoot(
+            name="Disabled managed",
+            path=str(disabled_path),
+            enabled=False,
+            allow_managed_writes=True,
+        )
+        offline = LibraryRoot(
+            name="Offline managed",
+            path=str(tmp_path / "offline"),
+            enabled=True,
+            allow_managed_writes=True,
+        )
+        session.add_all([default, managed, reference_only, disabled, offline])
+        await session.commit()
+
+    response = await authenticated_client.get("/story-arcs/catalog/42")
+
+    assert response.status_code == 200
+    assert response.text.count("Zulu default managed") == 2
+    assert response.text.count("Alpha managed") == 2
+    assert response.text.index("Zulu default managed") < response.text.index("Alpha managed")
+    assert response.text.count("Reference only") == 1
+    assert "Disabled managed" not in response.text
+    assert "Offline managed" not in response.text
 
 
 async def test_partial_catalog_blocks_add_and_retains_retry(
@@ -377,7 +457,8 @@ async def test_refresh_reviews_additions_and_preserves_removed_members_and_order
     detail = await authenticated_client.get(f"/story-arcs/{arc_id}")
     assert "Confirm this member" in detail.text
     assert "1 no longer listed by Comic Vine but preserved here" in detail.text
-    assert "Open issue / manual search" in detail.text
+    assert 'data-tip="Open issue"' in detail.text
+    assert "Open issue / manual search" not in detail.text
 
 
 async def test_manual_arc_search_is_authenticated_csrf_protected_and_active_only(
