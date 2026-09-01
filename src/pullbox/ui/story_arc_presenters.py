@@ -952,12 +952,21 @@ async def load_story_arc_detail(
     )
     cover_src = build_story_arc_cover_url(arc)
     if cover_src is None:
-        fallback_issue_id = next(
-            (membership.issue_id for membership in memberships if membership.issue_id is not None),
-            None,
+        fallback_issue_id = await session.scalar(
+            select(IssueStoryArc.issue_id)
+            .where(
+                IssueStoryArc.story_arc_id == story_arc_id,
+                IssueStoryArc.issue_id.is_not(None),
+            )
+            .order_by(
+                IssueStoryArc.sequence_number,
+                IssueStoryArc.source_ordinal,
+                IssueStoryArc.id,
+            )
+            .limit(1)
         )
         if fallback_issue_id is not None:
-            cover_src = f"/api/v1/issues/{fallback_issue_id}/cover"
+            cover_src = f"/api/v1/issues/{int(fallback_issue_id)}/cover"
     return StoryArcDetailView(
         id=arc.id,
         name=arc.name,

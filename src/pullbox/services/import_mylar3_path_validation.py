@@ -46,9 +46,17 @@ async def validate_mylar3_path_map_targets(
         available_roots = _available_root_boundaries(roots)
     for visible_prefix in path_map.values():
         target = Path(visible_prefix)
+        if not target.is_absolute() or ".." in target.parts or target == Path("/"):
+            raise ValidationError(
+                "Each Pullbox-visible Mylar mapping path must be a safe absolute directory."
+            )
         try:
-            lexical_target = target.expanduser().absolute()
-            resolved_target = target.expanduser().resolve(strict=True)
+            lexical_target = target
+            # This operator-confirmed source is bounded above, resolved before
+            # containment checks, and screened against sensitive paths below.
+            # Managed-copy imports intentionally allow external source roots.
+            # codeql[py/path-injection]
+            resolved_target = target.resolve(strict=True)
         except (OSError, RuntimeError, ValueError) as exc:
             raise ValidationError(
                 "Each Pullbox-visible Mylar mapping path must be an available directory."

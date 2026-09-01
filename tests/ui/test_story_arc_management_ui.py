@@ -979,6 +979,7 @@ class TestStoryArcManagementUI:
 
         second_page = await authenticated_client.get(f"/story-arcs/{ids['arc']}?page=2&per_page=2")
         assert second_page.status_code == 200
+        assert f'src="/api/v1/issues/{ids["million_issue"]}/cover"' in second_page.text
         assert 'data-exact-issue-number="0.5"' in second_page.text
         assert f'data-membership-id="{ids["fractional_membership"]}"' in second_page.text
         assert f'data-membership-id="{ids["million_membership"]}"' not in second_page.text
