@@ -105,6 +105,7 @@ async def test_provider_arc_detail_offers_review_before_refresh(
     assert "Review provider changes" in response.text
     assert f'action="/story-arcs/{arc_id}/search"' in response.text
     assert "Search missing issues" in response.text
+    assert 'href="https://comicvine.gamespot.com/story-arc/4045-42/"' in response.text
 
 
 async def test_catalog_search_marks_already_added_and_does_not_create(

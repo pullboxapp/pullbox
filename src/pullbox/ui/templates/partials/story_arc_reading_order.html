@@ -1,0 +1,207 @@
+<section data-testid="story-arc-detail-reading-order-section" aria-labelledby="story-arc-order-heading" class="series-domain-issues-wrap">
+  <div class="series-domain-section-card series-domain-issues-card">
+    <div class="series-domain-issues-toolbar">
+      <div class="series-domain-issues-toolbar-left">
+        <span id="story-arc-order-heading" class="series-domain-issues-title">Reading Order ({{ story_arc.membership_count }})</span>
+        <div data-testid="story-arc-reading-order-summary" class="series-domain-issues-summary">
+          <span class="pill pill-neutral">{{ story_arc.membership_count }} total</span>
+          <span class="pill pill-success">{{ story_arc.owned_count }} owned</span>
+          <span class="pill pill-info">Read {{ story_arc.read_count }}/{{ story_arc.readable_count }}</span>
+          <span class="pill {{ 'pill-warning' if story_arc.review_count else 'pill-success' }}">{{ story_arc.review_count }} review</span>
+        </div>
+      </div>
+      <p class="text-xs text-pb-text-sec">Issue numbers stay exactly as supplied by their source.</p>
+    </div>
+
+    {% if story_arc.membership_count %}
+      <div data-testid="story-arc-reading-order-progress" class="series-domain-issues-progress">
+        <div class="series-domain-issues-progress-track">
+          <div class="series-domain-issues-progress-fill" style="width: {{ story_arc.acquisition_pct }}%"></div>
+        </div>
+        <span class="series-domain-issues-progress-label">{{ story_arc.acquisition_pct }}%</span>
+      </div>
+    {% endif %}
+
+    {% if story_arc.memberships %}
+      <div class="series-domain-issues-table-wrap">
+        <table data-testid="story-arc-reading-order-table" class="series-domain-issues-table">
+          <thead>
+            <tr>
+              <th class="table-head-cell table-head-cell-tight w-28">Order</th>
+              <th class="table-head-cell table-head-cell-tight">Issue</th>
+              <th class="table-head-cell table-head-cell-tight hidden sm:table-cell">Reading</th>
+              <th class="table-head-cell table-head-cell-tight hidden md:table-cell">Status</th>
+              <th class="series-domain-table-head r hidden sm:table-cell">Actions</th>
+            </tr>
+          </thead>
+          {% for membership in story_arc.memberships %}
+            <tbody
+              x-data="{ reviewOpen: false }"
+              data-membership-id="{{ membership.id }}"
+              data-exact-issue-number="{{ membership.exact_issue_number }}"
+              data-resolution-state="{{ membership.resolution_state }}"
+            >
+              <tr>
+                <td class="series-domain-issue-num">
+                  <div class="flex items-center gap-1.5">
+                    <span class="inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-pb-bg px-2 text-xs font-semibold text-pb-text-sec">{{ membership.position }}</span>
+                    {% if story_arc.active %}
+                      {% if not membership.is_first %}
+                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move" method="post">
+                          <input type="hidden" name="direction" value="up">
+                          <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
+                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                          <button type="submit" class="series-domain-issue-action-btn" aria-label="Move issue {{ membership.exact_issue_number }} up" data-tip="Preview move up" data-tip-pos="right">
+                            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7" /></svg>
+                          </button>
+                        </form>
+                      {% endif %}
+                      {% if not membership.is_last %}
+                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move" method="post">
+                          <input type="hidden" name="direction" value="down">
+                          <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
+                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                          <button type="submit" class="series-domain-issue-action-btn" aria-label="Move issue {{ membership.exact_issue_number }} down" data-tip="Preview move down" data-tip-pos="right">
+                            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                          </button>
+                        </form>
+                      {% endif %}
+                    {% endif %}
+                  </div>
+                </td>
+                <td class="series-domain-issue-title-cell">
+                  {% if membership.issue_id %}
+                    <a
+                      href="/issues/{{ membership.issue_id }}?source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}"
+                      data-testid="story-arc-open-issue-{{ membership.issue_id }}"
+                      class="series-domain-issue-title-link"
+                    >{{ membership.series_name }} <span class="font-mono">#{{ membership.exact_issue_number }}</span></a>
+                  {% else %}
+                    <span class="font-medium text-pb-text">{{ membership.series_name }} <span class="font-mono">#{{ membership.exact_issue_number }}</span></span>
+                  {% endif %}
+                  <div class="mt-0.5 text-xs text-pb-text-sec">{{ membership.issue_title }}</div>
+                  <div class="mt-1 text-xs text-pb-text-sec sm:hidden">
+                    {% if membership.reading and membership.reading.completed %}Read{% elif membership.reading and membership.reading.progress_label %}{{ membership.reading.progress_label }}{% else %}No reading state{% endif %}
+                  </div>
+                </td>
+                <td class="series-domain-issue-reading hidden sm:table-cell">
+                  {% if membership.reading and membership.reading.completed %}
+                    <span class="pill pill-success">Read</span>
+                  {% elif membership.reading and membership.reading.progress_label %}
+                    <div class="series-domain-reading-progress" aria-label="{{ membership.reading.state_label }}">
+                      <span>{{ membership.reading.progress_label }}</span>
+                      <span class="series-domain-reading-progress-track" aria-hidden="true"><span class="series-domain-reading-progress-fill" style="width: {{ membership.reading.progress_percent }}%"></span></span>
+                    </div>
+                  {% else %}
+                    <span aria-hidden="true">—</span><span class="sr-only">No reading state</span>
+                  {% endif %}
+                  {% if membership.reading and membership.reading.want_to_read %}<span class="series-domain-reading-queue">Want to Read</span>{% endif %}
+                </td>
+                <td class="hidden md:table-cell">
+                  <div class="flex flex-col items-start gap-1">
+                    <span class="pill {{ 'pill-success' if membership.resolution_state == 'resolved' else 'pill-warning' if membership.can_resolve else 'pill-neutral' }}">{{ membership.resolution_label }}</span>
+                    <span class="text-xs text-pb-text-sec">{{ membership.canonical_state }}</span>
+                  </div>
+                </td>
+                <td class="series-domain-issue-actions-cell hidden sm:table-cell">
+                  <div class="series-domain-issue-actions">
+                    {% if membership.issue_id %}
+                      <a
+                        href="/issues/{{ membership.issue_id }}?source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}"
+                        class="series-domain-issue-action-btn"
+                        aria-label="Open issue {{ membership.exact_issue_number }}"
+                        data-tip="Open issue / manual search"
+                        data-tip-pos="left"
+                      >
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H18m0 0v4.5M18 6l-7.5 7.5M10.5 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4.5" /></svg>
+                      </a>
+                    {% endif %}
+                    {% if story_arc.active and membership.can_resolve %}
+                      <button
+                        type="button"
+                        data-testid="story-arc-membership-review-toggle-{{ membership.id }}"
+                        class="series-domain-issue-action-btn"
+                        :aria-expanded="reviewOpen ? 'true' : 'false'"
+                        @click="reviewOpen = !reviewOpen"
+                        aria-label="Review issue {{ membership.exact_issue_number }} match"
+                        data-tip="Review match"
+                        data-tip-pos="left"
+                      >
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
+                      </button>
+                    {% endif %}
+                    {% if story_arc.active %}
+                      <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/remove" method="post" hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/remove" hx-swap="none" x-data="{}" data-testid="story-arc-remove-membership-{{ membership.id }}">
+                        <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                        <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                        <button type="button" class="series-domain-issue-action-btn text-pb-error" aria-label="Remove issue {{ membership.exact_issue_number }} from Story Arc" data-tip="Remove" data-tip-pos="left" @click="pbConfirm({ title: 'Remove issue from Story Arc?', message: 'The canonical issue and its file will stay in your library.', confirmLabel: 'Remove', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })">
+                          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                      </form>
+                    {% endif %}
+                  </div>
+                </td>
+              </tr>
+
+              {% if story_arc.active and membership.can_resolve %}
+                <tr x-show="reviewOpen" x-cloak data-testid="story-arc-membership-review-panel-{{ membership.id }}">
+                  <td colspan="5" class="border-t border-pb-border bg-pb-bg/40 px-4 py-4">
+                    <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.65fr)]">
+                      <div class="space-y-3">
+                        {% if membership.issue_id and membership.resolution_state == 'pending' %}
+                          <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" class="space-y-2">
+                            <input type="hidden" name="issue_id" value="{{ membership.issue_id }}">
+                            <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                            <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                            <p class="text-sm text-pb-text-sec">Added by provider refresh; review its identity and reading order before enabling synchronization.</p>
+                            <button type="submit" class="btn-secondary">Confirm this member</button>
+                          </form>
+                        {% endif %}
+                        <form
+                          action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/local-issues"
+                          method="get"
+                          hx-get="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/local-issues"
+                          hx-target="#story-arc-local-issue-results-{{ membership.id }}"
+                          hx-swap="innerHTML"
+                          data-testid="story-arc-local-issue-search-{{ membership.id }}"
+                          class="flex flex-col gap-2 sm:flex-row sm:items-end"
+                        >
+                          <div class="min-w-0 flex-1">
+                            <label for="story-arc-local-issue-query-{{ membership.id }}" class="mb-1 block text-sm font-medium text-pb-text">Find an issue in this library</label>
+                            <input id="story-arc-local-issue-query-{{ membership.id }}" name="q" type="search" maxlength="500" required value="{{ membership.local_search_query }}" autocomplete="off" class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text">
+                          </div>
+                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                          <button type="submit" class="btn-secondary">Search local issues</button>
+                        </form>
+                        <div id="story-arc-local-issue-results-{{ membership.id }}"></div>
+                        <p class="text-xs text-pb-text-sec">Not in this library? <a href="{{ membership.metadata_add_url }}" class="text-pb-interactive hover:underline">Open Add Series with this evidence</a>.</p>
+                      </div>
+                      <details class="text-sm text-pb-text-sec">
+                        <summary class="cursor-pointer font-medium text-pb-text">Resolve by known issue ID</summary>
+                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" hx-swap="none" data-testid="story-arc-resolve-membership-{{ membership.id }}" class="mt-3 space-y-2">
+                          <label for="story-arc-resolve-issue-{{ membership.id }}" class="block text-sm font-medium text-pb-text">Existing issue ID</label>
+                          <input id="story-arc-resolve-issue-{{ membership.id }}" name="issue_id" type="number" min="1" required inputmode="numeric" class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text">
+                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                          <button type="submit" class="btn-secondary">Resolve</button>
+                        </form>
+                      </details>
+                    </div>
+                  </td>
+                </tr>
+              {% endif %}
+            </tbody>
+          {% endfor %}
+        </table>
+      </div>
+    {% else %}
+      <div class="series-empty-state">
+        <p class="font-semibold text-pb-text">This Story Arc is empty</p>
+        <p class="series-empty-state-copy">Add a canonical issue or an unresolved exact issue number to start the reading order.</p>
+      </div>
+    {% endif %}
+  </div>
+</section>

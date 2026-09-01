@@ -276,6 +276,7 @@ async def _render_story_arc_detail(
     story_arc_id: int,
     request: Request,
     username: str,
+    user_id: int,
     session: DbSession,
     page: int,
     per_page: int,
@@ -301,6 +302,7 @@ async def _render_story_arc_detail(
         story_arc_id=story_arc_id,
         page=page,
         per_page=per_page,
+        user_id=user_id,
     )
     if detail is None:
         raise HTTPException(status_code=404, detail="Story arc not found")
@@ -547,6 +549,7 @@ async def story_arc_detail(
         story_arc_id=story_arc_id,
         request=request,
         username=user.username,
+        user_id=user.id,
         session=session,
         page=page,
         per_page=per_page,
@@ -576,7 +579,6 @@ async def story_arc_placement_policy_preview(
     synchronize: bool = Form(False),
 ) -> Response:
     """Render a bounded candidate preview without persisting policy or files."""
-    username = user.username
     del expected_revision  # Preview is deliberately write-free; save enforces the revision.
     try:
         proposal = _placement_policy_input(
@@ -591,7 +593,8 @@ async def story_arc_placement_policy_preview(
         return await _render_story_arc_detail(
             story_arc_id=story_arc_id,
             request=request,
-            username=username,
+            username=user.username,
+            user_id=user.id,
             session=session,
             page=1,
             per_page=25,
@@ -604,7 +607,8 @@ async def story_arc_placement_policy_preview(
         return await _render_story_arc_detail(
             story_arc_id=story_arc_id,
             request=request,
-            username=username,
+            username=user.username,
+            user_id=user.id,
             session=session,
             page=1,
             per_page=25,
@@ -894,6 +898,7 @@ async def story_arc_move_membership(
             story_arc_id=story_arc_id,
             request=request,
             username=user.username,
+            user_id=user.id,
             session=session,
             page=return_page or 1,
             per_page=return_per_page or 25,
@@ -929,6 +934,7 @@ async def story_arc_move_membership(
                     story_arc_id=story_arc_id,
                     request=request,
                     username=user.username,
+                    user_id=user.id,
                     session=session,
                     page=return_page or 1,
                     per_page=return_per_page or 25,

@@ -39,7 +39,7 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementSyncService,
 )
 from pullbox.services.story_arc_service import StoryArcService
-from pullbox.ui import story_arc_routes
+from pullbox.ui import story_arc_presenters, story_arc_routes
 from pullbox.ui.story_arc_presenters import _load_sync_work_summary
 
 if TYPE_CHECKING:
@@ -501,6 +501,123 @@ class TestStoryArcManagementUI:
         authenticated_client.cookies.set("story_arc_view", "grid")
         persisted = await authenticated_client.get("/story-arcs?q=Registry")
         assert 'data-testid="story-arcs-collector-wall-view"' in persisted.text
+
+    async def test_detail_matches_series_hero_reading_order_and_footer_contract(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        sec_user,
+        tmp_path: Path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        arc_id = await _seed_registry_metrics_arc(
+            sec_db,
+            user_id=sec_user.id,
+            root_path=tmp_path,
+        )
+
+        response = await authenticated_client.get(f"/story-arcs/{arc_id}")
+
+        assert response.status_code == 200
+        assert 'data-testid="story-arc-detail-page"' in response.text
+        assert 'class="series-domain-page space-y-4"' in response.text
+        assert 'hx-history="false"' in response.text
+        assert '<main data-testid="story-arc-detail-page"' not in response.text
+        assert 'data-testid="story-arc-detail-hero"' in response.text
+        assert 'class="detail-hero-shell"' in response.text
+        assert 'data-testid="story-arc-detail-cover-frame"' in response.text
+        assert f'src="/api/v1/story-arcs/{arc_id}/cover?v=' in response.text
+        assert 'data-testid="story-arc-detail-title-link"' in response.text
+        assert 'href="https://comicvine.example/story-arc/31"' in response.text
+        assert "DC Comics" in response.text
+        assert "Monitored" in response.text
+        assert 'data-testid="story-arc-detail-meta-grid"' in response.text
+        assert "Source" in response.text
+        assert "ComicVine" in response.text
+        assert "Placement policy" in response.text
+        assert 'data-testid="story-arc-detail-hero-actions-panel"' in response.text
+        assert 'data-testid="story-arc-action-monitor-control"' in response.text
+        assert 'data-testid="story-arc-action-search"' in response.text
+        assert 'data-testid="story-arc-action-provider-review"' in response.text
+        assert 'data-testid="story-arc-action-archive"' in response.text
+        assert 'data-testid="story-arc-detail-reading-order-section"' in response.text
+        assert 'class="series-domain-section-card series-domain-issues-card"' in response.text
+        assert 'data-testid="story-arc-reading-order-summary"' in response.text
+        assert "3 total" in response.text
+        assert "1 owned" in response.text
+        assert "Read 1/1" in response.text
+        assert "2 review" in response.text
+        assert 'data-testid="story-arc-reading-order-progress"' in response.text
+        assert 'data-testid="story-arc-reading-order-table"' in response.text
+        assert "Order" in response.text
+        assert "Issue" in response.text
+        assert "Reading" in response.text
+        assert "Status" in response.text
+        assert "Actions" in response.text
+        assert 'data-testid="story-arc-membership-review-toggle-' in response.text
+        assert "Find an issue in this library" in response.text
+        assert 'data-testid="story-arc-detail-footer-dock"' in response.text
+        assert "acquisition" in response.text
+        assert "33%" in response.text
+        assert "owned" in response.text
+        assert "1/3" in response.text
+        assert "review" in response.text
+        assert "cvid" in response.text
+        assert "31" in response.text
+        assert 'data-testid="story-arc-edit-form"' in response.text
+        assert 'data-testid="story-arc-add-membership-form"' in response.text
+
+    async def test_detail_batches_reader_state_queries_at_the_supported_limit(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async with sec_db() as session:
+            arc = StoryArc(name="Large reading order", normalized_name="large reading order")
+            series = Series(title="Batch Series", sort_title="batch series")
+            session.add_all([arc, series])
+            await session.flush()
+            issues = [
+                Issue(
+                    series_id=series.id,
+                    issue_number=index,
+                    issue_number_text=str(index),
+                    status=IssueStatus.WANTED,
+                )
+                for index in range(1, 52)
+            ]
+            session.add_all(issues)
+            await session.flush()
+            session.add_all(
+                IssueStoryArc(
+                    story_arc_id=arc.id,
+                    issue_id=issue.id,
+                    sequence_number=index,
+                    source_ordinal=index,
+                    resolution_state=StoryArcResolutionState.RESOLVED,
+                )
+                for index, issue in enumerate(issues, start=1)
+            )
+            await session.commit()
+            arc_id = arc.id
+
+        original_loader = story_arc_presenters.load_visible_issue_states
+        batch_sizes: list[int] = []
+
+        async def _recording_loader(session, *, user_id: int, issue_ids: tuple[int, ...]):
+            batch_sizes.append(len(issue_ids))
+            return await original_loader(session, user_id=user_id, issue_ids=issue_ids)
+
+        monkeypatch.setattr(story_arc_presenters, "load_visible_issue_states", _recording_loader)
+
+        response = await authenticated_client.get(
+            f"/story-arcs/{arc_id}",
+            params={"per_page": 100},
+        )
+
+        assert response.status_code == 200
+        assert batch_sizes == [50, 1]
+        assert "51 total" in response.text
 
     async def test_manual_creation_is_hidden_and_unreachable_when_feature_flag_is_off(
         self,

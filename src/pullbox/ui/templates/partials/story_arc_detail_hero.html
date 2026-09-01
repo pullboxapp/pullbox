@@ -1,0 +1,161 @@
+{% set story_arc_title_parts = story_arc.name.split(" ", 1) %}
+
+<section data-testid="story-arc-detail-hero" class="detail-hero-shell">
+  <div class="series-domain-hero-inner">
+    <div class="series-domain-cover-column">
+      <div data-testid="story-arc-detail-cover-frame" class="series-domain-cover-frame">
+        {% if story_arc.cover_src %}
+          <img
+            src="{{ story_arc.cover_src }}"
+            alt="{{ story_arc.name }}"
+            data-testid="story-arc-detail-cover-link"
+            class="series-domain-cover-image"
+            @click="coverModalUrl = {{ story_arc.cover_src|tojson|forceescape }}; coverModalOpen = true"
+          >
+        {% else %}
+          <div data-testid="story-arc-detail-cover-placeholder" class="series-domain-cover-placeholder">
+            <svg class="h-9 w-9" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 5.25A2.25 2.25 0 016.25 3h11.5A2.25 2.25 0 0120 5.25v13.5A2.25 2.25 0 0117.75 21H6.25A2.25 2.25 0 014 18.75V5.25zM8 7h8M8 11h8M8 15h5" />
+            </svg>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div data-testid="story-arc-detail-hero-summary-panel" class="detail-summary-panel">
+      <div data-testid="story-arc-detail-header">
+        <h2 data-testid="story-arc-detail-title" class="series-domain-hero-title">
+          {% if story_arc.comicvine_url %}
+            <a
+              href="{{ story_arc.comicvine_url }}"
+              target="_blank"
+              rel="noopener"
+              data-testid="story-arc-detail-title-link"
+              class="series-domain-hero-title-link"
+              aria-label="Open {{ story_arc.name }} on ComicVine"
+            >
+              {{ story_arc_title_parts[0]|upper }}{% if story_arc_title_parts|length > 1 %} <span>{{ story_arc_title_parts[1]|upper }}</span>{% endif %}
+            </a>
+          {% else %}
+            {{ story_arc_title_parts[0]|upper }}{% if story_arc_title_parts|length > 1 %} <span>{{ story_arc_title_parts[1]|upper }}</span>{% endif %}
+          {% endif %}
+        </h2>
+        {% if story_arc.description %}
+          <p class="series-domain-hero-description">{{ story_arc.description|striptags|truncate(240) }}</p>
+        {% endif %}
+      </div>
+
+      <div data-testid="story-arc-detail-status-row" class="series-domain-status-row">
+        <span
+          class="series-domain-led {{ 'series-domain-led-on' if story_arc.monitored and story_arc.active else 'series-domain-led-off' }}"
+          data-tip="{{ 'Monitored' if story_arc.monitored and story_arc.active else 'Paused' }}"
+          data-tip-pos="right"
+          data-tip-size="narrow"
+        ></span>
+        <span class="pill {{ 'pill-success' if story_arc.active else 'pill-neutral' }}">{{ story_arc.lifecycle|title }}</span>
+        <span class="pill {{ 'pill-info' if story_arc.monitored and story_arc.active else 'pill-neutral' }}">
+          {{ 'Monitored' if story_arc.monitored and story_arc.active else 'Paused' }}
+        </span>
+        {% if story_arc.publisher_name %}<span class="pill pill-neutral">{{ story_arc.publisher_name }}</span>{% endif %}
+      </div>
+    </div>
+
+    <aside
+      data-testid="story-arc-detail-hero-actions-panel"
+      class="series-domain-actions-panel"
+      aria-labelledby="story-arc-detail-actions-title"
+    >
+      <p id="story-arc-detail-actions-title" class="series-domain-actions-title">Manage <span>story arc</span></p>
+      <div class="series-domain-actions-buttons">
+        <form
+          action="/story-arcs/{{ story_arc.id }}/edit"
+          method="post"
+          hx-post="/story-arcs/{{ story_arc.id }}/edit"
+          hx-swap="none"
+          data-testid="story-arc-action-monitor-control"
+          class="series-domain-inline-toggle"
+        >
+          <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
+          <input type="hidden" name="name" value="{{ story_arc.name }}">
+          <input type="hidden" name="description" value="{{ story_arc.description or '' }}">
+          {% if story_arc.search_missing %}<input type="hidden" name="search_missing" value="true">{% endif %}
+          {% if story_arc.include_upcoming %}<input type="hidden" name="include_upcoming" value="true">{% endif %}
+          <span class="series-domain-inline-toggle-label">Monitored</span>
+          <label class="relative inline-flex shrink-0 items-center">
+            <input
+              type="checkbox"
+              role="switch"
+              name="monitored"
+              value="true"
+              class="peer toggle-input"
+              aria-label="Toggle monitoring for this Story Arc"
+              {% if story_arc.monitored %}checked{% endif %}
+              {% if not story_arc.active %}disabled{% endif %}
+              @change="$el.form.requestSubmit()"
+            >
+            <span class="toggle-switch"></span>
+          </label>
+        </form>
+
+        <form action="/story-arcs/{{ story_arc.id }}/search" method="post" hx-post="/story-arcs/{{ story_arc.id }}/search" hx-swap="none">
+          <button data-testid="story-arc-action-search" type="submit" class="btn-primary"{% if not story_arc.active %} disabled{% endif %}>
+            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            Search missing issues
+          </button>
+        </form>
+
+        {% if story_arc.comicvine_id %}
+          <a data-testid="story-arc-action-provider-review" href="/story-arcs/{{ story_arc.id }}/catalog-refresh" class="btn-ghost">
+            Review provider changes
+          </a>
+        {% endif %}
+
+        {% if story_arc.active %}
+          <form action="/story-arcs/{{ story_arc.id }}/archive" method="post" hx-post="/story-arcs/{{ story_arc.id }}/archive" hx-swap="none" x-data="{}">
+            <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
+            <div id="story-arc-archive-safety" class="sr-only">
+              Canonical issues stay in your library. Canonical files stay in their current folders.
+              Story Arc memberships and reading order are retained. Monitoring and automation will be disabled.
+            </div>
+            <button
+              type="button"
+              data-testid="story-arc-action-archive"
+              class="btn-danger"
+              aria-describedby="story-arc-archive-safety"
+              @click="pbConfirm({ title: 'Archive Story Arc?', message: 'Monitoring and automation will stop. Canonical issues and files will be preserved.', confirmLabel: 'Archive', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })"
+            >
+              Archive Story Arc
+            </button>
+          </form>
+        {% else %}
+          <button type="button" data-testid="story-arc-action-archive" class="btn-ghost" disabled>Story Arc archived</button>
+        {% endif %}
+      </div>
+    </aside>
+  </div>
+
+  <div data-testid="story-arc-detail-meta-grid" class="series-domain-info-grid">
+    <div class="series-domain-info-box">
+      <p class="series-domain-info-label">Source</p>
+      <p class="series-domain-info-value">{{ story_arc.source_kind|replace('_', ' ')|title }}</p>
+    </div>
+    <div class="series-domain-info-box">
+      <p class="series-domain-info-label">ComicVine</p>
+      <p class="series-domain-info-value">
+        {% if story_arc.comicvine_url %}
+          <a href="{{ story_arc.comicvine_url }}" target="_blank" rel="noopener" class="mono">{{ story_arc.comicvine_id }}</a>
+        {% elif story_arc.comicvine_id %}
+          <span class="mono">{{ story_arc.comicvine_id }}</span>
+        {% else %}
+          Unlinked
+        {% endif %}
+      </p>
+    </div>
+    <div class="series-domain-info-box">
+      <p class="series-domain-info-label">Placement policy</p>
+      <p class="series-domain-info-value">{{ placement_ui.policy.layout_label }}</p>
+    </div>
+  </div>
+</section>
