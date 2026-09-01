@@ -292,6 +292,11 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     mylar3_path_map: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}"
     )
+    mylar3_path_map_confirmed: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
 
     # Relationships
     series: Mapped[list[ImportedSeries]] = relationship(

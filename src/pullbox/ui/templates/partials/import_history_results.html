@@ -59,6 +59,7 @@
       </thead>
       {% for job in jobs %}
         {% set is_active = job.status.value in active_statuses %}
+        {% set is_rollback_incomplete = job.status.value == 'failed' and (job.progress_snapshot or {}).get('mode') == 'rollback' and (job.progress_snapshot or {}).get('phase') == 'rollback_incomplete' %}
         {% set row_tone = "downloads-led-off" %}
         {% if is_active %}
           {% set row_tone = "downloads-led-blue" %}
@@ -108,7 +109,7 @@
             </td>
             <td>
               <span class="pill {{ status_tone.get(job.status.value, 'pill-neutral') }}">
-                {{ job.status.value|replace('_', ' ')|title }}
+                {{ 'Rollback Incomplete' if is_rollback_incomplete else job.status.value|replace('_', ' ')|title }}
               </span>
             </td>
             <td class="downloads-mono-cell is-right">{{ metrics.get("series_found", job.series_found or 0) }}</td>

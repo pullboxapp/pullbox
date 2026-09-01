@@ -193,7 +193,9 @@
     selectedItemCount: {{ review_summary.selected_items_total if review_summary else 0 }},
     importableItemCount: {{ review_summary.importable_items_total if review_summary else 0 }},
     resolvedConflictGroupCount: {{ review_summary.resolved_file_conflict_groups if review_summary else 0 }},
-    conflictSeriesCount: {{ review_summary.series_conflicts_total if review_summary else 0 }}
+    conflictSeriesCount: {{ review_summary.series_conflicts_total if review_summary else 0 }},
+    preferredRootId: {{ job.target_library_root_id|tojson }},
+    splitSeriesRequiresPreferredRoot: {{ split_series_review.requires_preferred_destination|tojson }}
   })"
   x-init="init()"
   x-on:import:review-summary-refresh.window="refreshReviewSummary()"
@@ -223,6 +225,41 @@
       Finish series and issue decisions here before starting the file import. Rows that already have a ComicVine series can be reconciled directly without going to Unmatched.
     </p>
   </section>
+
+  {% if job.source_type.value == 'mylar3' and job.mylar3_path_map_confirmed %}
+  <section
+    class="rounded-xl border border-pb-border bg-pb-card/50 px-4 py-4"
+    data-testid="import-review-mylar-path-snapshot"
+  >
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-pb-text-dim">
+          Confirmed Mylar path mapping
+        </p>
+        <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+          This is the frozen Step 1 snapshot used by the scan. Retry revalidates these paths
+          before reusing them.
+        </p>
+      </div>
+      <span class="pill pill-success">Confirmed</span>
+    </div>
+    {% if job.mylar3_path_map %}
+    <div class="mt-3 space-y-2">
+      {% for stored_prefix, pullbox_prefix in job.mylar3_path_map|dictsort %}
+      <div class="grid gap-1 rounded-lg border border-pb-border-subtle bg-pb-bg/35 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center sm:gap-3">
+        <span class="break-all font-mono text-pb-text">{{ stored_prefix }}</span>
+        <span class="text-pb-text-dim" aria-hidden="true">&rarr;</span>
+        <span class="break-all font-mono text-pb-text">{{ pullbox_prefix }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="mt-3 inline-alert inline-alert-success">
+      Identity only. Mylar paths were confirmed without translation.
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
 
   {% if job.story_arc_import_requested %}
   <div class="inline-alert inline-alert-info" data-testid="import-story-arc-step-one-intent">
@@ -305,6 +342,66 @@
     </div>
   </div>
 
+  {% if split_series_review.requires_preferred_destination %}
+  <section
+    data-testid="import-review-split-series"
+    class="rounded-xl border border-pb-warning/40 bg-pb-warning/5 px-4 py-4"
+  >
+    <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)] lg:items-start">
+      <div class="min-w-0">
+        <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-pb-warning">Split series</p>
+        <h3 class="mt-1 text-sm font-semibold text-pb-text">Choose where future acquisitions belong</h3>
+        <p class="mt-1 max-w-3xl text-sm leading-6 text-pb-text-sec">
+          The selected import has one or more series referenced from multiple library roots.
+          Existing files remain in place. This choice only sets the preferred managed destination for future files.
+        </p>
+        <ul class="mt-3 space-y-2">
+          {% for item in split_series_review.items %}
+          <li
+            data-testid="import-review-split-series-item"
+            class="rounded-lg border border-pb-border bg-pb-card/70 px-3 py-2"
+          >
+            <span class="text-sm font-semibold text-pb-text">{{ item.title }}</span>
+            <span class="ml-2 text-xs text-pb-text-sec">{{ item.root_names|join(' · ') }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+
+      <div>
+        <label for="import-review-preferred-root" class="field-label">
+          Preferred managed destination <span class="text-pb-error" aria-hidden="true">*</span>
+        </label>
+        <select
+          id="import-review-preferred-root"
+          data-testid="import-review-preferred-root"
+          class="input-pb mt-2 w-full"
+          x-model.number="preferredRootId"
+          @change="confirmError = ''; syncSelectionSummaryUi()"
+          required
+        >
+          <option value="">Choose a managed destination</option>
+          {% for root in managed_library_root_options %}
+          <option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>
+          {% endfor %}
+        </select>
+        {% if not managed_library_root_options %}
+        <p class="mt-2 text-xs leading-5 text-pb-error">
+          No enabled, available, readable, and writable managed destination is ready.
+          <a href="/settings?tab=media" class="text-pb-interactive hover:underline">Configure library roots</a>
+          before importing.
+        </p>
+        {% else %}
+        <p class="mt-2 text-xs leading-5 text-pb-text-dim">
+          This does not copy, move, rename, or otherwise reorganize existing files. Pullbox
+          revalidates the destination before confirmation and future managed placement.
+        </p>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
   <div data-testid="import-review-action-bar" class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3">
     <div x-show="confirmError" x-cloak class="mb-3">
       {% call inline_alert(tone="danger", icon="warning") %}
@@ -337,7 +434,7 @@
         <button
           type="button"
           @click="confirmImport()"
-          :disabled="totalSelectionCount() === 0 || confirming"
+          :disabled="totalSelectionCount() === 0 || confirming || !hasRequiredPreferredRoot()"
           data-import-review-import-button
           class="btn-primary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
         >

@@ -14,10 +14,13 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSourceType,
 )
+from pullbox.models.library import LibraryRoot
 from pullbox.schemas.import_job import ConfirmImportRequest
 from pullbox.services.import_confirm_policy import apply_confirm_import_policy
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -32,7 +35,18 @@ def _make_job() -> ImportJob:
 
 async def test_apply_confirm_policy_uses_global_search_on_add(
     db_session: AsyncSession,
+    tmp_path: Path,
 ) -> None:
+    root_path = tmp_path / "managed"
+    root_path.mkdir()
+    root = LibraryRoot(
+        name="Managed",
+        path=str(root_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=True,
+    )
+    db_session.add(root)
     db_session.add(SystemConfig(key="search_on_add_default", value="true", value_type="bool"))
     await db_session.flush()
     job = _make_job()
@@ -40,13 +54,101 @@ async def test_apply_confirm_policy_uses_global_search_on_add(
     await apply_confirm_import_policy(
         db_session,
         job,
-        ConfirmImportRequest(series_ids=[1], monitored=False, target_library_root_id=7),
+        ConfirmImportRequest(
+            series_ids=[1],
+            monitored=False,
+            target_library_root_id=root.id,
+        ),
     )
 
     assert job.search_on_add is True
     assert job.monitored is True
-    assert job.target_library_root_id == 7
+    assert job.target_library_root_id == root.id
     assert job.move_to_library is True
+
+
+async def test_apply_confirm_policy_rejects_missing_target_override(
+    db_session: AsyncSession,
+) -> None:
+    with pytest.raises(ValidationError, match="does not exist"):
+        await apply_confirm_import_policy(
+            db_session,
+            _make_job(),
+            ConfirmImportRequest(series_ids=[1], target_library_root_id=999_999),
+        )
+
+
+async def test_apply_confirm_policy_rejects_reference_only_target_override(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "reference-only"
+    root_path.mkdir()
+    root = LibraryRoot(
+        name="Reference only",
+        path=str(root_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
+    db_session.add(root)
+    await db_session.flush()
+
+    with pytest.raises(ValidationError, match="managed writes"):
+        await apply_confirm_import_policy(
+            db_session,
+            _make_job(),
+            ConfirmImportRequest(series_ids=[1], target_library_root_id=root.id),
+        )
+
+
+async def test_apply_confirm_policy_rejects_disabled_target_override(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "disabled"
+    root_path.mkdir()
+    root = LibraryRoot(
+        name="Disabled",
+        path=str(root_path),
+        enabled=False,
+        allow_referenced_registrations=True,
+        allow_managed_writes=True,
+    )
+    db_session.add(root)
+    await db_session.flush()
+
+    with pytest.raises(ValidationError, match="disabled"):
+        await apply_confirm_import_policy(
+            db_session,
+            _make_job(),
+            ConfirmImportRequest(series_ids=[1], target_library_root_id=root.id),
+        )
+
+
+async def test_apply_confirm_policy_rejects_unavailable_target_override(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "unavailable"
+    root_path.mkdir()
+    root = LibraryRoot(
+        name="Unavailable",
+        path=str(root_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=True,
+    )
+    db_session.add(root)
+    await db_session.flush()
+    root_path.rmdir()
+
+    with pytest.raises(ValidationError, match="existing directory"):
+        await apply_confirm_import_policy(
+            db_session,
+            _make_job(),
+            ConfirmImportRequest(series_ids=[1], target_library_root_id=root.id),
+        )
 
 
 async def test_apply_confirm_policy_rejects_conflicting_search_override(

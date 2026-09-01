@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, select
 
-from pullbox.core.exceptions import JobCancelledError, JobPausedError, NotFoundError
+from pullbox.core.exceptions import (
+    JobCancelledError,
+    JobPausedError,
+    NotFoundError,
+    ValidationError,
+)
 from pullbox.core.library_layout import SourceLayoutSpec
 from pullbox.core.mylar3_reader import (
     Mylar3ArcSettingsSnapshot,
@@ -31,7 +36,7 @@ from pullbox.models.import_job import (
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_progress_runtime import current_item_payload
 from pullbox.services.import_referenced_sources import (
-    load_mylar_in_place_root,
+    load_mylar_reference_root_boundaries,
     validate_mylar_in_place_files,
 )
 from pullbox.services.import_story_arc_resolution import (
@@ -629,42 +634,21 @@ async def _load_mylar3_discovered_series(
     if db_path.is_dir():
         db_path = db_path / "mylar.db"
 
+    if not job.mylar3_path_map_confirmed:
+        raise ValidationError(
+            "Return to Import Step 1 and confirm the Mylar path mapping before scanning."
+        )
     path_map: dict[str, str] | None = job.mylar3_path_map
-    if not path_map:
-        detected = await asyncio.to_thread(lambda: auto_detect_mylar3_path_map(db_path))
-        path_map = detected
-        if detected:
-            # Freeze the exact mapping used for scan-time path resolution so
-            # later review/execution can validate the same trusted host roots.
-            # Without this snapshot, auto-detected Mylar arc locations become
-            # unverifiable after the reader returns.
-            job.mylar3_path_map = dict(detected)
-            await log_event(
-                session,
-                job_id,
-                "INFO",
-                "mylar3_path_map_detected",
-                message="Auto-detected Mylar3 path mapping",
-                path_map=detected,
-            )
-        else:
-            await log_event(
-                session,
-                job_id,
-                "DEBUG",
-                "mylar3_path_map_not_detected",
-                message="No Mylar3 path mapping auto-detected",
-                db_path=str(db_path),
-            )
-    in_place_root = (
-        await load_mylar_in_place_root(session, job.target_library_root_id)
-        if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
-        else None
+    in_place = job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+    in_place_root_boundaries = (
+        await load_mylar_reference_root_boundaries(session) if in_place else ()
     )
-    in_place_root_path = Path(in_place_root.path) if in_place_root is not None else None
     reader_options: dict[str, object] = {}
-    if in_place_root_path is not None:
+    if in_place:
         reader_options["include_missing_files"] = True
+        reader_options["reference_root_boundaries"] = tuple(
+            (boundary.lexical, boundary.resolved) for boundary in in_place_root_boundaries
+        )
     reader = mylar3_reader_cls(
         db_path=db_path,
         path_map=path_map or None,
@@ -780,8 +764,12 @@ async def _load_mylar3_discovered_series(
         page = cast("list[DiscoveredSeries]", list(raw_page))
         if not page:
             return
-        if in_place_root_path is not None:
-            await asyncio.to_thread(validate_mylar_in_place_files, page, in_place_root_path)
+        if in_place:
+            await asyncio.to_thread(
+                validate_mylar_in_place_files,
+                page,
+                in_place_root_boundaries,
+            )
         if validate_discovered_files_safety is not None:
             await validate_discovered_files_safety(session, page)
         if materialize_discovered_scan_results is not None:

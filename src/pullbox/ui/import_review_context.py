@@ -17,10 +17,12 @@ from pullbox.models.import_job import (
 from pullbox.models.library import LibraryRoot
 from pullbox.services.import_review_selection import load_import_review_selection_state
 from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
+from pullbox.services.import_split_series import load_selected_split_series_review
 from pullbox.services.import_story_arc_review import (
     ImportedStoryArcReviewRow,
     load_import_story_arc_review_page,
 )
+from pullbox.services.library_root_management import list_library_roots
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
 from pullbox.ui.import_review_summary import (
     load_import_review_summary,
@@ -369,6 +371,19 @@ async def load_import_review_context(
         )
         library_roots = list(library_roots_result.scalars().all())
 
+    split_series_review = await load_selected_split_series_review(session, job)
+    managed_library_root_options: list[dict[str, Any]] = []
+    if split_series_review.requires_preferred_destination:
+        managed_library_root_options = [
+            root
+            for root in await list_library_roots(session)
+            if bool(root["enabled"])
+            and bool(root["allow_managed_writes"])
+            and bool(root["available"])
+            and bool(root["readable"])
+            and bool(root["writable"])
+        ]
+
     template_ctx: dict[str, object] = {
         "job": job,
         "series_items": series_items,
@@ -393,6 +408,8 @@ async def load_import_review_context(
         "sort": normalized_sort,
         "status_counts": await _load_status_counts(session, job_id),
         "review_summary": await load_import_review_summary(session, job),
+        "split_series_review": split_series_review,
+        "managed_library_root_options": managed_library_root_options,
         "safety_failure_summary": await load_import_safety_failure_summary(session, job),
         "selected_series_ids": await _load_selected_review_series_ids(session, job_id),
         "duplicate_selected_file_counts": await _load_duplicate_selected_file_counts(

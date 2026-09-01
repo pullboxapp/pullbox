@@ -25,13 +25,17 @@ def build_retry_import_request(original: Any) -> ImportJobCreate:
     """Build the creation request for a fresh retry job."""
     source_layout_snapshot = getattr(original, "source_layout_snapshot", None) or {}
     future_root_policy_snapshot = getattr(original, "future_root_policy_snapshot", None)
+    frozen_path_map = dict(original.mylar3_path_map or {})
     return ImportJobCreate(
         source_path=original.source_path,
         file_paths=list(original.selected_file_paths or []) or None,
         source_type=original.source_type,
         target_library_root_id=original.target_library_root_id,
         monitored=original.monitored,
-        mylar3_path_map=dict(original.mylar3_path_map or {}),
+        mylar3_path_map=frozen_path_map,
+        mylar3_path_map_confirmed=bool(
+            frozen_path_map or getattr(original, "mylar3_path_map_confirmed", False)
+        ),
         cv_match_threshold=original.cv_match_threshold,
         min_files_per_series=original.min_files_per_series,
         file_formats=original.file_formats,

@@ -496,6 +496,47 @@ class TestSettingsRouteContracts:
         assert "/naming-policy/preview" in response.text
         assert 'method: "DELETE"' in response.text
 
+    async def test_settings_media_exposes_safe_multi_library_root_management(
+        self,
+        authenticated_client,
+        sec_db,
+        tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        root_path = tmp_path / "managed-library"
+        root_path.mkdir()
+        async with sec_db() as session:
+            session.add(LibraryRoot(name="Managed Library", path=str(root_path), enabled=True))
+            await session.commit()
+
+        response = await authenticated_client.get("/settings?tab=media")
+
+        assert response.status_code == 200
+        assert 'data-testid="settings-media-library-roots"' in response.text
+        assert 'data-testid="settings-media-library-root-add"' in response.text
+        assert 'data-testid="settings-media-library-root-name"' in response.text
+        assert 'data-testid="settings-media-library-root-path"' in response.text
+        assert 'data-testid="settings-media-library-root-reference-role"' in response.text
+        assert 'data-testid="settings-media-library-root-managed-role"' in response.text
+        assert 'data-testid="settings-media-library-root-default"' in response.text
+        assert "Reference existing files" in response.text
+        assert "Allow managed files" in response.text
+        assert "Default managed destination" in response.text
+        assert 'libraryRootRequest("/api/v1/config/library-roots/preview"' in response.text
+        assert 'libraryRootRequest("/api/v1/config/library-roots"' in response.text
+        assert 'method: "PATCH"' in response.text
+        assert 'data-testid="settings-media-library-root-rebind"' in response.text
+        assert "Preview rebind" in response.text
+        assert "Confirm rebind" in response.text
+        assert "/rebind/preview" in response.text
+        assert 'confirmation: "REBIND"' in response.text
+        assert "Delete library root" not in response.text
+        assert "ordinary edits cannot change them" in response.text
+        assert "bootstraps the default managed destination" in response.text
+        assert (
+            "All imports and download handoff work eventually target this library root"
+            not in response.text
+        )
+
     async def test_settings_renders_standardized_shell(
         self,
         authenticated_client,

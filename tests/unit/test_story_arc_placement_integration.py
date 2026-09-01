@@ -399,6 +399,75 @@ async def test_policy_accepts_nested_destination_within_selected_library_root(
     assert policy.destination_root == str(destination.resolve())
 
 
+@pytest.mark.parametrize(
+    "root_state",
+    [
+        pytest.param("disabled", id="disabled"),
+        pytest.param("reference-only", id="reference-only"),
+        pytest.param("unavailable", id="unavailable"),
+    ],
+)
+async def test_policy_rejects_root_that_is_not_a_live_managed_destination(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    root_state: str,
+) -> None:
+    arc_id, _membership_id, root_id, _canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    async with db_factory() as session:
+        root = await session.get(LibraryRoot, root_id)
+        assert root is not None
+        if root_state == "disabled":
+            root.enabled = False
+        elif root_state == "reference-only":
+            root.allow_managed_writes = False
+        else:
+            root.path = str(tmp_path / "offline-library")
+        await session.commit()
+
+    async with db_factory() as session:
+        with pytest.raises(StoryArcPlacementIntegrationError) as error:
+            await StoryArcPlacementSyncService().validate_policy(
+                session,
+                arc_id,
+                _copy_policy(root_id, arc_root),
+            )
+
+    assert error.value.code == "target_library_root_unavailable"
+    assert error.value.category == "safety"
+
+
+async def test_reference_only_policy_accepts_a_live_reference_only_root(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, _membership_id, root_id, _canonical, arc_root = await _seed_membership(
+        db_factory, tmp_path
+    )
+    async with db_factory() as session:
+        root = await session.get(LibraryRoot, root_id)
+        assert root is not None
+        root.allow_referenced_registrations = True
+        root.allow_managed_writes = False
+        await session.commit()
+
+    async with db_factory() as session:
+        policy = await StoryArcPlacementSyncService().validate_policy(
+            session,
+            arc_id,
+            StoryArcPlacementPolicyInput(
+                mode=StoryArcPlacementPolicyMode.REFERENCE_ONLY,
+                target_library_root_id=root_id,
+                destination_root=str(arc_root),
+                synchronize=True,
+            ),
+        )
+
+    assert policy.mode is StoryArcPlacementPolicyMode.REFERENCE_ONLY
+    assert policy.target_library_root_id == root_id
+
+
 async def test_preview_and_copy_sync_preserve_exact_issue_and_are_idempotent(
     db_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

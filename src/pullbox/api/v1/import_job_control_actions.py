@@ -25,6 +25,7 @@ from pullbox.schemas.import_job import (
     RetryImportResponse,
     RetryStoryArcPlacementsResponse,
 )
+from pullbox.services.import_managed_copy_preflight import ManagedCopyPreflightError
 from pullbox.services.story_arc_sync_queue import (
     discard_unpublished_import_story_arc_sync_work,
 )
@@ -34,6 +35,10 @@ logger = structlog.get_logger(__name__)
 _ROLLBACK_PENDING_DELETE_MESSAGE = (
     "Rollback is still stopping an in-progress Story Arc placement. "
     "The import remains in history; delete it again after rollback finishes."
+)
+_ROLLBACK_INCOMPLETE_DELETE_MESSAGE = (
+    "Rollback is incomplete and some data requires manual recovery. "
+    "The import remains in history so its recovery evidence is preserved."
 )
 
 _CLEARABLE_HISTORY_STATUSES = (
@@ -116,6 +121,11 @@ async def confirm_import_response(
     """Confirm selected series for import and trigger the execute task."""
     try:
         job = await service.confirm_import(session, job_id, body)
+    except ManagedCopyPreflightError as exc:
+        # The service has restored REVIEW state and attached a sanitized live
+        # capacity snapshot. Persist that evidence before returning the block.
+        await session.commit()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
     except ValidationError as exc:
         raise HTTPException(status_code=409, detail=exc.message) from exc
 
@@ -166,6 +176,8 @@ async def cancel_import_job_response(
         purge_import_runtime_state(job_id)
         logger.info("import_job_deleted", job_id=job_id)
         return None
+    if action == "rollback_incomplete":
+        raise HTTPException(status_code=409, detail=_ROLLBACK_INCOMPLETE_DELETE_MESSAGE)
     if action != "rollback_pending":
         raise RuntimeError(f"Unsupported import deletion result: {action!r}")
     logger.info("import_job_delete_waiting_for_story_arc_rollback", job_id=job_id)

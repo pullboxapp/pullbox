@@ -204,6 +204,9 @@ async def resolve_naming_issue_type(session: AsyncSession, issue: Issue) -> str:
 def build_series_folder_name(
     series: object,
     naming_policy: LibraryIngestPolicy | dict[str, str],
+    *,
+    series_type_override: str | None = None,
+    comicvine_id_override: int | None = None,
 ) -> str:
     """Build a series folder name from a Series model and naming config."""
     title = ""
@@ -216,8 +219,14 @@ def build_series_folder_name(
     if isinstance(series, Series):
         title = series.title
         year = series.year_start
-        cv_id = series.comicvine_id
-        series_type_value = series.series_type.value if series.series_type else None
+        cv_id = comicvine_id_override or series.comicvine_id
+        series_type_value = (
+            series_type_override
+            if series_type_override is not None
+            else series.series_type.value
+            if series.series_type
+            else None
+        )
         if series.publisher is not None:
             publisher_name = series.publisher.name
 
@@ -236,6 +245,9 @@ def build_series_folder_name(
 def build_series_relative_path(
     series: object,
     naming_policy: LibraryIngestPolicy | dict[str, str],
+    *,
+    series_type_override: str | None = None,
+    comicvine_id_override: int | None = None,
 ) -> Path:
     """Render and sanitize every segment in a root-relative series path."""
     from pathlib import Path
@@ -261,6 +273,8 @@ def build_series_relative_path(
                     "dash",
                 ),
             },
+            series_type_override=series_type_override,
+            comicvine_id_override=comicvine_id_override,
         )
         for segment in raw_segments
     )

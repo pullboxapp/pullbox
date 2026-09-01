@@ -69,6 +69,19 @@ async def _count_completed_rollback_actions(session: AsyncSession, job_id: int) 
     return int(count or 0)
 
 
+async def _load_rollback_action_status_counts(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[ImportJobActionStatus, int]:
+    """Return the durable whole-journal state, including prior attempts."""
+    result = await session.execute(
+        sa_select(ImportJobAction.status, func.count(ImportJobAction.id))
+        .where(ImportJobAction.import_job_id == job_id)
+        .group_by(ImportJobAction.status)
+    )
+    return {status: int(count or 0) for status, count in result.all()}
+
+
 async def _iter_completed_rollback_actions(
     session: AsyncSession,
     job_id: int,
@@ -191,9 +204,24 @@ async def _rollback_import_job_while_enrichment_fenced(
             action_type=action.action_type,
             sequence_no=action.sequence_no,
         )
+        deferred_error: StoryArcManagedPlacementRollbackDeferredError | None = None
+        action_error: Exception | None = None
         try:
-            await rollback_action(session, action)
-        except StoryArcManagedPlacementRollbackDeferredError as exc:
+            async with session.begin_nested():
+                try:
+                    await rollback_action(session, action)
+                except StoryArcManagedPlacementRollbackDeferredError as exc:
+                    # Cooperative placement cancellation persists its request before
+                    # yielding. Swallow only this control-flow exception inside the
+                    # savepoint so the request remains durable.
+                    deferred_error = exc
+        except Exception as exc:
+            # The savepoint rolls back partial database mutations from this action
+            # without discarding earlier successful rollback work. Filesystem changes
+            # cannot be inferred safely, so the journal row becomes manual recovery.
+            action_error = exc
+
+        if deferred_error is not None:
             progress = int((idx / max(total, 1)) * 100)
             sync_progress_snapshot_state(
                 job,
@@ -204,9 +232,9 @@ async def _rollback_import_job_while_enrichment_fenced(
                 message="Waiting for an in-progress story-arc placement to stop safely...",
             )
             snapshot = dict(job.progress_snapshot or {})
-            snapshot["story_arc_rollback_waiting_work_id"] = exc.work_id
+            snapshot["story_arc_rollback_waiting_work_id"] = deferred_error.work_id
             job.progress_snapshot = snapshot
-            job.story_arc_rollback_waiting_work_id = exc.work_id
+            job.story_arc_rollback_waiting_work_id = deferred_error.work_id
             await session.flush()
             await log_event(
                 session,
@@ -218,11 +246,18 @@ async def _rollback_import_job_while_enrichment_fenced(
                 action_count=total,
                 action_type=action.action_type,
                 sequence_no=action.sequence_no,
-                sync_work_id=exc.work_id,
+                sync_work_id=deferred_error.work_id,
             )
             await session.commit()
             return False
-        except Exception as exc:
+
+        current_action = await session.get(ImportJobAction, action.action_id)
+        if action_error is not None:
+            if current_action is not None:
+                current_action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                current_action.error_message = str(action_error) or type(action_error).__name__
+                current_action.rolled_back_at = None
+                await session.flush()
             await log_event(
                 session,
                 job_id,
@@ -233,22 +268,39 @@ async def _rollback_import_job_while_enrichment_fenced(
                 action_count=total,
                 action_type=action.action_type,
                 sequence_no=action.sequence_no,
-                error=str(exc),
+                error=str(action_error),
             )
-            raise
-        await log_event(
-            session,
-            job_id,
-            "DEBUG",
-            "import_rollback_action_completed",
-            message=(
-                f"Rolled back action {idx + 1}/{total}: {action.action_type} #{action.sequence_no}."
-            ),
-            action_index=idx + 1,
-            action_count=total,
-            action_type=action.action_type,
-            sequence_no=action.sequence_no,
-        )
+        elif (
+            current_action is not None
+            and current_action.status == ImportJobActionStatus.ROLLBACK_FAILED
+        ):
+            await log_event(
+                session,
+                job_id,
+                "ERROR",
+                "import_rollback_action_failed",
+                message=(f"Rollback action failed: {action.action_type} #{action.sequence_no}."),
+                action_index=idx + 1,
+                action_count=total,
+                action_type=action.action_type,
+                sequence_no=action.sequence_no,
+                error=current_action.error_message or "Manual recovery is required.",
+            )
+        else:
+            await log_event(
+                session,
+                job_id,
+                "DEBUG",
+                "import_rollback_action_completed",
+                message=(
+                    f"Rolled back action {idx + 1}/{total}: "
+                    f"{action.action_type} #{action.sequence_no}."
+                ),
+                action_index=idx + 1,
+                action_count=total,
+                action_type=action.action_type,
+                sequence_no=action.sequence_no,
+            )
         idx += 1
         small_rollback = total <= ROLLBACK_ACTION_PAGE_SIZE
         page_checkpoint = small_rollback or idx % ROLLBACK_ACTION_PAGE_SIZE == 0 or idx == total
@@ -284,8 +336,56 @@ async def _rollback_import_job_while_enrichment_fenced(
         else:
             await session.commit()
 
-    await restore_review_state(session, job_id)
+    action_status_counts = await _load_rollback_action_status_counts(session, job_id)
+    rollback_action_count = sum(action_status_counts.values())
+    rolled_back_count = action_status_counts.get(ImportJobActionStatus.ROLLED_BACK, 0)
+    manual_recovery_count = action_status_counts.get(ImportJobActionStatus.ROLLBACK_FAILED, 0)
+    if manual_recovery_count > 0:
+        await recompute_series_counters(session, job)
+        await recompute_file_counters(session, job)
+        message = _incomplete_rollback_message(
+            rolled_back_count=rolled_back_count,
+            manual_recovery_count=manual_recovery_count,
+        )
+        progress = round((rolled_back_count / max(rollback_action_count, 1)) * 100)
+        job.status = ImportJobStatus.FAILED
+        job.control_request = ImportControlRequest.NONE
+        job.error_message = message
+        job.story_arc_placement_followup_pending = False
+        job.story_arc_rollback_waiting_work_id = None
+        sync_progress_snapshot_state(
+            job,
+            status=ImportJobStatus.FAILED,
+            mode="rollback",
+            phase="rollback_incomplete",
+            progress=progress,
+            message=message,
+        )
+        snapshot = dict(job.progress_snapshot or {})
+        snapshot.update(
+            {
+                "rollback_action_count": rollback_action_count,
+                "rollback_actions_rolled_back": rolled_back_count,
+                "rollback_manual_recovery_count": manual_recovery_count,
+            }
+        )
+        job.progress_snapshot = snapshot
+        await session.flush()
+        await log_event(
+            session,
+            job_id,
+            "ERROR",
+            "import_rollback_incomplete",
+            message=message,
+            action_count=rollback_action_count,
+            rolled_back_count=rolled_back_count,
+            manual_recovery_count=manual_recovery_count,
+        )
+        # True means the reverse walk reached a terminal state. The FAILED job
+        # and durable snapshot distinguish incomplete rollback from success.
+        return True
 
+    await restore_review_state(session, job_id)
     await recompute_series_counters(session, job)
     await recompute_file_counters(session, job)
     cancelled_during_rollback = job.control_request == ImportControlRequest.CANCEL
@@ -313,3 +413,24 @@ async def _rollback_import_job_while_enrichment_fenced(
         action_count=total,
     )
     return True
+
+
+def _incomplete_rollback_message(
+    *,
+    rolled_back_count: int,
+    manual_recovery_count: int,
+) -> str:
+    if rolled_back_count <= 0:
+        action_word = "action" if manual_recovery_count == 1 else "actions"
+        require_word = "requires" if manual_recovery_count == 1 else "require"
+        return (
+            f"Rollback incomplete: {manual_recovery_count} {action_word} {require_word} "
+            "manual recovery. Pullbox preserved the affected data."
+        )
+    rolled_back_word = "action was" if rolled_back_count == 1 else "actions were"
+    require_word = "requires" if manual_recovery_count == 1 else "require"
+    return (
+        f"Rollback incomplete: {rolled_back_count} {rolled_back_word} rolled back; "
+        f"{manual_recovery_count} {require_word} manual recovery. "
+        "Pullbox preserved the affected data."
+    )

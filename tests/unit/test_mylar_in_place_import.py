@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from sqlalchemy import select
 
+from pullbox.core.collection_scanner import DiscoveredFile, DiscoveredSeries
 from pullbox.core.exceptions import ValidationError
 from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.mylar3_reader import Mylar3Reader
@@ -23,6 +24,11 @@ from pullbox.models.import_job import (
 from pullbox.models.library import LibraryRoot
 from pullbox.schemas.import_job import ImportJobCreate
 from pullbox.services.import_job_creation import create_job
+from pullbox.services.import_referenced_sources import (
+    MYLAR_REFERENCE_ROOT_ID_SIGNATURE_KEY,
+    load_mylar_reference_root_boundaries,
+    validate_mylar_in_place_files,
+)
 from pullbox.services.import_scan_helpers import validate_discovered_files_safety
 from pullbox.services.import_scan_materialization import materialize_discovered_scan_results
 from pullbox.services.import_scan_pipeline import _load_mylar3_discovered_series
@@ -69,12 +75,53 @@ def _mylar_db(db_path: Path, locations: list[str]) -> None:
     )
 
 
-async def test_mylar_in_place_creation_accepts_database_outside_selected_root(
+def _discovered_series_for_file(*, title: str, comic: Path, ordinal: int) -> DiscoveredSeries:
+    signature = build_file_identity_signature(comic)
+    discovered_file = DiscoveredFile(
+        file_path=str(comic),
+        file_name=comic.name,
+        file_size=int(signature["size"]),
+        file_format="cbz",
+        parsed_series=title,
+        parsed_issue_number=float(ordinal),
+        parsed_year=2024,
+        parsed_publisher=None,
+        has_comicinfo=False,
+        comicvine_issue_id=100000 + ordinal,
+        issue_number_raw=str(ordinal),
+        source_signature=signature,
+    )
+    return DiscoveredSeries(
+        raw_series_name=title,
+        raw_year=2024,
+        raw_publisher=None,
+        file_count=1,
+        sample_paths=[str(comic)],
+        source_folder=str(comic.parent),
+        source_folder_relative=title,
+        files=[discovered_file],
+        mylar3_cv_id=200000 + ordinal,
+        diagnostics={
+            "mylar3_path": {
+                "status": "local",
+                "mapping_applied": False,
+            }
+        },
+    )
+
+
+async def test_mylar_in_place_creation_accepts_database_outside_reference_root_without_destination(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:
     comics = tmp_path / "comics"
     comics.mkdir()
-    root = LibraryRoot(name="Existing comics", path=str(comics), enabled=True)
+    root = LibraryRoot(
+        name="Existing library",
+        path=str(comics),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
     db_session.add(root)
     await db_session.flush()
     database = tmp_path / "mylar.db"
@@ -86,14 +133,15 @@ async def test_mylar_in_place_creation_accepts_database_outside_selected_root(
         ImportJobCreate(
             source_path=str(database),
             source_type=ImportSourceType.MYLAR3,
-            target_library_root_id=root.id,
             file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+            mylar3_path_map={"/comics": str(comics)},
+            mylar3_path_map_confirmed=True,
         ),
         log_event=_log_event,
     )
 
     assert job.source_path == str(database)
-    assert job.target_library_root_id == root.id
+    assert job.target_library_root_id is None
     assert job.effective_transfer_method == "leave_in_place"
     assert job.move_to_library is False
     assert job.convert_to_preferred_format is False
@@ -101,25 +149,187 @@ async def test_mylar_in_place_creation_accepts_database_outside_selected_root(
     assert _file_snapshot(database) == before
 
 
-@pytest.mark.parametrize("selection", ["none", "disabled", "missing"])
-async def test_mylar_in_place_requires_an_existing_enabled_selected_root(
-    db_session: AsyncSession, tmp_path: Path, selection: str
+async def test_mylar_in_place_scan_freezes_each_files_unique_containing_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    preferred_path = tmp_path / "preferred"
+    first_root_path = tmp_path / "current"
+    second_root_path = tmp_path / "archive"
+    preferred_path.mkdir()
+    first_comic = first_root_path / "Batman" / "Batman 001.cbz"
+    second_comic = second_root_path / "Saga" / "Saga 001.cbz"
+    create_minimal_cbz(first_comic)
+    create_minimal_cbz(second_comic)
+    before = _file_snapshot(first_comic), _file_snapshot(second_comic)
+    preferred_root = LibraryRoot(
+        name="Preferred managed destination",
+        path=str(preferred_path),
+        enabled=True,
+        allow_referenced_registrations=False,
+        allow_managed_writes=True,
+    )
+    first_root = LibraryRoot(name="Current", path=str(first_root_path), enabled=True)
+    second_root = LibraryRoot(name="Archive", path=str(second_root_path), enabled=True)
+    db_session.add_all([preferred_root, first_root, second_root])
+    await db_session.flush()
+    database = tmp_path / "mylar.db"
+    database.touch()
+    job = ImportJob(
+        source_path=str(database),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        target_library_root_id=preferred_root.id,
+        mylar3_path_map_confirmed=True,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    discovered = [
+        _discovered_series_for_file(title="Batman", comic=first_comic, ordinal=1),
+        _discovered_series_for_file(title="Saga", comic=second_comic, ordinal=2),
+    ]
+    captured_reference_boundaries: list[tuple[tuple[Path, Path], ...]] = []
+
+    class ReaderDouble:
+        def __init__(self, **kwargs: object) -> None:
+            captured_reference_boundaries.append(
+                tuple(kwargs["reference_root_boundaries"])  # type: ignore[arg-type]
+            )
+
+        async def read_series(self) -> list[DiscoveredSeries]:
+            return discovered
+
+    await _load_mylar3_discovered_series(
+        db_session,
+        job,
+        job_id=job.id,
+        mylar3_reader_cls=ReaderDouble,
+        auto_detect_mylar3_path_map=lambda _path: None,
+        log_event=_log_event,
+        validate_discovered_files_safety=validate_discovered_files_safety,
+        materialize_discovered_scan_results=materialize_discovered_scan_results,
+    )
+
+    rows = list((await db_session.scalars(select(ImportedFile).order_by(ImportedFile.id))).all())
+    assert [row.status for row in rows] == [
+        ImportedFileStatus.PENDING,
+        ImportedFileStatus.PENDING,
+    ]
+    assert [row.source_signature["mylar_reference_root_id"] for row in rows] == [
+        first_root.id,
+        second_root.id,
+    ]
+    assert captured_reference_boundaries == [
+        (
+            (first_root_path.absolute(), first_root_path.resolve()),
+            (second_root_path.absolute(), second_root_path.resolve()),
+        )
+    ]
+    assert job.target_library_root_id == preferred_root.id
+    assert (_file_snapshot(first_comic), _file_snapshot(second_comic)) == before
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        ("disabled", "source_outside_root"),
+        ("references_disabled", "source_outside_root"),
+        ("alias", "source_root_ambiguous"),
+        ("nested_alias", "source_root_ambiguous"),
+        ("nested", "source_root_ambiguous"),
+        ("symlink_escape", "source_outside_root"),
+    ],
+)
+async def test_mylar_in_place_root_selection_fails_closed_for_unsafe_boundaries(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    failure: str,
+    expected_code: str,
+) -> None:
+    root_path = tmp_path / "library"
+    comic = root_path / "Batman" / "Batman 001.cbz"
+    create_minimal_cbz(comic)
+    source = comic
+    root = LibraryRoot(
+        name="Library",
+        path=str(root_path),
+        enabled=failure != "disabled",
+        allow_referenced_registrations=failure != "references_disabled",
+    )
+    roots = [root]
+    if failure == "alias":
+        alias_path = tmp_path / "library-alias"
+        alias_path.symlink_to(root_path, target_is_directory=True)
+        roots.append(LibraryRoot(name="Alias", path=str(alias_path), enabled=True))
+    elif failure == "nested_alias":
+        alias_path = tmp_path / "batman-alias"
+        alias_path.symlink_to(comic.parent, target_is_directory=True)
+        roots.append(LibraryRoot(name="Nested alias", path=str(alias_path), enabled=True))
+    elif failure == "nested":
+        roots.append(
+            LibraryRoot(
+                name="Nested",
+                path=str(comic.parent),
+                enabled=True,
+            )
+        )
+    elif failure == "symlink_escape":
+        outside = tmp_path / "outside" / "Batman 002.cbz"
+        create_minimal_cbz(outside)
+        source = comic.parent / "Batman 002.cbz"
+        source.symlink_to(outside)
+    db_session.add_all(roots)
+    await db_session.flush()
+    before = _file_snapshot(comic)
+    discovered = [_discovered_series_for_file(title="Batman", comic=source, ordinal=1)]
+
+    boundaries = await load_mylar_reference_root_boundaries(db_session)
+    validate_mylar_in_place_files(discovered, boundaries)
+
+    safety = discovered[0].files[0].metadata_diagnostics["file_safety"]
+    assert safety["code"] == expected_code
+    assert safety["overrideable"] is False
+    assert MYLAR_REFERENCE_ROOT_ID_SIGNATURE_KEY not in discovered[0].files[0].source_signature
+    assert _file_snapshot(comic) == before
+
+
+async def test_mylar_in_place_rejects_invalid_explicit_future_destination(
+    db_session: AsyncSession, tmp_path: Path
 ) -> None:
     database = tmp_path / "mylar.db"
     _mylar_db(database, [])
-    root = LibraryRoot(name="Disabled", path=str(tmp_path), enabled=False)
-    db_session.add(root)
+    source_path = tmp_path / "existing-library"
+    source_path.mkdir()
+    source_root = LibraryRoot(
+        name="Existing library",
+        path=str(source_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
+    invalid_destination_path = tmp_path / "reference-only"
+    invalid_destination_path.mkdir()
+    invalid_destination = LibraryRoot(
+        name="Reference only",
+        path=str(invalid_destination_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
+    db_session.add_all([source_root, invalid_destination])
     await db_session.flush()
-    root_id = None if selection == "none" else root.id if selection == "disabled" else 999999
 
-    with pytest.raises(ValidationError, match=r"[Ll]ibrary root"):
+    with pytest.raises(ValidationError, match=r"[Ll]ibrary (?:root|destination)"):
         await create_job(
             db_session,
             ImportJobCreate(
                 source_path=str(database),
                 source_type=ImportSourceType.MYLAR3,
-                target_library_root_id=root_id,
+                target_library_root_id=invalid_destination.id,
                 file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+                mylar3_path_map={"/comics": str(source_path)},
+                mylar3_path_map_confirmed=True,
             ),
             log_event=_log_event,
         )
@@ -178,12 +388,17 @@ async def test_mylar_in_place_paging_retains_missing_cross_series_annual(tmp_pat
         database,
         series=[
             {
-                "ComicID": comic_id,
-                "ComicName": title,
+                "ComicID": "CV-97508",
+                "ComicName": "Batman",
+                "ComicYear": "2016",
+                "ComicLocation": None,
+            },
+            {
+                "ComicID": "CV-99999",
+                "ComicName": "Batman Annual",
                 "ComicYear": "2016",
                 "ComicLocation": "/comics/Batman",
-            }
-            for comic_id, title in [("CV-97508", "Batman"), ("CV-99999", "Batman Annual")]
+            },
         ],
         issues=[
             {
@@ -270,6 +485,7 @@ async def test_mylar_in_place_scan_retains_ineligible_files_for_nonoverrideable_
         file_handling_mode=ImportFileHandlingMode.IN_PLACE,
         target_library_root_id=root.id,
         mylar3_path_map={"/comics": str(mapped_root)},
+        mylar3_path_map_confirmed=True,
     )
     db_session.add(job)
     await db_session.flush()
@@ -295,7 +511,9 @@ async def test_mylar_in_place_scan_retains_ineligible_files_for_nonoverrideable_
     if failure in {"missing", "file_symlink"}:
         assert len(rows) == 2
         valid = next(row for row in rows if row.file_name == comic.name)
-        assert valid.source_signature == build_file_identity_signature(comic)
+        expected_signature = build_file_identity_signature(comic)
+        expected_signature[MYLAR_REFERENCE_ROOT_ID_SIGNATURE_KEY] = root.id
+        assert valid.source_signature == expected_signature
         assert valid.status == ImportedFileStatus.PENDING
     else:
         imported_series = (await db_session.scalars(select(ImportedSeries))).one()

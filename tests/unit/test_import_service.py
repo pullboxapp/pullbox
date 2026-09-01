@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import sqlite3
 import zipfile
 from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -48,6 +51,7 @@ from pullbox.schemas.import_job import (
     OrphanRecoveryDecision,
     RecoverOrphanRequest,
 )
+from pullbox.services import library_root_management
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.import_service import ComicVineMatchEvaluation, ImportService
 from pullbox.services.import_story_arc_placement_completion import (
@@ -221,11 +225,31 @@ async def _create_job_row(
     file_handling_mode: ImportFileHandlingMode = ImportFileHandlingMode.MANAGED_COPY,
 ) -> ImportJob:
     """Insert an ImportJob directly for test setup."""
+    target_library_root_id: int | None = None
+    if file_handling_mode == ImportFileHandlingMode.MANAGED_COPY:
+        root = await session.scalar(
+            select(LibraryRoot).where(LibraryRoot.is_default_managed_destination.is_(True))
+        )
+        if root is None:
+            root_path = get_settings().library_root
+            root_path.mkdir(parents=True, exist_ok=True)
+            root = LibraryRoot(
+                name="Test managed root",
+                path=str(root_path),
+                enabled=True,
+                allow_referenced_registrations=True,
+                allow_managed_writes=True,
+                is_default_managed_destination=True,
+            )
+            session.add(root)
+            await session.flush()
+        target_library_root_id = root.id
     job = ImportJob(
         source_path=source_path,
         source_type=source_type,
         status=status,
         file_handling_mode=file_handling_mode,
+        target_library_root_id=target_library_root_id,
     )
     session.add(job)
     await session.flush()
@@ -356,11 +380,49 @@ def service(
     )
 
 
+@pytest.fixture
+async def configured_managed_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LibraryRoot:
+    """Model the configured-root invariant for direct service tests."""
+    root = await db_session.scalar(
+        select(LibraryRoot).where(LibraryRoot.is_default_managed_destination.is_(True))
+    )
+    if root is None:
+        root_path = tmp_path / "configured-managed-root"
+        root_path.mkdir()
+        root = LibraryRoot(
+            name="Configured managed root",
+            path=str(root_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        db_session.add(root)
+        await db_session.flush()
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024**3),
+    )
+    return root
+
+
 # ── Test: create_job ─────────────────────────────────────────────────────
 
 
 class TestCreateJob:
     """Test create_job() — creates ImportJob row with PENDING status."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_create_job_pending(
@@ -386,18 +448,40 @@ class TestCreateJob:
 
     @pytest.mark.asyncio
     async def test_create_job_with_mylar3_path_map(
-        self, db_session: AsyncSession, service: ImportService, tmp_path: object
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        tmp_path: Path,
+        configured_managed_root: LibraryRoot,
     ) -> None:
         """Mylar3 path map is persisted to the job."""
-        source = str(tmp_path)
+        source = tmp_path / "mylar.db"
+        mapped_root = tmp_path / "mapped-comics"
+        (mapped_root / "Batman").mkdir(parents=True)
+        connection = sqlite3.connect(source)
+        connection.execute("CREATE TABLE comics (ComicLocation TEXT)")
+        connection.execute("INSERT INTO comics VALUES ('/comics/Batman')")
+        connection.commit()
+        connection.close()
+        mapped_library_root = LibraryRoot(
+            name="Mapped comics",
+            path=str(mapped_root),
+            enabled=True,
+            is_default_managed_destination=False,
+        )
+        db_session.add(mapped_library_root)
+        await db_session.flush()
         request = ImportJobCreate(
-            source_path=source,
+            source_path=str(source),
             source_type=ImportSourceType.MYLAR3,
-            mylar3_path_map={"/comics": "/mnt/comics"},
+            mylar3_path_map={"/comics": str(mapped_root)},
+            mylar3_path_map_confirmed=True,
+            target_library_root_id=configured_managed_root.id,
         )
         job = await service.create_job(db_session, request)
 
-        assert job.mylar3_path_map == {"/comics": "/mnt/comics"}
+        assert job.mylar3_path_map == {"/comics": str(mapped_root)}
+        assert job.mylar3_path_map_confirmed is True
 
     @pytest.mark.asyncio
     async def test_create_job_persists_selected_file_paths_and_forces_monitored(
@@ -430,6 +514,13 @@ class TestCreateJob:
 
 class TestLogicalSeriesConsolidation:
     """Repeated import buckets that point at the same target should merge physically."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_consolidates_matched_series_by_cv_id_and_title(
@@ -853,6 +944,7 @@ class TestStartScan:
             source_path="/tmp/mylar.db",
             source_type=ImportSourceType.MYLAR3,
         )
+        job.mylar3_path_map_confirmed = True
 
         discovered = [
             _make_discovered(name="Batman", year=2016, mylar3_cv_id=97508),
@@ -1815,6 +1907,37 @@ class TestRunMatching:
 class TestConfirmImport:
     """Test confirm_import() — validates and transitions to IMPORTING."""
 
+    @pytest.fixture(autouse=True)
+    async def default_managed_root(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> LibraryRoot:
+        """Give direct review-row fixtures the startup-managed root invariant."""
+        root = await db_session.scalar(
+            select(LibraryRoot).where(LibraryRoot.is_default_managed_destination.is_(True))
+        )
+        if root is None:
+            root_path = tmp_path / "confirm-managed-root"
+            root_path.mkdir()
+            root = LibraryRoot(
+                name="Confirm managed root",
+                path=str(root_path),
+                enabled=True,
+                allow_referenced_registrations=True,
+                allow_managed_writes=True,
+                is_default_managed_destination=True,
+            )
+            db_session.add(root)
+            await db_session.flush()
+        monkeypatch.setattr(
+            library_root_management.shutil,
+            "disk_usage",
+            lambda _path: SimpleNamespace(free=100 * 1024**3),
+        )
+        return root
+
     @pytest.mark.asyncio
     async def test_confirm_valid(self, db_session: AsyncSession, service: ImportService) -> None:
         """Confirm with valid series IDs transitions to IMPORTING."""
@@ -1825,8 +1948,198 @@ class TestConfirmImport:
         updated_job = await service.confirm_import(db_session, job.id, request)
 
         assert updated_job.status == ImportJobStatus.IMPORTING
+        assert updated_job.progress_snapshot["managed_copy_capacity"]["reserve_bytes"] == 1024**3
         await db_session.refresh(item)
         assert item.status == ImportSeriesStatus.CONFIRMED
+
+    @pytest.mark.asyncio
+    async def test_confirm_in_place_split_series_requires_future_destination(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        default_managed_root: LibraryRoot,
+        tmp_path: Path,
+    ) -> None:
+        archive_path = tmp_path / "confirm-archive-root"
+        archive_path.mkdir()
+        archive_root = LibraryRoot(
+            name="Confirm archive root",
+            path=str(archive_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+        )
+        db_session.add(archive_root)
+        await db_session.flush()
+        job = await _create_job_row(
+            db_session,
+            source_path=str(tmp_path),
+            source_type=ImportSourceType.MYLAR3,
+            status=ImportJobStatus.REVIEW,
+            file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        )
+        item = await _create_imported_series(
+            db_session,
+            job,
+            selected_for_import=True,
+        )
+        main_file = await _create_imported_file(
+            db_session,
+            job,
+            item,
+            file_name="Batman 001.cbz",
+        )
+        archive_file = await _create_imported_file(
+            db_session,
+            job,
+            item,
+            file_name="Batman 002.cbz",
+        )
+        main_path = Path(default_managed_root.path) / main_file.file_name
+        archive_file_path = archive_path / archive_file.file_name
+        main_path.write_bytes(b"main")
+        archive_file_path.write_bytes(b"archive")
+        main_file.file_path = str(main_path)
+        archive_file.file_path = str(archive_file_path)
+        await db_session.flush()
+
+        with pytest.raises(ValidationError, match="preferred managed destination"):
+            await service.confirm_import(
+                db_session,
+                job.id,
+                ConfirmImportRequest(series_ids=[]),
+            )
+
+        assert job.status == ImportJobStatus.REVIEW
+        assert item.status == ImportSeriesStatus.MATCHED
+        assert item.selected_for_import is True
+        assert main_file.status == ImportedFileStatus.MATCHED
+        assert archive_file.status == ImportedFileStatus.MATCHED
+
+        confirmed_job = await service.confirm_import(
+            db_session,
+            job.id,
+            ConfirmImportRequest(
+                series_ids=[],
+                target_library_root_id=default_managed_root.id,
+            ),
+        )
+
+        assert confirmed_job.status == ImportJobStatus.IMPORTING
+        assert confirmed_job.target_library_root_id == default_managed_root.id
+        assert item.status == ImportSeriesStatus.CONFIRMED
+        assert main_file.status == ImportedFileStatus.CONFIRMED
+        assert archive_file.status == ImportedFileStatus.CONFIRMED
+        assert main_path.read_bytes() == b"main"
+        assert archive_file_path.read_bytes() == b"archive"
+
+    @pytest.mark.asyncio
+    async def test_confirm_blocks_insufficient_managed_capacity_and_stays_in_review(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        default_managed_root: LibraryRoot,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        job = await _create_job_row(db_session, status=ImportJobStatus.REVIEW)
+        job.target_library_root_id = default_managed_root.id
+        item = await _create_imported_series(db_session, job, selected_for_import=True)
+        imp_file = await _create_imported_file(db_session, job, item)
+        imp_file.file_size = 20 * 1024**3
+        monkeypatch.setattr(
+            library_root_management.shutil,
+            "disk_usage",
+            lambda _path: SimpleNamespace(free=22 * 1024**3 - 1),
+        )
+
+        with pytest.raises(ValidationError, match="free space"):
+            await service.confirm_import(
+                db_session,
+                job.id,
+                ConfirmImportRequest(series_ids=[item.id]),
+            )
+
+        await db_session.refresh(item)
+        await db_session.refresh(imp_file)
+        assert job.status == ImportJobStatus.REVIEW
+        assert item.status == ImportSeriesStatus.MATCHED
+        assert item.selected_for_import is True
+        assert imp_file.status == ImportedFileStatus.MATCHED
+        snapshot = job.progress_snapshot["managed_copy_capacity"]
+        assert snapshot["status"] == "insufficient"
+        assert snapshot["stage"] == "confirmation"
+
+    @pytest.mark.asyncio
+    async def test_confirm_blocks_unknown_managed_capacity_and_stays_in_review(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        default_managed_root: LibraryRoot,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        job = await _create_job_row(db_session, status=ImportJobStatus.REVIEW)
+        job.target_library_root_id = default_managed_root.id
+        item = await _create_imported_series(db_session, job, selected_for_import=True)
+        await _create_imported_file(db_session, job, item)
+
+        def unknown_capacity(_path: Path) -> None:
+            raise OSError("capacity unavailable")
+
+        monkeypatch.setattr(
+            library_root_management.shutil,
+            "disk_usage",
+            unknown_capacity,
+        )
+
+        with pytest.raises(ValidationError, match="could not be determined"):
+            await service.confirm_import(
+                db_session,
+                job.id,
+                ConfirmImportRequest(series_ids=[item.id]),
+            )
+
+        assert job.status == ImportJobStatus.REVIEW
+        snapshot = job.progress_snapshot["managed_copy_capacity"]
+        assert snapshot["status"] == "unknown"
+        assert snapshot["free_bytes"] is None
+
+    @pytest.mark.asyncio
+    async def test_confirm_persists_sanitized_managed_capacity_snapshot(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        default_managed_root: LibraryRoot,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        job = await _create_job_row(db_session, status=ImportJobStatus.REVIEW)
+        job.target_library_root_id = default_managed_root.id
+        item = await _create_imported_series(db_session, job, selected_for_import=True)
+        imp_file = await _create_imported_file(db_session, job, item)
+        imp_file.file_size = 20 * 1024**3
+        monkeypatch.setattr(
+            library_root_management.shutil,
+            "disk_usage",
+            lambda _path: SimpleNamespace(free=22 * 1024**3),
+        )
+
+        updated_job = await service.confirm_import(
+            db_session,
+            job.id,
+            ConfirmImportRequest(series_ids=[item.id]),
+        )
+
+        snapshot = updated_job.progress_snapshot["managed_copy_capacity"]
+        assert snapshot == {
+            "schema_version": 1,
+            "stage": "confirmation",
+            "target_library_root_id": default_managed_root.id,
+            "selected_source_bytes": 20 * 1024**3,
+            "reserve_bytes": 2 * 1024**3,
+            "required_bytes": 22 * 1024**3,
+            "free_bytes": 22 * 1024**3,
+            "status": "ready",
+        }
+        assert default_managed_root.path not in str(snapshot)
 
     @pytest.mark.asyncio
     async def test_confirm_wrong_state_raises(
@@ -2850,7 +3163,8 @@ class TestMetadataRepair:
         transfer_progress_callback = AsyncMock()
         comicinfo_progress_callback = AsyncMock()
         converted_path = tmp_path / "adapter-test.cbz"
-        library_path = tmp_path / "library.cbz"
+        transfer_library_path = tmp_path / "transfer-library.cbz"
+        materialized_library_path = tmp_path / "materialized-library.cbz"
 
         async def fake_register_library_file(
             session: AsyncSession,
@@ -2867,19 +3181,19 @@ class TestMetadataRepair:
             )
             await kwargs["artifact_transfer"](
                 source_path_arg,
-                library_path,
+                transfer_library_path,
                 "move",
                 transfer_progress_callback=transfer_progress_callback,
             )
             await kwargs["comicinfo_materializer"](
                 source_path_arg,
-                library_path,
+                materialized_library_path,
                 {"Series": "Progress Test"},
                 transfer_method="move",
                 progress_callback=comicinfo_progress_callback,
             )
             await kwargs["comicinfo_embedder"](
-                library_path,
+                materialized_library_path,
                 {"Series": "Progress Test"},
                 progress_callback=comicinfo_progress_callback,
             )
@@ -2907,8 +3221,10 @@ class TestMetadataRepair:
             _payload: dict[str, object],
             *,
             transfer_method: str,
+            temp_path: Path | None = None,
             progress_callback=None,
         ) -> bool:
+            assert temp_path is not None
             assert transfer_method == "move"
             target_path.write_bytes(b"materialized")
             if progress_callback is not None:
@@ -2953,6 +3269,8 @@ class TestMetadataRepair:
 
         assert result == "ok"
         register_mock.assert_awaited_once()
+        assert register_mock.await_args.kwargs["source_scan_root"] == Path(job.source_path)
+        assert register_mock.await_args.kwargs["strict_import_target"] is True
         convert_mock.assert_awaited_once()
         assert convert_mock.await_args.kwargs["progress_callback"] is transfer_progress_callback
         transfer_mock.assert_awaited_once()
@@ -2968,6 +3286,310 @@ class TestMetadataRepair:
         assert log_event_mock.await_args_list[0].kwargs["target_size_bytes"] == len(b"transferred")
         assert log_event_mock.await_args_list[1].kwargs["target_size_bytes"] == len(b"materialized")
         assert log_event_mock.await_args_list[2].kwargs["changed"] is True
+
+    @pytest.mark.asyncio
+    async def test_register_import_library_file_durably_completes_placement_signature(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        tmp_path: Path,
+    ) -> None:
+        from pullbox.core.library_file_ownership import build_managed_placement_signature
+
+        publisher = Publisher(name="Image")
+        series = Series(
+            title="Placement Test",
+            sort_title="placement test",
+            year_start=2024,
+            publisher=publisher,
+        )
+        issue = Issue(series=series, issue_number=1.0, title="One")
+        db_session.add_all([publisher, series, issue])
+        await db_session.flush()
+        job = await _create_job_row(db_session, status=ImportJobStatus.IMPORTING)
+        source_path = tmp_path / "incoming.cbz"
+        source_path.write_bytes(b"source comic")
+        stable_source_path = tmp_path / "incoming.cbr"
+        stable_source_path.write_bytes(b"original comic")
+        destination_path = tmp_path / "library" / "Placement Test 001.cbz"
+        destination_path.parent.mkdir()
+
+        async def fake_register_library_file(
+            _session: AsyncSession,
+            source_path_arg: Path,
+            _issue_arg: Issue,
+            _confidence: MatchConfidence,
+            **kwargs: object,
+        ) -> str:
+            placement_started = kwargs["placement_started_callback"]
+            placement_completed = kwargs["placement_completed_callback"]
+            temp_paths = kwargs["placement_temp_paths"](
+                source_path_arg,
+                destination_path,
+            )
+            await placement_started(
+                artifact_source_path=source_path_arg,
+                target_path=destination_path,
+                transfer_method="copy",
+                series_folder_created=True,
+                series_folder_path=destination_path.parent,
+                temp_paths=temp_paths,
+            )
+            destination_path.write_bytes(b"placed comic")
+            await placement_completed(
+                target_path=destination_path,
+                destination_signature=build_managed_placement_signature(destination_path),
+            )
+            return "ok"
+
+        with (
+            patch(
+                "pullbox.services.import_service.register_library_file",
+                new=AsyncMock(side_effect=fake_register_library_file),
+            ),
+            patch.object(service, "_log_import_file_timing_events", new=AsyncMock()),
+        ):
+            result = await service._register_import_library_file(
+                db_session,
+                job,
+                source_path,
+                issue,
+                MatchConfidence.HIGH,
+                recovery_original_source_path=stable_source_path,
+            )
+
+        assert result == "ok"
+        action = await db_session.scalar(
+            select(ImportJobAction).where(
+                ImportJobAction.import_job_id == job.id,
+                ImportJobAction.action_type == "library_file_placement_started",
+            )
+        )
+        assert action is not None
+        assert action.payload["original_source_path"] == str(stable_source_path)
+        assert action.payload["artifact_source_path"] == str(source_path)
+        assert action.payload["placement_completed"] is True
+        assert action.payload["destination_signature"] == build_managed_placement_signature(
+            destination_path
+        )
+        assert action.payload["temp_paths"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tamper_destination", "converted_source", "recovery_transfer_method"),
+        [
+            (False, False, "move"),
+            (True, False, "move"),
+            (False, True, "copy"),
+            (False, True, "move"),
+        ],
+    )
+    async def test_register_import_library_file_recovers_same_job_completed_placement(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        tmp_path: Path,
+        tamper_destination: bool,
+        converted_source: bool,
+        recovery_transfer_method: str,
+    ) -> None:
+        from pullbox.core.library_file_ownership import build_managed_placement_signature
+        from pullbox.models.library import LibraryFileStorageMode
+
+        root_path = tmp_path / "library"
+        root_path.mkdir()
+        root = LibraryRoot(
+            name="Recovery root",
+            path=str(root_path),
+            enabled=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        publisher = Publisher(name="Image")
+        series = Series(
+            title="Placement Recovery",
+            sort_title="placement recovery",
+            year_start=2024,
+            publisher=publisher,
+            library_root=root,
+        )
+        issue = Issue(series=series, issue_number=1.0, title="One")
+        db_session.add_all([root, publisher, series, issue])
+        await db_session.flush()
+        job = ImportJob(
+            source_path=str(tmp_path / "incoming"),
+            source_type=ImportSourceType.FILESYSTEM,
+            status=ImportJobStatus.IMPORTING,
+            file_handling_mode=ImportFileHandlingMode.MANAGED_COPY,
+            target_library_root_id=root.id,
+        )
+        db_session.add(job)
+        await db_session.flush()
+        imported_series = ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name=series.title,
+            status=ImportSeriesStatus.CONFIRMED,
+            file_count=1,
+            series_id=series.id,
+        )
+        db_session.add(imported_series)
+        await db_session.flush()
+        source_path = (
+            tmp_path
+            / "incoming"
+            / ("Placement Recovery 001.cbr" if converted_source else "Placement Recovery 001.cbz")
+        )
+        registration_source_path = source_path
+        artifact_source_path = source_path
+        if converted_source:
+            source_path.parent.mkdir()
+            source_path.write_bytes(b"original cbr")
+            artifact_source_path = tmp_path / "old-work" / "Placement Recovery 001.cbz"
+            registration_source_path = tmp_path / "new-work" / "Placement Recovery 001.cbz"
+            registration_source_path.parent.mkdir()
+            registration_source_path.write_bytes(b"new converted temp")
+        imported_file = ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imported_series.id,
+            file_path=str(source_path),
+            file_name=source_path.name,
+            file_size=12,
+            file_format="cbz",
+            parsed_issue_number=1.0,
+            matched_issue_id=issue.id,
+            status=ImportedFileStatus.CONFIRMED,
+        )
+        db_session.add(imported_file)
+        await db_session.flush()
+        destination_path = root_path / "Placement Recovery (2024)" / registration_source_path.name
+        destination_path.parent.mkdir()
+        destination_path.write_bytes(b"placed comic")
+        destination_signature = build_managed_placement_signature(destination_path)
+        placement_action = ImportJobAction(
+            import_job_id=job.id,
+            sequence_no=1,
+            phase="import",
+            action_type="library_file_placement_started",
+            status=ImportJobActionStatus.COMPLETED,
+            payload={
+                "imported_file_id": imported_file.id,
+                "issue_id": issue.id,
+                "destination_path": str(destination_path),
+                "original_source_path": str(source_path),
+                "artifact_source_path": str(artifact_source_path),
+                "transfer_method": recovery_transfer_method,
+                "created_series_folder": True,
+                "created_series_folder_path": str(destination_path.parent),
+                "temp_paths": [],
+                "placement_completed": True,
+                "destination_signature": destination_signature,
+            },
+        )
+        db_session.add(placement_action)
+        await db_session.commit()
+
+        if tamper_destination:
+            placed_stat = destination_path.stat()
+            destination_path.write_bytes(b"other comic!")
+            os.utime(
+                destination_path,
+                ns=(placed_stat.st_atime_ns, placed_stat.st_mtime_ns),
+            )
+
+        async def attempt_recovery():  # type: ignore[no-untyped-def]
+            return await service._register_import_library_file(
+                db_session,
+                job,
+                registration_source_path,
+                issue,
+                MatchConfidence.HIGH,
+                recovery_imported_file_id=imported_file.id,
+                recovery_original_source_path=source_path,
+                move_to_library=True,
+                storage_mode=LibraryFileStorageMode.MANAGED,
+                library_root_id=root.id,
+                transfer_method=recovery_transfer_method,
+                normalize_to_cbz=False,
+                update_embedded_comicinfo_from_match=False,
+                loaded_issue=issue,
+                source_scan_root=Path(job.source_path),
+            )
+
+        if tamper_destination:
+            with pytest.raises(FileNotFoundError, match="Source file not found"):
+                await attempt_recovery()
+            assert destination_path.read_bytes() == b"other comic!"
+            assert await db_session.scalar(select(LibraryFile.id)) is None
+            return
+
+        result = await attempt_recovery()
+
+        library_file = result.library_file
+        assert library_file.file_path == str(destination_path)
+        assert library_file.storage_mode == LibraryFileStorageMode.MANAGED
+        assert library_file.source_signature == destination_signature
+        assert destination_path.read_bytes() == b"placed comic"
+        if converted_source:
+            assert source_path.read_bytes() == b"original cbr"
+            assert registration_source_path.read_bytes() == b"new converted temp"
+        else:
+            assert not source_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_mylar_managed_import_rejects_exact_source_destination(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+        tmp_path: Path,
+    ) -> None:
+        from pullbox.core.exceptions import ConfigurationError
+
+        series_folder = tmp_path / "existing-mylar-library" / "Batman (2016)"
+        series_folder.mkdir(parents=True)
+        source_path = series_folder / "Batman 001.cbz"
+        source_path.write_bytes(b"source comic")
+        database = tmp_path / "mylar.db"
+        database.write_bytes(b"database")
+        root = LibraryRoot(name="Existing Mylar", path=str(tmp_path / "existing-mylar-library"))
+        series = Series(
+            title="Batman",
+            sort_title="batman",
+            year_start=2016,
+            path=str(series_folder),
+            library_root=root,
+        )
+        issue = Issue(series=series, issue_number=1.0, title="One")
+        db_session.add_all([root, series, issue])
+        await db_session.flush()
+        job = await _create_job_row(db_session, status=ImportJobStatus.IMPORTING)
+        job.source_type = ImportSourceType.MYLAR3
+        job.source_path = str(database)
+        await db_session.flush()
+
+        with pytest.raises(ConfigurationError, match="same file"):
+            await service._register_import_library_file(
+                db_session,
+                job,
+                source_path,
+                issue,
+                MatchConfidence.HIGH,
+                move_to_library=True,
+                library_root_id=root.id,
+                transfer_method="copy",
+                rename=False,
+                normalize_to_cbz=False,
+                update_embedded_comicinfo_from_match=False,
+                loaded_issue=issue,
+                source_scan_root=series_folder,
+            )
+
+        assert source_path.read_bytes() == b"source comic"
+        actions = list(
+            await db_session.scalars(
+                select(ImportJobAction).where(ImportJobAction.import_job_id == job.id)
+            )
+        )
+        assert actions == []
 
 
 # ── Test: run_import ─────────────────────────────────────────────────────
@@ -3273,6 +3895,37 @@ class TestCancelJob:
         assert persisted is not None
         assert persisted.status == ImportJobStatus.ROLLING_BACK
         assert persisted.control_request == ImportControlRequest.CANCEL
+
+    @pytest.mark.asyncio
+    async def test_cancel_paused_import_preserves_incomplete_rollback_evidence(
+        self,
+        db_session: AsyncSession,
+        service: ImportService,
+    ) -> None:
+        job = await _create_job_row(db_session, status=ImportJobStatus.PAUSED)
+        job.import_started_at = datetime.now(UTC)
+        await db_session.flush()
+
+        async def incomplete_rollback(session: AsyncSession, job_id: int) -> bool:
+            current = await session.get(ImportJob, job_id)
+            assert current is not None
+            current.status = ImportJobStatus.FAILED
+            current.progress_snapshot = {
+                "mode": "rollback",
+                "phase": "rollback_incomplete",
+                "rollback_manual_recovery_count": 1,
+            }
+            return True
+
+        service.rollback_import = incomplete_rollback  # type: ignore[method-assign]
+
+        result = await service.cancel_job(db_session, job.id)
+
+        assert result == "rollback_incomplete"
+        persisted = await db_session.get(ImportJob, job.id)
+        assert persisted is job
+        assert persisted.status == ImportJobStatus.FAILED
+        assert persisted.progress_snapshot["rollback_manual_recovery_count"] == 1
 
 
 class TestRequestCancel:
@@ -4933,7 +5586,20 @@ class TestOrphanRecovery:
         assert payload["status"] == ImportSeriesStatus.IMPORTED
         assert len(actions) == 1
         assert actions[0].action_type == "series_created"
-        assert actions[0].payload == {"series_id": item.series_id, "import_series_id": item.id}
+        assert actions[0].payload["series_id"] == item.series_id
+        assert actions[0].payload["import_series_id"] == item.id
+        assert actions[0].payload["series_ownership_snapshot"] == {
+            "schema_version": 1,
+            "comicvine_id": 130322,
+            "monitored": False,
+            "status_override": None,
+            "alternate_names": [],
+            "parent_series_id": None,
+            "preferred_library_root_id": None,
+        }
+        assert list(actions[0].payload["issue_ownership_snapshot"].values()) == [
+            {"status": "skipped", "manual_skip": False}
+        ]
 
 
 # ── Test: Full end-to-end flow ───────────────────────────────────────────

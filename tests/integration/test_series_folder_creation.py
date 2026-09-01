@@ -13,7 +13,7 @@ import pytest
 from pullbox.core.events import EventBus
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.config import SystemConfig
-from pullbox.models.library import LibraryRoot
+from pullbox.models.library import LibraryRoot, LibraryRootPolicy, LibraryRootPolicySource
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.services.series_service import SeriesService
 
@@ -70,6 +70,7 @@ class TestSeriesFolderCreation:
         assert expected_path.is_dir()
         assert series.path == str(expected_path)
         assert series.library_root_id == root.id
+        assert series.preferred_library_root_id == root.id
 
     async def test_sets_series_path_and_root_id(self, db_session, tmp_path) -> None:
         """Series model fields are updated after folder creation."""
@@ -93,6 +94,47 @@ class TestSeriesFolderCreation:
 
         assert series.path == str(tmp_path / "Saga (2012)")
         assert series.library_root_id == root.id
+
+    async def test_uses_selected_roots_complete_naming_policy(self, db_session, tmp_path) -> None:
+        root = LibraryRoot(name="Publisher layout", path=str(tmp_path), enabled=True)
+        db_session.add(root)
+        await db_session.flush()
+        db_session.add(
+            LibraryRootPolicy(
+                library_root_id=root.id,
+                schema_version=1,
+                series_path_template="{Publisher}/{Series} ({Year})",
+                comic_file_template="{Series} #{Issue:03d}",
+                annual_file_template="{Series} Annual #{Issue:03d}",
+                non_standard_file_template="{Series} {Type} {Volume:02d}",
+                single_non_standard_file_template="{Series} {Type}",
+                replace_illegal_characters=True,
+                colon_replacement="dash",
+                source=LibraryRootPolicySource.MANUAL,
+                revision=1,
+            )
+        )
+        await db_session.flush()
+
+        series = Series(
+            title="Batman",
+            sort_title="Batman",
+            year_start=2024,
+            status=SeriesStatus.CONTINUING,
+            issue_count=0,
+        )
+        db_session.add(series)
+        await db_session.flush()
+
+        await _make_service()._create_series_folder(
+            db_session,
+            series,
+            root.id,
+            comicvine_id=162083,
+        )
+
+        assert series.path == str(tmp_path / "Unknown" / "Batman (2024)")
+        assert (tmp_path / "Unknown" / "Batman (2024)").is_dir()
 
     async def test_unknown_year_fallback(self, db_session, tmp_path) -> None:
         """Series without year_start uses 'Unknown' in folder name."""
@@ -321,6 +363,59 @@ class TestSeriesFolderErrors:
 
         svc = _make_service()
         with pytest.raises(ValidationError, match="disabled"):
+            await svc._create_series_folder(db_session, series, root.id, comicvine_id=162083)
+
+    async def test_reference_only_root_raises(self, db_session, tmp_path) -> None:
+        """ValidationError when a root does not allow managed writes."""
+        root = LibraryRoot(
+            name="Reference only",
+            path=str(tmp_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=False,
+        )
+        db_session.add(root)
+        await db_session.flush()
+        await _seed_naming_config(db_session)
+
+        series = Series(
+            title="Batman",
+            sort_title="Batman",
+            year_start=2024,
+            status=SeriesStatus.CONTINUING,
+            issue_count=0,
+        )
+        db_session.add(series)
+        await db_session.flush()
+
+        svc = _make_service()
+        with pytest.raises(ValidationError, match="managed writes"):
+            await svc._create_series_folder(db_session, series, root.id, comicvine_id=162083)
+
+    async def test_unavailable_root_raises(self, db_session, tmp_path) -> None:
+        """ValidationError when a managed root is no longer available."""
+        root = LibraryRoot(
+            name="Offline",
+            path=str(tmp_path / "missing"),
+            enabled=True,
+            allow_managed_writes=True,
+        )
+        db_session.add(root)
+        await db_session.flush()
+        await _seed_naming_config(db_session)
+
+        series = Series(
+            title="Batman",
+            sort_title="Batman",
+            year_start=2024,
+            status=SeriesStatus.CONTINUING,
+            issue_count=0,
+        )
+        db_session.add(series)
+        await db_session.flush()
+
+        svc = _make_service()
+        with pytest.raises(ValidationError, match="existing directory"):
             await svc._create_series_folder(db_session, series, root.id, comicvine_id=162083)
 
 

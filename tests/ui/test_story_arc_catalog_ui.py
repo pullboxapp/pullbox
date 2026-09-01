@@ -23,6 +23,8 @@ from pullbox.services.story_arc_catalog import StoryArcCatalogService
 from tests.story_arc_catalog_fixtures import CatalogProvider
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from httpx import AsyncClient
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -145,6 +147,67 @@ async def test_catalog_preview_requires_order_review_and_separate_canonical_root
     assert 'name="target_library_root_id"' in response.text
     assert "Keep the original filename" in response.text
     assert "Prefix arc filenames with the reading order" in response.text
+
+
+async def test_catalog_preview_lists_only_managed_roots_with_default_first(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    catalog_provider: CatalogProvider,
+    tmp_path: Path,
+):
+    default_path = tmp_path / "default"
+    managed_path = tmp_path / "managed"
+    reference_path = tmp_path / "reference"
+    disabled_path = tmp_path / "disabled"
+    default_path.mkdir()
+    managed_path.mkdir()
+    reference_path.mkdir()
+    disabled_path.mkdir()
+    async with sec_db() as session:
+        default = LibraryRoot(
+            name="Zulu default managed",
+            path=str(default_path),
+            enabled=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        managed = LibraryRoot(
+            name="Alpha managed",
+            path=str(managed_path),
+            enabled=True,
+            allow_managed_writes=True,
+        )
+        reference_only = LibraryRoot(
+            name="Reference only",
+            path=str(reference_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=False,
+        )
+        disabled = LibraryRoot(
+            name="Disabled managed",
+            path=str(disabled_path),
+            enabled=False,
+            allow_managed_writes=True,
+        )
+        offline = LibraryRoot(
+            name="Offline managed",
+            path=str(tmp_path / "offline"),
+            enabled=True,
+            allow_managed_writes=True,
+        )
+        session.add_all([default, managed, reference_only, disabled, offline])
+        await session.commit()
+
+    response = await authenticated_client.get("/story-arcs/catalog/42")
+
+    assert response.status_code == 200
+    assert response.text.count("Zulu default managed") == 2
+    assert response.text.count("Alpha managed") == 2
+    assert response.text.index("Zulu default managed") < response.text.index("Alpha managed")
+    assert response.text.count("Reference only") == 1
+    assert "Disabled managed" not in response.text
+    assert "Offline managed" not in response.text
 
 
 async def test_partial_catalog_blocks_add_and_retains_retry(

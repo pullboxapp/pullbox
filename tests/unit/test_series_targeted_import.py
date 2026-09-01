@@ -371,6 +371,41 @@ async def test_hydrate_series_catalog_marks_complete_and_emits_series_added(
 
 
 @pytest.mark.asyncio
+async def test_hydrate_series_catalog_routes_future_folder_work_to_preferred_root(
+    db_session: AsyncSession,
+) -> None:
+    metadata = MagicMock()
+    service = SeriesService(metadata_service=metadata, event_bus=EventBus())
+    current_root = LibraryRoot(
+        name="Existing",
+        path="/existing",
+        enabled=True,
+        allow_managed_writes=False,
+    )
+    preferred_root = LibraryRoot(name="Future", path="/future", enabled=True)
+    db_session.add_all([current_root, preferred_root])
+    await db_session.flush()
+    series = Series(
+        comicvine_id=166905,
+        title="Future Root",
+        sort_title="future root",
+        library_root_id=current_root.id,
+        preferred_library_root_id=preferred_root.id,
+        issue_catalog_state=IssueCatalogState.HYDRATING,
+    )
+    db_session.add(series)
+    await db_session.flush()
+    service.prefetch_comicvine_bundle = AsyncMock(return_value=(MagicMock(), []))  # type: ignore[method-assign]
+    add_prefetched = AsyncMock(return_value=series)
+    service.add_from_comicvine_prefetched = add_prefetched  # type: ignore[method-assign]
+
+    hydrated = await service.hydrate_series_catalog(db_session, series.id)
+
+    assert hydrated is series
+    assert add_prefetched.await_args.kwargs["library_root_id"] == preferred_root.id
+
+
+@pytest.mark.asyncio
 async def test_targeted_import_requires_a_comicvine_id(db_session: AsyncSession) -> None:
     metadata = MagicMock()
     service = SeriesService(metadata_service=metadata, event_bus=EventBus())

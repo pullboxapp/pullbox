@@ -290,11 +290,16 @@ class HealthService:
         )
 
     @staticmethod
-    def _check_filesystem_target(path: Path, name: str) -> tuple[SubCheckOutcome, str]:
+    def _check_filesystem_target(
+        path: Path,
+        name: str,
+        require_write: bool,
+    ) -> tuple[SubCheckOutcome, str]:
         """Check one operational filesystem target and return a persistable sub-check."""
         return check_filesystem_target(
             path,
             name,
+            require_write,
             perf_counter=time.perf_counter,
             scandir=os.scandir,
             mkstemp=tempfile.mkstemp,

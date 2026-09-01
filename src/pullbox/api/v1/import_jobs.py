@@ -112,11 +112,16 @@ from pullbox.schemas.import_job import (
     StoryArcReviewDecisionResponse,
 )
 from pullbox.schemas.import_layout import LayoutAnalysisResponse, LayoutPreviewRequest
+from pullbox.schemas.import_mylar3_path_preflight import (
+    MylarPathPreviewRequest,
+    MylarPathPreviewResponse,
+)
 from pullbox.schemas.import_story_arc_preflight import (
     StoryArcPreflightRequest,
     StoryArcPreflightResponse,
 )
 from pullbox.services.import_layout_analysis import ImportLayoutAnalyzer
+from pullbox.services.import_mylar3_path_preflight import Mylar3PathPreflightAnalyzer
 from pullbox.services.import_story_arc_preflight import StoryArcPreflightAnalyzer
 from pullbox.tasks.import_task import (
     purge_import_runtime_state,
@@ -248,6 +253,28 @@ async def preview_import_layout(
             warnings=warnings,
         )
     return LayoutAnalysisResponse.model_validate(result)
+
+
+@router.post("/mylar-path-preview", response_model=MylarPathPreviewResponse)
+async def preview_import_mylar_paths(
+    _user: AuthenticatedUser,
+    session: DbSession,
+    body: MylarPathPreviewRequest,
+) -> MylarPathPreviewResponse:
+    """Analyze Mylar path coverage without creating a job or mutating files."""
+    analyzer = Mylar3PathPreflightAnalyzer()
+    try:
+        return await analyzer.analyze(
+            session,
+            body.source_path,
+            auto_detect=body.auto_detect,
+            mappings=body.mappings,
+            file_handling_mode=body.file_handling_mode,
+        )
+    except (OSError, ValueError) as exc:
+        raise ValidationError(
+            "The Mylar path preview source is no longer available or readable."
+        ) from exc
 
 
 @router.post("/story-arc-preview", response_model=StoryArcPreflightResponse)

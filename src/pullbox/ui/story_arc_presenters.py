@@ -6,12 +6,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.db_utils import escape_like
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -23,6 +22,7 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
 from pullbox.services.cover_url_service import build_story_arc_cover_url
+from pullbox.services.library_root_management import list_library_roots
 from pullbox.services.reading_query_service import (
     ReadingStateProjection,
     load_story_arc_reading_aggregates,
@@ -194,6 +194,8 @@ class StoryArcPlacementRootView:
     name: str
     path: str
     enabled: bool
+    can_manage: bool
+    can_reference: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1158,31 +1160,52 @@ async def load_story_arc_placement_roots(
     *,
     selected_root_id: int | None,
 ) -> tuple[tuple[StoryArcPlacementRootView, ...], bool]:
-    roots = list(
-        (
-            await session.scalars(
-                select(LibraryRoot)
-                .where(
-                    or_(
-                        LibraryRoot.enabled.is_(True),
-                        LibraryRoot.id == selected_root_id,
-                    )
-                )
-                .order_by(LibraryRoot.name.asc(), LibraryRoot.id.asc())
-                .limit(_PLACEMENT_ROOT_OPTION_LIMIT + 1)
-            )
-        ).all()
+    states = await list_library_roots(session)
+    usable = [
+        root
+        for root in states
+        if bool(root["enabled"])
+        and bool(root["available"])
+        and bool(root["readable"])
+        and (
+            (bool(root["allow_managed_writes"]) and bool(root["writable"]))
+            or bool(root["allow_referenced_registrations"])
+        )
+    ]
+    usable.sort(
+        key=lambda root: (
+            not bool(root["is_default_managed_destination"]),
+            str(root["name"]).casefold(),
+            int(root["id"]),
+        )
     )
-    truncated = len(roots) > _PLACEMENT_ROOT_OPTION_LIMIT
+    usable_ids = {int(root["id"]) for root in usable}
+    options = list(usable)
+    if selected_root_id is not None and selected_root_id not in usable_ids:
+        selected = next(
+            (root for root in states if int(root["id"]) == selected_root_id),
+            None,
+        )
+        if selected is not None:
+            options.append(selected)
+    truncated = len(options) > _PLACEMENT_ROOT_OPTION_LIMIT
     return (
         tuple(
             StoryArcPlacementRootView(
-                id=root.id,
-                name=root.name,
-                path=root.path,
-                enabled=root.enabled,
+                id=int(root["id"]),
+                name=str(root["name"]),
+                path=str(root["path"]),
+                enabled=int(root["id"]) in usable_ids,
+                can_manage=(
+                    int(root["id"]) in usable_ids
+                    and bool(root["allow_managed_writes"])
+                    and bool(root["writable"])
+                ),
+                can_reference=(
+                    int(root["id"]) in usable_ids and bool(root["allow_referenced_registrations"])
+                ),
             )
-            for root in roots[:_PLACEMENT_ROOT_OPTION_LIMIT]
+            for root in options[:_PLACEMENT_ROOT_OPTION_LIMIT]
         ),
         truncated,
     )

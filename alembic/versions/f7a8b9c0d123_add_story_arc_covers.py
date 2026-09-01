@@ -31,6 +31,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Remove first-class Story Arc artwork fields."""
+    if op.get_bind().dialect.name == "sqlite":
+        # Native DROP preserves a2's inline foreign-key definitions. A batch
+        # rebuild turns them into table-level constraints that a2's later
+        # downgrade cannot remove column-by-column.
+        op.drop_column("story_arcs", "cover_url")
+        op.drop_column("story_arcs", "cover_path")
+        return
     with op.batch_alter_table("story_arcs") as batch_op:
         batch_op.drop_column("cover_url")
         batch_op.drop_column("cover_path")

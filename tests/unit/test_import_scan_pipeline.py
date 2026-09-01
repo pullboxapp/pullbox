@@ -17,7 +17,7 @@ from pullbox.core.collection_scanner import (
     DiscoveredFile,
     DiscoveredSeries,
 )
-from pullbox.core.exceptions import JobCancelledError
+from pullbox.core.exceptions import JobCancelledError, ValidationError
 from pullbox.core.library_layout import ImportLayoutMode, SourceLayoutSpec
 from pullbox.core.mylar3_reader import (
     Mylar3ArcSettingsSnapshot,
@@ -342,6 +342,7 @@ async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
         source_type=ImportSourceType.MYLAR3,
         status=ImportJobStatus.SCANNING,
         source_layout_snapshot=expected_layout.to_dict(),
+        mylar3_path_map_confirmed=True,
     )
     db_session.add(job)
     await db_session.flush()
@@ -370,7 +371,7 @@ async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
     assert captured_layouts == [expected_layout]
 
 
-async def test_load_mylar3_persists_auto_detected_path_map_for_execution(
+async def test_load_mylar3_rejects_unconfirmed_legacy_path_map_instead_of_detecting(
     db_session,
     tmp_path: Path,
 ) -> None:
@@ -388,6 +389,7 @@ async def test_load_mylar3_persists_auto_detected_path_map_for_execution(
     await db_session.flush()
     job_id = job.id
     captured_maps: list[dict[str, str] | None] = []
+    detector_calls: list[Path] = []
 
     class ReaderDouble:
         def __init__(self, *, db_path, path_map, source_layout) -> None:
@@ -399,20 +401,73 @@ async def test_load_mylar3_persists_auto_detected_path_map_for_execution(
     async def log_event(*_args, **_kwargs) -> None:
         return None
 
-    await _load_mylar3_discovered_series(
-        db_session,
-        job,
-        job_id=job_id,
-        mylar3_reader_cls=ReaderDouble,
-        auto_detect_mylar3_path_map=lambda _path: detected,
-        log_event=log_event,
-    )
+    def detect(path: Path) -> dict[str, str]:
+        detector_calls.append(path)
+        return detected
 
-    assert captured_maps == [detected]
+    with pytest.raises(ValidationError, match="Step 1"):
+        await _load_mylar3_discovered_series(
+            db_session,
+            job,
+            job_id=job_id,
+            mylar3_reader_cls=ReaderDouble,
+            auto_detect_mylar3_path_map=detect,
+            log_event=log_event,
+        )
+
+    assert detector_calls == []
+    assert captured_maps == []
     db_session.expire_all()
     persisted = await db_session.get(ImportJob, job_id)
     assert persisted is not None
-    assert persisted.mylar3_path_map == detected
+    assert persisted.mylar3_path_map == {}
+
+
+async def test_load_mylar3_respects_confirmed_empty_identity_map(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    db_path.touch()
+    job = ImportJob(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+        mylar3_path_map={},
+        mylar3_path_map_confirmed=True,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    detected = {"/stored/comics": str(tmp_path / "unexpected")}
+    captured_maps: list[dict[str, str] | None] = []
+    detector_calls: list[Path] = []
+
+    class ReaderDouble:
+        def __init__(self, *, db_path, path_map, source_layout) -> None:
+            captured_maps.append(path_map)
+
+        async def read_series(self) -> list[DiscoveredSeries]:
+            return []
+
+    def detect(path: Path) -> dict[str, str]:
+        detector_calls.append(path)
+        return detected
+
+    async def log_event(*_args, **_kwargs) -> None:
+        return None
+
+    await _load_mylar3_discovered_series(
+        db_session,
+        job,
+        job_id=job.id,
+        mylar3_reader_cls=ReaderDouble,
+        auto_detect_mylar3_path_map=detect,
+        log_event=log_event,
+    )
+
+    assert detector_calls == []
+    assert captured_maps == [None]
+    assert job.mylar3_path_map == {}
 
 
 async def test_load_mylar3_discovered_series_logs_path_resolution_counts(
@@ -425,6 +480,7 @@ async def test_load_mylar3_discovered_series_logs_path_resolution_counts(
         source_path=str(db_path),
         source_type=ImportSourceType.MYLAR3,
         status=ImportJobStatus.SCANNING,
+        mylar3_path_map_confirmed=True,
     )
     db_session.add(job)
     await db_session.flush()
@@ -493,6 +549,7 @@ async def test_load_mylar3_stages_arcs_from_one_complete_snapshot(
         source_path=str(db_path),
         source_type=ImportSourceType.MYLAR3,
         status=ImportJobStatus.SCANNING,
+        mylar3_path_map_confirmed=True,
     )
     db_session.add(job)
     await db_session.flush()
@@ -594,6 +651,7 @@ async def test_load_mylar3_streams_bounded_pages_to_persistence(
         source_path=str(db_path),
         source_type=ImportSourceType.MYLAR3,
         status=ImportJobStatus.SCANNING,
+        mylar3_path_map_confirmed=True,
     )
     db_session.add(job)
     await db_session.flush()
@@ -739,6 +797,7 @@ async def test_load_mylar3_cancellation_stops_before_next_page_persistence(
         source_path=str(db_path),
         source_type=ImportSourceType.MYLAR3,
         status=ImportJobStatus.SCANNING,
+        mylar3_path_map_confirmed=True,
     )
     db_session.add(job)
     await db_session.flush()

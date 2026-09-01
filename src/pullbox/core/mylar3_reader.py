@@ -36,7 +36,7 @@ from pullbox.core.source_metadata import MetadataSignal, SourceMetadataExtractor
 from pullbox.models.issue import IssueType
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
 
 logger = structlog.get_logger(__name__)
 
@@ -222,6 +222,8 @@ class Mylar3Reader:
                      safe sibling config.ini is discovered without following links.
         include_missing_files: Retain full recorded issue paths, including missing
                                files, for in-place source eligibility review.
+        reference_root_boundaries: Frozen lexical/resolved root pairs used by
+                                   in-place scans to mirror confirmed path semantics.
     """
 
     MYLAR3_CV_PREFIX = "CV-"
@@ -289,11 +291,20 @@ class Mylar3Reader:
         config_path: str | Path | None = None,
         *,
         include_missing_files: bool = False,
+        reference_root_boundaries: Sequence[tuple[Path, Path]] | None = None,
     ) -> None:
         self._db_path = Path(db_path)
         self._config_path = Path(config_path) if config_path is not None else None
         self._path_map = path_map or {}
         self._include_missing_files = include_missing_files
+        self._reference_root_boundaries = (
+            None
+            if reference_root_boundaries is None
+            else tuple(
+                (Path(lexical).expanduser().absolute(), Path(resolved))
+                for lexical, resolved in reference_root_boundaries
+            )
+        )
         self._source_layout = resolve_source_layout_spec(source_layout or SourceLayoutSpec())
         self._compiled_source_layout = (
             None
@@ -857,28 +868,31 @@ class Mylar3Reader:
             # Build sample paths and DiscoveredFile objects from the location directory
             sample_paths: list[str] = []
             discovered_files: list[DiscoveredFile] = []
-            if resolved_location:
-                p = Path(resolved_location)
-                if p.is_dir():
-                    comic_paths = sorted(
-                        f for f in p.iterdir() if f.suffix.lower() in COMIC_EXTENSIONS
-                    )
-                    if self._include_missing_files:
-                        comic_paths = self._include_recorded_issue_paths(
-                            comic_paths, p, series_issue_records
-                        )
-                    sample_paths = [str(f) for f in comic_paths[:5]]
-                    discovered_files = self._build_files(
-                        comic_paths,
-                        source_location=location,
-                        series_cv_id=cv_id,
-                        series_name=row["ComicName"] or "Unknown",
-                        series_year=year,
-                        series_publisher=row["ComicPublisher"],
-                        issue_records=series_issue_records,
-                        issue_count_hint=issue_count_hint,
-                        series_status=series_status,
-                    )
+            comic_paths: list[Path] = []
+            if resolved_location and Path(resolved_location).is_dir():
+                comic_paths = sorted(
+                    f
+                    for f in Path(resolved_location).iterdir()
+                    if f.suffix.lower() in COMIC_EXTENSIONS
+                )
+            comic_paths = self._include_recorded_issue_paths(
+                comic_paths,
+                path_resolution,
+                series_issue_records,
+            )
+            if comic_paths:
+                sample_paths = [str(f) for f in comic_paths[:5]]
+                discovered_files = self._build_files(
+                    comic_paths,
+                    source_location=location,
+                    series_cv_id=cv_id,
+                    series_name=row["ComicName"] or "Unknown",
+                    series_year=year,
+                    series_publisher=row["ComicPublisher"],
+                    issue_records=series_issue_records,
+                    issue_count_hint=issue_count_hint,
+                    series_status=series_status,
+                )
 
             if cv_id is not None and discovered_files:
                 parent_files: list[DiscoveredFile] = []
@@ -922,12 +936,46 @@ class Mylar3Reader:
                 file_count = len(discovered_files)
                 has_files = bool(discovered_files)
 
+            recorded_path_resolutions = [
+                resolution
+                for record in series_issue_records
+                if record.location
+                and (
+                    resolution := self._selected_recorded_issue_path_details(
+                        record.location,
+                        path_resolution,
+                    )
+                )
+                is not None
+                and resolution.path is not None
+                and resolution.path in comic_paths
+            ]
+            recorded_paths_replace_series_location = bool(
+                path_resolution.path is None
+                and path_resolution.status in {"missing", "unmapped"}
+                and discovered_files
+                and recorded_path_resolutions
+            )
             diagnostics: dict[str, object] = {}
-            diagnostics["mylar3_path"] = {
-                "status": path_resolution.status,
-                "mapping_applied": path_resolution.mapping_applied,
-            }
-            if path_resolution.reason is not None:
+            if recorded_paths_replace_series_location:
+                recorded_mapping_applied = any(
+                    resolution.mapping_applied for resolution in recorded_path_resolutions
+                )
+                diagnostics["mylar3_path"] = {
+                    "status": "mapped" if recorded_mapping_applied else "local",
+                    "mapping_applied": recorded_mapping_applied,
+                }
+                diagnostics["mylar3_series_location"] = {
+                    "status": path_resolution.status,
+                    "mapping_applied": path_resolution.mapping_applied,
+                    "reason": path_resolution.reason,
+                }
+            else:
+                diagnostics["mylar3_path"] = {
+                    "status": path_resolution.status,
+                    "mapping_applied": path_resolution.mapping_applied,
+                }
+            if path_resolution.reason is not None and not recorded_paths_replace_series_location:
                 diagnostics.update(
                     {
                         "kind": "mylar3_path_incompatible",
@@ -1069,6 +1117,42 @@ class Mylar3Reader:
                 reason="invalid_location",
                 rejection_reason="The Mylar comic folder must be an absolute path.",
             )
+        if ".." in location_path.parts or self._path_text_is_invalid(location):
+            return _ResolvedMylarPath(
+                path=None,
+                status="invalid",
+                mapping_applied=bool(self._path_map),
+                reason="unsafe_path_mapping",
+                rejection_reason=(
+                    "The Mylar comic folder resolves outside the configured mapped root."
+                ),
+            )
+
+        try:
+            resolved_local_path = location_path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            resolved_local_path = None
+        identity_outside_root = False
+        if resolved_local_path is not None and resolved_local_path.is_dir():
+            identity_status = self._root_claim_status(location_path, resolved_local_path)
+            if identity_status == "allowed":
+                return _ResolvedMylarPath(
+                    path=location_path if self._include_missing_files else resolved_local_path,
+                    status="local",
+                    mapping_applied=False,
+                )
+            if identity_status == "ambiguous":
+                return _ResolvedMylarPath(
+                    path=location_path if self._include_missing_files else None,
+                    status="ambiguous",
+                    mapping_applied=False,
+                    reason="source_root_ambiguous",
+                    rejection_reason=(
+                        "The Mylar comic folder matches ambiguous reference-capable roots."
+                    ),
+                )
+            identity_outside_root = True
+
         for container_prefix, host_prefix in self._ordered_path_map_items():
             container_root = Path(container_prefix)
             try:
@@ -1114,18 +1198,43 @@ class Mylar3Reader:
                     reason="mapped_path_missing",
                     rejection_reason=("The mapped Mylar comic folder is not available to Pullbox."),
                 )
+            mapped_identity_status = self._root_claim_status(host_root / relative, resolved_path)
+            if mapped_identity_status == "ambiguous":
+                return _ResolvedMylarPath(
+                    path=host_root / relative if self._include_missing_files else None,
+                    status="ambiguous",
+                    mapping_applied=True,
+                    reason="source_root_ambiguous",
+                    rejection_reason=(
+                        "The mapped Mylar comic folder matches ambiguous reference-capable roots."
+                    ),
+                )
+            if mapped_identity_status == "outside":
+                return _ResolvedMylarPath(
+                    path=host_root / relative if self._include_missing_files else None,
+                    status="outside_root",
+                    mapping_applied=True,
+                    reason="source_outside_root",
+                    rejection_reason=(
+                        "The mapped Mylar comic folder is outside every enabled "
+                        "reference-capable root."
+                    ),
+                )
             return _ResolvedMylarPath(
                 path=host_root / relative if self._include_missing_files else resolved_path,
                 status="mapped",
                 mapping_applied=True,
             )
 
-        resolved_local_path = location_path.resolve(strict=False)
-        if resolved_local_path.is_dir():
+        if identity_outside_root:
             return _ResolvedMylarPath(
-                path=location_path if self._include_missing_files else resolved_local_path,
-                status="local",
+                path=location_path if self._include_missing_files else None,
+                status="outside_root",
                 mapping_applied=False,
+                reason="source_outside_root",
+                rejection_reason=(
+                    "The Mylar comic folder is outside every enabled reference-capable root."
+                ),
             )
         if self._path_map:
             return _ResolvedMylarPath(
@@ -1153,6 +1262,26 @@ class Mylar3Reader:
             reverse=True,
         )
 
+    def _root_claim_status(self, lexical_path: Path, resolved_path: Path) -> str:
+        """Match preflight's lexical-and-resolved root containment contract."""
+        if self._reference_root_boundaries is None:
+            return "allowed"
+        try:
+            lexical = lexical_path.expanduser().absolute()
+        except (OSError, RuntimeError, ValueError):
+            return "outside"
+        claims = sum(
+            lexical.is_relative_to(root_lexical) and resolved_path.is_relative_to(root_resolved)
+            for root_lexical, root_resolved in self._reference_root_boundaries
+        )
+        if claims == 1:
+            return "allowed"
+        return "ambiguous" if claims > 1 else "outside"
+
+    @staticmethod
+    def _path_text_is_invalid(value: str) -> bool:
+        return len(value) > 4096 or not value.isprintable()
+
     def _build_files(
         self,
         comic_paths: list[Path],
@@ -1169,18 +1298,8 @@ class Mylar3Reader:
         """Build DiscoveredFile objects from a list of comic file paths."""
         results: list[DiscoveredFile] = []
         issue_by_file_name = self._issue_records_by_file_name(issue_records)
-        series_path = (
-            self._resolve_location(source_location) if self._include_missing_files else None
-        )
-        issue_by_path = (
-            {
-                str(self._recorded_issue_path(record.location, Path(series_path))): record
-                for record in issue_records
-                if record.location
-            }
-            if series_path is not None
-            else None
-        )
+        series_resolution = self._resolve_location_details(source_location)
+        issue_by_path = self._issue_records_by_path(issue_records, series_resolution)
         extractor = SourceMetadataExtractor()
         sidecars_by_folder = {
             folder: extractor.read_sidecars(folder)
@@ -1190,10 +1309,8 @@ class Mylar3Reader:
             sidecar_data = sidecars_by_folder[fpath.parent]
             file_name = fpath.name
             file_format = fpath.suffix.lstrip(".").lower()
-            issue_record = (
-                issue_by_path.get(str(fpath))
-                if issue_by_path is not None
-                else issue_by_file_name.get(file_name.casefold())
+            issue_record = issue_by_path.get(str(fpath)) or issue_by_file_name.get(
+                file_name.casefold()
             )
             try:
                 source_signature = build_file_identity_signature(fpath)
@@ -1410,10 +1527,10 @@ class Mylar3Reader:
     def _include_recorded_issue_paths(
         self,
         comic_paths: list[Path],
-        series_path: Path,
+        series_resolution: _ResolvedMylarPath,
         issue_records: list[_MylarIssueRecord],
     ) -> list[Path]:
-        """Retain missing recorded files for in-place review after safe path mapping."""
+        """Merge safely resolved records, retaining missing paths only in-place."""
         paths = set(comic_paths)
         for record in issue_records:
             if not record.location:
@@ -1421,21 +1538,142 @@ class Mylar3Reader:
             path = Path(record.location)
             if path.suffix.lower() not in COMIC_EXTENSIONS:
                 continue
-            paths.add(self._recorded_issue_path(record.location, series_path))
+            resolution = self._selected_recorded_issue_path_details(
+                record.location,
+                series_resolution,
+            )
+            if resolution is not None and resolution.path is not None:
+                paths.add(resolution.path)
         return sorted(paths)
 
-    def _recorded_issue_path(self, location: str, series_path: Path) -> Path:
-        """Map a recorded issue location without replacing it with a basename guess."""
+    def _issue_records_by_path(
+        self,
+        issue_records: list[_MylarIssueRecord],
+        series_resolution: _ResolvedMylarPath,
+    ) -> dict[str, _MylarIssueRecord]:
+        """Index issue identities by their exact selected source path."""
+        records: dict[str, _MylarIssueRecord] = {}
+        for record in issue_records:
+            if not record.location:
+                continue
+            resolution = self._selected_recorded_issue_path_details(
+                record.location,
+                series_resolution,
+            )
+            if resolution is not None and resolution.path is not None:
+                records[str(resolution.path)] = record
+        return records
+
+    def _selected_recorded_issue_path_details(
+        self,
+        location: str,
+        series_resolution: _ResolvedMylarPath,
+    ) -> _ResolvedMylarPath | None:
+        """Resolve one exact issue source under the confirmed series/path-map contract."""
+        if self._path_text_is_invalid(location):
+            return None
         path = Path(location)
+        if ".." in path.parts or path.suffix.lower() not in COMIC_EXTENSIONS:
+            return None
+
         if not path.is_absolute():
-            return series_path / path
-        for container_prefix, host_prefix in self._ordered_path_map_items():
+            if series_resolution.path is None:
+                return None
             try:
-                relative = path.relative_to(Path(container_prefix))
+                resolved_series = series_resolution.path.resolve(strict=False)
+                resolved_path = (series_resolution.path / path).resolve(strict=False)
+            except (OSError, RuntimeError, ValueError):
+                return None
+            if not resolved_path.is_relative_to(resolved_series):
+                return None
+            if not self._include_missing_files and not resolved_path.is_file():
+                return None
+            return _ResolvedMylarPath(
+                path=(series_resolution.path / path)
+                if self._include_missing_files
+                else resolved_path,
+                status=series_resolution.status,
+                mapping_applied=series_resolution.mapping_applied,
+            )
+
+        try:
+            identity_path = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            identity_path = None
+        identity_exists = identity_path is not None and identity_path.is_file()
+        if identity_exists:
+            assert identity_path is not None
+            identity_status = self._root_claim_status(path, identity_path)
+            if identity_status == "allowed":
+                return _ResolvedMylarPath(
+                    path=path if self._include_missing_files else identity_path,
+                    status="local",
+                    mapping_applied=False,
+                )
+            if identity_status == "ambiguous":
+                return (
+                    _ResolvedMylarPath(
+                        path=path,
+                        status="ambiguous",
+                        mapping_applied=False,
+                        reason="source_root_ambiguous",
+                    )
+                    if self._include_missing_files
+                    else None
+                )
+
+        for container_prefix, host_prefix in self._ordered_path_map_items():
+            container_root = Path(container_prefix)
+            try:
+                relative = path.relative_to(container_root)
             except ValueError:
                 continue
-            return Path(host_prefix) / relative
-        return path
+            host_root = Path(host_prefix)
+            if (
+                not container_root.is_absolute()
+                or not host_root.is_absolute()
+                or ".." in relative.parts
+            ):
+                return None
+            try:
+                resolved_root = host_root.resolve(strict=False)
+                resolved_path = (host_root / relative).resolve(strict=False)
+            except (OSError, RuntimeError, ValueError):
+                return None
+            if not resolved_path.is_relative_to(resolved_root):
+                return None
+            if not self._include_missing_files and not resolved_path.is_file():
+                return None
+            mapped_path = host_root / relative if self._include_missing_files else resolved_path
+            mapped_status = self._root_claim_status(host_root / relative, resolved_path)
+            if mapped_status == "allowed":
+                return _ResolvedMylarPath(
+                    path=mapped_path,
+                    status="mapped",
+                    mapping_applied=True,
+                )
+            return (
+                _ResolvedMylarPath(
+                    path=mapped_path,
+                    status="ambiguous" if mapped_status == "ambiguous" else "outside_root",
+                    mapping_applied=True,
+                    reason=(
+                        "source_root_ambiguous"
+                        if mapped_status == "ambiguous"
+                        else "source_outside_root"
+                    ),
+                )
+                if self._include_missing_files
+                else None
+            )
+        if self._include_missing_files:
+            return _ResolvedMylarPath(
+                path=path,
+                status="outside_root" if identity_exists else "missing",
+                mapping_applied=False,
+                reason="source_outside_root" if identity_exists else "path_missing",
+            )
+        return None
 
     def _match_selected_layout(
         self,
@@ -1466,6 +1704,8 @@ class Mylar3Reader:
         if not source_location:
             return None
         location_path = Path(source_location)
+        if ".." not in location_path.parts and location_path.resolve(strict=False).is_dir():
+            return None
         for container_prefix, host_prefix in self._ordered_path_map_items():
             try:
                 location_path.relative_to(Path(container_prefix))
@@ -1677,16 +1917,12 @@ class Mylar3Reader:
                 continue
             owner_location = owner_row["ComicLocation"]
             owner_resolution = self._resolve_location_details(owner_location)
-            if owner_resolution.path is None:
-                continue
-            candidate = (
-                self._recorded_issue_path(record.location, owner_resolution.path)
-                if self._include_missing_files
-                else owner_resolution.path / Path(record.location).name
+            candidate_resolution = self._selected_recorded_issue_path_details(
+                record.location,
+                owner_resolution,
             )
-            if candidate.suffix.lower() not in COMIC_EXTENSIONS or (
-                not self._include_missing_files and not candidate.is_file()
-            ):
+            candidate = candidate_resolution.path if candidate_resolution is not None else None
+            if candidate is None or candidate.suffix.lower() not in COMIC_EXTENSIONS:
                 continue
             existing_paths = {item.file_path for item in target.files}
             if str(candidate) in existing_paths:

@@ -17,7 +17,13 @@ from sqlalchemy import select, text
 from pullbox.api.v1.reader import _manifest_initial_page
 from pullbox.core.file_ops import register_library_file
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import User
@@ -357,6 +363,30 @@ async def test_remove_and_reimport_same_issue_preserve_state_and_restore_readabi
     assert _state_values(restored_state) == before
     assert restored_access is not None and restored_access.readable is True
     assert [item.issue_id for item in restored_continue.items] == [issue.id]
+
+
+@pytest.mark.asyncio
+async def test_remove_referenced_issue_file_detaches_without_deleting_user_source(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    _user, issue, library_file, _state = await _seed_reader_file(
+        db_session,
+        root_path=tmp_path / "existing-library",
+    )
+    library_file.storage_mode = LibraryFileStorageMode.REFERENCED
+    source_path = Path(library_file.file_path)
+    original_bytes = source_path.read_bytes()
+    library_file_id = int(library_file.id)
+    await db_session.commit()
+
+    result = await delete_issue_library_file(db_session, issue.id)
+    await db_session.commit()
+
+    assert result.file_deleted is False
+    assert result.trashed is False
+    assert source_path.read_bytes() == original_bytes
+    assert await db_session.get(LibraryFile, library_file_id) is None
 
 
 @pytest.mark.asyncio

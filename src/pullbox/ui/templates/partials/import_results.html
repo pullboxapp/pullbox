@@ -21,6 +21,13 @@
       - safety_blocked_files: list of ImportedFile with SAFETY_BLOCKED status
       - files_failed: int
       - failed_files: list of ImportedFile with FAILED status
+      - managed_artifacts_created: int
+      - referenced_files_registered: int
+      - rollback_managed_candidates: int (revalidated during rollback)
+      - rollback_reference_candidates: int
+      - rollback_manual_recovery_count: int
+      - rollback_incomplete: bool
+      - rollback_actions_rolled_back: int
 -#}
 {% from "components/settings_shell.html" import inline_alert %}
 
@@ -113,6 +120,22 @@
       </div>
     </div>
   </div>
+
+  {% set rollback_incomplete = rollback_incomplete|default(false) %}
+  {% set rollback_actions_rolled_back = rollback_actions_rolled_back|default(0) %}
+  {% set rollback_manual_recovery_count = rollback_manual_recovery_count|default(0) %}
+  {% if rollback_incomplete %}
+  <div data-testid="import-results-rollback-incomplete">
+    {% call inline_alert(tone="danger", icon="warning") %}
+      <span>
+        <strong>Rollback is incomplete.</strong>
+        {{ rollback_actions_rolled_back }} action{{ '' if rollback_actions_rolled_back == 1 else 's' }} rolled back safely;
+        {{ rollback_manual_recovery_count }} require{{ 's' if rollback_manual_recovery_count == 1 else '' }} manual recovery.
+        Pullbox preserved the affected data. Review the import log before making changes by hand.
+      </span>
+    {% endcall %}
+  </div>
+  {% endif %}
 
   {% if job.status.value == 'completed' and unmatched_queue_count > 0 %}
   <div data-testid="import-results-follow-up-notes" class="space-y-3">
@@ -245,6 +268,50 @@
               <p class="stat-card-copy">{{ "No files failed during import." if files_failed == 0 else "These files failed even after review and need inspection." }}</p>
             </div>
           </div>
+        </div>
+        {% endif %}
+
+        {% set managed_artifacts_created = managed_artifacts_created|default(0) %}
+        {% set referenced_files_registered = referenced_files_registered|default(0) %}
+        {% set rollback_managed_candidates = rollback_managed_candidates|default(0) %}
+        {% set rollback_reference_candidates = rollback_reference_candidates|default(0) %}
+        {% set rollback_manual_recovery_count = rollback_manual_recovery_count|default(0) %}
+        {% if managed_artifacts_created > 0 or referenced_files_registered > 0 or files_already_owned > 0 %}
+        <div data-testid="import-results-ownership-summary">
+          <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-text-dim">Ownership outcomes</p>
+          <div class="mt-3 grid gap-3 sm:grid-cols-3">
+            <div class="stat-card">
+              <p class="stat-card-kicker">Managed artifacts</p>
+              <p class="stat-card-value text-pb-success">{{ managed_artifacts_created }}</p>
+              <p class="stat-card-copy">Library and Story Arc artifacts created and owned by this import.</p>
+            </div>
+            <div class="stat-card">
+              <p class="stat-card-kicker">In-place references</p>
+              <p class="stat-card-value text-pb-interactive">{{ referenced_files_registered }}</p>
+              <p class="stat-card-copy">Existing source and Story Arc files registered without transferring or changing them.</p>
+            </div>
+            <div class="stat-card">
+              <p class="stat-card-kicker">Already owned</p>
+              <p class="stat-card-value">{{ files_already_owned }}</p>
+              <p class="stat-card-copy">Existing Pullbox registrations left unchanged.</p>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+        {% if can_rollback and (rollback_managed_candidates > 0 or rollback_reference_candidates > 0 or rollback_manual_recovery_count > 0) %}
+        <div
+          data-testid="import-results-rollback-summary"
+          class="rounded-xl border border-pb-border bg-pb-card-hover/40 px-4 py-3 text-sm text-pb-text-muted"
+        >
+          <p class="font-medium text-pb-text">Conditional rollback journal</p>
+          <p class="mt-1">
+            {{ rollback_managed_candidates }} managed artifact{{ '' if rollback_managed_candidates == 1 else 's' }} will be fingerprint-checked and removed only when unchanged;
+            {{ rollback_reference_candidates }} reference{{ '' if rollback_reference_candidates == 1 else 's' }} will be detached without deleting source files.
+            {% if rollback_manual_recovery_count > 0 %}
+              {{ rollback_manual_recovery_count }} prior rollback conflict{{ '' if rollback_manual_recovery_count == 1 else 's' }} require{{ 's' if rollback_manual_recovery_count == 1 else '' }} manual recovery.
+            {% endif %}
+          </p>
         </div>
         {% endif %}
       </div>

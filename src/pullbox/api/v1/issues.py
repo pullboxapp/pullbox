@@ -17,6 +17,7 @@ from pullbox.config import get_settings
 from pullbox.core.exceptions import ConfigurationError, NotFoundError, ValidationError
 from pullbox.core.file_ops import register_library_file
 from pullbox.core.file_safety import classify_resource_safety_exception
+from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
 from pullbox.models.download import DownloadClientType, DownloadState
@@ -1132,7 +1133,7 @@ async def import_file_for_issue(
             issue=prepared.issue,
             confidence=MatchConfidence.MANUAL,
             move_to_library=True,
-            library_root_id=prepared.issue.series.library_root_id,
+            library_root_id=preferred_managed_root_id(prepared.issue.series),
             loaded_issue=prepared.issue,
             ingest_policy=prepared.ingest_policy,
             allow_resource_safety_exception=body.allow_resource_safety_exception,

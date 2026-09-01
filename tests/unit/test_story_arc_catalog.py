@@ -647,3 +647,31 @@ async def test_imported_provider_arc_refresh_requires_explicit_new_parent_root(
         appended.sequence_number == 20
         and appended.resolution_state is StoryArcResolutionState.PENDING
     )
+
+
+async def test_add_rejects_reference_only_canonical_root_without_mutation(db_session, tmp_path):
+    from pullbox.services.story_arc_catalog import StoryArcCatalogError, StoryArcCatalogService
+
+    root = LibraryRoot(
+        name="Reference only",
+        path=str(tmp_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
+    db_session.add(root)
+    await db_session.flush()
+    service = StoryArcCatalogService(_provider())
+    preview = await service.preview("31")
+
+    with pytest.raises(StoryArcCatalogError) as error:
+        await service.add(
+            db_session,
+            preview,
+            ordered_issue_provider_ids=["11", "12"],
+            library_root_id=root.id,
+        )
+
+    assert error.value.code == "canonical_root_unavailable"
+    assert await db_session.scalar(select(func.count(StoryArc.id))) == 0
+    assert await db_session.scalar(select(func.count(Series.id))) == 0

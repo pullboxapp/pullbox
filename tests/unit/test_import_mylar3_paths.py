@@ -34,6 +34,22 @@ def test_auto_detect_mylar3_path_map_matches_nearby_directory(tmp_path: Path) ->
     assert auto_detect_mylar3_path_map(db_path) == {"/comics": str(host_comics)}
 
 
+def test_auto_detect_mylar3_path_map_prefers_existing_identity_over_alias(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "imports"
+    config_dir.mkdir()
+    db_path = config_dir / "mylar.db"
+    identity_root = tmp_path / "primary" / "comics"
+    identity_series = identity_root / "Absolute Wonder Woman (2024)"
+    identity_series.mkdir(parents=True)
+    alias_root = tmp_path / "comics"
+    (alias_root / identity_series.name).mkdir(parents=True)
+    _create_mylar_db(db_path, str(identity_series))
+
+    assert auto_detect_mylar3_path_map(db_path) is None
+
+
 def test_auto_detect_mylar3_path_map_prefers_nested_comics_mount(
     tmp_path: Path,
 ) -> None:
@@ -77,6 +93,44 @@ def test_auto_detect_mylar3_path_map_uses_later_existing_location(
     )
 
     assert auto_detect_mylar3_path_map(db_path) == {"/data/comics": str(host_comics)}
+
+
+def test_auto_detect_mylar3_path_map_collects_independent_prefixes(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "imports"
+    config_dir.mkdir()
+    db_path = config_dir / "mylar.db"
+    primary_host = tmp_path / "primary-comics"
+    archive_host = tmp_path / "archive-comics"
+    (primary_host / "Batman (2011)").mkdir(parents=True)
+    (archive_host / "Saga (2012)").mkdir(parents=True)
+    _create_mylar_db(
+        db_path,
+        [
+            "/primary-comics/Batman (2011)",
+            "/archive-comics/Saga (2012)",
+        ],
+    )
+
+    assert auto_detect_mylar3_path_map(db_path) == {
+        "/archive-comics": str(archive_host),
+        "/primary-comics": str(primary_host),
+    }
+
+
+def test_auto_detect_mylar3_path_map_rejects_ambiguous_alias_candidates(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "imports"
+    config_dir.mkdir()
+    db_path = config_dir / "mylar.db"
+    series_name = "Batman (2011)"
+    (config_dir / "comics" / series_name).mkdir(parents=True)
+    (tmp_path / "comics" / series_name).mkdir(parents=True)
+    _create_mylar_db(db_path, f"/data/comics/{series_name}")
+
+    assert auto_detect_mylar3_path_map(db_path) is None
 
 
 def test_auto_detect_mylar3_path_map_returns_none_for_empty_comics_table(

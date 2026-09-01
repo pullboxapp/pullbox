@@ -23,6 +23,7 @@ from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.cover_url_service import build_series_cover_url
+from pullbox.services.library_root_management import list_library_roots
 from pullbox.services.reading_query_service import load_series_reading_aggregates
 from pullbox.ui.comicvine_series_search import (
     ADD_SERIES_PER_PAGE,
@@ -525,10 +526,25 @@ async def add_series_page(
     search_mode: str | None = Query(None),
 ) -> Response:
     """Render the add series page with ComicVine search."""
-    roots_result = await session.execute(
-        select(LibraryRoot).where(LibraryRoot.enabled.is_(True)).order_by(LibraryRoot.name)
+    roots = [
+        root
+        for root in await list_library_roots(session)
+        if bool(root["enabled"])
+        and bool(root["allow_managed_writes"])
+        and bool(root["available"])
+        and bool(root["writable"])
+    ]
+    roots.sort(
+        key=lambda root: (
+            not bool(root["is_default_managed_destination"]),
+            str(root["name"]).casefold(),
+            int(root["id"]),
+        )
     )
-    roots = list(roots_result.scalars().all())
+    if not roots or not bool(roots[0]["is_default_managed_destination"]):
+        # The page intentionally has no arbitrary first-root fallback.  A
+        # managed default must be selected through root management first.
+        roots = []
 
     add_series_sort_options = COMICVINE_SERIES_SORT_OPTIONS
     add_series_search_ctx = await load_add_series_search_context(
@@ -591,7 +607,10 @@ async def load_add_series_search_context(
     requested_page = max(1, page)
     roots_count = (
         await session.scalar(
-            select(func.count(LibraryRoot.id)).where(LibraryRoot.enabled.is_(True))
+            select(func.count(LibraryRoot.id)).where(
+                LibraryRoot.enabled.is_(True),
+                LibraryRoot.allow_managed_writes.is_(True),
+            )
         )
     ) or 0
 

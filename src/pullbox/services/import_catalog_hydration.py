@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import select as sa_select
 
+from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.series import IssueCatalogState, Series
 
 if TYPE_CHECKING:
@@ -239,7 +240,7 @@ async def load_catalog_hydration_plan(
 
         return CatalogHydrationPlan(
             comicvine_id=int(series.comicvine_id),
-            library_root_id=series.library_root_id,
+            library_root_id=preferred_managed_root_id(series),
             search_on_add=search_on_add,
         )
 

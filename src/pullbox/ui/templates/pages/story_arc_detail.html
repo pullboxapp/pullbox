@@ -286,6 +286,7 @@
           method="post"
           data-testid="story-arc-placement-policy-form"
           class="mt-4 space-y-4"
+          x-data="{ placementMode: {{ placement_ui.policy.mode|tojson }} }"
         >
           <input type="hidden" name="expected_revision" value="{{ placement_ui.policy.revision }}">
           <fieldset class="space-y-4"{% if not story_arc.active %} disabled{% endif %}>
@@ -296,6 +297,7 @@
               <select
                 id="story-arc-placement-mode"
                 name="mode"
+                x-model="placementMode"
                 class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
               >
                 <option value="logical"{% if placement_ui.policy.mode == 'logical' %} selected{% endif %}>Logical only</option>
@@ -317,8 +319,9 @@
                 >
                   <option value=""{% if placement_ui.policy.target_library_root_id is none %} selected{% endif %}>Select an approved root</option>
                   {% for root in placement_ui.roots %}
-                    <option value="{{ root.id }}"{% if placement_ui.policy.target_library_root_id == root.id %} selected{% endif %}>
-                      {{ root.name }} — {{ root.path }}{% if not root.enabled %} (disabled; current policy){% endif %}
+                    <option value="{{ root.id }}"{% if placement_ui.policy.target_library_root_id == root.id %} selected{% endif %}{% if not root.enabled %} disabled{% endif %}
+                      :disabled="placementMode === 'reference_only' ? {{ 'false' if root.can_reference else 'true' }} : (placementMode === 'logical' ? false : {{ 'false' if root.can_manage else 'true' }})">
+                      {{ root.name }} — {{ root.path }}{% if root.can_manage and root.can_reference %}{% elif root.can_manage %} (managed only){% elif root.can_reference %} (reference only){% else %} (unavailable; current policy){% endif %}
                     </option>
                   {% endfor %}
                 </select>

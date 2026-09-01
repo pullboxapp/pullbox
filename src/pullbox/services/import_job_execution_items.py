@@ -10,6 +10,7 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportSeriesStatus,
 )
@@ -17,7 +18,9 @@ from pullbox.models.series import Series
 from pullbox.providers.base import IssueSummary
 from pullbox.services.import_catalog_hydration import schedule_catalog_hydration
 from pullbox.services.import_file_resolution import load_importable_files
+from pullbox.services.import_job_actions import build_series_created_action_payload
 from pullbox.services.import_job_execution_progress import progress_session_factory_for_runtime
+from pullbox.services.import_split_series import apply_import_preferred_series_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -91,6 +94,11 @@ async def execute_new_series(
     # are running. That prevents autoflush from opening a SQLite write
     # transaction before the slow work is finished.
     with session.no_autoflush:
+        current_library_root_id = (
+            None
+            if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+            else job.target_library_root_id
+        )
         existing_series_id = await session.scalar(
             sa_select(Series.id).where(Series.comicvine_id == cv_id)
         )
@@ -112,7 +120,7 @@ async def execute_new_series(
             new_series = await add_from_import_review_targeted(
                 session,
                 import_series=item,
-                library_root_id=job.target_library_root_id,
+                library_root_id=current_library_root_id,
                 search_on_add=job.search_on_add,
                 issue_summaries=targeted_issue_summaries_for_import_files(importable_files),
             )
@@ -125,7 +133,7 @@ async def execute_new_series(
             new_series = await add_from_comicvine_prefetched(
                 session,
                 comicvine_id=cv_id,
-                library_root_id=job.target_library_root_id,
+                library_root_id=current_library_root_id,
                 search_on_add=job.search_on_add,
                 series_meta=series_meta,
                 issue_summaries=issue_summaries,
@@ -134,18 +142,28 @@ async def execute_new_series(
             new_series = await series_service.add_from_comicvine(
                 session,
                 comicvine_id=cv_id,
-                library_root_id=job.target_library_root_id,
+                library_root_id=current_library_root_id,
                 search_on_add=job.search_on_add,
             )
     new_series_id = new_series.id
 
+    await apply_import_preferred_series_root(
+        session,
+        job,
+        series_id=new_series_id,
+        record_action=record_action,
+    )
     if existing_series_id is None:
         await record_action(
             session,
             job,
             phase="import",
             action_type="series_created",
-            payload={"series_id": new_series_id, "import_series_id": item_id},
+            payload=await build_series_created_action_payload(
+                session,
+                series_id=new_series_id,
+                import_series_id=item_id,
+            ),
         )
 
     await log_event(
@@ -297,6 +315,7 @@ async def execute_duplicate_series_merge(
     item: ImportedSeries,
     *,
     process_series_files: ProcessSeriesFilesFunc,
+    record_action: RecordActionFunc,
     log_event: LogEventFunc,
     report_file_progress: ReportFileProgressFunc | None = None,
 ) -> tuple[int, int, bool]:
@@ -305,6 +324,13 @@ async def execute_duplicate_series_merge(
     if item.series_id is None:
         await session.commit()
         return 0, 0, False
+
+    await apply_import_preferred_series_root(
+        session,
+        job,
+        series_id=item.series_id,
+        record_action=record_action,
+    )
 
     await log_event(
         session,

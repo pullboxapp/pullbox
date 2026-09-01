@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -40,6 +41,27 @@ async def _log_event(
     **kwargs: Any,
 ) -> None:
     _ = message, kwargs
+
+
+@pytest.fixture(autouse=True)
+async def default_managed_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> LibraryRoot:
+    """Model the startup invariant that every configured install has a default root."""
+    root_path = tmp_path / "default-managed-root"
+    root_path.mkdir(exist_ok=True)
+    root = LibraryRoot(
+        name="Default managed root",
+        path=str(root_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=True,
+        is_default_managed_destination=True,
+    )
+    db_session.add(root)
+    await db_session.flush()
+    return root
 
 
 async def test_create_job_uses_global_search_on_add_and_logs_event(
@@ -174,6 +196,112 @@ async def test_create_job_freezes_selected_root_policy(
     assert job.ingest_policy_snapshot["policy_revision"] == 3
 
 
+async def test_create_job_uses_live_default_managed_destination(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    default_managed_root: LibraryRoot,
+) -> None:
+    source_path = tmp_path / "imports"
+    source_path.mkdir()
+
+    job = await create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source_path),
+            source_type=ImportSourceType.FILESYSTEM,
+        ),
+        log_event=_log_event,
+    )
+
+    assert job.target_library_root_id == default_managed_root.id
+
+
+async def test_create_managed_copy_job_rejects_missing_managed_destination(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    default_managed_root: LibraryRoot,
+) -> None:
+    source_path = tmp_path / "imports-without-destination"
+    source_path.mkdir()
+    await db_session.delete(default_managed_root)
+    await db_session.flush()
+
+    with pytest.raises(ValidationError, match="No managed library destination"):
+        await create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(source_path),
+                source_type=ImportSourceType.FILESYSTEM,
+                file_handling_mode=ImportFileHandlingMode.MANAGED_COPY,
+            ),
+            log_event=_log_event,
+        )
+
+
+async def test_create_in_place_job_does_not_require_optional_managed_destination(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    default_managed_root: LibraryRoot,
+) -> None:
+    await db_session.delete(default_managed_root)
+    await db_session.flush()
+    reference_path = tmp_path / "reference-library"
+    source_path = reference_path / "Existing Layout"
+    source_path.mkdir(parents=True)
+    reference_root = LibraryRoot(
+        name="Reference library",
+        path=str(reference_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
+    db_session.add(reference_root)
+    await db_session.flush()
+
+    job = await create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source_path),
+            source_type=ImportSourceType.FILESYSTEM,
+            file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        ),
+        log_event=_log_event,
+    )
+
+    assert job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+    assert job.target_library_root_id is None
+
+
+async def test_create_job_rejects_reference_only_managed_destination(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    reference_path = tmp_path / "reference-only"
+    reference_path.mkdir()
+    source_path = tmp_path / "imports"
+    source_path.mkdir()
+    reference_root = LibraryRoot(
+        name="Reference only",
+        path=str(reference_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
+    db_session.add(reference_root)
+    await db_session.flush()
+
+    with pytest.raises(ValidationError, match="managed writes"):
+        await create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(source_path),
+                source_type=ImportSourceType.FILESYSTEM,
+                target_library_root_id=reference_root.id,
+            ),
+            log_event=_log_event,
+        )
+
+
 async def test_create_job_rejects_conflicting_compat_search_on_add(
     db_session: AsyncSession,
     tmp_path: object,
@@ -211,40 +339,161 @@ async def test_create_job_rejects_existing_active_import(
         await create_job(db_session, request, log_event=_log_event)
 
 
-@pytest.mark.parametrize(
-    ("request_overrides", "message"),
-    [
-        (
-            {
-                "future_layout_requested": True,
-                "future_root_policy": FutureRootPolicyPayload(
-                    series_path_template="{Publisher}/{Series} ({Year})",
-                    comic_file_template="{Series} {IssueTitle} Issue {Issue:03d}",
-                    annual_file_template="{Series} Annual Issue {Issue:03d}",
-                    non_standard_file_template="{Series} {Type} {Volume:02d} - {IssueTitle}",
-                    single_non_standard_file_template="{Series} {Type} - {IssueTitle}",
-                    replace_illegal_characters=True,
-                    colon_replacement="dash",
-                ),
-            },
-            "Future library layout requires a target library root",
-        ),
-    ],
-)
-async def test_create_job_rejects_not_yet_safe_execution_modes(
+async def test_create_job_accepts_confirmed_mylar_map_inside_enabled_root(
     db_session: AsyncSession,
-    tmp_path: object,
-    request_overrides: dict[str, object],
-    message: str,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    library_path = tmp_path / "library"
+    (library_path / "Series").mkdir(parents=True)
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE comics (ComicLocation TEXT)")
+    connection.execute(
+        "INSERT INTO comics (ComicLocation) VALUES (?)",
+        ("/mylar/comics/Series",),
+    )
+    connection.commit()
+    connection.close()
+    root = LibraryRoot(name="Existing library", path=str(library_path), enabled=True)
+    db_session.add(root)
+    await db_session.flush()
+
+    job = await create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(db_path),
+            source_type=ImportSourceType.MYLAR3,
+            mylar3_path_map={"/mylar/comics": str(library_path)},
+            mylar3_path_map_confirmed=True,
+        ),
+        log_event=_log_event,
+    )
+
+    assert job.mylar3_path_map == {"/mylar/comics": str(library_path)}
+
+
+async def test_create_job_accepts_managed_copy_mylar_map_outside_library_roots(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE comics (ComicLocation TEXT)")
+    connection.execute("INSERT INTO comics (ComicLocation) VALUES ('/mylar/comics/Series')")
+    connection.commit()
+    connection.close()
+    library_path = tmp_path / "library"
+    library_path.mkdir()
+    outside_path = tmp_path / "outside"
+    outside_path.mkdir()
+    destination = LibraryRoot(
+        name="Managed destination",
+        path=str(library_path),
+        enabled=True,
+        allow_referenced_registrations=False,
+        allow_managed_writes=True,
+    )
+    db_session.add(destination)
+    await db_session.flush()
+
+    request = ImportJobCreate(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        target_library_root_id=destination.id,
+        mylar3_path_map={"/mylar/comics": str(outside_path)},
+        mylar3_path_map_confirmed=True,
+    )
+
+    job = await create_job(db_session, request, log_event=_log_event)
+
+    assert job.target_library_root_id == destination.id
+    assert job.mylar3_path_map == {"/mylar/comics": str(outside_path)}
+
+
+async def test_create_job_rejects_mylar_map_inside_a_managed_only_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE comics (ComicLocation TEXT)")
+    connection.execute("INSERT INTO comics (ComicLocation) VALUES ('/mylar/comics/Series')")
+    connection.commit()
+    connection.close()
+    managed_only_path = tmp_path / "managed-only"
+    managed_only_path.mkdir()
+    managed_only = LibraryRoot(
+        name="Managed only",
+        path=str(managed_only_path),
+        enabled=True,
+        allow_referenced_registrations=False,
+        allow_managed_writes=True,
+    )
+    db_session.add(managed_only)
+    await db_session.flush()
+
+    request = ImportJobCreate(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        target_library_root_id=managed_only.id,
+        mylar3_path_map={"/mylar/comics": str(managed_only_path)},
+        mylar3_path_map_confirmed=True,
+    )
+
+    with pytest.raises(ValidationError, match="inside an enabled library root"):
+        await create_job(db_session, request, log_event=_log_event)
+
+
+async def test_create_job_revalidates_confirmed_mylar_mapping_snapshot(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "mylar.db"
+    library_path = tmp_path / "library"
+    library_path.mkdir()
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE comics (ComicLocation TEXT)")
+    connection.execute("INSERT INTO comics (ComicLocation) VALUES ('/mylar/comics/../escaped')")
+    connection.commit()
+    connection.close()
+    db_session.add(LibraryRoot(name="Existing library", path=str(library_path), enabled=True))
+    await db_session.flush()
+
+    request = ImportJobCreate(
+        source_path=str(db_path),
+        source_type=ImportSourceType.MYLAR3,
+        mylar3_path_map={"/mylar/comics": str(library_path)},
+        mylar3_path_map_confirmed=True,
+    )
+
+    with pytest.raises(ValidationError, match="preview is blocked"):
+        await create_job(db_session, request, log_event=_log_event)
+
+
+async def test_create_job_uses_default_root_for_future_layout_without_explicit_target(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    default_managed_root: LibraryRoot,
 ) -> None:
     request = ImportJobCreate(
         source_path=str(tmp_path),
         source_type=ImportSourceType.FILESYSTEM,
-        **request_overrides,
+        future_layout_requested=True,
+        future_root_policy=FutureRootPolicyPayload(
+            series_path_template="{Publisher}/{Series} ({Year})",
+            comic_file_template="{Series} {IssueTitle} Issue {Issue:03d}",
+            annual_file_template="{Series} Annual Issue {Issue:03d}",
+            non_standard_file_template="{Series} {Type} {Volume:02d} - {IssueTitle}",
+            single_non_standard_file_template="{Series} {Type} - {IssueTitle}",
+            replace_illegal_characters=True,
+            colon_replacement="dash",
+        ),
     )
 
-    with pytest.raises(ValidationError, match=message):
-        await create_job(db_session, request, log_event=_log_event)
+    job = await create_job(db_session, request, log_event=_log_event)
+
+    assert job.target_library_root_id == default_managed_root.id
 
 
 async def test_create_job_accepts_in_place_source_inside_enabled_root(
@@ -257,6 +506,8 @@ async def test_create_job_accepts_in_place_source_inside_enabled_root(
         name="Existing Library",
         path=str(tmp_path / "library"),
         enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
     )
     db_session.add(root)
     await db_session.flush()
@@ -272,12 +523,51 @@ async def test_create_job_accepts_in_place_source_inside_enabled_root(
     )
 
     assert job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
-    assert job.target_library_root_id == root.id
+    assert job.target_library_root_id is None
     assert job.move_to_library is False
     assert job.effective_transfer_method == "leave_in_place"
     assert job.source_preserved is True
     assert job.convert_to_preferred_format is False
     assert job.update_embedded_comicinfo_from_match is False
+
+
+async def test_create_job_keeps_in_place_source_root_separate_from_future_destination(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "legacy-library" / "Existing Layout"
+    source_path.mkdir(parents=True)
+    managed_path = tmp_path / "managed-library"
+    managed_path.mkdir()
+    reference_root = LibraryRoot(
+        name="Legacy reference",
+        path=str(source_path.parent),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=False,
+    )
+    managed_root = LibraryRoot(
+        name="Future managed",
+        path=str(managed_path),
+        enabled=True,
+        allow_referenced_registrations=False,
+        allow_managed_writes=True,
+    )
+    db_session.add_all([reference_root, managed_root])
+    await db_session.flush()
+
+    job = await create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source_path),
+            source_type=ImportSourceType.FILESYSTEM,
+            file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+            target_library_root_id=managed_root.id,
+        ),
+        log_event=_log_event,
+    )
+
+    assert job.target_library_root_id == managed_root.id
 
 
 async def test_create_job_freezes_future_policy_baseline_and_job_placement_policy(
@@ -333,7 +623,7 @@ async def test_create_job_rejects_in_place_source_outside_enabled_root(
     db_session.add(LibraryRoot(name="Library", path=str(library_path), enabled=True))
     await db_session.flush()
 
-    with pytest.raises(ValidationError, match="inside an enabled library root"):
+    with pytest.raises(ValidationError, match="allows referenced registrations"):
         await create_job(
             db_session,
             ImportJobCreate(
@@ -392,11 +682,23 @@ async def test_create_job_freezes_selected_layout_without_automatic_fallback(
 
 async def test_create_job_freezes_selected_layout_for_mylar_source(
     db_session: AsyncSession,
-    tmp_path: object,
+    tmp_path: Path,
 ) -> None:
+    series_path = tmp_path / "Existing Series"
+    series_path.mkdir()
+    database = tmp_path / "mylar.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE comics (ComicLocation TEXT)")
+    connection.execute(
+        "INSERT INTO comics (ComicLocation) VALUES (?)",
+        (str(series_path),),
+    )
+    connection.commit()
+    connection.close()
     request = ImportJobCreate(
-        source_path=str(tmp_path),
+        source_path=str(database),
         source_type=ImportSourceType.MYLAR3,
+        mylar3_path_map_confirmed=True,
         source_layout=SourceLayoutSpecPayload(
             mode="preset",
             preset="publisher_series",

@@ -241,6 +241,17 @@ async def _load_import_collection_context(session: AsyncSession) -> dict[str, ob
     """Load the collection import wizard context."""
     roots_result = await session.execute(select(LibraryRoot).order_by(LibraryRoot.name))
     library_roots = list(roots_result.scalars().all())
+    from pullbox.services.library_root_management import list_library_roots
+
+    enabled_root_options = [
+        root for root in await list_library_roots(session) if bool(root["enabled"])
+    ]
+    enabled_root_options.sort(
+        key=lambda root: (
+            not bool(root["is_default_managed_destination"]),
+            str(root["name"]).casefold(),
+        )
+    )
 
     jobs_result = await session.execute(
         select(ImportJob).order_by(ImportJob.created_at.desc()).limit(10)
@@ -249,11 +260,7 @@ async def _load_import_collection_context(session: AsyncSession) -> dict[str, ob
 
     return {
         "library_roots": library_roots,
-        "library_root_options": [
-            {"id": root.id, "name": root.name, "path": root.path}
-            for root in library_roots
-            if root.enabled
-        ],
+        "library_root_options": enabled_root_options,
         "recent_jobs": recent_jobs,
         "resume_step": None,
         "resume_job_id": None,

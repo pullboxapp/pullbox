@@ -44,9 +44,13 @@ def _prepared(
     source_path: Path,
     *,
     library_file: object | None = None,
+    preferred_library_root_id: int | None = 84,
 ) -> PreparedManualIssueImport:
     issue = SimpleNamespace(
-        series=SimpleNamespace(library_root_id=42),
+        series=SimpleNamespace(
+            library_root_id=42,
+            preferred_library_root_id=preferred_library_root_id,
+        ),
         library_file=library_file,
     )
     return PreparedManualIssueImport(
@@ -271,7 +275,7 @@ async def test_execute_manual_issue_import_wires_converter_progress(
     ) -> object:
         converter = kwargs["converter"]
         assert converter is not None
-        assert kwargs["library_root_id"] == 42
+        assert kwargs["library_root_id"] == 84
         assert kwargs["replace_existing_library_file"] is True
         assert kwargs["allow_resource_safety_exception"] is True
         assert kwargs["transfer_progress_callback"] is transfer_progress
@@ -423,13 +427,14 @@ async def test_execute_manual_issue_import_omits_converter_without_preparation_p
         assert kwargs["converter"] is None
         assert kwargs["source_path"] == source
         assert kwargs["move_to_library"] is True
+        assert kwargs["library_root_id"] is None
         return SimpleNamespace(id=101)
 
     monkeypatch.setattr(issue_import_service, "register_library_file", fake_register_library_file)
 
     result = await execute_manual_issue_import(
         object(),  # type: ignore[arg-type]
-        _prepared(source),
+        _prepared(source, preferred_library_root_id=None),
     )
 
     assert result.issue_id == 123

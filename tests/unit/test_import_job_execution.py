@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,20 +17,24 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
     ImportSourceType,
 )
 from pullbox.models.issue import Issue, IssueStatus, IssueType
+from pullbox.models.library import LibraryRoot
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, SeriesType
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services import library_root_management
 from pullbox.services.import_file_execution import process_import_series_files
 from pullbox.services.import_job_execution import (
     _active_file_progress_pct,
     _ActiveFileProgressSettings,
     _build_execution_item_plans,
     _emit_import_preparation_progress,
+    _execute_duplicate_series_merge,
     _execute_new_series,
     _prime_series_prefetch_window,
     _targeted_issue_summaries_for_import_files,
@@ -37,6 +42,33 @@ from pullbox.services.import_job_execution import (
 )
 from pullbox.services.import_job_execution_types import ExecutionItemPlan
 from pullbox.services.import_workflow_state import emit_progress
+
+
+@pytest.fixture(autouse=True)
+async def default_managed_root(
+    db_session,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LibraryRoot:
+    """Give direct execution fixtures the configured managed-root invariant."""
+    root_path = tmp_path / "execution-managed-root"
+    root_path.mkdir()
+    root = LibraryRoot(
+        name="Execution managed root",
+        path=str(root_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=True,
+        is_default_managed_destination=True,
+    )
+    db_session.add(root)
+    await db_session.flush()
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024**3),
+    )
+    return root
 
 
 async def _add_matched_file(
@@ -59,6 +91,87 @@ async def _add_matched_file(
         )
     )
     await db_session.flush()
+
+
+@pytest.mark.asyncio
+async def test_execute_import_job_reopens_review_when_managed_capacity_drifted(
+    db_session,
+    default_managed_root: LibraryRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = ImportJob(
+        source_path="/tmp/imports",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.IMPORTING,
+        file_handling_mode=ImportFileHandlingMode.MANAGED_COPY,
+        target_library_root_id=default_managed_root.id,
+        progress_snapshot={
+            "managed_copy_capacity": {
+                "schema_version": 1,
+                "stage": "confirmation",
+                "target_library_root_id": default_managed_root.id,
+                "selected_source_bytes": 20 * 1024**3,
+                "reserve_bytes": 2 * 1024**3,
+                "required_bytes": 22 * 1024**3,
+                "free_bytes": 30 * 1024**3,
+                "status": "ready",
+            }
+        },
+    )
+    db_session.add(job)
+    await db_session.flush()
+    item = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Capacity Drift",
+        status=ImportSeriesStatus.CONFIRMED,
+        cv_id=999_101,
+        file_count=1,
+    )
+    db_session.add(item)
+    await db_session.flush()
+    imp_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path="/tmp/imports/Capacity Drift 001.cbz",
+        file_name="Capacity Drift 001.cbz",
+        file_size=20 * 1024**3,
+        file_format="cbz",
+        status=ImportedFileStatus.CONFIRMED,
+    )
+    db_session.add(imp_file)
+    await db_session.flush()
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=22 * 1024**3 - 1),
+    )
+    series_service = AsyncMock()
+    process_series_files = AsyncMock()
+
+    await execute_import_job(
+        db_session,
+        job.id,
+        series_service=series_service,
+        process_series_files=process_series_files,
+        raise_if_cancelled=AsyncMock(),
+        record_action=AsyncMock(),
+        log_event=AsyncMock(),
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args, **_kwargs: None,
+        maybe_slow_item_delay=AsyncMock(),
+    )
+
+    await db_session.refresh(job)
+    await db_session.refresh(item)
+    await db_session.refresh(imp_file)
+    assert job.status == ImportJobStatus.REVIEW
+    assert job.import_started_at is None
+    assert job.progress_snapshot["managed_copy_capacity"]["stage"] == "execution"
+    assert job.progress_snapshot["managed_copy_capacity"]["status"] == "insufficient"
+    assert item.status == ImportSeriesStatus.MATCHED
+    assert imp_file.status == ImportedFileStatus.MATCHED
+    series_service.assert_not_awaited()
+    process_series_files.assert_not_awaited()
 
 
 def test_build_execution_item_plans_preserves_review_group_modes_and_cv_precedence() -> None:
@@ -92,6 +205,83 @@ def test_build_execution_item_plans_preserves_review_group_modes_and_cv_preceden
     assert plans[1].raw_series_name == "Existing Series"
     assert plans[1].cv_id == 300
     assert plans[1].existing_series_id == 44
+
+
+@pytest.mark.asyncio
+async def test_duplicate_in_place_import_sets_only_future_preferred_root(
+    db_session,
+    default_managed_root: LibraryRoot,
+    tmp_path,
+) -> None:
+    future_path = tmp_path / "future-root"
+    future_path.mkdir()
+    future_root = LibraryRoot(
+        name="Future root",
+        path=str(future_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=True,
+    )
+    db_session.add(future_root)
+    await db_session.flush()
+    existing_path = str(tmp_path / "existing-series")
+    series = Series(
+        title="Batman",
+        sort_title="batman",
+        year_start=2011,
+        comicvine_id=796,
+        path=existing_path,
+        library_root_id=default_managed_root.id,
+        preferred_library_root_id=None,
+    )
+    db_session.add(series)
+    await db_session.flush()
+    job = ImportJob(
+        source_path=str(tmp_path),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.IMPORTING,
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        target_library_root_id=future_root.id,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    item = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Batman",
+        status=ImportSeriesStatus.DUPLICATE,
+        cv_id=796,
+        series_id=series.id,
+        file_count=1,
+    )
+    db_session.add(item)
+    await db_session.flush()
+    record_action = AsyncMock()
+
+    result = await _execute_duplicate_series_merge(
+        db_session,
+        job,
+        item,
+        process_series_files=AsyncMock(return_value=(1, 0)),
+        record_action=record_action,
+        log_event=AsyncMock(),
+    )
+
+    await db_session.refresh(series)
+    assert result == (1, 0, True)
+    assert series.preferred_library_root_id == future_root.id
+    assert series.library_root_id == default_managed_root.id
+    assert series.path == existing_path
+    record_action.assert_awaited_once_with(
+        db_session,
+        job,
+        phase="import",
+        action_type="series_preferred_root_updated",
+        payload={
+            "series_id": series.id,
+            "old_preferred_library_root_id": None,
+            "new_preferred_library_root_id": future_root.id,
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -285,15 +475,18 @@ async def test_execute_new_series_keeps_review_row_clean_during_external_work(db
 
     observations: dict[str, object] = {}
 
-    async def _add_from_comicvine(*_args, **_kwargs):
+    async def _add_from_comicvine(_self, session, comicvine_id, *_args, **_kwargs):
         observations["dirty_during_series_fetch"] = bool(
             db_session.is_modified(item, include_collections=False) or item in db_session.dirty
         )
-
-        class _SeriesStub:
-            id = 901
-
-        return _SeriesStub()
+        created = Series(
+            title="Persephone",
+            sort_title="persephone",
+            comicvine_id=comicvine_id,
+        )
+        session.add(created)
+        await session.flush()
+        return created
 
     async def _process_series_files(
         session,
@@ -333,17 +526,28 @@ async def test_execute_new_series_keeps_review_row_clean_during_external_work(db
     assert should_emit is True
     assert observations["dirty_during_series_fetch"] is False
     assert observations["dirty_during_file_processing"] is False
-    assert observations["series_id_override"] == 901
+    assert isinstance(observations["series_id_override"], int)
+    assert observations["series_id_override"] > 0
     assert observations["duplicate_mode"] is False
     assert item.status == ImportSeriesStatus.IMPORTED
-    assert item.series_id == 901
+    assert item.series_id == observations["series_id_override"]
 
 
 @pytest.mark.asyncio
-async def test_execute_new_series_uses_targeted_import_path_when_available(db_session) -> None:
+async def test_execute_new_series_uses_targeted_import_path_when_available(
+    db_session,
+    tmp_path,
+) -> None:
+    preferred_path = tmp_path / "preferred"
+    preferred_path.mkdir()
+    preferred_root = LibraryRoot(name="Preferred", path=str(preferred_path), enabled=True)
+    db_session.add(preferred_root)
+    await db_session.flush()
     job = ImportJob(
         source_path="/tmp/imports",
         source_type=ImportSourceType.FILESYSTEM,
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        target_library_root_id=preferred_root.id,
         search_on_add=True,
     )
     db_session.add(job)
@@ -443,6 +647,10 @@ async def test_execute_new_series_uses_targeted_import_path_when_available(db_se
     }
     assert calls["series_id_override"] == item.series_id
     assert item.status == ImportSeriesStatus.IMPORTED
+    created_series = await db_session.get(Series, item.series_id)
+    assert created_series is not None
+    assert created_series.library_root_id is None
+    assert created_series.preferred_library_root_id == preferred_root.id
 
 
 def test_targeted_issue_summaries_preserve_review_issue_type() -> None:
@@ -933,11 +1141,15 @@ async def test_execute_new_series_commits_before_file_processing(db_session) -> 
         commit_seen_before_processing = True
         return await original_commit(*args, **kwargs)
 
-    async def _add_from_comicvine(*_args, **_kwargs):
-        class _SeriesStub:
-            id = 777
-
-        return _SeriesStub()
+    async def _add_from_comicvine(_self, session, comicvine_id, *_args, **_kwargs):
+        created = Series(
+            title="Fearscape",
+            sort_title="fearscape",
+            comicvine_id=comicvine_id,
+        )
+        session.add(created)
+        await session.flush()
+        return created
 
     async def _process_series_files(*_args, **_kwargs):
         assert commit_seen_before_processing is True

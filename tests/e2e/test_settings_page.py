@@ -18,6 +18,111 @@ pytestmark = pytest.mark.e2e
 class TestSettingsPage:
     """Behavior-first E2E checks for the settings shell."""
 
+    def test_media_library_root_manager_previews_and_adds_a_root(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        roots = [
+            {
+                "id": 700,
+                "name": "Primary",
+                "path": "/comics",
+                "enabled": True,
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": True,
+                "is_default_managed_destination": True,
+                "available": True,
+                "readable": True,
+                "writable": True,
+                "free_bytes": 10 * 1024**3,
+                "status": "ready",
+                "warnings": [],
+                "can_disable": False,
+            }
+        ]
+        create_requests: list[dict[str, Any]] = []
+
+        def handle_roots(route) -> None:  # type: ignore[no-untyped-def]
+            if route.request.method == "GET":
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(roots),
+                )
+                return
+
+            payload = route.request.post_data_json
+            create_requests.append(payload)
+            created = {
+                "id": 701,
+                **payload,
+                "enabled": True,
+                "available": True,
+                "readable": True,
+                "writable": False,
+                "free_bytes": 8 * 1024**3,
+                "status": "read_only",
+                "warnings": ["Directory is read-only to Pullbox."],
+                "can_disable": True,
+            }
+            roots.append(created)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps(created),
+            )
+
+        def handle_preview(route) -> None:  # type: ignore[no-untyped-def]
+            payload = route.request.post_data_json
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        **payload,
+                        "available": True,
+                        "readable": True,
+                        "writable": False,
+                        "free_bytes": 8 * 1024**3,
+                        "status": "read_only",
+                        "warnings": ["Directory is read-only to Pullbox."],
+                        "blocking_reasons": [],
+                        "can_create": True,
+                    }
+                ),
+            )
+
+        authed_page.route("**/api/v1/config/library-roots/preview", handle_preview)
+        authed_page.route("**/api/v1/config/library-roots", handle_roots)
+
+        settings = SettingsPage(authed_page, seeded_server)
+        settings.goto("media")
+
+        manager = authed_page.get_by_test_id("settings-media-library-roots")
+        manager.get_by_text("Primary", exact=True).wait_for(state="visible", timeout=5000)
+        authed_page.get_by_test_id("settings-media-library-root-name").fill("Archive")
+        authed_page.get_by_test_id("settings-media-library-root-path").fill("/archive")
+        authed_page.get_by_test_id("settings-media-library-root-managed-role").locator(
+            "xpath=.."
+        ).click()
+
+        manager.get_by_text("Ready to add", exact=True).wait_for(state="visible", timeout=5000)
+        manager.get_by_role("button", name="Add library root").click()
+
+        archive = authed_page.get_by_test_id("settings-media-library-root-701")
+        archive.get_by_text("Archive", exact=True).wait_for(state="visible", timeout=5000)
+        assert archive.get_by_text("Read only", exact=True).is_visible()
+        assert create_requests == [
+            {
+                "name": "Archive",
+                "path": "/archive",
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": False,
+                "is_default_managed_destination": False,
+            }
+        ]
+
     def test_settings_renders_stable_shell(
         self,
         authed_page,

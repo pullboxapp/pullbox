@@ -25,11 +25,13 @@ import os
 import sqlite3
 import sys
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -55,6 +57,7 @@ from pullbox.schemas.import_job import (
     OrphanRecoveryProgressResponse,
     SeriesSelectionBulkUpdateRequest,
 )
+from pullbox.services import library_root_management
 from pullbox.services.auth_service import AuthService
 
 
@@ -106,6 +109,38 @@ async def _api_key_header(
         session.add(APIKey(user_id=user.id, key_hash=key_hash, name="import-test"))
         await session.commit()
     return raw_key
+
+
+@pytest.fixture
+async def configured_managed_root(
+    _db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LibraryRoot:
+    """Model the application-startup managed-root invariant."""
+    root_path = tmp_path / "api-managed-root"
+    root_path.mkdir()
+    async with _db_factory() as session:
+        root = LibraryRoot(
+            name="API managed root",
+            path=str(root_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        session.add(root)
+        await session.commit()
+        root_id = root.id
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024**3),
+    )
+    async with _db_factory() as session:
+        persisted = await session.get(LibraryRoot, root_id)
+        assert persisted is not None
+        return persisted
 
 
 @pytest.fixture
@@ -648,8 +683,368 @@ class TestImportLayoutPreview:
         assert "private-source" not in response.text
 
 
+class TestMylarPathPreview:
+    """Test POST /api/v1/import/mylar-path-preview."""
+
+    @staticmethod
+    def _write_mylar_database(path: Path, locations: list[str]) -> None:
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE comics (ComicLocation TEXT)")
+        connection.executemany(
+            "INSERT INTO comics (ComicLocation) VALUES (?)",
+            [(location,) for location in locations],
+        )
+        connection.commit()
+        connection.close()
+
+    @pytest.mark.asyncio
+    async def test_preview_reports_identity_and_two_manual_mappings(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        identity_root = tmp_path / "identity"
+        current_root = tmp_path / "current"
+        archive_root = tmp_path / "archive"
+        (identity_root / "Identity Series").mkdir(parents=True)
+        (current_root / "Current Series").mkdir(parents=True)
+        (archive_root / "Archive Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(
+            db_path,
+            [
+                str(identity_root / "Identity Series"),
+                "/books/current/Current Series",
+                "/books/archive/Archive Series",
+            ],
+        )
+        async with _db_factory() as session:
+            session.add_all(
+                [
+                    LibraryRoot(name="Identity", path=str(identity_root), enabled=True),
+                    LibraryRoot(name="Current", path=str(current_root), enabled=True),
+                    LibraryRoot(name="Archive", path=str(archive_root), enabled=True),
+                ]
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "auto_detect": False,
+                "mappings": [
+                    {
+                        "stored_prefix": "/books/current",
+                        "pullbox_prefix": str(current_root),
+                    },
+                    {
+                        "stored_prefix": "/books/archive",
+                        "pullbox_prefix": str(archive_root),
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"] == {
+            "locations": 3,
+            "identity_resolved": 1,
+            "mapped_existing": 2,
+            "mapped_missing": 0,
+            "unmapped": 0,
+            "outside_root": 0,
+            "unreadable": 0,
+            "ambiguous": 0,
+            "invalid": 0,
+        }
+        assert data["requires_confirmation"] is True
+        assert data["can_confirm"] is True
+        assert data["path_map"] == {
+            "/books/current": str(current_root),
+            "/books/archive": str(archive_root),
+        }
+        assert [mapping["provenance"] for mapping in data["mappings"]] == [
+            "manual",
+            "manual",
+        ]
+        examples = [
+            example["relative_path"]
+            for mapping in data["mappings"]
+            for example in mapping["examples"]
+        ]
+        assert examples == ["Current Series", "Archive Series"]
+
+        from sqlalchemy import func, select
+
+        async with _db_factory() as session:
+            assert await session.scalar(select(func.count(ImportJob.id))) == 0
+
+    @pytest.mark.asyncio
+    async def test_identity_only_preview_can_be_confirmed_without_mapping_checkbox(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        library_root = tmp_path / "library"
+        (library_root / "Identity Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, [str(library_root / "Identity Series")])
+        async with _db_factory() as session:
+            session.add(LibraryRoot(name="Library", path=str(library_root), enabled=True))
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "auto_detect": True,
+                "mappings": [],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["identity_resolved"] == 1
+        assert data["path_map"] == {}
+        assert data["requires_confirmation"] is False
+        assert data["can_confirm"] is True
+
+    @pytest.mark.asyncio
+    async def test_in_place_preview_rejects_source_paths_in_a_managed_only_root(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        managed_only_root = tmp_path / "managed-only"
+        (managed_only_root / "Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, [str(managed_only_root / "Series")])
+        async with _db_factory() as session:
+            session.add(
+                LibraryRoot(
+                    name="Managed only",
+                    path=str(managed_only_root),
+                    enabled=True,
+                    allow_referenced_registrations=False,
+                    allow_managed_writes=True,
+                )
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "file_handling_mode": "in_place",
+                "auto_detect": True,
+                "mappings": [],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["identity_resolved"] == 0
+        assert data["resolution"]["outside_root"] == 1
+        assert data["can_confirm"] is False
+
+    @pytest.mark.asyncio
+    async def test_managed_copy_preview_accepts_manual_mapping_outside_library_roots(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        external_source = tmp_path / "mylar-comics"
+        (external_source / "Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, ["/stored/comics/Series"])
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "file_handling_mode": "managed_copy",
+                "auto_detect": False,
+                "mappings": [
+                    {
+                        "stored_prefix": "/stored/comics",
+                        "pullbox_prefix": str(external_source),
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["mapped_existing"] == 1
+        assert data["resolution"]["outside_root"] == 0
+        assert data["can_confirm"] is True
+        assert data["mappings"][0]["library_root_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_preview_auto_detects_two_independent_library_prefixes(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        current_root = tmp_path / "current"
+        archive_root = tmp_path / "archive"
+        (current_root / "Current One").mkdir(parents=True)
+        (current_root / "Current Two").mkdir(parents=True)
+        (archive_root / "Archive One").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(
+            db_path,
+            [
+                "/books/current/Current One",
+                "/books/current/Current Two",
+                "/books/archive/Archive One",
+            ],
+        )
+        async with _db_factory() as session:
+            session.add_all(
+                [
+                    LibraryRoot(name="Current", path=str(current_root), enabled=True),
+                    LibraryRoot(name="Archive", path=str(archive_root), enabled=True),
+                ]
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "auto_detect": True,
+                "mappings": [],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["path_map"] == {
+            "/books/current": str(current_root),
+            "/books/archive": str(archive_root),
+        }
+        assert data["resolution"]["mapped_existing"] == 3
+        assert data["resolution"]["ambiguous"] == 0
+        assert data["can_confirm"] is True
+        assert all(mapping["provenance"] == "automatic" for mapping in data["mappings"])
+
+    @pytest.mark.asyncio
+    async def test_identity_wins_and_blocks_a_no_effect_manual_alias(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        identity_root = tmp_path / "identity"
+        alias_root = tmp_path / "alias"
+        (identity_root / "Series").mkdir(parents=True)
+        (alias_root / "Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, [str(identity_root / "Series")])
+        async with _db_factory() as session:
+            session.add_all(
+                [
+                    LibraryRoot(name="Identity", path=str(identity_root), enabled=True),
+                    LibraryRoot(name="Alias", path=str(alias_root), enabled=True),
+                ]
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "auto_detect": False,
+                "mappings": [
+                    {
+                        "stored_prefix": str(identity_root),
+                        "pullbox_prefix": str(alias_root),
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["identity_resolved"] == 1
+        assert data["resolution"]["mapped_existing"] == 0
+        assert data["can_confirm"] is False
+        assert data["mappings"][0]["blocking_reasons"] == ["mapping_does_not_improve_coverage"]
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_automatic_targets_block_confirmation(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        first_root = tmp_path / "first"
+        second_root = tmp_path / "second"
+        (first_root / "Series").mkdir(parents=True)
+        (second_root / "Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, ["/books/Series"])
+        async with _db_factory() as session:
+            session.add_all(
+                [
+                    LibraryRoot(name="First", path=str(first_root), enabled=True),
+                    LibraryRoot(name="Second", path=str(second_root), enabled=True),
+                ]
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={"source_path": str(db_path), "source_type": "mylar3"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["ambiguous"] == 1
+        assert data["path_map"] == {}
+        assert data["can_confirm"] is False
+        assert "ambiguous_mapping_candidates" in data["warnings"]
+
+    @pytest.mark.asyncio
+    async def test_preview_requires_authentication(
+        self,
+        unauth_client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, [])
+
+        response = await unauth_client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={"source_path": str(db_path), "source_type": "mylar3"},
+        )
+
+        assert response.status_code == 401
+
+
 class TestCreateImportJob:
     """Test POST /api/v1/import."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_create_job(
@@ -785,10 +1180,18 @@ class TestCreateImportJob:
         source_path = library_path / "Existing Layout"
         source_path.mkdir(parents=True)
         async with _db_factory() as session:
-            root = LibraryRoot(name="Library", path=str(library_path), enabled=True)
+            existing_roots = list((await session.scalars(select(LibraryRoot))).all())
+            for existing_root in existing_roots:
+                await session.delete(existing_root)
+            await session.flush()
+            root = LibraryRoot(
+                name="Library",
+                path=str(library_path),
+                enabled=True,
+                is_default_managed_destination=True,
+            )
             session.add(root)
             await session.commit()
-            root_id = root.id
 
         with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
             resp = await client.post(
@@ -803,7 +1206,7 @@ class TestCreateImportJob:
         assert resp.status_code == 201
         data = resp.json()
         assert data["file_handling_mode"] == "in_place"
-        assert data["target_library_root_id"] == root_id
+        assert data["target_library_root_id"] is None
         assert data["move_to_library"] is False
         assert data["convert_to_preferred_format"] is False
         assert data["update_embedded_comicinfo_from_match"] is False
@@ -877,17 +1280,23 @@ class TestCreateImportJob:
                         "colon_replacement": "dash",
                     },
                 },
-                "Future library layout requires a target library root",
+                "No managed library destination is configured",
             ),
         ],
     )
     async def test_create_job_rejects_not_yet_safe_execution_modes(
         self,
         client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
         tmp_path: object,
         overrides: dict[str, object],
         message: str,
     ) -> None:
+        async with _db_factory() as session:
+            roots = list((await session.scalars(select(LibraryRoot))).all())
+            for root in roots:
+                await session.delete(root)
+            await session.commit()
         with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
             resp = await client.post(
                 "/api/v1/import",
@@ -1145,6 +1554,13 @@ class TestGetPreview:
 
 class TestConfirmImport:
     """Test POST /api/v1/import/{id}/confirm."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_confirm_succeeds(
@@ -2636,6 +3052,13 @@ class TestRetryStoryArcPlacementsEndpoint:
 class TestRetryImportEndpoint:
     """Test fresh retry API endpoint."""
 
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
+
     @pytest.mark.asyncio
     async def test_retry_import_creates_new_job_and_redirect(
         self,
@@ -2755,6 +3178,13 @@ class TestAuthRequired:
 
 class TestHandlersDirect:
     """Call route functions directly for coverage of handler bodies."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_create_job_direct(

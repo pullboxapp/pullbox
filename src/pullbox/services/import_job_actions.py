@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,17 +12,28 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from sqlalchemy import func as sa_func
 from sqlalchemy import insert as sa_insert
+from sqlalchemy import or_
 from sqlalchemy import select as sa_select
 from sqlalchemy import update as sa_update
 
-from pullbox.core.exceptions import NotFoundError
+from pullbox.core.exceptions import ConfigurationError, NotFoundError
+from pullbox.core.library_file_ownership import build_managed_placement_signature
+from pullbox.models.blocklist import BlocklistEntry
+from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
+from pullbox.models.download import DownloadHistory
 from pullbox.models.import_job import (
     ImportedFile,
+    ImportedFileStatus,
+    ImportedSeries,
     ImportJob,
     ImportJobAction,
     ImportJobActionStatus,
 )
-from pullbox.models.library import LibraryFile
+from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode
+from pullbox.models.pending_match import PendingMatch
+from pullbox.models.reader import IssueReaderState
+from pullbox.models.search_log import SearchLog
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -107,6 +119,44 @@ class DeleteSeriesForRollback(Protocol):
         delete_files: bool,
         delete_folder: bool,
     ) -> None: ...
+
+
+async def build_series_created_action_payload(
+    session: AsyncSession,
+    *,
+    series_id: int,
+    import_series_id: int,
+) -> dict[str, Any]:
+    """Capture the user-owned series state required for safe rollback.
+
+    Metadata hydration may legitimately update provider-owned fields after the
+    series is created, so this seal intentionally covers only user-owned
+    choices. Related files and activity are checked independently at rollback
+    time. Older journal rows without this seal are preserved for manual review.
+    """
+    await session.flush()
+    series = await session.get(Series, series_id)
+    if series is None:
+        raise NotFoundError("Series", series_id)
+    issue_rows = (
+        await session.execute(
+            sa_select(Issue.id, Issue.status, Issue.manual_skip)
+            .where(Issue.series_id == series_id)
+            .order_by(Issue.id)
+        )
+    ).all()
+    return {
+        "series_id": series_id,
+        "import_series_id": import_series_id,
+        "series_ownership_snapshot": _series_user_owned_snapshot(series),
+        "issue_ownership_snapshot": {
+            str(issue_id): {
+                "status": status.value,
+                "manual_skip": bool(manual_skip),
+            }
+            for issue_id, status, manual_skip in issue_rows
+        },
+    }
 
 
 async def next_action_sequence(session: AsyncSession, job_id: int) -> int:
@@ -273,6 +323,23 @@ def _action_sequence_cache(session: AsyncSession) -> dict[int, int]:
     return cached
 
 
+def _series_rollback_lock_statement(series_id: int) -> Any:
+    """Lock the candidate Series against concurrent user-owned changes."""
+    return (
+        sa_select(Series)
+        .where(Series.id == series_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+
+
+def _series_issue_rollback_lock_statement(series_id: int) -> Any:
+    """Lock every Issue before checking activity and deleting its Series."""
+    return (
+        sa_select(Issue.id).where(Issue.series_id == series_id).order_by(Issue.id).with_for_update()
+    )
+
+
 async def rollback_action(
     session: AsyncSession,
     *,
@@ -315,6 +382,45 @@ async def rollback_action(
         permission_restores = list(payload.get("permission_restores") or [])
 
         library_file = await session.get(LibraryFile, library_file_id)
+        source_reappeared = (
+            not referenced_file
+            and transfer_method == "move"
+            and os.path.lexists(original_source_path)
+            and (
+                (
+                    os.path.lexists(destination_path)
+                    and destination_path.resolve(strict=False)
+                    != original_source_path.resolve(strict=False)
+                )
+                or (bool(original_trash_path) and os.path.lexists(original_trash_path))
+            )
+        )
+        if source_reappeared:
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = (
+                "The original move source reappeared after import. Pullbox preserved both "
+                "the source and managed destination for review."
+            )
+            action.rolled_back_at = None
+            await session.flush()
+            return
+        if (
+            not referenced_file
+            and os.path.lexists(destination_path)
+            and not _managed_destination_matches_rollback_action(
+                destination_path,
+                library_file=library_file,
+                expected_signature=payload.get("destination_signature"),
+            )
+        ):
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = (
+                "Managed library file changed after import or no longer matches its "
+                "rollback ownership record. Pullbox preserved the file."
+            )
+            action.rolled_back_at = None
+            await session.flush()
+            return
         if library_file is not None:
             await session.delete(library_file)
 
@@ -322,12 +428,12 @@ async def rollback_action(
             if transfer_method == "move":
                 if original_trash_path:
                     restore_file_from_utility_trash(Path(original_trash_path), original_source_path)
-                    if destination_path.exists():
+                    if os.path.lexists(destination_path):
                         destination_path.unlink(missing_ok=True)
-                elif destination_path.exists():
+                elif os.path.lexists(destination_path):
                     original_source_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(destination_path), str(original_source_path))
-            elif destination_path.exists():
+            elif os.path.lexists(destination_path):
                 destination_path.unlink(missing_ok=True)
 
             for entry in permission_restores:
@@ -368,10 +474,16 @@ async def rollback_action(
         created_series_folder = bool(payload.get("created_series_folder"))
         created_series_folder_path_raw = str(payload.get("created_series_folder_path") or "")
         temp_paths = [Path(str(path)) for path in payload.get("temp_paths") or [] if str(path)]
-
-        for temp_path in temp_paths:
-            if temp_path.exists() and temp_path.is_file():
-                temp_path.unlink(missing_ok=True)
+        surviving_temp_paths = [path for path in temp_paths if os.path.lexists(path)]
+        if surviving_temp_paths:
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = (
+                "Import staging artifacts have no completed ownership signature. "
+                "Pullbox preserved them for review."
+            )
+            action.rolled_back_at = None
+            await session.flush()
+            return
 
         destination_is_original_source = (
             partial_destination_path is not None
@@ -381,20 +493,48 @@ async def rollback_action(
         )
         if (
             partial_destination_path is not None
-            and partial_destination_path.exists()
+            and os.path.lexists(partial_destination_path)
             and not destination_is_original_source
         ):
+            placement_completed = payload.get("placement_completed") is True
+            destination_signature = payload.get("destination_signature")
+            if not placement_completed or not _path_matches_signature(
+                partial_destination_path,
+                destination_signature,
+            ):
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "Import destination is incomplete, changed, or lacks durable ownership "
+                    "evidence. Pullbox preserved it for review."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
             can_restore_move = (
                 transfer_method == "move"
                 and partial_original_source_path is not None
                 and partial_artifact_source_path is not None
                 and partial_artifact_source_path == partial_original_source_path
-                and not partial_original_source_path.exists()
+                and not os.path.lexists(partial_original_source_path)
             )
             if can_restore_move:
                 assert partial_original_source_path is not None
                 partial_original_source_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(partial_destination_path), str(partial_original_source_path))
+            elif (
+                transfer_method == "move"
+                and partial_original_source_path is not None
+                and partial_artifact_source_path == partial_original_source_path
+                and os.path.lexists(partial_original_source_path)
+            ):
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The original move source reappeared after import. Pullbox preserved both "
+                    "the source and managed destination for review."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
             elif partial_destination_path.is_file() or partial_destination_path.is_symlink():
                 partial_destination_path.unlink(missing_ok=True)
 
@@ -408,19 +548,61 @@ async def rollback_action(
                 except OSError:
                     pass
 
+    elif action_type == "series_preferred_root_updated":
+        series_id = _positive_int(payload.get("series_id"), "series_id")
+        old_root_id = _optional_positive_int(
+            payload.get("old_preferred_library_root_id"),
+            "old_preferred_library_root_id",
+        )
+        new_root_id = _positive_int(
+            payload.get("new_preferred_library_root_id"),
+            "new_preferred_library_root_id",
+        )
+        series = await session.get(Series, series_id)
+        if series is not None:
+            if series.preferred_library_root_id != new_root_id:
+                action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                action.error_message = (
+                    "The series preferred destination changed after import. "
+                    "Pullbox preserved the current choice for review."
+                )
+                action.rolled_back_at = None
+                await session.flush()
+                return
+            series.preferred_library_root_id = old_root_id
+
     elif action_type == "series_created":
         series_id = int(payload.get("series_id") or 0)
         if series_id:
-            with contextlib.suppress(NotFoundError):
-                await delete_series(
+            series = await session.scalar(_series_rollback_lock_statement(series_id))
+            if series is not None:
+                unsafe_reason = await _created_series_rollback_block_reason(
                     session,
-                    series_id,
-                    delete_files=False,
-                    delete_folder=True,
+                    action=action,
+                    series=series,
+                    payload=payload,
                 )
-                # A series-created action can be replayed after a partial rollback or
-                # after multiple import rows converged on the same real series. Missing
-                # here means the rollback objective is already satisfied.
+                if unsafe_reason is not None:
+                    action.status = ImportJobActionStatus.ROLLBACK_FAILED
+                    action.error_message = unsafe_reason
+                    action.rolled_back_at = None
+                    await session.flush()
+                    return
+
+                with contextlib.suppress(NotFoundError):
+                    # SeriesService.delete has broader user-facing behavior: it can
+                    # cancel downloads and recursively delete a folder. The guards
+                    # above prove there are no related files/activity. Folder
+                    # ownership is not durably proven, so even an empty directory is
+                    # preserved rather than being inferred safe to remove.
+                    await delete_series(
+                        session,
+                        series_id,
+                        delete_files=False,
+                        delete_folder=False,
+                    )
+                    # A series-created action can be replayed after a partial rollback.
+                    # Missing here means the rollback objective is already satisfied.
 
     elif action_type == "series_folder_renamed":
         series_id = int(payload.get("series_id") or 0)
@@ -466,6 +648,207 @@ async def rollback_action(
     action.status = ImportJobActionStatus.ROLLED_BACK
     action.rolled_back_at = datetime.now(UTC)
     await session.flush()
+
+
+def _series_user_owned_snapshot(series: Series) -> dict[str, Any]:
+    status_override = series.status_override
+    return {
+        "schema_version": 1,
+        "comicvine_id": series.comicvine_id,
+        "monitored": bool(series.monitored),
+        "status_override": status_override.value if status_override is not None else None,
+        "alternate_names": list(series.alternate_names or []),
+        "parent_series_id": series.parent_series_id,
+        "preferred_library_root_id": series.preferred_library_root_id,
+    }
+
+
+async def _created_series_rollback_block_reason(
+    session: AsyncSession,
+    *,
+    action: ImportJobAction,
+    series: Series,
+    payload: dict[str, Any],
+) -> str | None:
+    """Return why a job-created series is no longer safe to remove."""
+    # The locked Series row prevents concurrent Series changes and new rows
+    # that reference it. Locking its Issues also prevents concurrent issue
+    # state changes and new dependent activity until deletion completes.
+    await session.execute(_series_issue_rollback_lock_statement(series.id))
+
+    import_series_id = _optional_positive_int(payload.get("import_series_id"), "import_series_id")
+    expected_snapshot = payload.get("series_ownership_snapshot")
+    expected_issue_snapshot = payload.get("issue_ownership_snapshot")
+    if (
+        import_series_id is None
+        or not isinstance(expected_snapshot, dict)
+        or not isinstance(expected_issue_snapshot, dict)
+    ):
+        return (
+            "The import journal does not contain enough series ownership evidence. "
+            "Pullbox preserved the series for manual recovery."
+        )
+
+    imported_series = await session.get(ImportedSeries, import_series_id)
+    if (
+        imported_series is None
+        or imported_series.import_job_id != action.import_job_id
+        or imported_series.series_id != series.id
+    ):
+        return (
+            "The import-created series is no longer owned exclusively by this import. "
+            "Pullbox preserved it for manual recovery."
+        )
+    if expected_snapshot != _series_user_owned_snapshot(series):
+        return (
+            "The import-created series changed after import. Pullbox preserved the current "
+            "series and its data for manual recovery."
+        )
+
+    issue_state_changed = await _created_series_issue_state_changed(
+        session,
+        action=action,
+        series=series,
+        expected_snapshot=expected_issue_snapshot,
+        monitored=bool(expected_snapshot.get("monitored")),
+    )
+    if issue_state_changed:
+        return (
+            "An issue in the import-created series changed after import. Pullbox preserved "
+            "the series and its issue state for manual recovery."
+        )
+
+    other_import_reference = await session.scalar(
+        sa_select(ImportedSeries.id)
+        .where(
+            ImportedSeries.series_id == series.id,
+            ImportedSeries.import_job_id != action.import_job_id,
+        )
+        .limit(1)
+    )
+    child_series = await session.scalar(
+        sa_select(Series.id).where(Series.parent_series_id == series.id).limit(1)
+    )
+    issue_ids = sa_select(Issue.id).where(Issue.series_id == series.id)
+    related_activity_checks = (
+        sa_select(LibraryFile.id).where(LibraryFile.issue_id.in_(issue_ids)).limit(1),
+        sa_select(DownloadHistory.id).where(DownloadHistory.issue_id.in_(issue_ids)).limit(1),
+        sa_select(IssueReaderState.id).where(IssueReaderState.issue_id.in_(issue_ids)).limit(1),
+        sa_select(PendingMatch.id).where(PendingMatch.issue_id.in_(issue_ids)).limit(1),
+        sa_select(SearchLog.id).where(SearchLog.issue_id.in_(issue_ids)).limit(1),
+        sa_select(DirectAcquisitionAttempt.id)
+        .where(DirectAcquisitionAttempt.issue_id.in_(issue_ids))
+        .limit(1),
+        sa_select(IssueStoryArc.id).where(IssueStoryArc.issue_id.in_(issue_ids)).limit(1),
+        sa_select(BlocklistEntry.id)
+        .where(
+            or_(
+                BlocklistEntry.series_id == series.id,
+                BlocklistEntry.issue_id.in_(issue_ids),
+            )
+        )
+        .limit(1),
+        sa_select(Issue.id)
+        .where(Issue.series_id == series.id, Issue.manual_skip.is_(True))
+        .limit(1),
+    )
+    has_related_activity = False
+    for statement in related_activity_checks:
+        if await session.scalar(statement) is not None:
+            has_related_activity = True
+            break
+    if other_import_reference is not None or child_series is not None or has_related_activity:
+        return (
+            "The import-created series has later files or activity. Pullbox preserved the "
+            "series and related data for manual recovery."
+        )
+    return None
+
+
+async def _created_series_issue_state_changed(
+    session: AsyncSession,
+    *,
+    action: ImportJobAction,
+    series: Series,
+    expected_snapshot: dict[str, Any],
+    monitored: bool,
+) -> bool:
+    """Detect user-owned issue-state changes while allowing import-owned OWNED state."""
+    imported_issue_ids = set(
+        (
+            await session.scalars(
+                sa_select(ImportedFile.matched_issue_id)
+                .join(ImportedSeries, ImportedFile.import_series_id == ImportedSeries.id)
+                .where(
+                    ImportedSeries.import_job_id == action.import_job_id,
+                    ImportedSeries.series_id == series.id,
+                    ImportedFile.status == ImportedFileStatus.IMPORTED,
+                    ImportedFile.matched_issue_id.is_not(None),
+                )
+            )
+        ).all()
+    )
+    current_rows = (
+        await session.execute(
+            sa_select(Issue.id, Issue.status, Issue.manual_skip)
+            .where(Issue.series_id == series.id)
+            .order_by(Issue.id)
+        )
+    ).all()
+    current_ids = {str(issue_id) for issue_id, _status, _manual_skip in current_rows}
+    if not set(expected_snapshot).issubset(current_ids):
+        return True
+
+    default_status = IssueStatus.WANTED if monitored else IssueStatus.SKIPPED
+    for issue_id, status, manual_skip in current_rows:
+        expected = expected_snapshot.get(str(issue_id))
+        if expected is None:
+            if bool(manual_skip) or status != default_status:
+                return True
+            continue
+        if not isinstance(expected, dict):
+            return True
+        expected_manual_skip = expected.get("manual_skip")
+        expected_status = expected.get("status")
+        if not isinstance(expected_manual_skip, bool) or not isinstance(expected_status, str):
+            return True
+        if bool(manual_skip) != expected_manual_skip:
+            return True
+        if issue_id in imported_issue_ids:
+            if status != IssueStatus.OWNED:
+                return True
+        elif status.value != expected_status:
+            return True
+    return False
+
+
+def _managed_destination_matches_rollback_action(
+    destination_path: Path,
+    *,
+    library_file: LibraryFile | None,
+    expected_signature: object,
+) -> bool:
+    """Require path, ownership, and creation signature before managed removal."""
+    if library_file is None or library_file.storage_mode != LibraryFileStorageMode.MANAGED:
+        return False
+    if Path(library_file.file_path).resolve(strict=False) != destination_path.resolve(strict=False):
+        return False
+    if not isinstance(expected_signature, dict) or not expected_signature:
+        return False
+    try:
+        current_signature = build_managed_placement_signature(destination_path)
+    except (ConfigurationError, OSError, RuntimeError, ValueError):
+        return False
+    return expected_signature == current_signature
+
+
+def _path_matches_signature(path: Path, expected_signature: object) -> bool:
+    if not isinstance(expected_signature, dict) or not expected_signature:
+        return False
+    try:
+        return build_managed_placement_signature(path) == expected_signature
+    except (ConfigurationError, OSError, RuntimeError, ValueError):
+        return False
 
 
 async def _rollback_import_managed_story_arc_placement(

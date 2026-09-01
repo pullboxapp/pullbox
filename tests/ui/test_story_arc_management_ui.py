@@ -87,6 +87,51 @@ def _copy_policy_form(
     }
 
 
+async def test_story_arc_root_options_keep_reference_only_current_policy_visible(
+    sec_db: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    default_path = tmp_path / "default"
+    current_path = tmp_path / "current-reference-only"
+    default_path.mkdir()
+    current_path.mkdir()
+    async with sec_db() as session:
+        default = LibraryRoot(
+            name="Default managed",
+            path=str(default_path),
+            enabled=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        current = LibraryRoot(
+            name="Current reference-only policy",
+            path=str(current_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=False,
+        )
+        offline = LibraryRoot(
+            name="Offline managed",
+            path=str(tmp_path / "offline"),
+            enabled=True,
+            allow_managed_writes=True,
+        )
+        session.add_all([default, current, offline])
+        await session.flush()
+
+        roots, truncated = await story_arc_presenters.load_story_arc_placement_roots(
+            session,
+            selected_root_id=current.id,
+        )
+
+    assert truncated is False
+    assert [root.id for root in roots] == [default.id, current.id]
+    assert roots[0].can_manage is True
+    assert roots[1].enabled is True
+    assert roots[1].can_manage is False
+    assert roots[1].can_reference is True
+
+
 @pytest.mark.parametrize(
     ("mode", "synchronize", "summary_label", "synchronization_label"),
     [

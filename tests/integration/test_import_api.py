@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 import zipfile
 from pathlib import Path  # noqa: TC003 - used at runtime in helpers
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -35,6 +36,7 @@ from pullbox.models.series import Series, SeriesStatus
 from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
 from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate, RecoverOrphanRequest
 from pullbox.schemas.import_layout import SourceLayoutSpecPayload
+from pullbox.services import library_root_management
 from pullbox.services.import_service import ImportService
 from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
 
@@ -128,11 +130,45 @@ def _write_cbz(path: Path, comicinfo_xml: str | None = None) -> None:
 async def _setup_comics_directory(session, comics_dir: Path) -> LibraryRoot:
     """Create a configured comics directory and matching LibraryRoot."""
     comics_dir.mkdir(parents=True, exist_ok=True)
-    session.add(SystemConfig(key="comics_directory", value=str(comics_dir), value_type="string"))
-    root = LibraryRoot(name="Comics", path=str(comics_dir), enabled=True)
-    session.add(root)
+    config = await session.get(SystemConfig, "comics_directory")
+    if config is None:
+        session.add(
+            SystemConfig(key="comics_directory", value=str(comics_dir), value_type="string")
+        )
+    else:
+        config.value = str(comics_dir)
+    root = await session.scalar(
+        sa_select(LibraryRoot).where(LibraryRoot.is_default_managed_destination.is_(True))
+    )
+    if root is None:
+        root = LibraryRoot(
+            name="Comics",
+            path=str(comics_dir),
+            enabled=True,
+            is_default_managed_destination=True,
+        )
+        session.add(root)
+    else:
+        root.path = str(comics_dir)
+        root.enabled = True
+        root.allow_managed_writes = True
     await session.flush()
     return root
+
+
+@pytest.fixture
+async def configured_managed_root(
+    db_session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LibraryRoot:
+    """Model the configured managed-root invariant for lifecycle tests."""
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024**3),
+    )
+    return await _setup_comics_directory(db_session, tmp_path / "library")
 
 
 def _make_fake_mylar_db(
@@ -366,6 +402,13 @@ async def _create_series_in_db(
 
 class TestFilesystemImport:
     """Scenario A: Full filesystem scan -> match -> import lifecycle."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     async def test_a_full_lifecycle(self, db_session, tmp_path) -> None:
         """Create job -> scan trusted folders -> confirm all -> import all."""
@@ -787,6 +830,13 @@ class TestFilesystemImport:
 class TestMylar3Import:
     """Scenario B: Import from Mylar3 database with CV ID lookup."""
 
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
+
     async def test_b_mylar3_lifecycle(self, db_session, tmp_path) -> None:
         """Mylar3 DB with 2 CV-ID lookups + 1 search match -> import."""
         comics_dir = tmp_path / "comics"
@@ -884,6 +934,7 @@ class TestMylar3Import:
         request = ImportJobCreate(
             source_path=str(mylar_db),
             source_type=ImportSourceType.MYLAR3,
+            mylar3_path_map_confirmed=True,
         )
         job = await svc.create_job(db_session, request)
 
@@ -1022,6 +1073,7 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
                 source_layout=SourceLayoutSpecPayload(
                     mode="preset",
                     preset="series_folders",
@@ -1132,6 +1184,7 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
             ),
         )
 
@@ -1185,6 +1238,7 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
             ),
         )
 
@@ -1218,6 +1272,8 @@ class TestMylar3Import:
                 return fail
 
         mapped_root = tmp_path / "mapped-comics"
+        mapped_series = mapped_root / "Batman"
+        create_minimal_cbz(mapped_series / "Batman 001.cbz")
         escaped_issue = tmp_path / "escaped" / "Batman 001.cbz"
         create_minimal_cbz(escaped_issue)
         mylar_db = tmp_path / "mylar.db"
@@ -1229,7 +1285,7 @@ class TestMylar3Import:
                     "ComicName": "Batman",
                     "ComicYear": "2011",
                     "ComicPublisher": "DC Comics",
-                    "ComicLocation": "/comics/../escaped",
+                    "ComicLocation": "/comics/Batman",
                     "Total": 1,
                 }
             ],
@@ -1246,8 +1302,19 @@ class TestMylar3Import:
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
                 mylar3_path_map={"/comics": str(mapped_root)},
+                mylar3_path_map_confirmed=True,
             ),
         )
+        # Simulate the source database changing after the safe mapping preview.
+        # Runtime resolution must still reject traversal rather than trusting
+        # the earlier confirmation.
+        connection = sqlite3.connect(mylar_db)
+        connection.execute(
+            "UPDATE comics SET ComicLocation = ?",
+            ("/comics/../escaped",),
+        )
+        connection.commit()
+        connection.close()
 
         await service.start_scan(db_session, job.id)
         await db_session.refresh(job)
@@ -1323,6 +1390,7 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
             ),
         )
 
@@ -1392,6 +1460,7 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
             ),
         )
 
@@ -1463,6 +1532,7 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
             ),
         )
 
@@ -1777,6 +1847,13 @@ class TestPartialFailure:
 
 class TestCancel:
     """Scenario E: Cancel an import job from REVIEW state."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     async def test_e_cancel_from_review(self, db_session, tmp_path) -> None:
         """Cancel a REVIEW-state job; confirm_import raises ValidationError."""

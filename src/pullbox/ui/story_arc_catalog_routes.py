@@ -237,6 +237,7 @@ async def story_arc_catalog_preview(
         message = _ERRORS[_failure_code(exc)]
         logger.warning("story_arc_catalog_preview_failed", category=_failure_code(exc))
     roots, truncated = await load_story_arc_placement_roots(session, selected_root_id=None)
+    managed_roots = tuple(root for root in roots if root.can_manage)
     return _render(
         request,
         username,
@@ -246,6 +247,7 @@ async def story_arc_catalog_preview(
         provider_id=provider_id,
         error_message=message,
         placement_roots=roots,
+        managed_roots=managed_roots,
         placement_roots_truncated=truncated,
     )
 
@@ -373,6 +375,7 @@ async def story_arc_catalog_refresh_preview(
         await session.rollback()
         message = _ERRORS[_failure_code(exc)]
     roots, truncated = await load_story_arc_placement_roots(session, selected_root_id=None)
+    managed_roots = tuple(root for root in roots if root.can_manage)
     return _render(
         request,
         username,
@@ -384,7 +387,7 @@ async def story_arc_catalog_refresh_preview(
         error_message=message,
         members=_members(preview) if preview else [],
         needs_library_root=needs_library_root,
-        placement_roots=roots,
+        placement_roots=managed_roots,
         placement_roots_truncated=truncated,
     )
 

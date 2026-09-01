@@ -8,10 +8,12 @@ from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from pullbox.models.library import LibraryRoot
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.providers.base import IssueSummary, SeriesMetadata
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.import_catalog_hydration import (
+    load_catalog_hydration_plan,
     mark_catalog_hydration_failed,
     run_pending_catalog_hydration,
 )
@@ -156,6 +158,76 @@ async def test_run_pending_catalog_hydration_recovers_hydrating_series_after_res
     await db_session.refresh(no_provider_id)
     assert already_complete.issue_catalog_state == IssueCatalogState.COMPLETE
     assert no_provider_id.issue_catalog_state == IssueCatalogState.HYDRATING
+
+
+async def test_load_catalog_hydration_plan_uses_explicit_preferred_root(db_session) -> None:
+    current_root = LibraryRoot(
+        name="Existing",
+        path="/existing",
+        enabled=True,
+        allow_managed_writes=False,
+    )
+    preferred_root = LibraryRoot(name="Future", path="/future", enabled=True)
+    db_session.add_all([current_root, preferred_root])
+    await db_session.flush()
+    series = Series(
+        title="Preferred Hydration",
+        sort_title="preferred hydration",
+        comicvine_id=4010,
+        library_root_id=current_root.id,
+        preferred_library_root_id=preferred_root.id,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+
+    plan = await load_catalog_hydration_plan(
+        session_factory,
+        series_id=series.id,
+        search_on_add=False,
+    )
+
+    assert plan is not None
+    assert plan.library_root_id == preferred_root.id
+
+
+async def test_load_catalog_hydration_plan_does_not_force_reference_only_current_root(
+    db_session,
+) -> None:
+    current_root = LibraryRoot(
+        name="Existing",
+        path="/existing",
+        enabled=True,
+        allow_managed_writes=False,
+    )
+    db_session.add(current_root)
+    await db_session.flush()
+    series = Series(
+        title="Default Hydration",
+        sort_title="default hydration",
+        comicvine_id=4020,
+        library_root_id=current_root.id,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+
+    plan = await load_catalog_hydration_plan(
+        session_factory,
+        series_id=series.id,
+        search_on_add=False,
+    )
+
+    assert plan is not None
+    assert plan.library_root_id is None
 
 
 async def test_run_pending_catalog_hydration_reuses_step_2_persistent_cache(

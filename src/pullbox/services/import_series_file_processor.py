@@ -108,6 +108,10 @@ async def process_series_files_for_import(
         | None = None,
         comicinfo_progress_callback: Callable[[str, int, int, str], Awaitable[None] | None]
         | None = None,
+        recovery_imported_file_id: int | None = None,
+        recovery_original_source_path: Path | None = None,
+        source_scan_root: Path | None = None,
+        strict_import_target: bool = False,
     ) -> LibraryFile | LibraryFileRegistrationOutcome:
         return await register_import_library_file(
             session,
@@ -128,6 +132,10 @@ async def process_series_files_for_import(
             permission_policy=permission_policy,
             transfer_progress_callback=transfer_progress_callback,
             comicinfo_progress_callback=comicinfo_progress_callback,
+            recovery_imported_file_id=recovery_imported_file_id,
+            recovery_original_source_path=recovery_original_source_path,
+            source_scan_root=source_scan_root,
+            strict_import_target=strict_import_target,
         )
 
     return await core_processor(
@@ -151,6 +159,7 @@ async def process_series_files_for_import(
         move_to_trash=move_to_trash,
         report_file_progress=report_file_progress,
         defer_comicinfo_enrichment=defer_comicinfo_enrichment,
+        revalidate_managed_sources=True,
         file_worker_count=file_worker_count,
         session_factory=session_factory,
     )

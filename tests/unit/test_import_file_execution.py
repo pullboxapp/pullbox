@@ -7,21 +7,30 @@ file-level counters, and gracefully handles per-file errors.
 
 from __future__ import annotations
 
+import os
 import zipfile
 from pathlib import Path
+from tempfile import mkdtemp
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from pullbox.core.exceptions import ValidationError
+from pullbox.core.library_file_ownership import (
+    build_file_identity_signature,
+    build_managed_placement_signature,
+)
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
     ImportFileHandlingMode,
     ImportJob,
+    ImportJobAction,
+    ImportJobActionStatus,
     ImportJobStatus,
     ImportSeriesStatus,
     ImportSourceType,
@@ -40,7 +49,9 @@ from pullbox.schemas.import_job import (
     ConflictResolution,
     FileMatchOverride,
 )
+from pullbox.services.import_referenced_sources import MYLAR_REFERENCE_ROOT_ID_SIGNATURE_KEY
 from pullbox.services.import_service import ImportService
+from scripts.mylar3_import_fixture import create_minimal_cbz
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,14 +138,29 @@ async def _setup_full_scenario(
     await session.flush()
 
     if create_library_root:
-        root = LibraryRoot(name="Comics", path="/tmp/comics-lib", enabled=True)
+        scenario_root = Path(mkdtemp(prefix="pullbox-import-execution-"))
+        source_root = scenario_root / "source"
+        target_root = scenario_root / "library"
+        source_root.mkdir()
+        target_root.mkdir()
+        root = LibraryRoot(
+            name="Comics",
+            path=str(target_root),
+            enabled=True,
+            is_default_managed_destination=True,
+        )
         session.add(root)
         await session.flush()
+    else:
+        scenario_root = Path(mkdtemp(prefix="pullbox-import-execution-"))
+        source_root = scenario_root / "source"
+        source_root.mkdir()
 
     job = ImportJob(
-        source_path="/tmp/comics",
+        source_path=str(source_root),
         source_type=ImportSourceType.FILESYSTEM,
         status=job_status,
+        target_library_root_id=root.id if create_library_root else None,
     )
     session.add(job)
     await session.flush()
@@ -159,10 +185,12 @@ async def _setup_full_scenario(
     imp_files: list[ImportedFile] = []
     for i, status in enumerate(file_statuses):
         idx = i + 1
+        source_file = source_root / f"Batman {idx:03d}.cbz"
+        source_file.write_bytes(b"x" * (1024 * idx))
         imp_file = ImportedFile(
             import_job_id=job.id,
             import_series_id=imp_series.id,
-            file_path=f"/tmp/comics/Batman {idx:03d}.cbz",
+            file_path=str(source_file),
             file_name=f"Batman {idx:03d}.cbz",
             file_size=1024 * idx,
             file_format="cbz",
@@ -172,6 +200,7 @@ async def _setup_full_scenario(
             matched_issue_id=issues[i].id if i < len(issues) else None,
             match_confidence="high",
             match_method="issue_number",
+            source_signature=build_file_identity_signature(source_file),
         )
         session.add(imp_file)
         imp_files.append(imp_file)
@@ -202,7 +231,8 @@ def _mock_register_library_file() -> AsyncMock:
         # Find the existing library root
         root_result = await session.execute(sa_sel(LibraryRoot).limit(1))
         root = root_result.scalars().first()
-        root_id = root.id if root else 1
+        explicit_root_id = kwargs.get("library_root_id")
+        root_id = int(explicit_root_id) if explicit_root_id is not None else root.id if root else 1
 
         # Create a real LibraryFile so FK constraints are satisfied
         lf = LibraryFile(
@@ -649,6 +679,158 @@ class TestFileStatusSetToFailedOnError:
         }
 
     @pytest.mark.asyncio
+    async def test_managed_copy_source_change_is_rejected_before_preparation(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+    ) -> None:
+        job, _imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        source = tmp_path / "incoming" / "Batman 001.cbz"
+        source.parent.mkdir()
+        source.write_bytes(b"scanned comic")
+        imp_files[0].file_path = str(source)
+        imp_files[0].file_name = source.name
+        imp_files[0].file_size = source.stat().st_size
+        imp_files[0].source_signature = build_file_identity_signature(source)
+        job.source_path = str(source.parent)
+        job.file_handling_mode = ImportFileHandlingMode.MANAGED_COPY
+        job.effective_transfer_method = "copy"
+        target_root = await db_session.scalar(select(LibraryRoot))
+        assert target_root is not None
+        target_library = tmp_path / "library"
+        target_library.mkdir()
+        target_root.path = str(target_library)
+        job.target_library_root_id = target_root.id
+        await db_session.flush()
+        source.write_bytes(b"changed after scan")
+        mock_register = _mock_register_library_file()
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with (
+            patch(
+                "pullbox.services.import_service.register_library_file",
+                mock_register,
+            ),
+            patch.object(svc, "_prepare_import_file", wraps=svc._prepare_import_file) as prepare,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        await db_session.refresh(imp_files[0])
+        assert prepare.await_count == 0
+        assert mock_register.await_count == 0
+        assert imp_files[0].status == ImportedFileStatus.FAILED
+        assert imp_files[0].include_in_import is False
+        assert imp_files[0].diagnostics["source_revalidation"]["code"] == "source_changed"
+        assert source.read_bytes() == b"changed after scan"
+
+    @pytest.mark.asyncio
+    async def test_completed_direct_move_resumes_without_missing_source_metadata_read(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+    ) -> None:
+        job, _imp_series, imp_files, series, issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        source = Path(imp_files[0].file_path)
+        target_root = await db_session.get(LibraryRoot, job.target_library_root_id)
+        assert target_root is not None
+        destination = Path(target_root.path) / "Batman (2016)" / source.name
+        destination.parent.mkdir()
+        source.rename(destination)
+        job.effective_transfer_method = "move"
+        job.update_embedded_comicinfo_from_match = True
+        action = ImportJobAction(
+            import_job_id=job.id,
+            sequence_no=1,
+            phase="import",
+            action_type="library_file_placement_started",
+            status=ImportJobActionStatus.COMPLETED,
+            payload={
+                "imported_file_id": imp_files[0].id,
+                "issue_id": issues[0].id,
+                "destination_path": str(destination),
+                "original_source_path": str(source),
+                "artifact_source_path": str(source),
+                "transfer_method": "move",
+                "created_series_folder": True,
+                "created_series_folder_path": str(destination.parent),
+                "temp_paths": [],
+                "placement_completed": True,
+                "destination_signature": build_managed_placement_signature(destination),
+            },
+        )
+        db_session.add(action)
+        await db_session.commit()
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch.object(
+            svc,
+            "_build_cached_comicinfo_payload_for_issue",
+            wraps=svc._build_cached_comicinfo_payload_for_issue,
+        ) as payload_builder:
+            await svc.run_import(db_session, job.id)
+
+        await db_session.refresh(imp_files[0])
+        library_file = await db_session.get(LibraryFile, imp_files[0].library_file_id)
+        assert imp_files[0].status == ImportedFileStatus.IMPORTED
+        assert library_file is not None
+        assert Path(library_file.file_path).resolve() == destination.resolve()
+        assert library_file.source_signature == build_managed_placement_signature(destination)
+        assert not source.exists()
+        assert destination.exists()
+        payload_builder.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_managed_destination_collision_is_excluded_for_review(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        from pullbox.core.exceptions import ImportDestinationValidationError
+
+        job, _imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        mock_register = AsyncMock(
+            side_effect=ImportDestinationValidationError(
+                "destination_collision",
+                "Managed import target already exists and must be reviewed.",
+            )
+        )
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        await db_session.refresh(imp_files[0])
+        assert imp_files[0].status == ImportedFileStatus.FAILED
+        assert imp_files[0].include_in_import is False
+        assert imp_files[0].diagnostics["destination_review"] == {
+            "kind": "managed_destination_review",
+            "code": "destination_collision",
+            "reason": (
+                "The planned managed-library destination is not a new, disjoint path. "
+                "Review the existing artifact or choose another destination."
+            ),
+            "retryable": False,
+            "overrideable": False,
+        }
+
+    @pytest.mark.asyncio
     async def test_resource_safety_failure_sets_safety_blocked_not_failed(
         self,
         db_session: AsyncSession,
@@ -751,6 +933,7 @@ class TestFileStatusSetToFailedOnError:
                 match_confidence=confidence,
                 issue_id=issue_arg.id,
                 library_root_id=1,
+                source_signature=build_managed_placement_signature(destination_path),
             )
             session.add(library_file)
             await session.flush()
@@ -1160,6 +1343,7 @@ class TestImportExecutionAutoflushDiscipline:
             **kwargs: object,
         ) -> LibraryFile:
             assert source == converted_path
+            assert kwargs["recovery_original_source_path"] == source_path
             assert kwargs["comicinfo_payload"] == {"Series": "Batman", "Number": "1"}
             library_file = LibraryFile(
                 file_path=str(final_path),
@@ -1176,6 +1360,10 @@ class TestImportExecutionAutoflushDiscipline:
             return library_file
 
         log_event = AsyncMock()
+        record_action = AsyncMock()
+
+        def _unexpected_trash(*_args: object, **_kwargs: object) -> Path:
+            raise AssertionError("Collection import must preserve the original source")
 
         files_imported, files_failed = await process_import_series_files(
             db_session,
@@ -1197,10 +1385,10 @@ class TestImportExecutionAutoflushDiscipline:
             build_comicinfo_payload=AsyncMock(return_value={"Series": "Batman", "Number": "1"}),
             apply_comicinfo=lambda *_args, **_kwargs: None,
             cleanup_prepared_file=lambda *_args, **_kwargs: None,
-            record_action=AsyncMock(),
+            record_action=record_action,
             log_event=log_event,
             register_file=_register_file,
-            move_to_trash=lambda *args, **kwargs: tmp_path / ".trash" / source_path.name,
+            move_to_trash=_unexpected_trash,
         )
 
         assert files_imported == 1
@@ -1221,6 +1409,9 @@ class TestImportExecutionAutoflushDiscipline:
         assert placed_call.kwargs["source_path"] == str(source_path)
         assert placed_call.kwargs["destination_path"] == str(final_path)
         assert placed_call.kwargs["destination_file_name"] == final_path.name
+        assert source_path.read_text() == "source-cbr"
+        assert record_action.await_args.kwargs["payload"]["transfer_method"] == "copy"
+        assert record_action.await_args.kwargs["payload"]["original_trash_path"] == ""
 
     @pytest.mark.asyncio
     async def test_import_builds_comicinfo_payload_from_prepared_archive_path(
@@ -2131,9 +2322,135 @@ def test_failed_referenced_registration_cleanup_never_unlinks_source(tmp_path: P
         storage_mode="referenced",
         created_series_folder=False,
         created_series_folder_path=None,
+        expected_destination_signature=None,
     )
 
     assert source_path.read_text(encoding="utf-8") == "user-owned comic"
+
+
+def test_failed_managed_registration_cleanup_removes_unchanged_proven_destination(
+    tmp_path: Path,
+) -> None:
+    from pullbox.services.import_file_execution import _cleanup_failed_library_artifact
+
+    source_path = tmp_path / "incoming" / "Issue 001.cbz"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"source comic")
+    destination_path = tmp_path / "library" / "Series" / "Issue 001.cbz"
+    destination_path.parent.mkdir(parents=True)
+    destination_path.write_bytes(b"import-created comic")
+    signature = build_managed_placement_signature(destination_path)
+
+    _cleanup_failed_library_artifact(
+        destination_path=destination_path,
+        original_source=source_path,
+        original_trash_path=None,
+        transfer_method="copy",
+        storage_mode="managed",
+        created_series_folder=True,
+        created_series_folder_path=destination_path.parent,
+        expected_destination_signature=signature,
+    )
+
+    assert source_path.read_bytes() == b"source comic"
+    assert not destination_path.exists()
+    assert not destination_path.parent.exists()
+
+
+def test_failed_managed_registration_cleanup_preserves_changed_destination(
+    tmp_path: Path,
+) -> None:
+    from pullbox.services.import_file_execution import _cleanup_failed_library_artifact
+
+    source_path = tmp_path / "incoming" / "Issue 001.cbz"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"source comic")
+    destination_path = tmp_path / "library" / "Series" / "Issue 001.cbz"
+    destination_path.parent.mkdir(parents=True)
+    destination_path.write_bytes(b"import-created comic")
+    signature = build_managed_placement_signature(destination_path)
+    destination_path.write_bytes(b"changed after placement")
+
+    _cleanup_failed_library_artifact(
+        destination_path=destination_path,
+        original_source=source_path,
+        original_trash_path=None,
+        transfer_method="copy",
+        storage_mode="managed",
+        created_series_folder=True,
+        created_series_folder_path=destination_path.parent,
+        expected_destination_signature=signature,
+    )
+
+    assert source_path.read_bytes() == b"source comic"
+    assert destination_path.read_bytes() == b"changed after placement"
+    assert destination_path.parent.exists()
+
+
+def test_failed_move_cleanup_preserves_reappeared_source_and_owned_destination(
+    tmp_path: Path,
+) -> None:
+    from pullbox.services.import_file_execution import _cleanup_failed_library_artifact
+
+    source_path = tmp_path / "incoming" / "Issue 001.cbz"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"reappeared source")
+    destination_path = tmp_path / "library" / "Series" / "Issue 001.cbz"
+    destination_path.parent.mkdir(parents=True)
+    destination_path.write_bytes(b"import-created comic")
+    signature = build_managed_placement_signature(destination_path)
+
+    preserved = _cleanup_failed_library_artifact(
+        destination_path=destination_path,
+        original_source=source_path,
+        original_trash_path=None,
+        transfer_method="move",
+        storage_mode="managed",
+        created_series_folder=True,
+        created_series_folder_path=destination_path.parent,
+        expected_destination_signature=signature,
+    )
+
+    assert preserved is True
+    assert source_path.read_bytes() == b"reappeared source"
+    assert destination_path.read_bytes() == b"import-created comic"
+    assert destination_path.parent.exists()
+
+
+def test_failed_cleanup_digest_rejects_same_size_bytes_with_restored_mtime(
+    tmp_path: Path,
+) -> None:
+    from pullbox.services.import_file_execution import _cleanup_failed_library_artifact
+
+    source_path = tmp_path / "incoming" / "Issue 001.cbz"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"source comic")
+    destination_path = tmp_path / "library" / "Series" / "Issue 001.cbz"
+    destination_path.parent.mkdir(parents=True)
+    destination_path.write_bytes(b"owned-content")
+    signature = build_managed_placement_signature(destination_path)
+    original_stat = destination_path.stat()
+    destination_path.write_bytes(b"other-content")
+    destination_path.chmod(original_stat.st_mode)
+    destination_path.touch()
+    os.utime(
+        destination_path,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+
+    preserved = _cleanup_failed_library_artifact(
+        destination_path=destination_path,
+        original_source=source_path,
+        original_trash_path=None,
+        transfer_method="copy",
+        storage_mode="managed",
+        created_series_folder=True,
+        created_series_folder_path=destination_path.parent,
+        expected_destination_signature=signature,
+    )
+
+    assert preserved is True
+    assert destination_path.read_bytes() == b"other-content"
 
 
 class TestOneFileFailsOthersContinue:
@@ -2395,6 +2712,108 @@ class TestMoveToLibraryPassedThrough:
         assert call_kwargs.get("move_to_library") is True
 
     @pytest.mark.asyncio
+    async def test_mylar_managed_copy_uses_series_source_folder_as_strict_boundary(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+    ) -> None:
+        job, imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        source_folder = tmp_path / "existing-mylar-library" / "Batman (2016)"
+        source_folder.mkdir(parents=True)
+        comic = source_folder / "Batman 001.cbz"
+        comic.write_bytes(b"source comic")
+        database = tmp_path / "mylar.db"
+        database.write_bytes(b"sqlite database placeholder")
+        imp_series.source_folder = str(source_folder)
+        imp_files[0].file_path = str(comic)
+        imp_files[0].file_name = comic.name
+        imp_files[0].file_size = comic.stat().st_size
+        imp_files[0].source_signature = build_file_identity_signature(comic)
+        job.source_type = ImportSourceType.MYLAR3
+        job.source_path = str(database)
+        job.file_handling_mode = ImportFileHandlingMode.MANAGED_COPY
+        job.effective_transfer_method = "copy"
+        target_root = await db_session.scalar(select(LibraryRoot))
+        assert target_root is not None
+        target_library = tmp_path / "library"
+        target_library.mkdir()
+        target_root.path = str(target_library)
+        job.target_library_root_id = target_root.id
+        await db_session.flush()
+        mock_register = _mock_register_library_file()
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        call_kwargs = mock_register.call_args_list[0].kwargs
+        assert call_kwargs["source_scan_root"] == source_folder
+        assert call_kwargs["source_scan_root"] != database
+        assert call_kwargs["strict_import_target"] is True
+        assert comic.read_bytes() == b"source comic"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("series_folder_available", [False, True])
+    async def test_mylar_managed_copy_uses_issue_parent_when_comic_location_is_missing(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+        series_folder_available: bool,
+    ) -> None:
+        job, imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        issue_parent = tmp_path / "existing-mylar-library" / "Shared"
+        issue_parent.mkdir(parents=True)
+        comic = issue_parent / "Batman Special 001.cbz"
+        comic.write_bytes(b"source comic")
+        series_folder = tmp_path / "existing-mylar-library" / "Batman"
+        if series_folder_available:
+            series_folder.mkdir()
+        database = tmp_path / "mylar.db"
+        database.write_bytes(b"sqlite database placeholder")
+        imp_series.source_folder = str(series_folder) if series_folder_available else ""
+        imp_files[0].file_path = str(comic)
+        imp_files[0].file_name = comic.name
+        imp_files[0].file_size = comic.stat().st_size
+        imp_files[0].source_signature = build_file_identity_signature(comic)
+        job.source_type = ImportSourceType.MYLAR3
+        job.source_path = str(database)
+        job.file_handling_mode = ImportFileHandlingMode.MANAGED_COPY
+        job.effective_transfer_method = "copy"
+        target_root = await db_session.scalar(select(LibraryRoot))
+        assert target_root is not None
+        target_library = tmp_path / "library"
+        target_library.mkdir()
+        target_root.path = str(target_library)
+        job.target_library_root_id = target_root.id
+        await db_session.flush()
+        mock_register = _mock_register_library_file()
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        call_kwargs = mock_register.call_args_list[0].kwargs
+        assert call_kwargs["source_scan_root"] == issue_parent
+        assert call_kwargs["strict_import_target"] is True
+        assert comic.read_bytes() == b"source comic"
+
+    @pytest.mark.asyncio
     async def test_in_place_execution_passes_typed_referenced_contract(
         self,
         db_session: AsyncSession,
@@ -2412,7 +2831,10 @@ class TestMoveToLibraryPassedThrough:
             "inode": 2,
         }
         imp_files[0].source_signature = signature
+        preferred_root = await db_session.scalar(select(LibraryRoot))
+        assert preferred_root is not None
         job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+        job.target_library_root_id = preferred_root.id
         job.move_to_library = False
         job.effective_transfer_method = "leave_in_place"
         job.convert_to_preferred_format = False
@@ -2434,8 +2856,133 @@ class TestMoveToLibraryPassedThrough:
         assert call_kwargs["storage_mode"] == LibraryFileStorageMode.REFERENCED
         assert call_kwargs["expected_source_signature"] == signature
         assert call_kwargs["transfer_method"] == "leave_in_place"
+        assert call_kwargs["library_root_id"] is None
         assert call_kwargs["normalize_to_cbz"] is False
         assert call_kwargs["update_embedded_comicinfo_from_match"] is False
+
+    @pytest.mark.asyncio
+    async def test_mylar_in_place_execution_uses_each_files_scan_selected_root(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+    ) -> None:
+        job, _imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+            create_library_root=False,
+        )
+        preferred_path = tmp_path / "preferred"
+        archive_path = tmp_path / "archive"
+        preferred_path.mkdir()
+        comic = archive_path / "Batman" / "Batman 001.cbz"
+        create_minimal_cbz(comic)
+        before = comic.read_bytes(), comic.stat().st_mtime_ns, comic.stat().st_mode
+        preferred_root = LibraryRoot(name="Preferred", path=str(preferred_path), enabled=True)
+        archive_root = LibraryRoot(name="Archive", path=str(archive_path), enabled=True)
+        db_session.add_all([preferred_root, archive_root])
+        await db_session.flush()
+
+        signature = build_file_identity_signature(comic)
+        signature[MYLAR_REFERENCE_ROOT_ID_SIGNATURE_KEY] = archive_root.id
+        imp_files[0].file_path = str(comic)
+        imp_files[0].file_name = comic.name
+        imp_files[0].file_size = comic.stat().st_size
+        imp_files[0].source_signature = signature
+        job.source_type = ImportSourceType.MYLAR3
+        job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+        job.target_library_root_id = preferred_root.id
+        job.move_to_library = False
+        job.effective_transfer_method = "leave_in_place"
+        job.convert_to_preferred_format = False
+        job.update_embedded_comicinfo_from_match = False
+        await db_session.flush()
+        mock_register = _mock_register_library_file()
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        call_kwargs = mock_register.call_args_list[0].kwargs
+        assert call_kwargs["library_root_id"] == archive_root.id
+        assert call_kwargs["expected_source_signature"] == signature
+        await db_session.refresh(imp_files[0])
+        library_file = await db_session.get(LibraryFile, imp_files[0].library_file_id)
+        assert library_file is not None
+        assert library_file.library_root_id == archive_root.id
+        assert job.target_library_root_id == preferred_root.id
+        assert (comic.read_bytes(), comic.stat().st_mtime_ns, comic.stat().st_mode) == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("root_mutation", "expected_code"),
+        [
+            ("capability_loss", "source_outside_root"),
+            ("nested_ambiguity", "source_root_ambiguous"),
+        ],
+    )
+    async def test_mylar_in_place_execution_revalidates_scan_selected_root(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+        root_mutation: str,
+        expected_code: str,
+    ) -> None:
+        job, _imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+            create_library_root=False,
+        )
+        root_path = tmp_path / "library"
+        comic = root_path / "Batman" / "Batman 001.cbz"
+        create_minimal_cbz(comic)
+        before = comic.read_bytes(), comic.stat().st_mtime_ns, comic.stat().st_mode
+        root = LibraryRoot(name="Existing", path=str(root_path), enabled=True)
+        db_session.add(root)
+        await db_session.flush()
+        signature = build_file_identity_signature(comic)
+        signature[MYLAR_REFERENCE_ROOT_ID_SIGNATURE_KEY] = root.id
+        imp_files[0].file_path = str(comic)
+        imp_files[0].file_name = comic.name
+        imp_files[0].file_size = comic.stat().st_size
+        imp_files[0].source_signature = signature
+        job.source_type = ImportSourceType.MYLAR3
+        job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+        job.target_library_root_id = root.id
+        job.move_to_library = False
+        job.effective_transfer_method = "leave_in_place"
+        if root_mutation == "capability_loss":
+            root.allow_referenced_registrations = False
+        else:
+            db_session.add(
+                LibraryRoot(
+                    name="Nested conflict",
+                    path=str(comic.parent),
+                    enabled=True,
+                )
+            )
+        await db_session.flush()
+        mock_register = _mock_register_library_file()
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        assert mock_register.call_count == 0
+        await db_session.refresh(imp_files[0])
+        assert imp_files[0].status == ImportedFileStatus.FAILED
+        assert imp_files[0].include_in_import is False
+        assert imp_files[0].diagnostics["source_revalidation"]["code"] == expected_code
+        assert (comic.read_bytes(), comic.stat().st_mtime_ns, comic.stat().st_mode) == before
 
     @pytest.mark.asyncio
     async def test_import_execution_disables_nested_normalization_but_keeps_metadata_update(
@@ -2798,7 +3345,7 @@ class TestSourcePathPassedCorrectly:
         call_args = mock_register.call_args_list[0]
         source_path_arg = call_args[0][1]
         assert isinstance(source_path_arg, Path)
-        assert str(source_path_arg) == "/tmp/comics/Batman 001.cbz"
+        assert source_path_arg == Path(job.source_path) / "Batman 001.cbz"
 
 
 class TestConfirmImportAppliesConflictResolutions:

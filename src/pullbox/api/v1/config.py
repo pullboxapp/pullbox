@@ -25,14 +25,29 @@ from pullbox.models.user import User
 from pullbox.schemas.config import (
     ConfigResponse,
     ConfigUpdate,
+    LibraryRootCreate,
     LibraryRootPolicyClear,
     LibraryRootPolicyPreviewRequest,
     LibraryRootPolicyPreviewResponse,
     LibraryRootPolicyState,
     LibraryRootPolicyUpdate,
+    LibraryRootPreviewResponse,
+    LibraryRootRebindConfirmRequest,
+    LibraryRootRebindPreviewRequest,
+    LibraryRootRebindPreviewResponse,
+    LibraryRootState,
+    LibraryRootUpdate,
     NamingPreview,
     NamingPreviewEntry,
     NamingPreviewGrouped,
+)
+from pullbox.services.library_root_management import (
+    create_library_root,
+    list_library_roots,
+    preview_library_root,
+    preview_library_root_rebind,
+    rebind_library_root,
+    update_library_root,
 )
 from pullbox.services.library_root_policy_service import (
     clear_library_root_policy,
@@ -690,6 +705,111 @@ async def save_comicvine_key(
         "message": "API key saved.",
         "obfuscated": obfuscate_api_key(api_key),
     }
+
+
+# ── Library Root Management ────────────────────────────────────────
+
+
+@router.get("/library-roots", response_model=list[LibraryRootState])
+async def get_library_roots(
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> list[LibraryRootState]:
+    """List configured roots with live read/write/capacity state."""
+    states = await list_library_roots(session)
+    return [LibraryRootState.model_validate(state) for state in states]
+
+
+@router.post(
+    "/library-roots/preview",
+    response_model=LibraryRootPreviewResponse,
+)
+async def preview_new_library_root(
+    body: LibraryRootCreate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPreviewResponse:
+    """Validate a proposed root without persisting it."""
+    preview = await preview_library_root(session, **body.model_dump())
+    return LibraryRootPreviewResponse.model_validate(preview)
+
+
+@router.post(
+    "/library-roots",
+    response_model=LibraryRootState,
+    status_code=201,
+)
+async def post_library_root(
+    body: LibraryRootCreate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootState:
+    """Add an existing persistent container directory as a root."""
+    state = await create_library_root(session, **body.model_dump())
+    logger.info("library_root_created", library_root_id=state["id"])
+    return LibraryRootState.model_validate(state)
+
+
+@router.patch(
+    "/library-roots/{library_root_id}",
+    response_model=LibraryRootState,
+)
+async def patch_library_root(
+    library_root_id: int,
+    body: LibraryRootUpdate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootState:
+    """Update root roles/default state while preserving immutable path identity."""
+    state = await update_library_root(
+        session,
+        library_root_id,
+        body.model_dump(exclude_unset=True),
+    )
+    logger.info("library_root_updated", library_root_id=library_root_id)
+    return LibraryRootState.model_validate(state)
+
+
+@router.post(
+    "/library-roots/{library_root_id}/rebind/preview",
+    response_model=LibraryRootRebindPreviewResponse,
+)
+async def preview_existing_library_root_rebind(
+    library_root_id: int,
+    body: LibraryRootRebindPreviewRequest,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootRebindPreviewResponse:
+    """Preview a path rebind and its persisted association impact without writing."""
+    preview = await preview_library_root_rebind(
+        session,
+        library_root_id,
+        replacement_path=body.replacement_path,
+        actor_id=user.id,
+    )
+    return LibraryRootRebindPreviewResponse.model_validate(preview)
+
+
+@router.post(
+    "/library-roots/{library_root_id}/rebind",
+    response_model=LibraryRootState,
+)
+async def confirm_existing_library_root_rebind(
+    library_root_id: int,
+    body: LibraryRootRebindConfirmRequest,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootState:
+    """Apply one explicitly confirmed, signed and drift-checked root path rebind."""
+    state = await rebind_library_root(
+        session,
+        library_root_id,
+        replacement_path=body.replacement_path,
+        preview_token=body.preview_token,
+        actor_id=user.id,
+    )
+    logger.info("library_root_rebound", library_root_id=library_root_id)
+    return LibraryRootState.model_validate(state)
 
 
 # ── Per-root Naming Policy ──────────────────────────────────────────

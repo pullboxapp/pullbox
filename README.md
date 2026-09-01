@@ -268,8 +268,6 @@ live in the repo docs:
 - `docs/development/SECURITY_STANDARDS.md`
 - `docs/development/INFRASTRUCTURE.md`
 - `docs/development/DESIGN_SYSTEM.md`
-- `docs/features/airdcpp.md`
-- `docs/features/comic-reader.md`
 
 
 ## Security

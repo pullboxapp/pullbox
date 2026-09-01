@@ -42,11 +42,11 @@
             <label for="catalog-library-root" class="mb-1 block text-sm font-medium text-pb-text">Library root for new series</label>
             <select id="catalog-library-root" name="library_root_id" required class="input-pb w-full">
               <option value="">Choose a library root</option>
-              {% for root in placement_roots %}<option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>{% endfor %}
+              {% for root in managed_roots %}<option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>{% endfor %}
             </select>
             <p class="mt-1 text-sm text-pb-text-sec">New series and downloads use their normal series folders here, even with no separate arc folder. Existing series paths and monitoring don't change.</p>
           </div>
-          {% if not placement_roots %}<p role="status" class="text-sm text-pb-text-sec">Configure an enabled library root in Settings before adding.</p>{% endif %}
+          {% if not managed_roots %}<p role="status" class="text-sm text-pb-text-sec">Configure an available managed library root in Settings before adding.</p>{% endif %}
           <fieldset class="space-y-2">
             <legend class="mb-2 text-sm font-medium text-pb-text">Independent arc monitoring</legend>
             <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="monitored" value="true" class="mt-0.5">Monitor this story arc</label>
@@ -58,7 +58,7 @@
           {% include "partials/story_arc_create_storage.html" %}
         </section>
         <div class="flex flex-wrap gap-3">
-          <button type="submit" class="btn-primary"{% if not placement_roots %} disabled{% endif %}>Add reviewed Story Arc</button>
+          <button type="submit" class="btn-primary"{% if not managed_roots %} disabled{% endif %}>Add reviewed Story Arc</button>
           <a href="/story-arcs" class="btn-secondary">Cancel</a>
         </div>
       </form>

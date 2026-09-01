@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from pullbox.models.library import LibraryFileStorageMode
 from pullbox.tasks.post_processing_progress import PostProcessingPhase
 
 
@@ -55,6 +56,7 @@ async def test_build_destination_plan_uses_probe_when_source_is_missing() -> Non
     from pullbox.tasks.download_post_processing_destination import build_destination_plan
 
     captured_probe: list[Path] = []
+    captured_root_ids: list[int | None] = []
 
     async def fake_resolve_destination(
         session: object,
@@ -63,21 +65,27 @@ async def test_build_destination_plan_uses_probe_when_source_is_missing() -> Non
         *,
         library_root_id: int | None,
     ) -> tuple[Path, Path]:
-        _ = session, issue, library_root_id
+        _ = session, issue
         captured_probe.append(destination_probe)
+        captured_root_ids.append(library_root_id)
         return Path("relative/Absolute Superman 009.cbz"), Path("relative")
 
     log = _FakeLog()
     plan = await build_destination_plan(
         session=object(),
         comic_file=None,
-        series=SimpleNamespace(title="Absolute Superman", library_root_id=4),
+        series=SimpleNamespace(
+            title="Absolute Superman",
+            library_root_id=4,
+            preferred_library_root_id=14,
+        ),
         issue=SimpleNamespace(id=9),
         log=log,
         resolve_library_destination=fake_resolve_destination,
     )
 
     assert captured_probe == [Path("Absolute Superman #probe.cbz")]
+    assert captured_root_ids == [14]
     assert plan.extension == "cbz"
     assert plan.dest_path.is_absolute()
     assert plan.issue_filename == "Absolute Superman 009.cbz"
@@ -96,7 +104,7 @@ async def test_build_destination_plan_uses_source_extension(tmp_path: Path) -> N
     plan = await build_destination_plan(
         session=object(),
         comic_file=source,
-        series=SimpleNamespace(title="Series", library_root_id=None),
+        series=SimpleNamespace(title="Series", library_root_id=12),
         issue=SimpleNamespace(id=1),
         log=_FakeLog(),
         resolve_library_destination=resolver,
@@ -104,6 +112,7 @@ async def test_build_destination_plan_uses_source_extension(tmp_path: Path) -> N
 
     resolver.assert_awaited_once()
     assert resolver.await_args.args[1] == source
+    assert resolver.await_args.kwargs["library_root_id"] is None
     assert plan.extension == "cbr"
     assert plan.dest_path == tmp_path / "Library" / "Issue.cbr"
 
@@ -191,7 +200,7 @@ async def test_register_existing_destination_file_records_recovered_file(
             size_bytes=dest_path.stat().st_size,
         ),
         issue=SimpleNamespace(id=1),
-        series=SimpleNamespace(library_root_id=8),
+        series=SimpleNamespace(library_root_id=8, preferred_library_root_id=18),
         download=download,
         trace=trace,
         runtime=runtime,
@@ -210,6 +219,8 @@ async def test_register_existing_destination_file_records_recovered_file(
     assert register_calls
     *_, kwargs = register_calls[0]
     assert kwargs["move_to_library"] is False
+    assert kwargs["storage_mode"] is LibraryFileStorageMode.MANAGED
+    assert kwargs["recover_existing_managed_artifact"] is True
     assert kwargs["rename"] is False
-    assert kwargs["library_root_id"] == 8
+    assert kwargs["library_root_id"] == 18
     assert any(event == "post_processing_complete" for event, _ in log.events)

@@ -98,9 +98,11 @@ async def test_service_builder_seams_delegate(
 @pytest.mark.asyncio
 async def test_load_and_list_series_branches(db_session: AsyncSession) -> None:
     publisher = Publisher(name="DC Comics")
-    db_session.add(publisher)
+    preferred_root = LibraryRoot(name="Future", path="/future", enabled=True)
+    db_session.add_all([publisher, preferred_root])
     await db_session.flush()
     series = await _seed_series(db_session, publisher=publisher, monitored=False)
+    series.preferred_library_root_id = preferred_root.id
     db_session.add_all(
         [
             Issue(series_id=series.id, issue_number=1, status=IssueStatus.OWNED),
@@ -114,6 +116,7 @@ async def test_load_and_list_series_branches(db_session: AsyncSession) -> None:
     assert loaded.publisher_name == "DC Comics"
     assert loaded.owned_count == 1
     assert loaded.wanted_count == 1
+    assert loaded.preferred_library_root_id == preferred_root.id
 
     with pytest.raises(NotFoundError):
         await series_api._load_series_response(db_session, 99999)
@@ -135,6 +138,7 @@ async def test_load_and_list_series_branches(db_session: AsyncSession) -> None:
     assert listed.items[0].publisher_name == "DC Comics"
     assert listed.items[0].owned_count == 1
     assert listed.items[0].wanted_count == 1
+    assert listed.items[0].preferred_library_root_id == preferred_root.id
     assert listed.has_more is False
 
 
@@ -147,6 +151,8 @@ def test_enrich_series_fallback_counts() -> None:
         series_type=SeriesType.STANDARD,
         monitored=True,
         issue_count=2,
+        library_root_id=10,
+        preferred_library_root_id=20,
     )
     series.issues = [
         Issue(series_id=99, issue_number=1, status=IssueStatus.OWNED),
@@ -160,6 +166,8 @@ def test_enrich_series_fallback_counts() -> None:
     assert detail["wanted_count"] == 1
     assert listed["owned_count"] == 1
     assert listed["wanted_count"] == 1
+    assert detail["preferred_library_root_id"] == 20
+    assert listed["preferred_library_root_id"] == 20
 
 
 @pytest.mark.asyncio

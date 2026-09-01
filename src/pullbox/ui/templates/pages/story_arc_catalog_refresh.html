@@ -33,7 +33,7 @@
             {% for root in placement_roots %}<option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>{% endfor %}
           </select>
           <p class="mt-1 text-sm text-pb-text-sec">Choose where any new parent series will keep future downloads. Existing series paths and arc storage stay unchanged.</p>
-          {% if not placement_roots %}<p role="status" class="text-sm text-pb-text-sec">Configure an enabled library root in Settings before refreshing.</p>{% endif %}
+          {% if not placement_roots %}<p role="status" class="text-sm text-pb-text-sec">Configure an available managed library root in Settings before refreshing.</p>{% endif %}
           {% if placement_roots_truncated %}<p class="text-sm text-pb-text-sec">Only the first library roots are shown. Review your roots in Settings if one is missing.</p>{% endif %}
         </div>
       {% endif %}

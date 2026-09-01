@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 
+from pullbox.core.exceptions import ValidationError
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
@@ -53,6 +54,10 @@ from pullbox.models.story_arc import (
     StoryArcResolutionState,
     StoryArcSourceKind,
     StoryArcSymlinkStyle,
+)
+from pullbox.services.library_root_management import (
+    validate_managed_library_root,
+    validate_reference_library_root,
 )
 from pullbox.services.story_arc_placement_preview import (
     StoryArcCollisionKind,
@@ -1436,12 +1441,23 @@ async def validate_story_arc_placement_policy_input(
             "Placement policy requires a selected library root",
         )
     library_root = await session.get(LibraryRoot, root_id)
-    if library_root is None or not library_root.enabled:
+    if library_root is None:
         raise StoryArcPlacementIntegrationError(
             "target_library_root_unavailable",
             "Selected story-arc library root is unavailable",
             category="safety",
         )
+    try:
+        if mode is StoryArcPlacementPolicyMode.REFERENCE_ONLY:
+            await validate_reference_library_root(library_root)
+        else:
+            await validate_managed_library_root(library_root)
+    except ValidationError as exc:
+        raise StoryArcPlacementIntegrationError(
+            "target_library_root_unavailable",
+            "Selected story-arc library root is unavailable",
+            category="safety",
+        ) from exc
     raw_destination = proposal.destination_root
     if raw_destination is None or not raw_destination.strip():
         raise StoryArcPlacementIntegrationError(
@@ -1658,10 +1674,17 @@ async def _policy_root_is_available(
         return True
     if policy.target_library_root_id is None:
         return False
-    enabled = await session.scalar(
-        select(LibraryRoot.enabled).where(LibraryRoot.id == policy.target_library_root_id)
-    )
-    return enabled is True
+    root = await session.get(LibraryRoot, policy.target_library_root_id)
+    if root is None:
+        return False
+    try:
+        if policy.mode is StoryArcPlacementPolicyMode.REFERENCE_ONLY:
+            await validate_reference_library_root(root)
+        else:
+            await validate_managed_library_root(root)
+    except ValidationError:
+        return False
+    return True
 
 
 def _placement_policy_shape(

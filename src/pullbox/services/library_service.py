@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import func, select
 
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
-from pullbox.models.series import Series
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,27 +20,6 @@ logger = structlog.get_logger(__name__)
 def _normalize_library_path(path: str | Path) -> str:
     """Return a normalized absolute path string for library path comparisons."""
     return str(Path(path).expanduser().resolve(strict=False))
-
-
-@overload
-def _rewrite_library_prefix(path_value: str, old_prefix: str, new_prefix: str) -> str: ...
-
-
-@overload
-def _rewrite_library_prefix(path_value: None, old_prefix: str, new_prefix: str) -> None: ...
-
-
-def _rewrite_library_prefix(path_value: str | None, old_prefix: str, new_prefix: str) -> str | None:
-    """Rewrite one absolute library path from an old root prefix to a new one."""
-    if not path_value:
-        return path_value
-
-    normalized = _normalize_library_path(path_value)
-    if normalized == old_prefix:
-        return new_prefix
-    if normalized.startswith(old_prefix + os.sep):
-        return new_prefix + normalized[len(old_prefix) :]
-    return path_value
 
 
 class LibraryService:
@@ -114,10 +91,11 @@ async def get_comics_directory(session: AsyncSession) -> Path | None:
 
 
 async def set_comics_directory(session: AsyncSession, path: Path) -> LibraryRoot:
-    """Set the primary comics directory.
+    """Set the legacy primary comics directory through explicit root management.
 
-    Validates the path, stores it in SystemConfig, and ensures a
-    LibraryRoot record exists for the path.
+    This compatibility entry point preserves path identity: an existing root is
+    promoted, while a new path creates a separate validated root. It never
+    rewrites paths owned by an established root.
 
     Raises:
         ValueError: If the path does not exist or is not a directory.
@@ -132,44 +110,83 @@ async def set_comics_directory(session: AsyncSession, path: Path) -> LibraryRoot
         raise ValueError(f"Path '{path}' is not a directory")
     path = path.resolve(strict=True)
 
-    # Upsert the SystemConfig row
-    row = await session.get(SystemConfig, "comics_directory")
-    if row:
-        row.value = str(path)
-    else:
-        session.add(SystemConfig(key="comics_directory", value=str(path), value_type="string"))
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.library_root_management import (
+        create_library_root,
+        update_library_root,
+    )
 
-    # Find or create a LibraryRoot for this path
     result = await session.execute(select(LibraryRoot).where(LibraryRoot.path == str(path)))
     root = result.scalar_one_or_none()
+    try:
+        if root is not None:
+            configured_names = {
+                name.casefold()
+                for name in (
+                    await session.scalars(select(LibraryRoot.name).where(LibraryRoot.id != root.id))
+                ).all()
+            }
+            promoted_name = (
+                root.name if "comics directory" in configured_names else "Comics Directory"
+            )
+            await update_library_root(
+                session,
+                root.id,
+                {
+                    "name": promoted_name,
+                    "enabled": True,
+                    "allow_referenced_registrations": True,
+                    "allow_managed_writes": True,
+                    "is_default_managed_destination": True,
+                },
+            )
+            return root
 
-    if root:
-        root.name = "Comics Directory"
-        root.enabled = True
-    else:
-        root = LibraryRoot(name="Comics Directory", path=str(path), enabled=True)
-        session.add(root)
+        configured_names = {
+            name.casefold() for name in (await session.scalars(select(LibraryRoot.name))).all()
+        }
+        name = "Comics Directory"
+        suffix = 2
+        while name.casefold() in configured_names:
+            name = f"Comics Directory {suffix}"
+            suffix += 1
+        created = await create_library_root(
+            session,
+            name=name,
+            path=str(path),
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+    except ValidationError as exc:
+        raise ValueError(exc.message) from exc
 
-    await session.flush()
-    return root
+    created_root = await session.get(LibraryRoot, int(created["id"]))
+    if created_root is None:  # pragma: no cover - guarded by the flush above
+        raise RuntimeError("Created library root could not be reloaded.")
+    return created_root
 
 
 async def reconcile_runtime_library_paths(
     session: AsyncSession,
     runtime_root: Path,
-) -> dict[str, int | str] | None:
-    """Reconcile persisted library paths to the active runtime library root.
+) -> dict[str, bool | int | str] | None:
+    """Bootstrap a fresh runtime root without rebinding established paths.
 
-    Pullbox stores library roots, series folders, and tracked file paths as
-    absolute paths. When the app moves between host-local development and a
-    containerized runtime, those absolute prefixes can drift even though both
-    runtimes point at the same mounted library data. This helper rewrites the
-    persisted primary library prefix so health checks and filesystem operations
-    continue to target the active runtime path.
+    A changed container path is not proof that it represents the same physical
+    library. Established roots and tracked paths therefore remain untouched
+    until an operator completes an explicit rebind workflow.
     """
     runtime_root_str = _normalize_library_path(runtime_root)
     config_row = await session.get(SystemConfig, "comics_directory")
-    if config_row is None or not config_row.value.strip():
+    roots = list((await session.execute(select(LibraryRoot).order_by(LibraryRoot.id))).scalars())
+    stored_root_str = (
+        _normalize_library_path(config_row.value)
+        if config_row is not None and config_row.value.strip()
+        else ""
+    )
+
+    if not stored_root_str and not roots:
         if config_row is None:
             config_row = SystemConfig(
                 key="comics_directory",
@@ -180,137 +197,69 @@ async def reconcile_runtime_library_paths(
         else:
             config_row.value = runtime_root_str
 
-        root_result = await session.execute(
-            select(LibraryRoot).where(LibraryRoot.path == runtime_root_str)
+        root = LibraryRoot(
+            name="Comics Directory",
+            path=runtime_root_str,
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
         )
-        root = root_result.scalar_one_or_none()
-        if root is None:
-            root = LibraryRoot(
-                name="Comics Directory",
-                path=runtime_root_str,
-                enabled=True,
-            )
-            session.add(root)
-        else:
-            root.name = "Comics Directory"
-            root.enabled = True
+        session.add(root)
 
         await session.flush()
         return {
+            "status": "bootstrapped",
             "old_root": "",
             "new_root": runtime_root_str,
             "series_updated": 0,
             "library_files_updated": 0,
+            "rebind_required": False,
         }
 
-    stored_root_str = _normalize_library_path(config_row.value)
-    roots = list((await session.execute(select(LibraryRoot))).scalars().all())
-    target_root = next(
+    runtime_record = next(
         (root for root in roots if _normalize_library_path(root.path) == runtime_root_str),
         None,
     )
 
     if stored_root_str == runtime_root_str:
-        if target_root is None:
-            target_root = LibraryRoot(
+        if runtime_record is None:
+            runtime_record = LibraryRoot(
                 name="Comics Directory",
                 path=runtime_root_str,
                 enabled=True,
+                allow_referenced_registrations=True,
+                allow_managed_writes=True,
+                is_default_managed_destination=not any(
+                    root.is_default_managed_destination for root in roots
+                ),
             )
-            session.add(target_root)
-        elif not target_root.enabled:
-            target_root.name = "Comics Directory"
-            target_root.enabled = True
-        else:
-            return None
-
-        await session.flush()
-        return {
-            "old_root": stored_root_str,
-            "new_root": runtime_root_str,
-            "series_updated": 0,
-            "library_files_updated": 0,
-        }
-
-    config_row.value = runtime_root_str
-
-    old_root = next(
-        (root for root in roots if _normalize_library_path(root.path) == stored_root_str),
-        None,
-    )
-
-    if target_root is None:
-        if old_root is not None:
-            old_root.path = runtime_root_str
-            old_root.enabled = True
-            target_root = old_root
-        else:
-            target_root = LibraryRoot(
-                name="Comics Directory",
-                path=runtime_root_str,
-                enabled=True,
-            )
-            session.add(target_root)
+            session.add(runtime_record)
             await session.flush()
+            return {
+                "status": "bootstrapped",
+                "old_root": stored_root_str,
+                "new_root": runtime_root_str,
+                "series_updated": 0,
+                "library_files_updated": 0,
+                "rebind_required": False,
+            }
+        if not runtime_record.enabled:
+            return {
+                "status": "root_unavailable",
+                "old_root": stored_root_str,
+                "new_root": runtime_root_str,
+                "series_updated": 0,
+                "library_files_updated": 0,
+                "rebind_required": False,
+            }
+        return None
 
-    series_rows = list((await session.execute(select(Series))).scalars().all())
-    library_files = list((await session.execute(select(LibraryFile))).scalars().all())
-
-    series_updated = 0
-    library_files_updated = 0
-    for series in series_rows:
-        next_path = _rewrite_library_prefix(series.path, stored_root_str, runtime_root_str)
-        root_id_changed = False
-        if (
-            old_root is not None
-            and target_root is not None
-            and series.library_root_id == old_root.id
-            and target_root.id is not None
-            and series.library_root_id != target_root.id
-        ):
-            series.library_root_id = target_root.id
-            root_id_changed = True
-        if next_path != series.path:
-            series.path = next_path
-            series_updated += 1
-        elif root_id_changed:
-            series_updated += 1
-
-    for library_file in library_files:
-        next_path = _rewrite_library_prefix(
-            library_file.file_path,
-            stored_root_str,
-            runtime_root_str,
-        )
-        root_id_changed = False
-        if (
-            old_root is not None
-            and target_root is not None
-            and library_file.library_root_id == old_root.id
-            and target_root.id is not None
-            and library_file.library_root_id != target_root.id
-        ):
-            library_file.library_root_id = target_root.id
-            root_id_changed = True
-        if next_path != library_file.file_path:
-            library_file.file_path = next_path
-            library_file.file_name = Path(next_path).name
-            library_files_updated += 1
-        elif root_id_changed:
-            library_files_updated += 1
-
-    if (
-        old_root is not None
-        and target_root is not None
-        and old_root.id != target_root.id
-        and old_root.path != runtime_root_str
-    ):
-        old_root.enabled = False
-
-    await session.flush()
     return {
+        "status": "rebind_required",
         "old_root": stored_root_str,
         "new_root": runtime_root_str,
-        "series_updated": series_updated,
-        "library_files_updated": library_files_updated,
+        "series_updated": 0,
+        "library_files_updated": 0,
+        "rebind_required": True,
     }

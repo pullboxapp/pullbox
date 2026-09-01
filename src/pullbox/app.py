@@ -287,8 +287,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         async with factory() as session:
             reconciliation = await reconcile_runtime_library_paths(session, settings.library_root)
             if reconciliation:
-                await session.commit()
-                logger.info("library_paths_reconciled_at_startup", **reconciliation)
+                if reconciliation.get("rebind_required") is True:
+                    logger.warning("library_path_rebind_required", **reconciliation)
+                elif reconciliation.get("status") == "root_unavailable":
+                    logger.warning("runtime_library_root_unavailable", **reconciliation)
+                else:
+                    await session.commit()
+                    logger.info("runtime_library_root_bootstrapped", **reconciliation)
     except Exception:
         logger.warning("library_path_reconciliation_failed", exc_info=True)
 

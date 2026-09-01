@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -21,7 +22,13 @@ from pullbox.core.file_ops import (
     register_library_file_with_metadata,
 )
 from pullbox.core.mylar3_reader import Mylar3Reader
-from pullbox.models.import_job import ImportedSeries, ImportJob, ImportJobAction, ImportJobStatus
+from pullbox.models.import_job import (
+    ImportedSeries,
+    ImportJob,
+    ImportJobAction,
+    ImportJobStatus,
+    ImportSourceType,
+)
 from pullbox.services.import_catalog_hydration import run_pending_catalog_hydration
 from pullbox.services.import_comicinfo_enrichment import (
     run_pending_import_comicinfo_enrichment,
@@ -71,6 +78,9 @@ from pullbox.services.import_matching import (
 )
 from pullbox.services.import_matching import (
     score_cv_result as _score_cv_result,  # noqa: F401 - compatibility import
+)
+from pullbox.services.import_placement_recovery import (
+    load_completed_import_placement_recovery,
 )
 from pullbox.services.import_provider_cache import (
     CachedImportMetadataProvider,
@@ -124,7 +134,6 @@ from pullbox.utilities.sse import publish
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from datetime import datetime
-    from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -132,7 +141,6 @@ if TYPE_CHECKING:
     from pullbox.core.events import EventBus
     from pullbox.core.library_permissions import LibraryPermissionPolicy
     from pullbox.core.library_policy import LibraryIngestPolicy
-    from pullbox.models.import_job import ImportJobAction
     from pullbox.models.issue import Issue
     from pullbox.models.library import LibraryFile, MatchConfidence
     from pullbox.providers.base import SeriesMetadata
@@ -485,6 +493,12 @@ class ImportService(
                 self._materialize_import_cbz_with_comicinfo_interruptible
             ),
         )
+        recovery_imported_file_id = kwargs.pop("recovery_imported_file_id", None)
+        recovery_source_value = kwargs.pop("recovery_original_source_path", None)
+        recovery_original_source_path = (
+            Path(recovery_source_value) if recovery_source_value is not None else source_path
+        )
+        placement_action_id: int | None = None
 
         async def placement_started_callback(
             *,
@@ -495,24 +509,101 @@ class ImportService(
             series_folder_path: Path,
             temp_paths: tuple[Path, ...] = (),
         ) -> None:
-            await self._record_action(
+            nonlocal placement_action_id
+            action = await self._record_action(
                 session,
                 job,
                 phase="import",
                 action_type="library_file_placement_started",
                 payload={
+                    "imported_file_id": recovery_imported_file_id,
+                    "issue_id": issue.id,
                     "destination_path": str(target_path),
-                    "original_source_path": str(source_path),
+                    "original_source_path": str(recovery_original_source_path),
                     "artifact_source_path": str(artifact_source_path),
                     "transfer_method": transfer_method,
                     "created_series_folder": series_folder_created,
                     "created_series_folder_path": str(series_folder_path),
                     "temp_paths": [str(path) for path in temp_paths],
+                    "placement_completed": False,
                 },
             )
+            placement_action_id = action.id
             # This journal row must survive if archive materialization raises and
             # the caller rolls back the active session.
             await session.commit()
+
+        async def placement_completed_callback(
+            *,
+            target_path: Path,
+            destination_signature: dict[str, int | str],
+        ) -> None:
+            if placement_action_id is None:
+                raise RuntimeError("Import placement completed without a durable start record")
+            action = await session.get(ImportJobAction, placement_action_id)
+            if action is None:
+                raise RuntimeError("Import placement start record disappeared before completion")
+            payload = dict(action.payload or {})
+            if str(payload.get("destination_path") or "") != str(target_path):
+                raise RuntimeError("Import placement completion target changed after planning")
+            payload["placement_completed"] = True
+            payload["destination_signature"] = dict(destination_signature)
+            action.payload = payload
+            await session.commit()
+
+        source_scan_root = kwargs.pop(
+            "source_scan_root",
+            Path(job.source_path) if job.source_type == ImportSourceType.FILESYSTEM else None,
+        )
+        kwargs.pop("strict_import_target", None)
+
+        transfer_method = str(kwargs.get("transfer_method") or "")
+        recovery = None
+        if (
+            isinstance(recovery_imported_file_id, int)
+            and not isinstance(recovery_imported_file_id, bool)
+            and issue.id is not None
+            and transfer_method
+        ):
+            recovery = await load_completed_import_placement_recovery(
+                session,
+                job_id=int(job.id),
+                imported_file_id=recovery_imported_file_id,
+                issue_id=int(issue.id),
+                source_path=recovery_original_source_path,
+                transfer_method=transfer_method,
+            )
+        if recovery is not None:
+            recovery_kwargs = dict(kwargs)
+            recovery_kwargs.update(
+                {
+                    "move_to_library": False,
+                    "expected_source_signature": None,
+                    "transfer_method": "recovered",
+                    "normalize_to_cbz": False,
+                    "update_embedded_comicinfo_from_match": False,
+                    "comicinfo_payload": None,
+                    "rename": False,
+                    "recover_existing_managed_artifact": True,
+                }
+            )
+            result = await register_library_file(
+                session,
+                recovery.destination_path,
+                issue,
+                confidence,
+                source_scan_root=None,
+                strict_import_target=True,
+                **recovery_kwargs,
+            )
+            library_file = (
+                result.library_file
+                if isinstance(result, LibraryFileRegistrationOutcome)
+                else result
+            )
+            library_file.source_signature = dict(recovery.destination_signature)
+            await session.flush()
+            return result
 
         result = await register_library_file(
             session,
@@ -524,6 +615,10 @@ class ImportService(
             artifact_transfer=adapters.artifact_transfer,
             comicinfo_materializer=adapters.comicinfo_materializer,
             placement_started_callback=placement_started_callback,
+            placement_completed_callback=placement_completed_callback,
+            placement_temp_paths=adapters.placement_temp_paths,
+            source_scan_root=source_scan_root,
+            strict_import_target=True,
             **kwargs,
         )
         await self._log_import_file_timing_events(

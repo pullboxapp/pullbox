@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -21,6 +22,7 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.models.issue import Issue
+from pullbox.models.library import LibraryRoot
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
@@ -31,6 +33,7 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.services import library_root_management
 from pullbox.services.import_job_actions import record_action, rollback_action
 from pullbox.services.import_job_execution import execute_import_job
 from pullbox.services.import_story_arc_materialization import StoryArcMaterializationResult
@@ -39,11 +42,40 @@ from pullbox.services.import_story_arc_placement_completion import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class _UnusedSeriesService:
     """Arc-only jobs never invoke a metadata provider service."""
+
+
+@pytest.fixture
+async def managed_import_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LibraryRoot:
+    """Provide the managed destination required by direct job fixtures."""
+    root_path = tmp_path / "story-arc-execution-library"
+    root_path.mkdir()
+    root = LibraryRoot(
+        name="Story arc execution library",
+        path=str(root_path),
+        enabled=True,
+        allow_referenced_registrations=True,
+        allow_managed_writes=True,
+        is_default_managed_destination=True,
+    )
+    db_session.add(root)
+    await db_session.flush()
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024**3),
+    )
+    return root
 
 
 async def _execute(
@@ -79,11 +111,13 @@ async def _execute(
 @pytest.mark.asyncio
 async def test_arc_only_execution_preserves_million_issue_and_missing_order(
     db_session: AsyncSession,
+    managed_import_root: LibraryRoot,
 ) -> None:
     job = ImportJob(
         source_path="/private/mylar/mylar.db",
         source_type=ImportSourceType.MYLAR3,
         status=ImportJobStatus.REVIEW,
+        target_library_root_id=managed_import_root.id,
     )
     db_session.add(job)
     await db_session.flush()
@@ -283,11 +317,13 @@ async def test_normal_exception_after_durable_arc_page_fails_closed_without_losi
 @pytest.mark.asyncio
 async def test_expected_per_arc_validation_failure_remains_nonfatal(
     db_session: AsyncSession,
+    managed_import_root: LibraryRoot,
 ) -> None:
     job = ImportJob(
         source_path="/private/source",
         source_type=ImportSourceType.MYLAR3,
         status=ImportJobStatus.REVIEW,
+        target_library_root_id=managed_import_root.id,
     )
     existing = StoryArc(name="Existing Arc")
     db_session.add_all([job, existing])
@@ -335,11 +371,13 @@ async def test_expected_per_arc_validation_failure_remains_nonfatal(
 @pytest.mark.asyncio
 async def test_post_file_resolution_links_new_canonical_issue(
     db_session: AsyncSession,
+    managed_import_root: LibraryRoot,
 ) -> None:
     job = ImportJob(
         source_path="/private/source",
         source_type=ImportSourceType.FILESYSTEM,
         status=ImportJobStatus.REVIEW,
+        target_library_root_id=managed_import_root.id,
     )
     series = Series(title="Late Resolution", sort_title="late resolution")
     db_session.add_all([job, series])
@@ -428,11 +466,13 @@ async def test_post_file_resolution_links_new_canonical_issue(
 async def test_materialization_failure_keeps_committed_canonical_registration(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    managed_import_root: LibraryRoot,
 ) -> None:
     job = ImportJob(
         source_path="/private/source/should-not-leak",
         source_type=ImportSourceType.FILESYSTEM,
         status=ImportJobStatus.REVIEW,
+        target_library_root_id=managed_import_root.id,
     )
     series = Series(title="Canonical Survives", sort_title="canonical survives")
     db_session.add_all([job, series])
@@ -526,11 +566,13 @@ async def test_materialization_failure_keeps_committed_canonical_registration(
 async def test_managed_placement_work_keeps_import_in_truthful_pending_phase(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    managed_import_root: LibraryRoot,
 ) -> None:
     job = ImportJob(
         source_path="/private/source",
         source_type=ImportSourceType.FILESYSTEM,
         status=ImportJobStatus.REVIEW,
+        target_library_root_id=managed_import_root.id,
     )
     db_session.add(job)
     await db_session.flush()

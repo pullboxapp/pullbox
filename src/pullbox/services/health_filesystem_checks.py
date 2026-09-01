@@ -28,7 +28,7 @@ Scandir = Callable[[Path], AbstractContextManager[Iterable[object]]]
 Mkstemp = Callable[..., tuple[int, str]]
 Close = Callable[[int], None]
 Unlink = Callable[[str], None]
-FilesystemTargetCheck = Callable[[Path, str], tuple[SubCheckOutcome, str]]
+FilesystemTargetCheck = Callable[[Path, str, bool], tuple[SubCheckOutcome, str]]
 
 
 async def check_filesystem(
@@ -38,12 +38,18 @@ async def check_filesystem(
     check_target: FilesystemTargetCheck,
 ) -> CheckOutcome:
     """Check operational filesystem targets and persist path-level sub-checks."""
-    paths: list[tuple[str, Path]] = []
+    paths: list[tuple[str, Path, bool]] = []
 
     result = await session.execute(select(LibraryRoot).where(LibraryRoot.enabled.is_(True)))
     roots = list(result.scalars().all())
     for root in roots:
-        paths.append((f"Library Root: {root.name}", Path(root.path)))
+        paths.append(
+            (
+                f"Library Root: {root.name}",
+                Path(root.path),
+                bool(root.allow_managed_writes),
+            )
+        )
 
     if settings:
         configured_targets = (
@@ -60,7 +66,7 @@ async def check_filesystem(
             if configured is None:
                 continue
             if configured != default_path or configured.exists():
-                paths.append((label, configured))
+                paths.append((label, configured, True))
 
     if not paths:
         return CheckOutcome(
@@ -76,8 +82,13 @@ async def check_filesystem(
     worst = HealthStatus.HEALTHY
     inaccessible_or_unwritable = False
 
-    for name, path in paths:
-        sub_check, guidance = await asyncio.to_thread(check_target, path, name)
+    for name, path, require_write in paths:
+        sub_check, guidance = await asyncio.to_thread(
+            check_target,
+            path,
+            name,
+            require_write,
+        )
         sub_checks.append(sub_check)
         if guidance:
             guidance_parts.append(guidance)
@@ -88,6 +99,8 @@ async def check_filesystem(
 
     if inaccessible_or_unwritable:
         msg = "One or more paths are inaccessible or not writable"
+    elif any(not require_write for _name, _path, require_write in paths):
+        msg = "All paths meet configured access requirements"
     else:
         msg = "All paths accessible and writable"
 
@@ -105,6 +118,7 @@ async def check_filesystem(
 def check_filesystem_target(
     path: Path,
     name: str,
+    require_write: bool,
     *,
     perf_counter: PerfCounter,
     scandir: Scandir,
@@ -115,7 +129,10 @@ def check_filesystem_target(
     """Check one operational filesystem target and return a persistable sub-check."""
     started = perf_counter()
     check_name = name
-    details: dict[str, Any] = {"path": str(path)}
+    details: dict[str, Any] = {
+        "path": str(path),
+        "required_access": "read_write" if require_write else "read",
+    }
 
     if not path.is_dir():
         return (
@@ -144,21 +161,22 @@ def check_filesystem_target(
             f"'{path}' is not readable. Check filesystem permissions and mount status.",
         )
 
-    try:
-        fd, probe = mkstemp(prefix=".pullbox-health-", dir=path)
-        close(fd)
-        unlink(probe)
-    except OSError as exc:
-        return (
-            SubCheckOutcome(
-                check_name=check_name,
-                name=name,
-                status=HealthStatus.UNHEALTHY,
-                message=f"Not writable ({exc})",
-                details={**details, "issue": "unwritable"},
-            ),
-            f"'{path}' is not writable. Check directory ownership and write permissions.",
-        )
+    if require_write:
+        try:
+            fd, probe = mkstemp(prefix=".pullbox-health-", dir=path)
+            close(fd)
+            unlink(probe)
+        except OSError as exc:
+            return (
+                SubCheckOutcome(
+                    check_name=check_name,
+                    name=name,
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Not writable ({exc})",
+                    details={**details, "issue": "unwritable"},
+                ),
+                f"'{path}' is not writable. Check directory ownership and write permissions.",
+            )
 
     elapsed_ms = (perf_counter() - started) * 1000
 
@@ -167,7 +185,7 @@ def check_filesystem_target(
             check_name=check_name,
             name=name,
             status=HealthStatus.HEALTHY,
-            message="Readable and writable",
+            message="Readable and writable" if require_write else "Readable (reference-only)",
             details={**details, "issue": "ok"},
             response_time_ms=elapsed_ms,
         ),
