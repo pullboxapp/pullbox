@@ -3,7 +3,7 @@ tests/api/test_comicvine_key.py:generic-api-key:253
 tests/integration/test_security_endpoints.py:generic-api-key:206
 tests/unit/test_secret_validation.py:generic-api-key:103
 tests/fixtures/prowlarr_test_fixtures.json:square-access-token:206168
-tests/unit/test_import_scan_pipeline.py:generic-api-key:887
+tests/unit/test_import_scan_pipeline.py:generic-api-key:946
 tests/unit/test_import_story_arc_staging.py:generic-api-key:456
 tests/unit/test_import_story_arc_staging.py:generic-api-key:468
 tests/unit/test_import_story_arc_staging.py:generic-api-key:480

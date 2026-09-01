@@ -75,8 +75,9 @@ _EXACT_METADATA_SIGNALS = frozenset(
 # Regex: folder name with a year token, optionally followed by release tags
 _FOLDER_YEAR_RE = re.compile(r"^(.+?)\s*[\[(](\d{4})[\])](?:\s*(?:\([^)]*\)|\[[^\]]*\]))*\s*$")
 _PULLBOX_FOLDER_CV_ID_RE = re.compile(
-    r"^(?P<name>.+?)\s+\((?P<year>(?:19|20)\d{2})\)\s+"
-    r"(?:(?P<bare_cv_id>\d{4,})|\[cv-(?P<bracketed_cv_id>\d{4,})\])\s*$"
+    r"^(?P<name>.+?)\s+\((?P<year>(?:\d{4}|Unknown Year))\)\s+"
+    r"(?:(?P<bare_cv_id>\d{4,})|\[cv-(?P<bracketed_cv_id>[1-9]\d*)\])\s*$",
+    re.IGNORECASE,
 )
 
 # Comic file extensions (lowercase, with dot)
@@ -1508,6 +1509,52 @@ class CollectionScanner:
         folder_is_series_boundary = root is None or source_dir != root
 
         for discovered_file in discovered_files:
+            embedded_series_id = discovered_file.comicvine_series_id
+            belongs_to_trusted_folder = folder_cv_id is not None and embedded_series_id in {
+                None,
+                folder_cv_id,
+            }
+            if belongs_to_trusted_folder or embedded_series_id is not None:
+                # A Comic Vine volume ID is a stronger series boundary than an
+                # issue filename's publication year or publisher text. Real
+                # ComicInfo files commonly omit ``Volume`` while retaining the
+                # issue-level ``Year``; grouping on that year splits one series
+                # into a candidate per issue year. A trusted folder identity
+                # also safely absorbs files whose archive metadata was deferred.
+                exact_series_id = folder_cv_id if belongs_to_trusted_folder else embedded_series_id
+                identity_key: tuple[str, int | None, str | None] = (
+                    f"comicvine:{exact_series_id}",
+                    None,
+                    None,
+                )
+                classified.setdefault(identity_key, []).append(discovered_file)
+
+                if belongs_to_trusted_folder:
+                    discovered_file.parsed_series = folder_name
+                    label_name = folder_name
+                    label_year = folder_year
+                    label_publisher = folder_publisher or discovered_file.parsed_publisher
+                else:
+                    label_name = discovered_file.parsed_series or folder_name
+                    year_signal = discovered_file.metadata_signals.get("year")
+                    label_year = (
+                        discovered_file.parsed_year
+                        if year_signal in {"comicinfo", "sidecar", "source_layout"}
+                        else folder_year
+                    )
+                    label_publisher = discovered_file.parsed_publisher or folder_publisher
+
+                existing_label = labels.get(identity_key)
+                if existing_label is None:
+                    labels[identity_key] = (label_name, label_year, label_publisher)
+                else:
+                    labels[identity_key] = (
+                        existing_label[0],
+                        existing_label[1] or label_year,
+                        existing_label[2] or label_publisher,
+                    )
+                continue
+
             identity = self._identity_for_file(
                 discovered_file,
                 allow_weak_file_identity=allow_weak_file_identity,
@@ -1782,9 +1829,10 @@ class CollectionScanner:
             return name, year, None
         comicvine_id = match.group("bare_cv_id") or match.group("bracketed_cv_id")
         assert comicvine_id is not None
+        year_text = match.group("year")
         return (
             re.sub(r"\s{2,}", " ", match.group("name")).strip(),
-            int(match.group("year")),
+            int(year_text) if year_text.isdigit() else None,
             int(comicvine_id),
         )
 

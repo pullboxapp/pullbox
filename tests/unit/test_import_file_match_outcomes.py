@@ -87,6 +87,7 @@ def test_apply_matched_file_outcome_marks_multi_entry_graphic_novel_as_volume() 
     )
 
     assert imp_file.diagnostics == {
+        "source_metadata": {"filename_parse": {"issue_type": IssueType.GN.value}},
         "target_issue_summary": {
             "provider_id": "1001",
             "issue_number": 2.0,
@@ -94,7 +95,7 @@ def test_apply_matched_file_outcome_marks_multi_entry_graphic_novel_as_volume() 
             "release_date": None,
             "cover_url": None,
             "issue_type": IssueType.VOLUME.value,
-        }
+        },
     }
 
 

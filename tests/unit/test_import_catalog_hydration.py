@@ -15,6 +15,7 @@ from pullbox.services.comicvine_persistent_cache import PersistentComicVineCache
 from pullbox.services.import_catalog_hydration import (
     load_catalog_hydration_plan,
     mark_catalog_hydration_failed,
+    run_catalog_hydration,
     run_pending_catalog_hydration,
 )
 from pullbox.services.metadata_service import MetadataService
@@ -158,6 +159,50 @@ async def test_run_pending_catalog_hydration_recovers_hydrating_series_after_res
     await db_session.refresh(no_provider_id)
     assert already_complete.issue_catalog_state == IssueCatalogState.COMPLETE
     assert no_provider_id.issue_catalog_state == IssueCatalogState.HYDRATING
+
+
+async def test_catalog_hydration_does_not_recreate_series_deleted_during_fetch(
+    db_session,
+) -> None:
+    series = Series(
+        title="Rollback Race",
+        sort_title="rollback race",
+        comicvine_id=4040,
+        monitored=True,
+        issue_catalog_state=IssueCatalogState.HYDRATING,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    series_id = series.id
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    add_calls = 0
+
+    async def delete_while_fetching(_comicvine_id: int):
+        async with session_factory() as delete_session:
+            persisted = await delete_session.get(Series, series_id)
+            assert persisted is not None
+            await delete_session.delete(persisted)
+            await delete_session.commit()
+        return {"comicvine_id": 4040}, []
+
+    async def add_from_prefetched(*_args, **_kwargs):
+        nonlocal add_calls
+        add_calls += 1
+
+    hydrated = await run_catalog_hydration(
+        session_factory,
+        series_id=series_id,
+        search_on_add=True,
+        prefetch_comicvine_bundle=delete_while_fetching,
+        add_from_comicvine_prefetched=add_from_prefetched,
+    )
+
+    assert add_calls == 0
+    assert hydrated is False
 
 
 async def test_load_catalog_hydration_plan_uses_explicit_preferred_root(db_session) -> None:

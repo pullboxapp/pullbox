@@ -569,6 +569,53 @@ class TestArchiveMetadataExtraction:
         assert metadata.signals["issue_type"] == MetadataSignal.RELEASE_TITLE
         assert metadata.folder_issue_type == IssueType.HC
 
+    def test_numbered_issue_does_not_inherit_type_words_from_series_folder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        folder = tmp_path / "A Returner's Magic Should be Special (2023)"
+        folder.mkdir()
+        archive = folder / "Issue 1 - Untitled.cbz"
+        _write_cbz(
+            archive,
+            """<?xml version="1.0"?>
+            <ComicInfo>
+              <Series>A Returner's Magic Should be Special</Series>
+              <Number>1</Number>
+            </ComicInfo>
+            """,
+        )
+
+        metadata = SourceMetadataExtractor().from_archive_path(archive)
+
+        assert metadata.issue_number == 1.0
+        assert metadata.issue_type == IssueType.ISSUE
+        assert metadata.signals["issue_type"] == MetadataSignal.RELEASE_TITLE
+        assert metadata.folder_issue_type == IssueType.SPECIAL
+
+    def test_explicit_issue_marker_outranks_type_word_in_issue_title(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        folder = tmp_path / "Yamataika (2014)"
+        folder.mkdir()
+        archive = folder / "Issue 2 - Hoshino Yukinobu Special Selection 5.cbz"
+        _write_cbz(
+            archive,
+            """<?xml version="1.0"?>
+            <ComicInfo>
+              <Series>Yamataika</Series>
+              <Number>2</Number>
+            </ComicInfo>
+            """,
+        )
+
+        metadata = SourceMetadataExtractor().from_archive_path(archive)
+
+        assert metadata.issue_number == 2.0
+        assert metadata.issue_type == IssueType.ISSUE
+        assert metadata.signals["issue_type"] == MetadataSignal.RELEASE_TITLE
+
     def test_archive_page_names_can_supply_issue_mismatch_hint(
         self,
         tmp_path: Path,

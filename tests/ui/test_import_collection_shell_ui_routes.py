@@ -728,6 +728,24 @@ class TestImportShellRouteContracts:
         assert "!this.levelFilter &&" in viewer_controller
         assert "!this.searchQuery &&" in viewer_controller
 
+    async def test_import_log_viewer_retains_only_a_bounded_recent_window(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        import_log_viewer_template = Path(
+            "src/pullbox/ui/templates/components/import_log_viewer.html"
+        ).read_text()
+        start = script.index("function importJobLogViewerData")
+        end = script.index("function importProgressData")
+        viewer_controller = script[start:end]
+
+        assert "var _MAX_RETAINED_ENTRIES" in viewer_controller
+        assert "_trimRetainedEntries: function () {" in viewer_controller
+        assert "this.entries.splice(0, overflow);" in viewer_controller
+        assert '"&order=desc"' in viewer_controller
+        assert "items.slice().reverse()" in viewer_controller
+        assert "while (true)" not in viewer_controller
+        assert '" recent of " + this.totalCount + " entries"' in viewer_controller
+        assert 'pagination_status_text_expr="footerStatusText"' in import_log_viewer_template
+
     async def test_shared_log_viewer_keys_namespace_persisted_and_stream_rows(self) -> None:
         template = Path("src/pullbox/ui/templates/components/log_viewer.html").read_text()
 
@@ -1004,6 +1022,38 @@ class TestImportShellRouteContracts:
         assert f"resumeJobId: {job_id}" in response.text
         assert "resumeJobStatus: &#34;importing&#34;" in response.text
 
+    async def test_import_collection_resumes_preparation_stall_from_import_snapshot(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+
+        async with sec_db() as session:
+            job = ImportJob(
+                source_path="/tmp/import-preparation-stall",
+                source_type=ImportSourceType.FILESYSTEM,
+                status=ImportJobStatus.STALLED,
+                progress_snapshot={
+                    "mode": "import",
+                    "phase": "queued",
+                    "progress": 0,
+                    "message": "Import stalled because the database was busy.",
+                },
+            )
+            session.add(job)
+            await session.commit()
+            job_id = job.id
+
+        response = await authenticated_client.get(
+            f"/import?tab=collection&resume_job_id={job_id}&resume_step=4"
+        )
+
+        assert response.status_code == 200
+        assert "resumeStep: 4" in response.text
+        assert f"resumeJobId: {job_id}" in response.text
+        assert "resumeJobStatus: &#34;stalled&#34;" in response.text
+
     async def test_import_tabs_preserve_active_matching_job_when_returning_to_collection(
         self,
         authenticated_client,
@@ -1092,8 +1142,10 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-progress-current-file-stage"' in response.text
         assert 'data-testid="import-progress-current-file-detail"' in response.text
         assert "Current item" in response.text
-        assert 'data-testid="import-progress-recent-log"' in response.text
-        assert 'data-log-viewer-contract="v1"' in response.text
+        assert 'data-testid="import-progress-recent-log"' not in response.text
+        assert 'data-log-viewer-contract="v1"' not in response.text
+        assert 'data-testid="import-progress-log-download"' in response.text
+        assert f'href="/api/v1/import/{job_id}/logs/download"' in response.text
 
     async def test_import_progress_partial_hydrates_review_snapshot(
         self,
@@ -1176,7 +1228,8 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         assert 'data-testid="import-progress-view-history"' in response.text
-        assert "Rollback log" in response.text
+        assert 'data-testid="import-progress-log-download"' in response.text
+        assert "Rollback log" not in response.text
 
     async def test_import_results_partial_restores_collection_footer_dock(
         self,

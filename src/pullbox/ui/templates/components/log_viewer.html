@@ -69,6 +69,7 @@
   total_pages_expr="totalPages",
   prev_action="prevPage()",
   next_action="nextPage()",
+  pagination_status_text_expr="",
   footer_status_text_expr="",
   footer_status_show_expr="",
   footer_status_label_expr="",
@@ -287,7 +288,13 @@
 
   {% if show_pagination %}
   <div x-show="{{ total_pages_expr }} > 1" x-cloak class="px-4 py-2 bg-pb-card border-t border-pb-border flex items-center justify-between text-[11px] text-pb-text-dim">
-    <span x-text="'Page ' + {{ current_page_expr }} + ' of ' + {{ total_pages_expr }}"></span>
+    <div class="flex min-w-0 items-center gap-1.5">
+      <span x-text="'Page ' + {{ current_page_expr }} + ' of ' + {{ total_pages_expr }}"></span>
+      {% if pagination_status_text_expr %}
+      <span aria-hidden="true">·</span>
+      <span class="truncate" x-text="{{ pagination_status_text_expr }}"></span>
+      {% endif %}
+    </div>
     <div class="flex items-center gap-1.5">
       <button type="button" @click="{{ prev_action }}" :disabled="{{ current_page_expr }} <= 1" class="btn-ghost btn-sm !min-h-8 !px-2.5 !py-1.5">
         Prev

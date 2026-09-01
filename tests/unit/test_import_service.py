@@ -4252,7 +4252,7 @@ class TestRetryJob:
         await db_session.refresh(job)
 
         assert rolled_back_sequences == [2, 1]
-        assert progress_events == [50, 100]
+        assert progress_events == [0, 100]
         assert job.status == ImportJobStatus.ROLLED_BACK
         assert job.error_message is None
         assert job.progress_snapshot == {}

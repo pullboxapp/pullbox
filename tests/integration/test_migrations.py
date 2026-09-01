@@ -39,6 +39,9 @@ _STORY_ARC_COVER_REVISION = "f7a8b9c0d123"
 _MYLAR_PATH_CONFIRMATION_REVISION = "g8b9c0d1e234"
 _LIBRARY_ROOT_MANAGEMENT_REVISION = "h9c0d1e2f345"
 _SERIES_PREFERRED_ROOT_REVISION = "i0d1e2f3a456"
+_IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION = "j1e2f3a4b567"
+_IMPORT_FILE_SERIES_INDEX_REVISION = "k2f3a4b5c678"
+_IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION = "l3f4a5b6c789"
 
 
 @pytest.fixture
@@ -1874,7 +1877,7 @@ class TestMigrationChain:
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
 
-        assert script.get_heads() == [_SERIES_PREFERRED_ROOT_REVISION]
+        assert script.get_heads() == [_IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION]
 
         command.upgrade(cfg, "head")
         engine = create_engine(sync_url)
@@ -1921,6 +1924,60 @@ class TestMigrationChain:
         assert "story_arc_rollback_waiting_work_id" not in b3_columns
 
         command.upgrade(cfg, "head")
+
+    def test_import_file_matched_issue_index_is_reversible(self, alembic_cfg) -> None:
+        """Issue rollback uses an indexed import-file foreign-key lookup."""
+        cfg, sync_url = alembic_cfg
+
+        command.upgrade(cfg, _SERIES_PREFERRED_ROOT_REVISION)
+        assert "ix_import_files_matched_issue_id" not in _get_indexes(sync_url, "import_files")
+
+        command.upgrade(cfg, _IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION)
+        assert _get_indexes(sync_url, "import_files")["ix_import_files_matched_issue_id"] == [
+            "matched_issue_id"
+        ]
+
+        command.downgrade(cfg, _SERIES_PREFERRED_ROOT_REVISION)
+        assert "ix_import_files_matched_issue_id" not in _get_indexes(sync_url, "import_files")
+
+    def test_import_file_series_index_is_reversible(self, alembic_cfg) -> None:
+        """Per-series matching and rollback use an indexed file lookup."""
+        cfg, sync_url = alembic_cfg
+
+        command.upgrade(cfg, _IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION)
+        assert "ix_import_files_import_series_id" not in _get_indexes(sync_url, "import_files")
+
+        command.upgrade(cfg, _IMPORT_FILE_SERIES_INDEX_REVISION)
+        assert _get_indexes(sync_url, "import_files")["ix_import_files_import_series_id"] == [
+            "import_series_id"
+        ]
+
+        command.downgrade(cfg, _IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION)
+        assert "ix_import_files_import_series_id" not in _get_indexes(sync_url, "import_files")
+
+    def test_import_file_delete_reference_indexes_are_reversible(self, alembic_cfg) -> None:
+        """Large staged-job deletes use indexed foreign-key reference checks."""
+        cfg, sync_url = alembic_cfg
+
+        command.upgrade(cfg, _IMPORT_FILE_SERIES_INDEX_REVISION)
+        assert "ix_import_files_duplicate_of_file_id" not in _get_indexes(sync_url, "import_files")
+        assert "ix_import_story_arc_entries_import_file_id" not in _get_indexes(
+            sync_url, "import_story_arc_entries"
+        )
+
+        command.upgrade(cfg, _IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION)
+        assert _get_indexes(sync_url, "import_files")["ix_import_files_duplicate_of_file_id"] == [
+            "duplicate_of_file_id"
+        ]
+        assert _get_indexes(sync_url, "import_story_arc_entries")[
+            "ix_import_story_arc_entries_import_file_id"
+        ] == ["import_file_id"]
+
+        command.downgrade(cfg, _IMPORT_FILE_SERIES_INDEX_REVISION)
+        assert "ix_import_files_duplicate_of_file_id" not in _get_indexes(sync_url, "import_files")
+        assert "ix_import_story_arc_entries_import_file_id" not in _get_indexes(
+            sync_url, "import_story_arc_entries"
+        )
 
     def test_series_preferred_root_backfills_only_managed_destinations(
         self,

@@ -995,6 +995,7 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
     )
 
     assert materialized_batch_sizes == [25, 1]
+    assert job.series_found == 26
     assert await db_session.scalar(select(func.count()).select_from(ImportedStoryArc)) == 1
     assert await db_session.scalar(select(func.count()).select_from(ImportedStoryArcEntry)) == 26
     assert cancellation_checks >= 7

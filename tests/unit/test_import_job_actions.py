@@ -764,6 +764,78 @@ async def test_rollback_action_allows_issue_state_owned_by_same_import(
     assert action.status == ImportJobActionStatus.ROLLED_BACK
 
 
+async def test_rollback_action_allows_later_issue_owned_by_same_import(
+    db_session: AsyncSession,
+) -> None:
+    """Targeted hydration may add import-owned issues after the series action seal."""
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    series = Series(
+        title="New Series",
+        sort_title="new series",
+        comicvine_id=328,
+        monitored=False,
+    )
+    first_issue = Issue(
+        series=series,
+        issue_number=1,
+        issue_number_text="1",
+        status=IssueStatus.SKIPPED,
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="New Series",
+        status=ImportSeriesStatus.IMPORTED,
+        series=series,
+    )
+    db_session.add_all([first_issue, imported_series])
+    await db_session.flush()
+    payload = await build_series_created_action_payload(
+        db_session,
+        series_id=series.id,
+        import_series_id=imported_series.id,
+    )
+
+    later_issue = Issue(
+        series=series,
+        issue_number=2,
+        issue_number_text="2",
+        status=IssueStatus.OWNED,
+    )
+    db_session.add(later_issue)
+    await db_session.flush()
+    imported_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path="/imports/New Series 002.cbz",
+        file_name="New Series 002.cbz",
+        file_size=1,
+        file_format="cbz",
+        status=ImportedFileStatus.IMPORTED,
+        matched_issue_id=later_issue.id,
+    )
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload=payload,
+    )
+    db_session.add_all([imported_file, action])
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    service._series_service.delete.assert_awaited_once_with(
+        db_session,
+        series.id,
+        delete_files=False,
+        delete_folder=False,
+    )
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+
 async def test_rollback_action_allows_unlinked_partial_import_series_owned_by_action(
     db_session: AsyncSession,
 ) -> None:

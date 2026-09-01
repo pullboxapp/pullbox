@@ -152,6 +152,18 @@ class TestImportedFileModel:
         indexes = {idx.name for idx in ImportedFile.__table__.indexes}
         assert "ix_import_files_job_series" in indexes
 
+    def test_index_on_matched_issue_id(self) -> None:
+        indexes = {idx.name for idx in ImportedFile.__table__.indexes}
+        assert "ix_import_files_matched_issue_id" in indexes
+
+    def test_index_on_import_series_id(self) -> None:
+        indexes = {idx.name for idx in ImportedFile.__table__.indexes}
+        assert "ix_import_files_import_series_id" in indexes
+
+    def test_index_on_duplicate_file_reference(self) -> None:
+        indexes = {idx.name for idx in ImportedFile.__table__.indexes}
+        assert "ix_import_files_duplicate_of_file_id" in indexes
+
 
 class TestImportedSeriesFileCounters:
     """ImportedSeries has file counter fields."""
@@ -206,6 +218,14 @@ class TestImportJobFileCounters:
         mapper = inspect(ImportJob)
         rel_names = {r.key for r in mapper.relationships}
         assert "files" in rel_names
+
+    def test_staged_scan_relationships_use_database_side_cascade_deletes(self) -> None:
+        job_relationships = inspect(ImportJob).relationships
+        assert all(
+            job_relationships[name].passive_deletes is True
+            for name in ("series", "files", "logs", "actions", "story_arcs")
+        )
+        assert inspect(ImportedSeries).relationships["files"].passive_deletes is True
 
 
 class TestImportedFileReadSchema:

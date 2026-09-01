@@ -182,6 +182,7 @@ async def _load_status_counts(
 
 async def _load_safety_blocked_files_by_series_id(
     session: AsyncSession,
+    job_id: int,
     visible_series_ids: list[int],
 ) -> dict[int, list[ImportedFile]]:
     safety_blocked_files_by_series_id: dict[int, list[ImportedFile]] = {
@@ -193,6 +194,7 @@ async def _load_safety_blocked_files_by_series_id(
     safety_files_result = await session.execute(
         select(ImportedFile)
         .where(
+            ImportedFile.import_job_id == job_id,
             ImportedFile.import_series_id.in_(visible_series_ids),
             ImportedFile.status.in_(
                 [ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED]
@@ -350,6 +352,7 @@ async def load_import_review_context(
         visible_series_ids = [item.id for item in series_items]
         safety_blocked_files_by_series_id = await _load_safety_blocked_files_by_series_id(
             session,
+            job_id,
             visible_series_ids,
         )
         safety_rematch_pending = any(
@@ -360,10 +363,12 @@ async def load_import_review_context(
         if visible_series_ids:
             matched_file_targets_by_series_id = await _load_import_review_matched_file_targets(
                 session,
+                job_id,
                 visible_series_ids,
             )
             review_file_groups_by_series_id = await _load_import_review_file_detail_groups(
                 session,
+                job_id,
                 series_items,
             )
         library_roots_result = await session.execute(

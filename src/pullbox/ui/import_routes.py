@@ -28,7 +28,10 @@ from pullbox.services.import_safety_bulk_review import (
     preview_import_safety_category,
 )
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
-from pullbox.services.import_workflow_state import ACTIVE_IMPORT_JOB_STATUSES
+from pullbox.services.import_workflow_state import (
+    ACTIVE_IMPORT_JOB_STATUSES,
+    snapshot_mode_for_job,
+)
 from pullbox.tasks.import_task import trigger_import_safety_bulk_rematch
 from pullbox.ui import import_orphaned_routes
 from pullbox.ui.comicvine_series_search import (
@@ -139,7 +142,11 @@ def _can_resume_collection_job(job: ImportJob, requested_step: int | None) -> bo
             ImportJobStatus.ROLLING_BACK,
             ImportJobStatus.COMPLETED,
             ImportJobStatus.FAILED,
-        } and (job.status != ImportJobStatus.STALLED or job.import_started_at is not None)
+        } and (
+            job.status != ImportJobStatus.STALLED
+            or job.import_started_at is not None
+            or snapshot_mode_for_job(job) in {"import", "rollback"}
+        )
     if step == 3:
         return job.status == ImportJobStatus.REVIEW and job.import_started_at is None
     if step == 2:

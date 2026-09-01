@@ -8,7 +8,6 @@
     Shared controller: importProgressData() from pullbox.js.
 -#}
 {% from "components/settings_shell.html" import ui_icon %}
-{% from "components/import_log_viewer.html" import import_log_viewer %}
 
 <div
   x-data="importProgressData({{ job.id }}, {{ completion_target_step | default(next_step | default(3)) }}, '{{ job.source_type.value }}', {{ progress_snapshot|tojson|forceescape }}, '{{ progress_mode|default('scan') }}')"
@@ -406,21 +405,21 @@
         </div>
       </div>
 
-      <div class="space-y-2">
-        <p class="section-eyebrow !mb-0">Recent log output</p>
-        <div class="border-t border-pb-border"></div>
-        {{ import_log_viewer(
-          job.id,
-          title=(
-            "Rollback log"
-            if progress_mode|default("scan") == "rollback"
-            else ("Import log" if progress_mode|default("scan") == "import" else "Scan log")
-          ),
-          root_testid="import-progress-recent-log",
-          live=true,
-          max_height="280px",
-          class_name="rounded-xl"
-        ) }}
+      <div class="flex flex-col gap-2 border-t border-pb-border pt-3 sm:flex-row sm:items-center sm:justify-between">
+        <p class="text-xs text-pb-text-dim">
+          Detailed diagnostic logs are available without loading them into this page.
+        </p>
+        <a
+          href="/api/v1/import/{{ job.id }}/logs/download"
+          hx-boost="false"
+          data-testid="import-progress-log-download"
+          class="btn-secondary btn-sm shrink-0"
+        >
+          <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
+          </svg>
+          Download full log
+        </a>
       </div>
 
     </div>

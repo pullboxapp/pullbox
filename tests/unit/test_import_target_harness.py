@@ -18,6 +18,7 @@ from pullbox.performance.import_target_harness import (
     ImportTargetSourceLane,
     TargetCommandSample,
     assert_comparable_target_reports,
+    build_import_database_parity_report,
     build_import_target_report,
     build_target_workload,
     scale_shape,
@@ -58,6 +59,10 @@ def _successful_metadata_sample(*, peak_rss_bytes: int = 128 * 1024 * 1024) -> T
             "rollback_select_count": 7,
             "peak_rss_bytes": peak_rss_bytes,
             "database_bytes": 4096,
+            "confirmed_arc_count": 10,
+            "final_matched_series_count": 25,
+            "final_no_match_file_count": 100,
+            "final_confirmed_arc_count": 10,
             "provider_call_count": 0,
             "archive_payload_count": 0,
             "filesystem_scan_count": 0,
@@ -76,7 +81,7 @@ def test_scale_profiles_freeze_the_required_target_shapes() -> None:
     assert target.story_arc_count == 10_000
 
 
-def test_target_workload_is_deterministic_and_records_backend_limitations(
+def test_target_workload_is_deterministic_for_sqlite_and_postgresql(
     tmp_path: Path,
 ) -> None:
     config = _config(
@@ -98,8 +103,20 @@ def test_target_workload_is_deterministic_and_records_backend_limitations(
     assert workload.capability_failures == ()
 
     postgres = build_target_workload(_config(tmp_path, backend=ImportTargetBackend.POSTGRESQL))
-    assert postgres.command == ()
-    assert postgres.capability_failures == ("postgresql_source_lane_not_instrumented",)
+    assert postgres.command == (
+        "scripts/benchmark_import_metadata_scale.py",
+        "--series-count",
+        "25",
+        "--files-per-series",
+        "4",
+        "--story-arc-count",
+        "10",
+        "--backend",
+        "postgresql",
+        "--reset-dedicated-database",
+    )
+    assert postgres.capability_failures == ()
+    assert "postgresql://" not in " ".join(postgres.command)
 
 
 def test_report_is_bounded_path_free_and_preserves_required_configuration(
@@ -291,6 +308,59 @@ def test_comparison_rejects_unlike_backend_hardware_or_filesystem(tmp_path: Path
     mismatched["context"] = mismatched_context
     with pytest.raises(ValueError, match="filesystem_label"):
         assert_comparable_target_reports(left, mismatched)
+
+
+def test_database_parity_report_requires_matching_semantic_results(tmp_path: Path) -> None:
+    sqlite_report = build_import_target_report(
+        _config(tmp_path, samples=1),
+        sample_runner=lambda *_args, **_kwargs: _successful_metadata_sample(),
+    )
+    postgresql_report = build_import_target_report(
+        _config(tmp_path, samples=1, backend=ImportTargetBackend.POSTGRESQL),
+        sample_runner=lambda *_args, **_kwargs: _successful_metadata_sample(),
+    )
+
+    parity = build_import_database_parity_report(sqlite_report, postgresql_report)
+
+    assert parity["passed"] is True
+    assert parity["backends"] == ["postgresql", "sqlite"]
+    assert parity["hard_failures"] == []
+    assert "/private/" not in str(parity)
+
+    workload = cast("dict[str, object]", postgresql_report["workload"])
+    metrics = cast("dict[str, object]", workload["metrics"])
+    matched = cast("dict[str, object]", metrics["final_matched_series_count"])
+    matched["median"] = 24.0
+
+    mismatch = build_import_database_parity_report(sqlite_report, postgresql_report)
+
+    assert mismatch["passed"] is False
+    assert "semantic_metric_mismatch_final_matched_series_count" in cast(
+        "list[str]", mismatch["hard_failures"]
+    )
+
+
+def test_database_parity_is_separate_from_incomplete_release_probes(tmp_path: Path) -> None:
+    sqlite_report = build_import_target_report(
+        _config(tmp_path, samples=1),
+        sample_runner=lambda *_args, **_kwargs: _successful_metadata_sample(),
+    )
+    postgresql_report = build_import_target_report(
+        _config(tmp_path, samples=1, backend=ImportTargetBackend.POSTGRESQL),
+        sample_runner=lambda *_args, **_kwargs: _successful_metadata_sample(),
+    )
+    for report in (sqlite_report, postgresql_report):
+        report["gate_evaluation"] = {
+            "passed": False,
+            "hard_failures": ["target_cancel_restart_recovery_not_measured"],
+            "warnings": [],
+        }
+
+    parity = build_import_database_parity_report(sqlite_report, postgresql_report)
+
+    assert parity["passed"] is True
+    assert parity["hard_failures"] == []
+    assert parity["warnings"] == ["source_release_gates_not_complete"]
 
 
 def test_target_harness_cli_writes_a_gate_evaluated_smoke_report(tmp_path: Path) -> None:

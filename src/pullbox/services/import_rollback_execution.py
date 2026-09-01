@@ -49,14 +49,16 @@ RecomputeFileCounters = Callable[["AsyncSession", ImportJob], Awaitable[None]]
 RecomputeSeriesCounters = Callable[["AsyncSession", ImportJob], Awaitable[None]]
 LogImportEvent = Callable[..., Awaitable[None]]
 EmitProgress = Callable[
-    ["AsyncSession", ImportJob, ImportProgressEvent, ProgressCallback],
+    ["AsyncSession", ImportJob, ImportProgressEvent, ProgressCallback | None],
     Awaitable[None],
 ]
 EstimateRemainingSeconds = Callable[["datetime | None", int], int | None]
 JobStats = Callable[[ImportJob], dict[str, int]]
 
 ROLLBACK_ACTION_PAGE_SIZE = 500
+ROLLBACK_ACTION_CHECKPOINT_SIZE = 25
 ROLLBACK_PROGRESS_MIN_INTERVAL_SECONDS = 1.0
+_RETRIABLE_FAILED_ACTION_TYPES = ("library_file_placement_started",)
 
 
 async def _count_completed_rollback_actions(session: AsyncSession, job_id: int) -> int:
@@ -92,6 +94,53 @@ async def _iter_completed_rollback_actions(
         statement = sa_select(ImportJobAction).where(
             ImportJobAction.import_job_id == job_id,
             ImportJobAction.status == ImportJobActionStatus.COMPLETED,
+        )
+        if cursor is not None:
+            sequence_no, action_id = cursor
+            statement = statement.where(
+                or_(
+                    ImportJobAction.sequence_no < sequence_no,
+                    and_(
+                        ImportJobAction.sequence_no == sequence_no,
+                        ImportJobAction.id < action_id,
+                    ),
+                )
+            )
+        result = await session.execute(
+            statement.order_by(
+                ImportJobAction.sequence_no.desc(),
+                ImportJobAction.id.desc(),
+            ).limit(ROLLBACK_ACTION_PAGE_SIZE)
+        )
+        page = [
+            RollbackActionPlan(
+                action_id=action.id,
+                sequence_no=action.sequence_no,
+                action_type=action.action_type,
+                payload=dict(action.payload or {}),
+            )
+            for action in result.scalars().all()
+        ]
+        if not page:
+            return
+        cursor = (page[-1].sequence_no, page[-1].action_id)
+        for action in page:
+            yield action
+        if len(page) < ROLLBACK_ACTION_PAGE_SIZE:
+            return
+
+
+async def _iter_retriable_failed_rollback_actions(
+    session: AsyncSession,
+    job_id: int,
+) -> AsyncIterator[RollbackActionPlan]:
+    """Replay collision starts once their earlier destination owner is removed."""
+    cursor: tuple[int, int] | None = None
+    while True:
+        statement = sa_select(ImportJobAction).where(
+            ImportJobAction.import_job_id == job_id,
+            ImportJobAction.status == ImportJobActionStatus.ROLLBACK_FAILED,
+            ImportJobAction.action_type.in_(_RETRIABLE_FAILED_ACTION_TYPES),
         )
         if cursor is not None:
             sequence_no, action_id = cursor
@@ -186,6 +235,20 @@ async def _rollback_import_job_while_enrichment_fenced(
         "import_rollback_started",
         message=f"Rolling back {total} recorded import actions.",
         action_count=total,
+    )
+    await emit_progress(
+        session,
+        job,
+        ImportProgressEvent(
+            job_id=job.id,
+            status=ImportJobStatus.ROLLING_BACK,
+            phase="rollback",
+            progress=0,
+            message=f"Rolling back 0/{total} actions...",
+            estimated_seconds_remaining=None,
+            **job_stats(job),
+        ),
+        progress_callback,
     )
     idx = 0
     last_progress_emit_at = monotonic()
@@ -302,18 +365,14 @@ async def _rollback_import_job_while_enrichment_fenced(
                 sequence_no=action.sequence_no,
             )
         idx += 1
-        small_rollback = total <= ROLLBACK_ACTION_PAGE_SIZE
-        page_checkpoint = small_rollback or idx % ROLLBACK_ACTION_PAGE_SIZE == 0 or idx == total
+        page_checkpoint = idx % ROLLBACK_ACTION_CHECKPOINT_SIZE == 0 or idx == total
         if not page_checkpoint:
             continue
         now = monotonic()
-        should_emit_progress = progress_callback is not None and (
-            small_rollback
-            or idx == total
-            or now - last_progress_emit_at >= ROLLBACK_PROGRESS_MIN_INTERVAL_SECONDS
+        should_emit_progress = (
+            idx == total or now - last_progress_emit_at >= ROLLBACK_PROGRESS_MIN_INTERVAL_SECONDS
         )
         if should_emit_progress:
-            assert progress_callback is not None
             progress = int((idx / max(total, 1)) * 100)
             await emit_progress(
                 session,
@@ -335,6 +394,45 @@ async def _rollback_import_job_while_enrichment_fenced(
             last_progress_emit_at = now
         else:
             await session.commit()
+
+    # A failed placement start can point at a destination still owned by an
+    # earlier completed action. The first reverse pass must preserve that path;
+    # after the owner action is reversed, one bounded replay can prove the
+    # destination is gone and close the start record as a safe no-op. Changed or
+    # otherwise unproven destinations remain failed after this replay.
+    async for action in _iter_retriable_failed_rollback_actions(session, job_id):
+        retry_action_error: Exception | None = None
+        try:
+            async with session.begin_nested():
+                await rollback_action(session, action)
+        except Exception as exc:
+            retry_action_error = exc
+
+        current_action = await session.get(ImportJobAction, action.action_id)
+        if retry_action_error is not None and current_action is not None:
+            current_action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            current_action.error_message = (
+                str(retry_action_error) or type(retry_action_error).__name__
+            )
+            current_action.rolled_back_at = None
+            await session.flush()
+        if (
+            current_action is not None
+            and current_action.status is ImportJobActionStatus.ROLLED_BACK
+        ):
+            await log_event(
+                session,
+                job_id,
+                "DEBUG",
+                "import_rollback_action_retry_completed",
+                message=(
+                    "Rolled back a deferred placement-start action after its earlier "
+                    "destination owner was removed."
+                ),
+                action_type=action.action_type,
+                sequence_no=action.sequence_no,
+            )
+        await session.commit()
 
     action_status_counts = await _load_rollback_action_status_counts(session, job_id)
     rollback_action_count = sum(action_status_counts.values())

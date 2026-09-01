@@ -331,6 +331,12 @@ def test_import_staging_is_separate_from_final_arc_and_membership_rows() -> None
     assert ImportedStoryArc.__table__.c.source_ordinal.nullable is False
     assert ImportedStoryArc.__table__.c.name.nullable is True
     assert ImportedStoryArc.__table__.c.normalized_name.nullable is True
+    imported_entry_indexes = {
+        index.name: tuple(index.columns.keys()) for index in ImportedStoryArcEntry.__table__.indexes
+    }
+    assert imported_entry_indexes["ix_import_story_arc_entries_import_file_id"] == (
+        "import_file_id",
+    )
 
 
 def test_imported_files_capture_folder_cohort_order_without_reorganizing_source() -> None:

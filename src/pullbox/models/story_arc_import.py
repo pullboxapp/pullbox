@@ -121,6 +121,7 @@ class ImportedStoryArcEntry(Base, IdentityMixin, TimestampMixin):
             "source_ordinal",
             "id",
         ),
+        Index("ix_import_story_arc_entries_import_file_id", "import_file_id"),
         Index("ix_import_story_arc_entries_matched_issue_id", "matched_issue_id", "id"),
     )
 

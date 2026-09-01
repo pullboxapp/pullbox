@@ -1522,7 +1522,10 @@ async def _created_series_issue_state_changed(
     for issue_id, status, manual_skip in current_rows:
         expected = expected_snapshot.get(str(issue_id))
         if expected is None:
-            if bool(manual_skip) or status != default_status:
+            if issue_id in imported_issue_ids:
+                if bool(manual_skip) or status != IssueStatus.OWNED:
+                    return True
+            elif bool(manual_skip) or status != default_status:
                 return True
             continue
         if not isinstance(expected, dict):

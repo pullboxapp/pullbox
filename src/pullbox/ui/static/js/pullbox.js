@@ -3944,6 +3944,14 @@ function importJobLogViewerData(config) {
   var cfg = config || {};
   var _REQUEST_TIMEOUT_MS =
     Number(cfg.requestTimeoutMs || 0) > 0 ? Number(cfg.requestTimeoutMs) : 12000;
+  var requestedMaxEntries = Number(cfg.maxEntries || 500);
+  var _MAX_RETAINED_ENTRIES = Math.max(
+    250,
+    Math.min(
+      500,
+      Number.isFinite(requestedMaxEntries) ? Math.floor(requestedMaxEntries) : 500,
+    ),
+  );
 
   return {
     jobId: Number(cfg.jobId || 0),
@@ -4138,9 +4146,19 @@ function importJobLogViewerData(config) {
         return "0 entries";
       }
       if (!this.levelFilter && !this.searchQuery) {
+        if (this.totalCount > this.entries.length) {
+          return this.entries.length + " recent of " + this.totalCount + " entries";
+        }
         return this.totalCount + " entries";
       }
-      return this.filteredCount + " entries (filtered from " + this.totalCount + ")";
+      return (
+        this.filteredCount +
+        " recent matches (" +
+        this.entries.length +
+        " recent of " +
+        this.totalCount +
+        " entries)"
+      );
     },
 
     get downloadHref() {
@@ -4229,6 +4247,17 @@ function importJobLogViewerData(config) {
       };
     },
 
+    _trimRetainedEntries: function () {
+      var overflow = this.entries.length - _MAX_RETAINED_ENTRIES;
+      if (overflow <= 0) {
+        return;
+      }
+      this.entries.splice(0, overflow);
+      if (this.currentPage > this.totalPages) {
+        this.currentPage = this.totalPages;
+      }
+    },
+
     _appendStreamEntry: function (event) {
       if (!event || !event.data) {
         return;
@@ -4247,6 +4276,7 @@ function importJobLogViewerData(config) {
         var shouldFollowTail = this._shouldFollowLiveTail();
         this.entries.push(this._normalizeStreamEntry(payload));
         this.totalCount += 1;
+        this._trimRetainedEntries();
         if (shouldFollowTail) {
           this.currentPage = this.totalPages;
         } else if (this.currentPage > this.totalPages) {
@@ -4334,11 +4364,12 @@ function importJobLogViewerData(config) {
           }
           if (incrementalData) {
             var newItems = Array.isArray(incrementalData.items) ? incrementalData.items : [];
-            this.totalCount = Number(incrementalData.total || this.totalCount || this.entries.length) || this.entries.length;
             if (newItems.length) {
               for (var n = 0; n < newItems.length; n++) {
                 this.entries.push(this._normalizeEntry(newItems[n]));
               }
+              this.totalCount += newItems.length;
+              this._trimRetainedEntries();
               if (this.currentPage > this.totalPages) {
                 this.currentPage = this.totalPages;
               }
@@ -4347,34 +4378,24 @@ function importJobLogViewerData(config) {
           }
         }
 
-        var page = 1;
-        var pageSize = 500;
-        var allEntries = [];
-        var total = 0;
-
-        while (true) {
-          var data = await this._fetchJson(
-            "/api/v1/import/" + this.jobId + "/logs?page=" + page + "&page_size=" + pageSize + "&order=asc",
-            request,
-          );
-          if (request.token !== this._requestToken) {
-            return;
-          }
-          if (!data) {
-            break;
-          }
-          var items = Array.isArray(data.items) ? data.items : [];
-          if (page === 1) {
-            total = Number(data.total || items.length) || 0;
-          }
-          for (var i = 0; i < items.length; i++) {
-            allEntries.push(this._normalizeEntry(items[i]));
-          }
-          if (!items.length || allEntries.length >= total) {
-            break;
-          }
-          page += 1;
+        var data = await this._fetchJson(
+          "/api/v1/import/" +
+            this.jobId +
+            "/logs?page=1&page_size=" +
+            _MAX_RETAINED_ENTRIES +
+            "&order=desc",
+          request,
+        );
+        if (request.token !== this._requestToken) {
+          return;
         }
+        if (!data) {
+          return;
+        }
+
+        var items = Array.isArray(data.items) ? data.items : [];
+        var allEntries = items.slice().reverse().map(this._normalizeEntry.bind(this));
+        var total = Number(data.total || items.length) || 0;
 
         var shouldFollowTail = this._shouldFollowLiveTail();
         this.entries = allEntries;

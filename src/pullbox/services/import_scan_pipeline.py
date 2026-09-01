@@ -988,6 +988,11 @@ async def _scan_collection_discovered_series(
 
         if materialize_discovered_scan_results is not None:
             await materialize_discovered_scan_results(session, job, batch_to_flush)
+            # The shared materializer also supports one-shot callers and sets
+            # this counter to the size of the list it receives. Restore the
+            # cumulative scanner count after each incremental batch so large
+            # scans do not appear to contain only their final (partial) batch.
+            job.series_found = series_found
 
         if log_event is not None:
             await log_event(
