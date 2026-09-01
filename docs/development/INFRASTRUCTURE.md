@@ -24,7 +24,9 @@ requirements.
   automation.
 - Pull request pushes run a cheap GitHub Actions preflight by default. Full PR
   CI/security/workflow-hygiene checks run after maintainers apply `ci:full`.
-- CI tests Python 3.12, 3.13, and 3.14.
+- CI runs the complete test suite and uploads coverage for Python 3.12, 3.13,
+  and 3.14. The blocking 90% coverage gate applies to the production/default
+  Python 3.14 runtime and local full CI.
 - Self-hosted Python matrix jobs use five pytest workers per Python version.
 - Self-hosted functional E2E jobs use three isolated pytest workers per browser.
 - Normal PR E2E runs disable video encoding; manual CI dispatches can enable
@@ -208,7 +210,9 @@ tracked in the active CI/CD path.
 - Branch rulesets should require only stable aggregate checks:
   `CI Required`, `Security Required`, `Workflow Hygiene Required`, and
   `Docker Validate Required`.
-- Python tests run across the supported matrix.
+- Python tests run across the supported matrix. Every version publishes a
+  coverage report; the production/default Python 3.14 job enforces the 90%
+  release threshold while compatibility jobs report coverage without gating it.
 - Migration checks must validate upgrade and downgrade behavior.
 - Accessibility checks must stay separate from functional browser checks.
 - E2E runs should upload useful artifacts on failure.
