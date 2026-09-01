@@ -504,3 +504,52 @@ async def test_completed_rollback_clears_deferred_followup_marker(
     assert job.status is ImportJobStatus.ROLLED_BACK
     assert job.story_arc_placement_followup_pending is False
     assert job.progress_snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_completed_integrated_cancellation_rollback_is_terminally_cancelled(
+    db_session: AsyncSession,
+) -> None:
+    job = ImportJob(
+        source_path="/imports/cancelled-library",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+        control_request=ImportControlRequest.CANCEL,
+        import_started_at=datetime.now(UTC),
+    )
+    action = ImportJobAction(
+        import_job=job,
+        sequence_no=1,
+        phase="files",
+        action_type="safe_file",
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    async def reverse_action(session: AsyncSession, plan: RollbackActionPlan) -> None:
+        current = await session.get(ImportJobAction, plan.action_id)
+        assert current is not None
+        current.status = ImportJobActionStatus.ROLLED_BACK
+
+    log_event = AsyncMock()
+    completed = await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=reverse_action,
+        restore_review_state=AsyncMock(),
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=log_event,
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args: None,
+        job_stats=lambda _job: {},
+    )
+
+    assert completed is True
+    assert job.status is ImportJobStatus.CANCELLED
+    assert job.control_request is ImportControlRequest.NONE
+    assert job.error_message == "Import cancelled by user."
+    assert any(
+        len(call.args) >= 4 and call.args[3] == "import_cancelled_after_rollback"
+        for call in log_event.await_args_list
+    )

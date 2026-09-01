@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -65,6 +66,64 @@ if TYPE_CHECKING:
     from pullbox.services.metadata_service import MetadataService
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesFolderCreationResult:
+    """Exact directory ownership captured while assigning a Series path."""
+
+    folder_path: Path
+    ownership_boundary_path: Path
+    created_directory_paths: tuple[Path, ...]
+
+    def ownership_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "folder_path": str(self.folder_path),
+            "ownership_boundary_path": str(self.ownership_boundary_path),
+            "created_directory_paths": [str(path) for path in self.created_directory_paths],
+        }
+
+
+def _create_series_folder_directories(
+    folder_path: Path,
+    ownership_boundary_path: Path,
+) -> tuple[Path, ...]:
+    """Create and return only strict descendant directory segments created here."""
+    relative = folder_path.relative_to(ownership_boundary_path)
+    if not relative.parts:
+        raise ValueError("Series folder cannot be the library root")
+    boundary_resolved = ownership_boundary_path.resolve(strict=True)
+    if not boundary_resolved.is_dir():
+        raise NotADirectoryError(ownership_boundary_path)
+
+    created: list[Path] = []
+    current = ownership_boundary_path
+    try:
+        for segment in relative.parts:
+            current /= segment
+            current_created = False
+            try:
+                current.mkdir()
+            except FileExistsError:
+                if not current.is_dir():
+                    raise
+            else:
+                current_created = True
+            resolved_current = current.resolve(strict=True)
+            resolved_relative = resolved_current.relative_to(boundary_resolved)
+            if not resolved_relative.parts:
+                raise ValueError("Series folder segment cannot resolve to the library root")
+            if current_created:
+                created.append(resolved_current)
+    except (OSError, ValueError):
+        for directory in reversed(created):
+            try:
+                directory.rmdir()
+            except OSError:
+                continue
+        raise
+    return tuple(created)
 
 
 def _targeted_import_folder_type_hint(
@@ -218,14 +277,18 @@ class SeriesService:
         series.issue_catalog_last_checked_at = None
         series.metadata_source = "comicvine_partial"
 
+        diagnostics = dict(import_series.diagnostics or {})
+        diagnostics.pop("series_folder_ownership", None)
         if library_root_id is not None and not series.path:
-            await self._create_series_folder(
+            folder_creation = await self._create_series_folder(
                 session,
                 series,
                 library_root_id,
                 cv_id,
                 folder_series_type=_targeted_import_folder_type_hint(series, issue_summaries),
             )
+            diagnostics["series_folder_ownership"] = folder_creation.ownership_payload()
+        import_series.diagnostics = diagnostics
 
         local_cover = (
             find_imported_series_cover(Path(import_series.source_folder))
@@ -237,7 +300,25 @@ class SeriesService:
                 select(ImportJob.source_type).where(ImportJob.id == import_series.import_job_id)
             )
             if source_type == ImportSourceType.MYLAR3:
-                await cache_imported_series_cover(session, series, local_cover)
+                diagnostics = dict(import_series.diagnostics or {})
+                diagnostics.pop("cover_cache_ownership", None)
+                cached_cover = await cache_imported_series_cover(session, series, local_cover)
+                if (
+                    cached_cover is not None
+                    and cached_cover.artifact_created
+                    and cached_cover.artifact_signature is not None
+                ):
+                    diagnostics["cover_cache_ownership"] = {
+                        "schema_version": 1,
+                        "base_path": str(cached_cover.covers_base),
+                        "ownership_boundary_path": str(cached_cover.ownership_boundary_path),
+                        "created_directory_paths": [
+                            str(path) for path in cached_cover.created_directory_paths
+                        ],
+                        "artifact_path": str(cached_cover.path),
+                        "artifact_signature": dict(cached_cover.artifact_signature),
+                    }
+                import_series.diagnostics = diagnostics
 
         if issue_summaries:
             await self._metadata.upsert_issue_summaries(session, series, issue_summaries)
@@ -390,7 +471,7 @@ class SeriesService:
         comicvine_id: int,
         *,
         folder_series_type: SeriesType | None = None,
-    ) -> None:
+    ) -> SeriesFolderCreationResult:
         """Create a series folder on disk inside the given library root.
 
         Sets the current and preferred series library roots. If a folder with
@@ -440,8 +521,16 @@ class SeriesService:
                 comicvine_id=comicvine_id,
             )
 
-        # Create the directory (run in thread to avoid blocking event loop)
-        await asyncio.to_thread(folder_path.mkdir, parents=True, exist_ok=True)
+        # Create each missing segment independently so import rollback can
+        # distinguish directories created here from pre-existing user paths.
+        try:
+            created_directory_paths = await asyncio.to_thread(
+                _create_series_folder_directories,
+                folder_path,
+                root_path,
+            )
+        except (OSError, ValueError) as exc:
+            raise ValidationError("Series folder must be created inside its library root") from exc
 
         series.path = str(folder_path)
         series.library_root_id = library_root_id
@@ -452,6 +541,11 @@ class SeriesService:
             path=str(folder_path),
             series_title=series.title,
             library_root=root.name,
+        )
+        return SeriesFolderCreationResult(
+            folder_path=folder_path.resolve(strict=True),
+            ownership_boundary_path=root_path.resolve(strict=True),
+            created_directory_paths=created_directory_paths,
         )
 
     @staticmethod

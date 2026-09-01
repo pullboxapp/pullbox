@@ -18,7 +18,13 @@ from pullbox.models.series import Series
 from pullbox.providers.base import IssueSummary
 from pullbox.services.import_catalog_hydration import schedule_catalog_hydration
 from pullbox.services.import_file_resolution import load_importable_files
-from pullbox.services.import_job_actions import build_series_created_action_payload
+from pullbox.services.import_job_actions import (
+    build_series_cover_cache_action_payload,
+    build_series_cover_path_updated_action_payload,
+    build_series_created_action_payload,
+    build_series_folder_created_action_payload,
+    build_series_monitoring_updated_action_payload,
+)
 from pullbox.services.import_job_execution_progress import progress_session_factory_for_runtime
 from pullbox.services.import_split_series import apply_import_preferred_series_root
 
@@ -99,8 +105,31 @@ async def execute_new_series(
             if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
             else job.target_library_root_id
         )
-        existing_series_id = await session.scalar(
-            sa_select(Series.id).where(Series.comicvine_id == cv_id)
+        existing_series_row = (
+            await session.execute(
+                sa_select(
+                    Series.id,
+                    Series.cover_path,
+                    Series.path,
+                    Series.library_root_id,
+                    Series.preferred_library_root_id,
+                    Series.monitored,
+                ).where(Series.comicvine_id == cv_id)
+            )
+        ).one_or_none()
+        existing_series_id = existing_series_row[0] if existing_series_row is not None else None
+        existing_series_cover_path = (
+            existing_series_row[1] if existing_series_row is not None else None
+        )
+        existing_series_path = existing_series_row[2] if existing_series_row is not None else None
+        existing_series_library_root_id = (
+            existing_series_row[3] if existing_series_row is not None else None
+        )
+        existing_series_preferred_root_id = (
+            existing_series_row[4] if existing_series_row is not None else None
+        )
+        existing_series_monitored = (
+            bool(existing_series_row[5]) if existing_series_row is not None else False
         )
         targeted_descriptor = getattr(
             type(series_service),
@@ -146,6 +175,10 @@ async def execute_new_series(
                 search_on_add=job.search_on_add,
             )
     new_series_id = new_series.id
+    # Persist the review-row ownership link before file work begins. A
+    # cooperative cancellation can interrupt that work, and the rollback
+    # journal must still be able to prove which import created this series.
+    item.series_id = new_series_id
 
     await apply_import_preferred_series_root(
         session,
@@ -165,6 +198,66 @@ async def execute_new_series(
                 import_series_id=item_id,
             ),
         )
+    else:
+        monitoring_action_payload = await build_series_monitoring_updated_action_payload(
+            session,
+            series_id=new_series_id,
+            import_series_id=item_id,
+            previous_monitored=existing_series_monitored,
+        )
+        if monitoring_action_payload is not None:
+            await record_action(
+                session,
+                job,
+                phase="import",
+                action_type="series_monitoring_updated",
+                payload=monitoring_action_payload,
+            )
+        folder_action_payload = await build_series_folder_created_action_payload(
+            session,
+            series_id=new_series_id,
+            import_series_id=item_id,
+            previous_series_path=existing_series_path,
+            previous_library_root_id=existing_series_library_root_id,
+            previous_preferred_library_root_id=existing_series_preferred_root_id,
+        )
+        if folder_action_payload is not None:
+            await record_action(
+                session,
+                job,
+                phase="import",
+                action_type="series_folder_created",
+                payload=folder_action_payload,
+            )
+        cover_action_payload = await build_series_cover_cache_action_payload(
+            session,
+            series_id=new_series_id,
+            import_series_id=item_id,
+            previous_cover_path=existing_series_cover_path,
+        )
+        if cover_action_payload is not None:
+            await record_action(
+                session,
+                job,
+                phase="import",
+                action_type="series_cover_cache_created",
+                payload=cover_action_payload,
+            )
+        else:
+            cover_path_action_payload = await build_series_cover_path_updated_action_payload(
+                session,
+                series_id=new_series_id,
+                import_series_id=item_id,
+                previous_cover_path=existing_series_cover_path,
+            )
+            if cover_path_action_payload is not None:
+                await record_action(
+                    session,
+                    job,
+                    phase="import",
+                    action_type="series_cover_path_updated",
+                    payload=cover_path_action_payload,
+                )
 
     await log_event(
         session,

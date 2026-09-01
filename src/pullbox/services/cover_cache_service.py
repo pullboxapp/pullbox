@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -12,6 +13,8 @@ import httpx
 import structlog
 
 from pullbox.config import get_settings
+from pullbox.core.exceptions import ConfigurationError
+from pullbox.core.library_file_ownership import build_managed_placement_signature
 from pullbox.services.cover_resolver import resolve_covers_dir
 
 if TYPE_CHECKING:
@@ -24,6 +27,18 @@ logger = structlog.get_logger(__name__)
 _SERIES_COVER_LOCKS: dict[int, asyncio.Lock] = {}
 _STORY_ARC_COVER_LOCKS: dict[int, asyncio.Lock] = {}
 _SUPPORTED_COVER_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+
+
+@dataclass(frozen=True, slots=True)
+class ImportedSeriesCoverCacheResult:
+    """Cached local artwork plus exact directory ownership for import rollback."""
+
+    path: Path
+    covers_base: Path
+    ownership_boundary_path: Path
+    created_directory_paths: tuple[Path, ...]
+    artifact_created: bool
+    artifact_signature: dict[str, int | str] | None
 
 
 def find_cover_file(directory: Path, stem: str) -> Path | None:
@@ -89,7 +104,7 @@ async def cache_imported_series_cover(
     session: AsyncSession,
     series: Series,
     source_path: Path,
-) -> Path | None:
+) -> ImportedSeriesCoverCacheResult | None:
     """Copy discovered local artwork into Pullbox's managed cover cache."""
     try:
         source = source_path.expanduser().resolve(strict=True)
@@ -100,22 +115,49 @@ async def cache_imported_series_cover(
 
     covers_base = await resolve_covers_dir(session)
     covers_dir = covers_base / str(series.id)
+    try:
+        ownership_boundary_path = _nearest_existing_directory(covers_base)
+    except OSError:
+        logger.exception(
+            "imported_series_cover_cache_boundary_invalid",
+            series_id=series.id,
+            path=str(covers_base),
+        )
+        return None
     existing = find_cover_file(covers_dir, "series")
     if existing is not None:
         series.cover_path = f"/api/v1/series/{series.id}/cover"
-        return existing
+        return ImportedSeriesCoverCacheResult(
+            path=existing,
+            covers_base=covers_base,
+            ownership_boundary_path=ownership_boundary_path,
+            created_directory_paths=(),
+            artifact_created=False,
+            artifact_signature=None,
+        )
 
     destination = covers_dir / f"series{source.suffix.lower()}"
     temporary = covers_dir / f".{destination.name}.tmp"
 
-    def _copy() -> None:
-        covers_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, temporary)
-        temporary.replace(destination)
+    def _copy() -> tuple[tuple[Path, ...], dict[str, int | str]]:
+        created_directories = _create_cover_cache_directories(
+            covers_dir,
+            ownership_boundary_path,
+        )
+        try:
+            shutil.copyfile(source, temporary)
+            temporary.replace(destination)
+            artifact_signature = build_managed_placement_signature(destination)
+        except (ConfigurationError, OSError):
+            temporary.unlink(missing_ok=True)
+            destination.unlink(missing_ok=True)
+            _remove_owned_empty_directories(created_directories)
+            raise
+        return created_directories, artifact_signature
 
     try:
-        await asyncio.to_thread(_copy)
-    except OSError:
+        created_directory_paths, artifact_signature = await asyncio.to_thread(_copy)
+    except (ConfigurationError, OSError):
         logger.exception(
             "imported_series_cover_cache_failed",
             series_id=series.id,
@@ -124,7 +166,63 @@ async def cache_imported_series_cover(
         return None
 
     series.cover_path = f"/api/v1/series/{series.id}/cover"
-    return destination
+    return ImportedSeriesCoverCacheResult(
+        path=destination,
+        covers_base=covers_base,
+        ownership_boundary_path=ownership_boundary_path,
+        created_directory_paths=created_directory_paths,
+        artifact_created=True,
+        artifact_signature=artifact_signature,
+    )
+
+
+def _nearest_existing_directory(path: Path) -> Path:
+    """Return the first existing directory above a possibly missing cache base."""
+    candidate = path
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    if not candidate.is_dir():
+        raise NotADirectoryError(candidate)
+    return candidate
+
+
+def _create_cover_cache_directories(
+    covers_dir: Path,
+    ownership_boundary_path: Path,
+) -> tuple[Path, ...]:
+    """Create every missing cache segment and report exactly what was created."""
+    try:
+        relative = covers_dir.relative_to(ownership_boundary_path)
+    except ValueError as exc:
+        raise OSError("Cover cache directory is outside its ownership boundary") from exc
+
+    created: list[Path] = []
+    current = ownership_boundary_path
+    try:
+        for segment in relative.parts:
+            current /= segment
+            try:
+                current.mkdir()
+            except FileExistsError:
+                if not current.is_dir():
+                    raise
+            else:
+                created.append(current)
+    except OSError:
+        _remove_owned_empty_directories(created)
+        raise
+    return tuple(created)
+
+
+def _remove_owned_empty_directories(paths: list[Path] | tuple[Path, ...]) -> None:
+    for directory in reversed(paths):
+        try:
+            directory.rmdir()
+        except (FileNotFoundError, OSError):
+            continue
 
 
 async def purge_series_cover_cache(

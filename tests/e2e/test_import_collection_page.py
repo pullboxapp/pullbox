@@ -3051,6 +3051,17 @@ class TestImportCollectionTab:
                 body=json.dumps({"id": 323, "status": "pending"}),
             )
 
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(self._identity_mylar_path_response()),
+            )
+
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
         authed_page.route("**/api/v1/import/story-arc-preview", fulfill_arc_preview)
         authed_page.route("**/api/v1/import", fulfill_create)
         import_page = ImportPage(authed_page, seeded_server)
@@ -3059,6 +3070,10 @@ class TestImportCollectionTab:
 
         import_page.source_mylar3_card.click()
         import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.mylar_path_preview.get_by_text("No mapping is required.").wait_for(
+            state="visible",
+            timeout=5000,
+        )
         import_page.story_arc_section.wait_for(state="visible", timeout=5000)
 
         preview_text = import_page.story_arc_preview.text_content() or ""

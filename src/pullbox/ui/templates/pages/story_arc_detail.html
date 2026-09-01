@@ -286,7 +286,7 @@
           method="post"
           data-testid="story-arc-placement-policy-form"
           class="mt-4 space-y-4"
-          x-data="{ placementMode: {{ placement_ui.policy.mode|tojson }} }"
+          x-data='{ placementMode: {{ placement_ui.policy.mode|tojson }} }'
         >
           <input type="hidden" name="expected_revision" value="{{ placement_ui.policy.revision }}">
           <fieldset class="space-y-4"{% if not story_arc.active %} disabled{% endif %}>

@@ -6,12 +6,15 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy import func as sa_func
+from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
 from pullbox.models.import_job import (
     ImportedFile,
+    ImportedFileStatus,
     ImportedSeries,
     ImportJob,
     ImportJobStatus,
@@ -48,6 +51,30 @@ if TYPE_CHECKING:
     )
 
 logger = structlog.get_logger(__name__)
+
+
+async def reconcile_durable_import_execution_counters(
+    session: AsyncSession,
+    job: ImportJob,
+) -> None:
+    """Rebuild execution totals from file and series rows committed before interruption."""
+    file_status_result = await session.execute(
+        sa_select(ImportedFile.status, sa_func.count(ImportedFile.id))
+        .where(ImportedFile.import_job_id == job.id)
+        .group_by(ImportedFile.status)
+    )
+    file_status_counts = {status: count for status, count in file_status_result.all()}
+    series_status_result = await session.execute(
+        sa_select(ImportedSeries.status, sa_func.count(ImportedSeries.id))
+        .where(ImportedSeries.import_job_id == job.id)
+        .group_by(ImportedSeries.status)
+    )
+    series_status_counts = {status: count for status, count in series_status_result.all()}
+
+    job.total_files_imported = file_status_counts.get(ImportedFileStatus.IMPORTED, 0)
+    job.total_files_failed = file_status_counts.get(ImportedFileStatus.FAILED, 0)
+    job.series_imported = series_status_counts.get(ImportSeriesStatus.IMPORTED, 0)
+    job.series_failed = series_status_counts.get(ImportSeriesStatus.FAILED, 0)
 
 
 async def build_import_group_progress_plans(

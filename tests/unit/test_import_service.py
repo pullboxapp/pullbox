@@ -3333,6 +3333,8 @@ class TestMetadataRepair:
                 transfer_method="copy",
                 series_folder_created=True,
                 series_folder_path=destination_path.parent,
+                created_directory_paths=(destination_path.parent,),
+                directory_ownership_boundary_path=destination_path.parent.parent,
                 temp_paths=temp_paths,
             )
             destination_path.write_bytes(b"placed comic")
@@ -3373,6 +3375,10 @@ class TestMetadataRepair:
             destination_path
         )
         assert action.payload["temp_paths"]
+        assert action.payload["created_directory_paths"] == [str(destination_path.parent)]
+        assert action.payload["directory_ownership_boundary_path"] == str(
+            destination_path.parent.parent
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

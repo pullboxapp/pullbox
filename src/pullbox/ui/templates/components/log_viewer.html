@@ -231,7 +231,10 @@
       {% if body_testid %}data-testid="{{ body_testid }}"{% endif %}
       {% if body_scroll_action %}@scroll="{{ body_scroll_action }}"{% endif %}
     >
-      <template x-for="(entry, idx) in {{ entries_expr }}" :key="entry.id || idx">
+      <template
+        x-for="(entry, idx) in {{ entries_expr }}"
+        :key="Number(entry.id || 0) > 0 ? 'persisted:' + entry.id : (entry._streamToken ? 'stream:' + entry._streamToken : 'synthetic:' + idx)"
+      >
         <div class="min-w-0 max-w-full overflow-hidden">
           <div
             class="log-line flex w-full min-w-0 max-w-full gap-0 overflow-hidden cursor-pointer select-none transition-colors"

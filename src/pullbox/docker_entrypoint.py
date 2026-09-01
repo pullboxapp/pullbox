@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, TextIO, cast
 
@@ -21,6 +22,11 @@ from pullbox.startup_messages import (
 )
 
 DEFAULT_COMMAND = ("python", "-m", "pullbox")
+
+# Uvicorn gets five seconds to drain active requests. Keep the entrypoint's
+# supervisor deadline below Docker's default ten-second stop grace period while
+# leaving enough time for Uvicorn to finish its lifespan shutdown.
+CHILD_SHUTDOWN_TIMEOUT_SECONDS = 8.0
 
 
 class _TeeStream:
@@ -116,10 +122,26 @@ def _run_process(command: list[str]) -> int:
         return 127
 
     previous_handlers: dict[signal.Signals, Any] = {}
+    forwarded_signal: signal.Signals | None = None
+    shutdown_timer: threading.Timer | None = None
+
+    def _force_kill_after_timeout() -> None:
+        if process.poll() is None:
+            process.kill()
 
     def _forward(signum: int, _frame: object | None) -> None:
+        nonlocal forwarded_signal, shutdown_timer
         if process.poll() is None:
-            process.send_signal(signum)
+            forwarded = signal.Signals(signum)
+            process.send_signal(forwarded)
+            if forwarded_signal is None:
+                forwarded_signal = forwarded
+                shutdown_timer = threading.Timer(
+                    CHILD_SHUTDOWN_TIMEOUT_SECONDS,
+                    _force_kill_after_timeout,
+                )
+                shutdown_timer.daemon = True
+                shutdown_timer.start()
 
     for signum in (signal.Signals.SIGINT, signal.Signals.SIGTERM):
         previous_handlers[signum] = signal.getsignal(signum)
@@ -129,10 +151,25 @@ def _run_process(command: list[str]) -> int:
         if process.stdout is not None:
             for line in process.stdout:
                 print(line, end="", flush=True)
-        return process.wait()
+        exit_code = process.wait()
     finally:
+        if shutdown_timer is not None:
+            shutdown_timer.cancel()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, cast("Any", handler))
+
+    # Uvicorn intentionally re-raises the captured shutdown signal after its
+    # graceful lifecycle completes. A SIGTERM that this entrypoint forwarded is
+    # therefore an expected container stop, not an application failure. Raising
+    # here also prevents a stop received during migrations from launching the
+    # application after the migration child exits.
+    if forwarded_signal is signal.Signals.SIGTERM and exit_code in {
+        0,
+        -int(signal.Signals.SIGTERM),
+    }:
+        raise SystemExit(0)
+
+    return exit_code
 
 
 def main(argv: list[str] | None = None) -> None:

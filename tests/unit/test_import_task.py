@@ -1102,6 +1102,40 @@ class TestRunImportExecuteTask:
         assert operation.overall_percent == 100
         assert operation.completed_at is not None
 
+    @pytest.mark.asyncio
+    async def test_rollback_terminal_event_publishes_explicit_durable_zero_counters(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Terminal rollback must replace stale Alpine counters with durable zeros."""
+        job = await _create_job(db_session, status=ImportJobStatus.ROLLED_BACK)
+        job.series_imported = 0
+        job.series_failed = 0
+        job.total_files_imported = 0
+        job.total_files_failed = 0
+        job.progress_snapshot = {
+            "status": ImportJobStatus.ROLLED_BACK.value,
+            "mode": "rollback",
+            "phase": "rollback",
+            "progress": 100,
+            "message": "Import rollback completed.",
+            "series_imported": None,
+            "series_failed": None,
+            "total_files_imported": None,
+            "total_files_failed": None,
+        }
+        await db_session.commit()
+
+        with patch("pullbox.tasks.import_task.publish", new_callable=AsyncMock):
+            terminal_status = await _emit_terminal_event_for_job(db_session, job.id)
+
+        await db_session.refresh(job)
+        snapshot = dict(job.progress_snapshot or {})
+        assert terminal_status is ImportJobStatus.ROLLED_BACK
+        assert snapshot["series_imported"] == 0
+        assert snapshot["series_failed"] == 0
+        assert snapshot["total_files_imported"] == 0
+        assert snapshot["total_files_failed"] == 0
+
 
 # ── Test: Startup Recovery ───────────────────────────────────────────────
 
@@ -1160,6 +1194,79 @@ class TestStartupRecovery:
         assert (job.progress_snapshot or {}).get("recovered_status") == (
             ImportJobStatus.IMPORTING.value
         )
+
+    @pytest.mark.asyncio
+    async def test_importing_job_recovery_rebuilds_durable_execution_counters(
+        self, async_engine: object, db_session: AsyncSession
+    ) -> None:
+        """Restart recovery must count file commits missing from the job aggregate."""
+        from pullbox.models.import_job import (
+            ImportedFile,
+            ImportedFileStatus,
+            ImportedSeries,
+            ImportSeriesStatus,
+        )
+
+        job = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        job.series_imported = 0
+        job.total_files_imported = 0
+        completed_series = ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name="Completed before restart",
+            status=ImportSeriesStatus.IMPORTED,
+        )
+        active_series = ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name="Interrupted series",
+            status=ImportSeriesStatus.IMPORTING,
+        )
+        db_session.add_all([completed_series, active_series])
+        await db_session.flush()
+        db_session.add_all(
+            [
+                ImportedFile(
+                    import_job_id=job.id,
+                    import_series_id=completed_series.id,
+                    file_path="/source/completed.cbz",
+                    file_name="completed.cbz",
+                    file_size=1,
+                    file_format="cbz",
+                    status=ImportedFileStatus.IMPORTED,
+                ),
+                *[
+                    ImportedFile(
+                        import_job_id=job.id,
+                        import_series_id=active_series.id,
+                        file_path=f"/source/committed-{index}.cbz",
+                        file_name=f"committed-{index}.cbz",
+                        file_size=1,
+                        file_format="cbz",
+                        status=ImportedFileStatus.IMPORTED,
+                    )
+                    for index in range(4)
+                ],
+                ImportedFile(
+                    import_job_id=job.id,
+                    import_series_id=active_series.id,
+                    file_path="/source/pending.cbz",
+                    file_name="pending.cbz",
+                    file_size=1,
+                    file_format="cbz",
+                    status=ImportedFileStatus.CONFIRMED,
+                ),
+            ]
+        )
+        await db_session.commit()
+
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        recovered = await recover_stuck_import_jobs(factory)
+
+        assert recovered == 1
+        await db_session.refresh(job)
+        await db_session.refresh(active_series)
+        assert active_series.status is ImportSeriesStatus.CONFIRMED
+        assert job.series_imported == 1
+        assert job.total_files_imported == 5
 
     @pytest.mark.asyncio
     async def test_story_arc_placement_phase_survives_startup_recovery(

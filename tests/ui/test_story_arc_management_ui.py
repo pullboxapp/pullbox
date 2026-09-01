@@ -1038,6 +1038,7 @@ class TestStoryArcManagementUI:
         assert response.status_code == 200
         assert 'data-testid="story-arc-placement-policy"' in response.text
         assert 'data-testid="story-arc-placement-policy-form"' in response.text
+        assert "x-data='{ placementMode: \"logical\" }'" in response.text
         assert "<legend" in response.text
         assert "Logical only" in response.text
         assert "Separate Story Arc folder" in response.text

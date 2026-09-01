@@ -135,6 +135,8 @@ class LibraryFileRegistrationOutcome:
     library_file: LibraryFile
     series_folder_created: bool
     series_folder_path: Path | None
+    created_directory_paths: tuple[Path, ...] = ()
+    directory_ownership_boundary_path: Path | None = None
     permission_results: tuple[PermissionChangeResult, ...] = ()
 
 
@@ -388,6 +390,8 @@ async def register_library_file_with_metadata(
     referenced_signature: dict[str, int | str] | None = None
     managed_placement_signature: dict[str, int | str] | None = None
     placement_started = False
+    created_directory_paths: tuple[Path, ...] = ()
+    directory_ownership_boundary_path: Path | None = None
 
     if effective_storage_mode == LibraryFileStorageMode.REFERENCED and move_to_library:
         raise ConfigurationError("Referenced storage cannot materialize a managed library file.")
@@ -413,6 +417,8 @@ async def register_library_file_with_metadata(
         target_path: Path,
         effective_transfer_method: str,
         series_folder_created: bool,
+        created_directories: tuple[Path, ...],
+        directory_ownership_boundary: Path | None,
     ) -> None:
         nonlocal placement_started
         if placement_started_callback is None:
@@ -435,6 +441,8 @@ async def register_library_file_with_metadata(
             transfer_method=effective_transfer_method,
             series_folder_created=series_folder_created,
             series_folder_path=target_path.parent,
+            created_directory_paths=created_directories,
+            directory_ownership_boundary_path=directory_ownership_boundary,
             temp_paths=tuple(temp_paths),
         )
         if inspect.isawaitable(callback_result):
@@ -654,6 +662,8 @@ async def register_library_file_with_metadata(
                         target_path=target_path,
                         effective_transfer_method=transfer_method,
                         series_folder_created=target.series_folder_created,
+                        created_directories=target.created_directory_paths,
+                        directory_ownership_boundary=target.directory_ownership_boundary_path,
                     )
                     final_path = await transfer_artifact(
                         prepared_source,
@@ -662,6 +672,8 @@ async def register_library_file_with_metadata(
                         transfer_progress_callback=transfer_progress_callback,
                     )
                     series_folder_created = target.series_folder_created
+                    created_directory_paths = target.created_directory_paths
+                    directory_ownership_boundary_path = target.directory_ownership_boundary_path
                 else:
                     target = await _resolve_library_target_path(
                         session,
@@ -702,6 +714,8 @@ async def register_library_file_with_metadata(
                             target_path=target.path,
                             effective_transfer_method=transfer_method,
                             series_folder_created=target.series_folder_created,
+                            created_directories=target.created_directory_paths,
+                            directory_ownership_boundary=target.directory_ownership_boundary_path,
                         )
                         materialize_result = materializer(
                             prepared_source,
@@ -715,6 +729,8 @@ async def register_library_file_with_metadata(
                             await materialize_result
                         final_path = target.path
                         series_folder_created = target.series_folder_created
+                        created_directory_paths = target.created_directory_paths
+                        directory_ownership_boundary_path = target.directory_ownership_boundary_path
                         comicinfo_already_embedded = True
                     else:
                         await notify_placement_started(
@@ -722,6 +738,8 @@ async def register_library_file_with_metadata(
                             target_path=target.path,
                             effective_transfer_method=transfer_method,
                             series_folder_created=target.series_folder_created,
+                            created_directories=target.created_directory_paths,
+                            directory_ownership_boundary=target.directory_ownership_boundary_path,
                         )
                         final_path = await transfer_artifact(
                             prepared_source,
@@ -730,6 +748,8 @@ async def register_library_file_with_metadata(
                             transfer_progress_callback=transfer_progress_callback,
                         )
                         series_folder_created = target.series_folder_created
+                        created_directory_paths = target.created_directory_paths
+                        directory_ownership_boundary_path = target.directory_ownership_boundary_path
             elif recover_existing_managed_artifact:
                 if not _path_is_inside_root(prepared_source, root):
                     raise ConfigurationError(
@@ -851,6 +871,8 @@ async def register_library_file_with_metadata(
                     library_file=existing,
                     series_folder_created=series_folder_created,
                     series_folder_path=final_path.parent,
+                    created_directory_paths=created_directory_paths,
+                    directory_ownership_boundary_path=directory_ownership_boundary_path,
                 )
 
             permission_results = await _apply_materialized_file_permissions(
@@ -923,6 +945,8 @@ async def register_library_file_with_metadata(
             library_file=lf,
             series_folder_created=series_folder_created,
             series_folder_path=final_path.parent,
+            created_directory_paths=created_directory_paths,
+            directory_ownership_boundary_path=directory_ownership_boundary_path,
             permission_results=permission_results,
         )
     except asyncio.CancelledError:

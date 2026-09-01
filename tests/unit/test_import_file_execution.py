@@ -304,6 +304,33 @@ class TestFileStatusUpdatedOnSuccess:
         assert imp_files[0].library_file_id is not None
 
     @pytest.mark.asyncio
+    async def test_source_comicinfo_truth_is_propagated_to_library_file(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        job, _imp_series, imp_files, series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        imp_files[0].has_comicinfo = True
+        mock_register = _mock_register_library_file()
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        await db_session.refresh(imp_files[0])
+        assert imp_files[0].library_file_id is not None
+        library_file = await db_session.get(LibraryFile, imp_files[0].library_file_id)
+        assert library_file is not None
+        assert library_file.has_comicinfo is True
+
+    @pytest.mark.asyncio
     async def test_zero_issue_special_placeholder_creates_resolvable_issue(
         self,
         db_session: AsyncSession,
@@ -1502,6 +1529,11 @@ class TestImportExecutionAutoflushDiscipline:
         assert files_imported == 1
         assert files_failed == 0
         assert seen_payloads == [{"Series": "Batman", "PageCount": 2}]
+        await db_session.refresh(imp_files[0])
+        assert imp_files[0].library_file_id is not None
+        library_file = await db_session.get(LibraryFile, imp_files[0].library_file_id)
+        assert library_file is not None
+        assert library_file.has_comicinfo is True
 
     @pytest.mark.asyncio
     async def test_import_marks_deferred_comicinfo_enrichment_after_file_placement(
@@ -2355,6 +2387,69 @@ def test_failed_managed_registration_cleanup_removes_unchanged_proven_destinatio
     assert source_path.read_bytes() == b"source comic"
     assert not destination_path.exists()
     assert not destination_path.parent.exists()
+
+
+def test_failed_managed_registration_cleanup_removes_exact_owned_nested_directories(
+    tmp_path: Path,
+) -> None:
+    from pullbox.services.import_file_execution import _cleanup_failed_library_artifact
+
+    source_path = tmp_path / "incoming" / "Issue 001.cbz"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"source comic")
+    publisher_folder = tmp_path / "library" / "Image"
+    series_folder = publisher_folder / "Series"
+    series_folder.mkdir(parents=True)
+    destination_path = series_folder / "Issue 001.cbz"
+    destination_path.write_bytes(b"import-created comic")
+
+    _cleanup_failed_library_artifact(
+        destination_path=destination_path,
+        original_source=source_path,
+        original_trash_path=None,
+        transfer_method="copy",
+        storage_mode="managed",
+        created_series_folder=True,
+        created_series_folder_path=series_folder,
+        expected_destination_signature=build_managed_placement_signature(destination_path),
+        created_directory_paths=(publisher_folder, series_folder),
+        directory_ownership_boundary_path=tmp_path / "library",
+    )
+
+    assert not series_folder.exists()
+    assert not publisher_folder.exists()
+
+
+def test_failed_managed_registration_cleanup_preserves_unjournaled_empty_parent(
+    tmp_path: Path,
+) -> None:
+    from pullbox.services.import_file_execution import _cleanup_failed_library_artifact
+
+    source_path = tmp_path / "incoming" / "Issue 001.cbz"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"source comic")
+    publisher_folder = tmp_path / "library" / "Image"
+    publisher_folder.mkdir(parents=True)
+    series_folder = publisher_folder / "Series"
+    series_folder.mkdir()
+    destination_path = series_folder / "Issue 001.cbz"
+    destination_path.write_bytes(b"import-created comic")
+
+    _cleanup_failed_library_artifact(
+        destination_path=destination_path,
+        original_source=source_path,
+        original_trash_path=None,
+        transfer_method="copy",
+        storage_mode="managed",
+        created_series_folder=True,
+        created_series_folder_path=series_folder,
+        expected_destination_signature=build_managed_placement_signature(destination_path),
+        created_directory_paths=(series_folder,),
+        directory_ownership_boundary_path=tmp_path / "library",
+    )
+
+    assert not series_folder.exists()
+    assert publisher_folder.exists()
 
 
 def test_failed_managed_registration_cleanup_preserves_changed_destination(

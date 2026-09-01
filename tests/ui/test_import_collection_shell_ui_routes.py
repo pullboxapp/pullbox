@@ -728,6 +728,14 @@ class TestImportShellRouteContracts:
         assert "!this.levelFilter &&" in viewer_controller
         assert "!this.searchQuery &&" in viewer_controller
 
+    async def test_shared_log_viewer_keys_namespace_persisted_and_stream_rows(self) -> None:
+        template = Path("src/pullbox/ui/templates/components/log_viewer.html").read_text()
+
+        assert ':key="entry.id || idx"' not in template
+        assert "'persisted:' + entry.id" in template
+        assert "'stream:' + entry._streamToken" in template
+        assert "'synthetic:' + idx" in template
+
     async def test_import_review_shell_reprocesses_htmx_after_morph_swaps(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
         review_template = Path(

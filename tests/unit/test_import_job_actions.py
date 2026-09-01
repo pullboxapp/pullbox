@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import pytest
 from sqlalchemy.dialects import postgresql
 
 from pullbox.core.acquisition import AcquisitionProtocol
@@ -314,6 +316,14 @@ async def test_rollback_action_deletes_created_series_without_files(
         raw_series_name="New Series",
         status=ImportSeriesStatus.IMPORTED,
         series=series,
+        diagnostics={
+            "series_folder_ownership": {
+                "schema_version": 1,
+                "folder_path": str(series_folder),
+                "ownership_boundary_path": str(series_folder.parent),
+                "created_directory_paths": [str(series_folder)],
+            }
+        },
     )
     db_session.add(imported_series)
     await db_session.flush()
@@ -340,9 +350,230 @@ async def test_rollback_action_deletes_created_series_without_files(
         delete_files=False,
         delete_folder=False,
     )
-    assert series_folder.exists()
+    assert not series_folder.exists()
+    assert (tmp_path / "library").exists()
     assert action.status == ImportJobActionStatus.ROLLED_BACK
     assert action.rolled_back_at is not None
+
+
+async def test_series_created_rollback_preserves_preexisting_series_directory(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    library_root = tmp_path / "library"
+    series_folder = library_root / "Preexisting Series"
+    series_folder.mkdir(parents=True)
+    series = Series(
+        title="Preexisting Series",
+        sort_title="preexisting series",
+        comicvine_id=327,
+        path=str(series_folder),
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Preexisting Series",
+        status=ImportSeriesStatus.IMPORTED,
+        series=series,
+        diagnostics={
+            "series_folder_ownership": {
+                "schema_version": 1,
+                "folder_path": str(series_folder),
+                "ownership_boundary_path": str(library_root),
+                "created_directory_paths": [],
+            }
+        },
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload=await build_series_created_action_payload(
+            db_session,
+            series_id=series.id,
+            import_series_id=imported_series.id,
+        ),
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert series_folder.exists()
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+
+async def test_series_created_rollback_preserves_user_modified_owned_series_directory(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    library_root = tmp_path / "library"
+    series_folder = library_root / "Adopted Series"
+    series_folder.mkdir(parents=True)
+    user_file = series_folder / "keep.txt"
+    user_file.write_text("user data", encoding="utf-8")
+    series = Series(
+        title="Adopted Series",
+        sort_title="adopted series",
+        comicvine_id=330,
+        path=str(series_folder),
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Adopted Series",
+        status=ImportSeriesStatus.IMPORTED,
+        series=series,
+        diagnostics={
+            "series_folder_ownership": {
+                "schema_version": 1,
+                "folder_path": str(series_folder),
+                "ownership_boundary_path": str(library_root),
+                "created_directory_paths": [str(series_folder)],
+            }
+        },
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload=await build_series_created_action_payload(
+            db_session,
+            series_id=series.id,
+            import_series_id=imported_series.id,
+        ),
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    service._series_service.delete.assert_not_awaited()
+    assert user_file.read_text(encoding="utf-8") == "user data"
+    assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
+
+
+async def test_series_created_rollback_rejects_root_or_outside_folder_ownership(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "series_id": 9999,
+            "series_folder_ownership": {
+                "schema_version": 1,
+                "folder_path": str(library_root),
+                "ownership_boundary_path": str(library_root),
+                "created_directory_paths": [str(tmp_path), str(library_root)],
+                "installed_library_root_id": None,
+                "installed_preferred_library_root_id": None,
+            },
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert tmp_path.exists()
+    assert library_root.exists()
+    assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
+
+
+async def test_existing_series_folder_action_restores_prior_state_and_replays(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    old_root = LibraryRoot(name="Old", path=str(tmp_path / "old"))
+    new_root_path = tmp_path / "new"
+    new_root_path.mkdir()
+    new_root = LibraryRoot(name="New", path=str(new_root_path))
+    series = Series(
+        title="Existing",
+        sort_title="existing",
+        comicvine_id=331,
+        library_root=old_root,
+        preferred_library_root=old_root,
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Existing",
+        status=ImportSeriesStatus.IMPORTING,
+        series=series,
+    )
+    db_session.add_all([new_root, imported_series])
+    await db_session.flush()
+    series_folder = new_root_path / "Existing"
+    series_folder.mkdir()
+    series.path = str(series_folder)
+    series.library_root_id = new_root.id
+    series.preferred_library_root_id = new_root.id
+    imported_series.diagnostics = {
+        "series_folder_ownership": {
+            "schema_version": 1,
+            "folder_path": str(series_folder),
+            "ownership_boundary_path": str(new_root_path),
+            "created_directory_paths": [str(series_folder)],
+        }
+    }
+    payload = {
+        "series_id": series.id,
+        "import_series_id": imported_series.id,
+        "previous_series_path": None,
+        "previous_library_root_id": old_root.id,
+        "previous_preferred_library_root_id": old_root.id,
+        "series_folder_ownership": {
+            "schema_version": 1,
+            "folder_path": str(series_folder),
+            "ownership_boundary_path": str(new_root_path),
+            "created_directory_paths": [str(series_folder)],
+            "installed_library_root_id": new_root.id,
+            "installed_preferred_library_root_id": new_root.id,
+        },
+    }
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_folder_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload=payload,
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert series.path is None
+    assert series.library_root_id == old_root.id
+    assert series.preferred_library_root_id == old_root.id
+    assert not series_folder.exists()
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+    action.status = ImportJobActionStatus.COMPLETED
+    await service._rollback_action(db_session, _rollback_plan(action))
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
 
 
 async def test_rollback_action_tolerates_missing_created_series(
@@ -531,6 +762,122 @@ async def test_rollback_action_allows_issue_state_owned_by_same_import(
         delete_folder=False,
     )
     assert action.status == ImportJobActionStatus.ROLLED_BACK
+
+
+async def test_rollback_action_allows_unlinked_partial_import_series_owned_by_action(
+    db_session: AsyncSession,
+) -> None:
+    """Cancellation may arrive before the review row receives its final series link."""
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    series = Series(
+        title="Cancelled Series",
+        sort_title="cancelled series",
+        comicvine_id=326,
+        monitored=False,
+    )
+    issue = Issue(
+        series=series,
+        issue_number=1,
+        issue_number_text="1",
+        status=IssueStatus.SKIPPED,
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Cancelled Series",
+        status=ImportSeriesStatus.IMPORTING,
+        series_id=None,
+    )
+    db_session.add_all([issue, imported_series])
+    await db_session.flush()
+    payload = await build_series_created_action_payload(
+        db_session,
+        series_id=series.id,
+        import_series_id=imported_series.id,
+    )
+    imported_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path="/imports/Cancelled Series 001.cbz",
+        file_name="Cancelled Series 001.cbz",
+        file_size=1,
+        file_format="cbz",
+        status=ImportedFileStatus.IMPORTED,
+        matched_issue_id=issue.id,
+    )
+    db_session.add(imported_file)
+    issue.status = IssueStatus.OWNED
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload=payload,
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    service._series_service.delete.assert_awaited_once_with(
+        db_session,
+        series.id,
+        delete_files=False,
+        delete_folder=False,
+    )
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+
+async def test_rollback_action_preserves_unlinked_partial_series_adopted_by_other_import(
+    db_session: AsyncSession,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    other_job = await _create_job_row(db_session)
+    series = Series(
+        title="Adopted Series",
+        sort_title="adopted series",
+        comicvine_id=327,
+        monitored=False,
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Adopted Series",
+        status=ImportSeriesStatus.IMPORTING,
+        series_id=None,
+    )
+    db_session.add_all([series, imported_series])
+    await db_session.flush()
+    payload = await build_series_created_action_payload(
+        db_session,
+        series_id=series.id,
+        import_series_id=imported_series.id,
+    )
+    db_session.add(
+        ImportedSeries(
+            import_job_id=other_job.id,
+            raw_series_name="Adopted Series",
+            status=ImportSeriesStatus.IMPORTED,
+            series_id=series.id,
+        )
+    )
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload=payload,
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    service._series_service.delete.assert_not_awaited()
+    assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
+    assert "later files or activity" in (action.error_message or "")
 
 
 async def test_rollback_action_preserves_created_series_with_later_file_and_download(
@@ -752,6 +1099,620 @@ async def test_rollback_action_removes_empty_import_created_series_folder(
 
     assert not destination_path.exists()
     assert not series_folder.exists()
+
+
+async def test_rollback_action_removes_all_journaled_empty_nested_directories(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    publisher_folder = tmp_path / "library" / "Image"
+    series_folder = publisher_folder / "Saga (2012)"
+    series_folder.mkdir(parents=True)
+    destination_path = series_folder / "Saga 001.cbz"
+    destination_path.write_bytes(b"comic")
+    root = LibraryRoot(name="Library", path=str(tmp_path / "library"))
+    db_session.add(root)
+    await db_session.flush()
+    library_file = LibraryFile(
+        file_path=str(destination_path),
+        file_name=destination_path.name,
+        file_size=destination_path.stat().st_size,
+        file_format=FileFormat.CBZ,
+        file_modified_at=datetime.now(tz=UTC),
+        match_confidence=MatchConfidence.HIGH,
+        library_root_id=root.id,
+    )
+    db_session.add(library_file)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="library_file_registered",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "library_file_id": library_file.id,
+            "destination_path": str(destination_path),
+            "destination_signature": build_managed_placement_signature(destination_path),
+            "original_source_path": str(tmp_path / "incoming" / destination_path.name),
+            "transfer_method": "copy",
+            "created_series_folder": True,
+            "created_series_folder_path": str(series_folder),
+            "created_directory_paths": [str(publisher_folder), str(series_folder)],
+            "directory_ownership_boundary_path": str(tmp_path / "library"),
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert not destination_path.exists()
+    assert not series_folder.exists()
+    assert not publisher_folder.exists()
+
+
+async def test_rollback_action_never_removes_the_journaled_library_root_or_outside_parent(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    library_root = tmp_path / "library"
+    series_folder = library_root / "Series"
+    series_folder.mkdir(parents=True)
+    destination_path = series_folder / "Issue 001.cbz"
+    destination_path.write_bytes(b"comic")
+    root = LibraryRoot(name="Library", path=str(library_root))
+    db_session.add(root)
+    await db_session.flush()
+    library_file = LibraryFile(
+        file_path=str(destination_path),
+        file_name=destination_path.name,
+        file_size=destination_path.stat().st_size,
+        file_format=FileFormat.CBZ,
+        file_modified_at=datetime.now(tz=UTC),
+        match_confidence=MatchConfidence.HIGH,
+        library_root_id=root.id,
+    )
+    db_session.add(library_file)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="library_file_registered",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "library_file_id": library_file.id,
+            "destination_path": str(destination_path),
+            "destination_signature": build_managed_placement_signature(destination_path),
+            "original_source_path": str(tmp_path / "incoming" / destination_path.name),
+            "transfer_method": "copy",
+            "created_directory_paths": [
+                str(tmp_path),
+                str(library_root),
+                str(series_folder),
+            ],
+            "directory_ownership_boundary_path": str(library_root),
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert tmp_path.exists()
+    assert library_root.exists()
+    assert not series_folder.exists()
+
+
+async def test_rollback_action_ignores_journaled_sibling_outside_destination_chain(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    library_root = tmp_path / "library"
+    series_folder = library_root / "Series"
+    sibling = library_root / "User Empty Folder"
+    series_folder.mkdir(parents=True)
+    sibling.mkdir()
+    destination_path = series_folder / "Issue 001.cbz"
+    destination_path.write_bytes(b"comic")
+    root = LibraryRoot(name="Library", path=str(library_root))
+    db_session.add(root)
+    await db_session.flush()
+    library_file = LibraryFile(
+        file_path=str(destination_path),
+        file_name=destination_path.name,
+        file_size=destination_path.stat().st_size,
+        file_format=FileFormat.CBZ,
+        file_modified_at=datetime.now(tz=UTC),
+        match_confidence=MatchConfidence.HIGH,
+        library_root_id=root.id,
+    )
+    db_session.add(library_file)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="library_file_registered",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "library_file_id": library_file.id,
+            "destination_path": str(destination_path),
+            "destination_signature": build_managed_placement_signature(destination_path),
+            "original_source_path": str(tmp_path / "incoming" / destination_path.name),
+            "transfer_method": "copy",
+            "created_directory_paths": [str(series_folder), str(sibling)],
+            "directory_ownership_boundary_path": str(library_root),
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert not series_folder.exists()
+    assert sibling.exists()
+
+
+async def test_series_created_rollback_removes_only_owned_empty_cover_directories(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    series = Series(title="Covered", sort_title="covered", comicvine_id=328)
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Covered",
+        status=ImportSeriesStatus.IMPORTING,
+        series=series,
+        diagnostics={
+            "cover_cache_ownership": {
+                "schema_version": 1,
+                "base_path": str(tmp_path / ".covers"),
+                "ownership_boundary_path": str(tmp_path),
+                "created_directory_paths": [
+                    str(tmp_path / ".covers"),
+                    str(tmp_path / ".covers" / "pending"),
+                ],
+            }
+        },
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    cover_dir = tmp_path / ".covers" / str(series.id)
+    cover_dir.mkdir(parents=True)
+    cover_path = cover_dir / "series.jpg"
+    cover_path.write_bytes(b"cover")
+    imported_series.diagnostics = {
+        "cover_cache_ownership": {
+            "schema_version": 1,
+            "base_path": str(tmp_path / ".covers"),
+            "ownership_boundary_path": str(tmp_path),
+            "created_directory_paths": [
+                str(tmp_path / ".covers"),
+                str(cover_dir),
+            ],
+            "artifact_path": str(cover_path),
+            "artifact_signature": build_managed_placement_signature(cover_path),
+        }
+    }
+    payload = await build_series_created_action_payload(
+        db_session,
+        series_id=series.id,
+        import_series_id=imported_series.id,
+    )
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload=payload,
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    async def delete_series(*_args: object, **_kwargs: object) -> None:
+        shutil.rmtree(cover_dir)
+
+    service._series_service.delete.side_effect = delete_series
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert payload["cover_cache_ownership"] == imported_series.diagnostics["cover_cache_ownership"]
+    assert not cover_dir.exists()
+    assert not (tmp_path / ".covers").exists()
+
+
+async def test_series_created_rollback_preserves_preexisting_empty_cover_base(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    covers_base = tmp_path / ".covers"
+    covers_base.mkdir()
+    series = Series(title="Covered", sort_title="covered", comicvine_id=329)
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Covered",
+        status=ImportSeriesStatus.IMPORTING,
+        series=series,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    cover_dir = covers_base / str(series.id)
+    cover_dir.mkdir()
+    cover_path = cover_dir / "series.jpg"
+    cover_path.write_bytes(b"cover")
+    imported_series.diagnostics = {
+        "cover_cache_ownership": {
+            "schema_version": 1,
+            "base_path": str(covers_base),
+            "ownership_boundary_path": str(tmp_path),
+            "created_directory_paths": [str(cover_dir)],
+            "artifact_path": str(cover_path),
+            "artifact_signature": build_managed_placement_signature(cover_path),
+        }
+    }
+    payload = await build_series_created_action_payload(
+        db_session,
+        series_id=series.id,
+        import_series_id=imported_series.id,
+    )
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload=payload,
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    async def delete_series(*_args: object, **_kwargs: object) -> None:
+        shutil.rmtree(cover_dir)
+
+    service._series_service.delete.side_effect = delete_series
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert covers_base.exists()
+
+
+async def test_series_created_rollback_replay_cleans_owned_cover_dirs_when_series_is_gone(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    covers_base = tmp_path / ".covers"
+    cover_dir = covers_base / "404"
+    cover_dir.mkdir(parents=True)
+    cover_path = cover_dir / "series.jpg"
+    cover_path.write_bytes(b"import cover")
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "series_id": 404,
+            "cover_cache_ownership": {
+                "schema_version": 1,
+                "base_path": str(covers_base),
+                "ownership_boundary_path": str(tmp_path),
+                "created_directory_paths": [str(covers_base), str(cover_dir)],
+                "artifact_path": str(cover_path),
+                "artifact_signature": build_managed_placement_signature(cover_path),
+            },
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    service._series_service.delete.assert_not_awaited()
+    assert not cover_dir.exists()
+    assert not covers_base.exists()
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+    action.status = ImportJobActionStatus.COMPLETED
+    await service._rollback_action(db_session, _rollback_plan(action))
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+
+async def test_series_created_rollback_replay_preserves_changed_cover_artifact(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    covers_base = tmp_path / ".covers"
+    cover_dir = covers_base / "405"
+    cover_dir.mkdir(parents=True)
+    cover_path = cover_dir / "series.jpg"
+    cover_path.write_bytes(b"import cover")
+    signature = build_managed_placement_signature(cover_path)
+    cover_path.write_bytes(b"user replacement")
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "series_id": 405,
+            "cover_cache_ownership": {
+                "schema_version": 1,
+                "base_path": str(covers_base),
+                "ownership_boundary_path": str(tmp_path),
+                "created_directory_paths": [str(covers_base), str(cover_dir)],
+                "artifact_path": str(cover_path),
+                "artifact_signature": signature,
+            },
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert cover_path.read_bytes() == b"user replacement"
+    assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
+
+
+async def test_existing_series_cover_cache_action_restores_prior_cover_and_replays(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    covers_base = tmp_path / ".covers"
+    cover_dir = covers_base / "existing"
+    cover_dir.mkdir(parents=True)
+    cover_path = cover_dir / "series.jpg"
+    cover_path.write_bytes(b"import cover")
+    series = Series(
+        title="Existing",
+        sort_title="existing",
+        comicvine_id=406,
+        cover_path="/api/v1/series/1/cover",
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Existing",
+        status=ImportSeriesStatus.IMPORTING,
+        series=series,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    installed_cover_path = f"/api/v1/series/{series.id}/cover"
+    series.cover_path = installed_cover_path
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_cover_cache_created",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "series_id": series.id,
+            "import_series_id": imported_series.id,
+            "previous_cover_path": "https://example.invalid/prior.jpg",
+            "installed_cover_path": installed_cover_path,
+            "cover_cache_ownership": {
+                "schema_version": 1,
+                "base_path": str(covers_base),
+                "ownership_boundary_path": str(tmp_path),
+                "created_directory_paths": [str(covers_base), str(cover_dir)],
+                "artifact_path": str(cover_path),
+                "artifact_signature": build_managed_placement_signature(cover_path),
+            },
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert series.cover_path == "https://example.invalid/prior.jpg"
+    assert not cover_path.exists()
+    assert not covers_base.exists()
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+
+async def test_existing_series_cover_path_action_restores_db_without_touching_artifact(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    artifact = tmp_path / ".covers" / "existing" / "series.jpg"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"pre-existing cover")
+    series = Series(
+        title="Existing Path",
+        sort_title="existing path",
+        comicvine_id=407,
+        cover_path="/api/v1/series/1/cover",
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Existing Path",
+        status=ImportSeriesStatus.IMPORTING,
+        series=series,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    installed_cover_path = f"/api/v1/series/{series.id}/cover"
+    series.cover_path = installed_cover_path
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_cover_path_updated",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "series_id": series.id,
+            "import_series_id": imported_series.id,
+            "previous_cover_path": "https://example.invalid/prior.jpg",
+            "installed_cover_path": installed_cover_path,
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert series.cover_path == "https://example.invalid/prior.jpg"
+    assert artifact.read_bytes() == b"pre-existing cover"
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+    assert series.cover_path == "https://example.invalid/prior.jpg"
+    assert artifact.read_bytes() == b"pre-existing cover"
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+
+async def test_existing_series_cover_path_action_fails_closed_on_concurrent_change(
+    db_session: AsyncSession,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    series = Series(
+        title="Changed Cover Path",
+        sort_title="changed cover path",
+        comicvine_id=408,
+        cover_path="https://example.invalid/user-change.jpg",
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Changed Cover Path",
+        status=ImportSeriesStatus.IMPORTING,
+        series=series,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_cover_path_updated",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "series_id": series.id,
+            "import_series_id": imported_series.id,
+            "previous_cover_path": "https://example.invalid/prior.jpg",
+            "installed_cover_path": f"/api/v1/series/{series.id}/cover",
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert series.cover_path == "https://example.invalid/user-change.jpg"
+    assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
+
+
+@pytest.mark.parametrize(("previous", "installed"), [(False, True), (True, False)])
+async def test_existing_series_monitoring_action_restores_both_directions_and_replays(
+    db_session: AsyncSession,
+    previous: bool,
+    installed: bool,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    series = Series(
+        title="Monitoring",
+        sort_title="monitoring",
+        comicvine_id=409,
+        monitored=installed,
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Monitoring",
+        status=ImportSeriesStatus.IMPORTING,
+        series=series,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_monitoring_updated",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "series_id": series.id,
+            "import_series_id": imported_series.id,
+            "previous_monitored": previous,
+            "installed_monitored": installed,
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert series.monitored is previous
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+    assert series.monitored is previous
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
+
+
+async def test_existing_series_monitoring_action_fails_closed_on_user_change_before_rollback(
+    db_session: AsyncSession,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    series = Series(
+        title="User Monitoring",
+        sort_title="user monitoring",
+        comicvine_id=410,
+        monitored=False,
+    )
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="User Monitoring",
+        status=ImportSeriesStatus.IMPORTING,
+        series=series,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    action = ImportJobAction(
+        import_job_id=job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="series_monitoring_updated",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "series_id": series.id,
+            "import_series_id": imported_series.id,
+            "previous_monitored": False,
+            "installed_monitored": True,
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    assert series.monitored is False
+    assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
 
 
 async def test_rollback_action_preserves_preexisting_series_folder(

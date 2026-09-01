@@ -507,6 +507,8 @@ class ImportService(
             transfer_method: str,
             series_folder_created: bool,
             series_folder_path: Path,
+            created_directory_paths: tuple[Path, ...] = (),
+            directory_ownership_boundary_path: Path | None = None,
             temp_paths: tuple[Path, ...] = (),
         ) -> None:
             nonlocal placement_action_id
@@ -524,6 +526,12 @@ class ImportService(
                     "transfer_method": transfer_method,
                     "created_series_folder": series_folder_created,
                     "created_series_folder_path": str(series_folder_path),
+                    "created_directory_paths": [str(path) for path in created_directory_paths],
+                    "directory_ownership_boundary_path": (
+                        str(directory_ownership_boundary_path)
+                        if directory_ownership_boundary_path is not None
+                        else None
+                    ),
                     "temp_paths": [str(path) for path in temp_paths],
                     "placement_completed": False,
                 },

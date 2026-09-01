@@ -116,6 +116,8 @@ def _cleanup_failed_library_artifact(
     created_series_folder: bool,
     created_series_folder_path: Path | None,
     expected_destination_signature: dict[str, object] | None,
+    created_directory_paths: tuple[Path, ...] = (),
+    directory_ownership_boundary_path: Path | None = None,
 ) -> bool:
     """Best-effort cleanup when import fails after the library artifact was placed."""
     if storage_mode == "referenced" or transfer_method == "leave_in_place":
@@ -169,19 +171,69 @@ def _cleanup_failed_library_artifact(
     elif destination_matches and destination_path is not None:
         destination_path.unlink(missing_ok=True)
 
-    if (
-        not destination_preserved
-        and created_series_folder
-        and created_series_folder_path is not None
-        and created_series_folder_path.exists()
-    ):
-        try:
-            next(created_series_folder_path.iterdir())
-        except StopIteration:
-            created_series_folder_path.rmdir()
-        except OSError:
-            pass
+    if not destination_preserved:
+        owned_directories: tuple[Path, ...] = ()
+        if created_directory_paths and directory_ownership_boundary_path is not None:
+            owned_directories = _validated_created_directory_paths(
+                created_directory_paths,
+                boundary_path=directory_ownership_boundary_path,
+                destination_parent=destination_path.parent
+                if destination_path is not None
+                else None,
+            )
+        elif (
+            created_series_folder
+            and created_series_folder_path is not None
+            and destination_path is not None
+        ):
+            try:
+                if created_series_folder_path.resolve(
+                    strict=False
+                ) == destination_path.parent.resolve(strict=False):
+                    owned_directories = (created_series_folder_path,)
+            except (OSError, RuntimeError):
+                owned_directories = ()
+        for directory in sorted(
+            set(owned_directories),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            try:
+                directory.rmdir()
+            except (FileNotFoundError, OSError):
+                continue
     return destination_preserved
+
+
+def _validated_created_directory_paths(
+    paths: tuple[Path, ...],
+    *,
+    boundary_path: Path,
+    destination_parent: Path | None,
+) -> tuple[Path, ...]:
+    """Return only exact import-owned descendants on the destination chain."""
+    if destination_parent is None:
+        return ()
+    try:
+        boundary_resolved = boundary_path.resolve(strict=False)
+        destination_resolved = destination_parent.resolve(strict=False)
+        destination_relative = destination_resolved.relative_to(boundary_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return ()
+    if not destination_relative.parts:
+        return ()
+
+    validated: list[Path] = []
+    for path in paths:
+        try:
+            path_resolved = path.resolve(strict=False)
+            relative = path_resolved.relative_to(boundary_resolved)
+            destination_resolved.relative_to(path_resolved)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if relative.parts:
+            validated.append(path)
+    return tuple(validated)
 
 
 def _destination_matches_signature(
@@ -842,6 +894,8 @@ async def process_import_series_files(
         placed_destination_signature: dict[str, object] | None = None
         placed_series_folder_created = False
         placed_series_folder_path: Path | None = None
+        placed_created_directory_paths: tuple[Path, ...] = ()
+        placed_directory_ownership_boundary_path: Path | None = None
         placed_storage_mode = "referenced" if not move_to_library else "managed"
         original_trash_path: Path | None = None
         source_transfer_method = transfer_method
@@ -1099,6 +1153,11 @@ async def process_import_series_files(
                     strict_import_target=not in_place,
                 )
             library_file, registration = _registration_outcome(registration_result)
+            library_file.has_comicinfo = bool(
+                library_file.has_comicinfo
+                or imp_file.has_comicinfo
+                or comicinfo_payload is not None
+            )
             placed_destination_path = Path(library_file.file_path)
             placed_destination_signature = dict(library_file.source_signature or {})
             placed_storage_mode = library_file.storage_mode.value
@@ -1109,6 +1168,12 @@ async def process_import_series_files(
                 registration.series_folder_path
                 if registration is not None
                 else placed_destination_path.parent
+            )
+            placed_created_directory_paths = (
+                registration.created_directory_paths if registration is not None else ()
+            )
+            placed_directory_ownership_boundary_path = (
+                registration.directory_ownership_boundary_path if registration is not None else None
             )
             final_file_name = placed_destination_path.name
             if comicinfo_payload is not None:
@@ -1219,6 +1284,14 @@ async def process_import_series_files(
                         if registration is not None and registration.series_folder_path is not None
                         else ""
                     ),
+                    "created_directory_paths": [
+                        str(path) for path in placed_created_directory_paths
+                    ],
+                    "directory_ownership_boundary_path": (
+                        str(placed_directory_ownership_boundary_path)
+                        if placed_directory_ownership_boundary_path is not None
+                        else None
+                    ),
                     "permission_restores": _permission_restore_payload(
                         registration,
                         original_source=prepared.original_source,
@@ -1316,6 +1389,8 @@ async def process_import_series_files(
                     created_series_folder=placed_series_folder_created,
                     created_series_folder_path=placed_series_folder_path,
                     expected_destination_signature=placed_destination_signature,
+                    created_directory_paths=placed_created_directory_paths,
+                    directory_ownership_boundary_path=(placed_directory_ownership_boundary_path),
                 )
             except Exception:
                 logger.exception(

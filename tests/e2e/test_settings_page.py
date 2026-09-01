@@ -900,16 +900,10 @@ class TestSettingsPage:
         settings = SettingsPage(authed_page, seeded_server)
         settings.goto("media")
 
-        authed_page.evaluate(
-            """
-            () => {
-              const content = document.getElementById("content");
-              if (!content) return;
-              content.scrollTop = 500;
-              content.dispatchEvent(new Event("scroll"));
-            }
-            """
-        )
+        format_toggle = authed_page.locator(
+            "[data-testid='settings-panel-media'] .settings-row:has(.settings-row-label:text('Normalize Imported Archives to CBZ')) .toggle-switch"
+        ).first
+        format_toggle.scroll_into_view_if_needed()
 
         before_scroll = authed_page.evaluate(
             """
@@ -919,27 +913,29 @@ class TestSettingsPage:
             }
             """
         )
-        assert before_scroll == 500
+        assert before_scroll > 0
 
-        authed_page.locator(
-            "[data-testid='settings-panel-media'] .settings-row:has(.settings-row-label:text('Normalize Imported Archives to CBZ')) .toggle-switch"
-        ).first.click()
+        format_toggle.click()
 
         authed_page.wait_for_function(
             """
-            () => {
+            (expectedScroll) => {
               const content = document.getElementById("content");
               if (!content) return false;
-              const resetButton = document.querySelector(
-                "[data-testid='settings-panel-media'] .section-card:nth-of-type(2) .settings-footer button[type='button']"
+              const formatToggle = document.querySelector(
+                "[data-testid='settings-panel-media'] input[name='convert_to_preferred_format_on_import']"
               );
+              const resetButton = formatToggle
+                ?.closest("form")
+                ?.querySelector(".settings-footer button[type='button']");
               return (
-                Math.abs(content.scrollTop - 500) <= 1 &&
+                Math.abs(content.scrollTop - expectedScroll) <= 1 &&
                 !!resetButton &&
                 window.getComputedStyle(resetButton).display !== "none"
               );
             }
             """,
+            arg=before_scroll,
             timeout=5000,
         )
 
@@ -951,7 +947,9 @@ class TestSettingsPage:
             }
             """
         )
-        assert abs(after_scroll - 500) <= 1, f"media toggle scrolled content to {after_scroll}"
+        assert abs(after_scroll - before_scroll) <= 1, (
+            f"media toggle scrolled content from {before_scroll} to {after_scroll}"
+        )
 
     def test_media_naming_preview_edit_keeps_layout_stable(
         self,

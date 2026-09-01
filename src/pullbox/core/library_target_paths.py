@@ -30,6 +30,8 @@ class ResolvedLibraryTarget:
 
     path: Path
     series_folder_created: bool
+    created_directory_paths: tuple[Path, ...] = ()
+    directory_ownership_boundary_path: Path | None = None
 
 
 async def resolve_library_target_path(
@@ -69,8 +71,12 @@ async def resolve_library_target_path(
             source_scan_root=source_scan_root,
         )
 
-    series_folder_created = not series_folder.exists()
-    await asyncio.to_thread(series_folder.mkdir, parents=True, exist_ok=True)
+    created_directory_paths = await asyncio.to_thread(
+        _create_target_directories,
+        series_folder,
+        comics_dir,
+    )
+    series_folder_created = series_folder in created_directory_paths
 
     target_is_replaceable = replace_existing_path is not None and target_path.resolve(
         strict=False
@@ -91,7 +97,40 @@ async def resolve_library_target_path(
     return ResolvedLibraryTarget(
         path=target_path,
         series_folder_created=series_folder_created,
+        created_directory_paths=created_directory_paths,
+        directory_ownership_boundary_path=comics_dir,
     )
+
+
+def _create_target_directories(directory: Path, boundary: Path) -> tuple[Path, ...]:
+    """Create target directories one at a time and return only paths we created.
+
+    ``mkdir(parents=True)`` cannot report which missing ancestors it created. A
+    rollback therefore could not distinguish an import-owned publisher folder
+    from an empty folder that existed before the import. Creating each segment
+    individually gives the rollback journal exact, race-aware ownership.
+    """
+    try:
+        relative = directory.relative_to(boundary)
+    except ValueError:
+        # Existing series paths may be expressed through a lexical alias while
+        # resolving inside the configured root. Preserve compatibility without
+        # claiming ownership that cannot be proven from this path expression.
+        directory.mkdir(parents=True, exist_ok=True)
+        return ()
+
+    created: list[Path] = []
+    current = boundary
+    for segment in relative.parts:
+        current /= segment
+        try:
+            current.mkdir()
+        except FileExistsError:
+            if not current.is_dir():
+                raise
+        else:
+            created.append(current)
+    return tuple(created)
 
 
 def _validate_strict_import_target(

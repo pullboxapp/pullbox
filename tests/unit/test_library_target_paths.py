@@ -99,6 +99,77 @@ async def test_resolve_library_target_path_creates_folder_and_suffixes_collision
 
     assert target.path == series_folder / "Batman 002 (1).cbz"
     assert target.series_folder_created is False
+    assert target.created_directory_paths == ()
+    assert target.directory_ownership_boundary_path == root_path
+
+
+@pytest.mark.asyncio
+async def test_resolve_library_target_path_journals_exact_created_nested_directories(
+    db_session,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    root_path = tmp_path / "comics"
+    root_path.mkdir()
+    root = LibraryRoot(name="Comics", path=str(root_path), enabled=True)
+    publisher = Publisher(name="DC Comics")
+    series = Series(
+        title="Batman",
+        sort_title="batman",
+        year_start=2026,
+        publisher=publisher,
+    )
+    issue = Issue(series=series, issue_number=2.0, issue_type=IssueType.ISSUE)
+    db_session.add_all([root, publisher, series, issue])
+    await db_session.flush()
+
+    target = await resolve_library_target_path(
+        db_session,
+        tmp_path / "imports" / "Batman 002.cbz",
+        issue,
+        series,
+        root,
+        _policy(series_path_template="{Publisher}/{Series} ({Year})"),
+        rename=False,
+    )
+
+    publisher_folder = root_path / "DC Comics"
+    series_folder = publisher_folder / "Batman (2026)"
+    assert target.created_directory_paths == (publisher_folder, series_folder)
+    assert target.directory_ownership_boundary_path == root_path
+
+
+@pytest.mark.asyncio
+async def test_resolve_library_target_path_does_not_claim_preexisting_empty_parent(
+    db_session,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    root_path = tmp_path / "comics"
+    publisher_folder = root_path / "DC Comics"
+    publisher_folder.mkdir(parents=True)
+    root = LibraryRoot(name="Comics", path=str(root_path), enabled=True)
+    publisher = Publisher(name="DC Comics")
+    series = Series(
+        title="Batman",
+        sort_title="batman",
+        year_start=2026,
+        publisher=publisher,
+    )
+    issue = Issue(series=series, issue_number=2.0, issue_type=IssueType.ISSUE)
+    db_session.add_all([root, publisher, series, issue])
+    await db_session.flush()
+
+    target = await resolve_library_target_path(
+        db_session,
+        tmp_path / "imports" / "Batman 002.cbz",
+        issue,
+        series,
+        root,
+        _policy(series_path_template="{Publisher}/{Series} ({Year})"),
+        rename=False,
+    )
+
+    assert target.created_directory_paths == (publisher_folder / "Batman (2026)",)
+    assert publisher_folder.exists()
 
 
 @pytest.mark.asyncio

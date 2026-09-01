@@ -26,6 +26,10 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services.import_counters import job_stats
+from pullbox.services.import_job_execution_progress import (
+    reconcile_durable_import_execution_counters,
+)
 from pullbox.services.import_workflow_state import (
     emit_progress,
     import_control_state_for_job,
@@ -249,25 +253,9 @@ async def _emit_terminal_event_for_job(
         "error_message": job.error_message,
         "control_state": import_control_state_for_job(job),
     }
+    payload.update(job_stats(job))
     snapshot = dict(job.progress_snapshot or {})
     for field_name in (
-        "scan_total_files",
-        "scan_total_dirs",
-        "series_found",
-        "series_duplicate",
-        "series_matched",
-        "series_no_match",
-        "series_new",
-        "series_imported",
-        "series_failed",
-        "total_files_found",
-        "total_files_matched",
-        "total_files_duplicate",
-        "total_files_already_owned",
-        "total_files_conflict",
-        "total_files_no_match",
-        "total_files_imported",
-        "total_files_failed",
         "story_arc_placements_total",
         "story_arc_placements_queued",
         "story_arc_placements_running",
@@ -1096,6 +1084,7 @@ async def recover_stuck_import_jobs(
                 )
                 for item in series_result.scalars().all():
                     item.status = ImportSeriesStatus.CONFIRMED
+                await reconcile_durable_import_execution_counters(session, job)
 
             if (
                 job.control_request is ImportControlRequest.CANCEL
