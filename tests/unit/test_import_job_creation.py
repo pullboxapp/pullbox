@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -25,10 +26,9 @@ from pullbox.models.story_arc_import import ImportedStoryArc
 from pullbox.schemas.import_job import FutureRootPolicyPayload, ImportJobCreate, ImportJobRead
 from pullbox.schemas.import_layout import SourceLayoutSpecPayload
 from pullbox.services.import_job_creation import create_job
+from pullbox.services.import_mylar3_path_preflight import Mylar3PathPreflightAnalyzer
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -41,6 +41,123 @@ async def _log_event(
     **kwargs: Any,
 ) -> None:
     _ = message, kwargs
+
+
+async def test_mylar_partial_import_requires_acknowledgement_on_server(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    default_managed_root: LibraryRoot,
+) -> None:
+    root = Path(default_managed_root.path)
+    (root / "Existing").mkdir()
+    database = tmp_path / "mylar.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE comics (ComicID TEXT, ComicLocation TEXT)")
+        connection.executemany(
+            "INSERT INTO comics VALUES (?, ?)",
+            [
+                ("1", str(root / "Existing")),
+                ("2", str(root / "Missing")),
+            ],
+        )
+    request = ImportJobCreate(
+        source_path=str(database),
+        source_type=ImportSourceType.MYLAR3,
+        mylar3_path_map_confirmed=True,
+    )
+    with pytest.raises(ValidationError, match="acknowledge"):
+        await create_job(db_session, request, log_event=_log_event)
+    assert await db_session.scalar(select(func.count(ImportJob.id))) == 0
+    preview = await Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=False,
+        mappings=[],
+    )
+    acknowledged = request.model_copy(
+        update={
+            "mylar3_allow_unresolved_paths": True,
+            "mylar3_unresolved_fingerprint": preview.unresolved_fingerprint,
+        }
+    )
+    job = await create_job(db_session, acknowledged, log_event=_log_event)
+    assert job.status == ImportJobStatus.PENDING
+
+
+async def test_partial_acknowledgement_cannot_cover_changed_paths(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    default_managed_root: LibraryRoot,
+) -> None:
+    root = Path(default_managed_root.path)
+    (root / "Existing").mkdir()
+    database = tmp_path / "mylar.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE comics (ComicID TEXT, ComicLocation TEXT)")
+        connection.executemany(
+            "INSERT INTO comics VALUES (?, ?)",
+            [
+                ("1", str(root / "Existing")),
+                ("2", str(root / "Missing")),
+            ],
+        )
+    preview = await Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=True,
+        mappings=[],
+    )
+    request = ImportJobCreate(
+        source_path=str(database),
+        source_type=ImportSourceType.MYLAR3,
+        mylar3_path_map_confirmed=True,
+        mylar3_allow_unresolved_paths=True,
+        mylar3_unresolved_fingerprint=preview.unresolved_fingerprint,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE comics SET ComicLocation=? WHERE ComicID='2'",
+            (str(root / "Other"),),
+        )
+    with pytest.raises(ValidationError, match="changed"):
+        await create_job(db_session, request, log_event=_log_event)
+    assert await db_session.scalar(select(func.count(ImportJob.id))) == 0
+
+
+async def test_partial_acknowledgement_cannot_override_path_safety(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    default_managed_root: LibraryRoot,
+) -> None:
+    root = Path(default_managed_root.path)
+    (root / "Existing").mkdir()
+    database = tmp_path / "mylar.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE comics (ComicID TEXT, ComicLocation TEXT)")
+        connection.executemany(
+            "INSERT INTO comics VALUES (?, ?)",
+            [
+                ("1", str(root / "Existing")),
+                ("2", str(root / "Missing")),
+                ("3", str(root / ".." / "Unsafe")),
+            ],
+        )
+    preview = await Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=False,
+        mappings=[],
+    )
+    request = ImportJobCreate(
+        source_path=str(database),
+        source_type=ImportSourceType.MYLAR3,
+        mylar3_path_map_confirmed=True,
+        mylar3_allow_unresolved_paths=True,
+        mylar3_unresolved_fingerprint=preview.unresolved_fingerprint,
+    )
+    with pytest.raises(ValidationError, match="blocked"):
+        await create_job(db_session, request, log_event=_log_event)
+    assert await db_session.scalar(select(func.count(ImportJob.id))) == 0
 
 
 @pytest.fixture(autouse=True)
@@ -386,6 +503,7 @@ async def test_create_job_accepts_managed_copy_mylar_map_outside_library_roots(
     library_path.mkdir()
     outside_path = tmp_path / "outside"
     outside_path.mkdir()
+    (outside_path / "Series").mkdir()
     destination = LibraryRoot(
         name="Managed destination",
         path=str(library_path),

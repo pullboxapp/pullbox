@@ -437,6 +437,23 @@ Step 3 is the active decision point:
 - Matched and In Library rows can be selected only by the user; state changes
   must not silently auto-select files for import.
 
+Mylar Step 1 analyzes stored locations before creating a job. Missing folders
+inside a visible root are distinct from unmapped prefixes, unreadable paths,
+ambiguous roots, and unsafe paths. The preview exposes series identity, stored
+and attempted paths, the reason, and a suggested action for every exception.
+Its searchable 25-row pages and full JSON export read a saved report instead of
+rescanning the filesystem. The most recent report is included in diagnostic
+packages even when preflight prevented job creation.
+
+If some locations are accessible and the only exceptions are missing or
+unmapped sources, the user can explicitly acknowledge continuing with available
+sources. The acknowledgement is bound to the reviewed exception set and is
+revalidated at job creation. Unavailable Mylar records remain review exceptions;
+they are not silently dropped or treated as owned files. Permission failures,
+unsafe paths, ambiguous roots, unavailable configured roots, and truncated
+previews still block starting. Preflight never modifies the Mylar database or
+creates, renames, or changes permissions on source folders.
+
 Step 4 is the only place files move into the library. It may reuse Step 2/3
 matched summaries, create targeted series and issue rows first, and then mark
 the issue catalog as hydrating while full ComicVine issue metadata is fetched

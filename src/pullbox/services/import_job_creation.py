@@ -128,7 +128,24 @@ async def create_job(
             raise ValidationError(
                 "The confirmed Mylar path mapping could not be revalidated."
             ) from exc
-        if not preview.can_confirm or preview.path_map != request.mylar3_path_map:
+        if (
+            preview.requires_unresolved_acknowledgement
+            and not request.mylar3_allow_unresolved_paths
+        ):
+            raise ValidationError(
+                "Review and acknowledge the unavailable Mylar paths before starting the scan."
+            )
+        if preview.requires_unresolved_acknowledgement and (
+            request.mylar3_unresolved_fingerprint != preview.unresolved_fingerprint
+        ):
+            raise ValidationError(
+                "The unavailable Mylar paths changed or have not been reviewed. "
+                "Analyze the paths again and acknowledge the current report."
+            )
+        allowed = preview.can_confirm or (
+            request.mylar3_allow_unresolved_paths and preview.can_continue_with_unresolved
+        )
+        if not allowed or preview.path_map != request.mylar3_path_map:
             raise ValidationError(
                 "The confirmed Mylar path mapping preview is blocked. Analyze the paths again."
             )

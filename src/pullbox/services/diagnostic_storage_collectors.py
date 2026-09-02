@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from pathlib import Path
@@ -54,6 +55,11 @@ async def collect_disk_and_permissions(session: AsyncSession) -> dict[str, objec
     except Exception:
         pass
 
+    return await asyncio.to_thread(_probe_directories, dirs)
+
+
+def _probe_directories(dirs: dict[str, Path]) -> dict[str, object]:
+    """Probe roots only; diagnostics must never enumerate the user's collection."""
     output: dict[str, object] = {}
     for name, path in dirs.items():
         info: dict[str, object] = {"path": str(path)}
@@ -75,12 +81,11 @@ async def collect_disk_and_permissions(session: AsyncSession) -> dict[str, objec
         except OSError:
             pass
 
-        if path.exists() and path.is_dir():
-            try:
-                total_size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-                info["dir_size_bytes"] = total_size
-            except (OSError, PermissionError):
-                pass
+        info["dir_size_bytes"] = None
+        info["dir_size_status"] = "not_collected"
+        info["dir_size_reason"] = (
+            "Recursive directory sizing is omitted to keep diagnostics independent of library size."
+        )
 
         output[name] = info
 

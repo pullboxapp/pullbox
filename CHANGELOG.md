@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Made Mylar path preflight show searchable, exportable exceptions with exact
+  paths and repair guidance, distinguishing missing folders from bad mappings.
+  Added explicit, revalidated continuation with available sources while retaining
+  unavailable records for review and keeping permission and safety failures blocked.
+- Included recent Mylar preflight evidence in diagnostic packages even when an
+  import cannot start.
 - Matched issue-only filenames using series-folder context and handled issue
   titles embedded in filenames without treating the title as a new series.
 - Preserved exact issue-number identity for large and special issue numbers
@@ -51,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- Removed recursive comic-library sizing from diagnostic generation and moved
+  blocking filesystem, database snapshot, and ZIP work off the application event
+  loop. Mylar preflight filesystem analysis also runs on a worker thread.
 - Bounded Mylar staging, file matching, and conflict rebuilding so large jobs do
   not retain complete ORM result sets or unbounded task queues.
 - Moved filesystem inventory and source ordering to a private temporary SQLite

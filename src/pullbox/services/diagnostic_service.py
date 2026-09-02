@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -51,6 +52,7 @@ from pullbox.services.diagnostic_utility_collectors import (
 from pullbox.services.diagnostic_utility_collectors import (
     collect_utility_jobs as _collect_utility_jobs,
 )
+from pullbox.services.import_mylar3_path_reports import latest_report as _collect_mylar_path_report
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -400,9 +402,9 @@ async def create_diagnostic_package(session: AsyncSession) -> tuple[bytes, str]:
     # Collect all data
     system_info = await _collect_system_info()
     bootstrap_settings = await _collect_bootstrap_settings()
-    container_runtime = _collect_container_runtime()
+    container_runtime = await asyncio.to_thread(_collect_container_runtime)
     config = await _collect_config(session)
-    config_xml_snapshot = _collect_config_xml_snapshot()
+    config_xml_snapshot = await asyncio.to_thread(_collect_config_xml_snapshot)
     health = await _collect_health_status(session)
     health_history = await _collect_health_history(session)
     health_incidents = await _collect_health_incidents(session)
@@ -417,6 +419,7 @@ async def create_diagnostic_package(session: AsyncSession) -> tuple[bytes, str]:
     runtime_info = await _collect_runtime_info(session)
     import_jobs = await _collect_import_jobs(session)
     import_story_arc_diagnostics = await _collect_import_story_arc_diagnostics(session)
+    mylar_path_report = await asyncio.to_thread(_collect_mylar_path_report)
     utility_jobs = await _collect_utility_jobs(session)
     utility_job_logs = await _collect_utility_job_logs(
         session,
@@ -424,7 +427,7 @@ async def create_diagnostic_package(session: AsyncSession) -> tuple[bytes, str]:
     )
 
     # Get logs directory from runtime settings
-    log_files = _collect_log_files(get_settings().logs_dir)
+    log_files = await asyncio.to_thread(_collect_log_files, get_settings().logs_dir)
 
     # Create sanitized database copy
     db_copy: bytes | None = None
@@ -432,12 +435,13 @@ async def create_diagnostic_package(session: AsyncSession) -> tuple[bytes, str]:
         settings = get_settings()
         if ":///" in settings.db_url:
             db_path = Path(settings.db_url.split(":///", 1)[1])
-            db_copy = _create_sanitized_db_copy(db_path)
+            db_copy = await asyncio.to_thread(_create_sanitized_db_copy, db_path)
     except Exception:
         logger.warning("diagnostic_db_snapshot_skipped", exc_info=True)
 
     binary_artifacts = [config_xml_snapshot] if config_xml_snapshot is not None else []
-    zip_bytes = build_diagnostic_zip(
+    zip_bytes = await asyncio.to_thread(
+        build_diagnostic_zip,
         prefix=prefix,
         json_artifacts={
             "system_info.json": system_info,
@@ -458,6 +462,7 @@ async def create_diagnostic_package(session: AsyncSession) -> tuple[bytes, str]:
             "runtime_info.json": runtime_info,
             "import_jobs.json": import_jobs,
             "import_story_arc_diagnostics.json": import_story_arc_diagnostics,
+            "mylar_path_preflight.json": mylar_path_report,
             "utility_jobs.json": utility_jobs,
             "utility_job_logs.json": utility_job_logs,
         },

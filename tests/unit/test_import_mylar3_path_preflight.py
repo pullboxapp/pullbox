@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pullbox.models.import_job import ImportFileHandlingMode
@@ -11,8 +12,6 @@ from pullbox.schemas.import_mylar3_path_preflight import MylarPathMappingDraft
 from pullbox.services import import_mylar3_path_preflight as path_preflight
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -283,3 +282,147 @@ def test_location_inventory_applies_database_limit_to_combined_rows(
     assert partial is True
     assert len(inventory_queries) == 1
     assert "LIMIT 3" in inventory_queries[0].upper()
+
+
+async def test_identity_missing_paths_have_actionable_exceptions_and_safe_continuation(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "comics"
+    (root / "Existing").mkdir(parents=True)
+    database = tmp_path / "mylar.db"
+    _write_mylar_path_database(
+        database,
+        comics=[
+            ("1", str(root / "Existing")),
+            ("2", str(root / "Missing")),
+            ("3", str(tmp_path / "other-mount" / "Unmapped")),
+        ],
+        issues=[],
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE comics ADD COLUMN ComicName TEXT")
+        connection.execute("UPDATE comics SET ComicName = 'Missing series' WHERE ComicID = '2'")
+    db_session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
+    await db_session.flush()
+    preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=True,
+        mappings=[],
+    )
+    data = preview.model_dump()
+    assert data["resolution"].get("missing") == 1
+    assert data["resolution"]["unmapped"] == 1
+    assert data.get("can_continue_with_unresolved") is True
+    assert data.get("requires_unresolved_acknowledgement") is True
+    assert preview.can_confirm is False
+    missing = next(
+        item for item in data["exceptions"] if item["stored_path"] == str(root / "Missing")
+    )
+    assert missing["series_name"] == "Missing series"
+    assert missing["series_id"] == "2"
+    assert missing["attempted_path"] == str(root / "Missing")
+    assert missing["outcome"] == "missing"
+    assert missing["reason"] and missing["suggested_action"]
+
+
+async def test_permission_denied_is_not_reported_as_unmapped(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "comics"
+    (root / "Existing").mkdir(parents=True)
+    denied = root / "Denied"
+    database = tmp_path / "mylar.db"
+    _write_mylar_path_database(
+        database, comics=[("1", str(root / "Existing")), ("2", str(denied))], issues=[]
+    )
+    db_session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
+    await db_session.flush()
+    original = Path.resolve
+
+    def resolve(path: Path, strict: bool = False) -> Path:
+        if path == denied:
+            raise PermissionError("blocked")
+        return original(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=True,
+        mappings=[],
+    )
+    assert preview.resolution.unreadable == 1
+    assert preview.resolution.unmapped == 0
+    assert preview.model_dump().get("can_continue_with_unresolved") is False
+
+
+async def test_entirely_unavailable_library_cannot_continue(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "comics"
+    root.mkdir()
+    database = tmp_path / "mylar.db"
+    _write_mylar_path_database(database, comics=[("1", str(root / "Missing"))], issues=[])
+    db_session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
+    await db_session.flush()
+    for automatic in (True, False):
+        preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+            db_session,
+            database,
+            auto_detect=automatic,
+            mappings=[],
+        )
+        assert preview.can_confirm is False
+        assert preview.model_dump().get("can_continue_with_unresolved") is False
+
+
+async def test_io_errors_and_sensitive_missing_paths_are_not_skippable(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "comics"
+    (root / "Existing").mkdir(parents=True)
+    broken = root / "Broken"
+    database = tmp_path / "mylar.db"
+    _write_mylar_path_database(
+        database,
+        comics=[("1", str(root / "Existing")), ("2", str(broken))],
+        issues=[],
+    )
+    db_session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
+    await db_session.flush()
+    original_resolve = Path.resolve
+
+    def resolve(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == broken:
+            raise OSError("Input/output error")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=False,
+        mappings=[],
+    )
+    assert not preview.can_continue_with_unresolved
+    assert preview.resolution.invalid == 1
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE comics SET ComicLocation=? WHERE ComicID='2'",
+            ("/etc/missing-comic",),
+        )
+    preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=False,
+        mappings=[],
+    )
+    assert not preview.can_continue_with_unresolved
+    assert preview.resolution.invalid == 1

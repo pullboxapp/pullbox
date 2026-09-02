@@ -473,6 +473,21 @@ TZ
 - The container runtime user must be able to read mounted import paths and read
   or write the mounted library and downloads paths based on the configured
   workflow.
+- Mylar Step 1 reports the exact unavailable locations. A missing child folder
+  under an accessible root is not itself evidence of a broken Docker mount.
+  Verify the stored path and container-visible path before adding a mapping;
+  do not create empty directories simply to make preflight pass.
+- Recent Mylar preflight reports are private app data under
+  `/data/diagnostics/mylar-preflight` (or the configured data directory).
+  Authenticated report/export requests expire after 24 hours; at most five
+  reports of up to 32 MiB each are retained. They contain library paths and
+  series names, so treat exports as private support data.
+- Diagnostic collection probes directory permissions and filesystem capacity
+  without recursively sizing the comic library. `dir_size_bytes` is `null`
+  with an explicit `not_collected` reason, not a zero-byte library. Blocking
+  filesystem collection, sanitized database copying, and ZIP compression run
+  on worker threads rather than the application event loop. Generation time
+  can still depend on database/log size and storage responsiveness.
 - Library permission management is chmod-only. It can normalize file and folder
   modes, but it cannot repair ownership, group, NAS ACL, or mount-option
   problems.
