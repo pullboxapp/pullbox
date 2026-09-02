@@ -454,6 +454,21 @@ unsafe paths, ambiguous roots, unavailable configured roots, and truncated
 previews still block starting. Preflight never modifies the Mylar database or
 creates, renames, or changes permissions on source folders.
 
+Both Mylar and folder imports use the same sidecar parser and comic-content
+review policy. Mylar's nested `series.json` metadata and explicit `cvinfo`
+ComicVine volume URLs are authoritative local evidence; an unqualified
+`series_id` is not. Conflicting explicit identities remain review exceptions.
+Archive member inventories, not declared ComicInfo page counts or minimum file
+sizes, identify metadata-only and possible cover-only CBZ/CBR/CB7/CBT files.
+No-page archives cannot be imported; single-page archives require individual
+approval without disabling resource or dangerous-file checks. PDF and EPUB do
+not use this image-member heuristic. These checks neither extract page payloads
+nor fetch provider metadata.
+
+Affected saved reviews can be rechecked with the offline, dry-run-first
+maintenance procedure in [Import Review Recovery](IMPORT_REVIEW_RECOVERY.md).
+It does not silently repair existing reviews during an upgrade.
+
 Step 4 is the only place files move into the library. It may reuse Step 2/3
 matched summaries, create targeted series and issue rows first, and then mark
 the issue catalog as hydrating while full ComicVine issue metadata is fetched

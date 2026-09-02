@@ -14,12 +14,14 @@ import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from stat import S_ISLNK
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from pullbox.core.comicinfo import ComicInfoData, parse_comicinfo
 from pullbox.core.filesystem_scan import iter_supported_files_with_handler
+from pullbox.core.page_sources.base import canonical_page_names
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,6 +129,7 @@ class ZipArchiveSafetyReport:
     comicinfo_entry: str | None
     comicinfo_entry_count: int
     comicinfo_error: str | None
+    page_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +208,8 @@ def is_resource_safety_exception_allowed(diagnostics: Mapping[str, Any] | None) 
         return False
     previous_block = safety_exception.get("previous_block")
     if not isinstance(previous_block, Mapping):
+        return False
+    if previous_block.get("code") in {"archive_no_pages", "single_page_comic"}:
         return False
     return bool(previous_block.get("overrideable", True))
 
@@ -493,6 +498,17 @@ def inspect_zip_archive_safety(
         comicinfo_entry=comicinfo_entry,
         comicinfo_entry_count=len(comicinfo_entries),
         comicinfo_error=comicinfo_error,
+        page_count=len(
+            canonical_page_names(
+                [
+                    entry.filename
+                    for entry in entries
+                    if not entry.is_dir()
+                    and entry.file_size > 0
+                    and not S_ISLNK(entry.external_attr >> 16)
+                ]
+            )
+        ),
     )
 
 

@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Corrected Mylar `series.json` metadata wrappers and `cvinfo` volume URL
+  parsing in both Mylar and folder imports, without interpreting another
+  application's unqualified `series_id` as a ComicVine identity.
+- Isolated metadata-only and possible cover-only comic archives in import
+  review while preserving valid series identities. Single-page approval is
+  explicit and does not bypass archive safety limits.
+- Added an offline, dry-run-first `recheck-import` maintenance command for
+  affected saved reviews, preserving manual decisions and source files without
+  repeating the directory scan.
 - Raised the database-size health warning to above 1 GiB and the critical
   threshold to above 2 GiB to accommodate large collections and retained logs.
   Disk-space, integrity, latency, and database-bloat checks remain unchanged.

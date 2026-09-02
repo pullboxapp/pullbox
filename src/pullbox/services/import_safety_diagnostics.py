@@ -17,6 +17,8 @@ class ImportSafetyCategory(enum.StrEnum):
     PERMISSION_UNREADABLE = "permission_unreadable"
     ARCHIVE_INSPECTION_FAILED = "archive_inspection_failed"
     ZERO_BYTE = "zero_byte"
+    ARCHIVE_NO_PAGES = "archive_no_pages"
+    SINGLE_PAGE_COMIC = "single_page_comic"
     DECOMPRESSION_SIZE_LIMIT = "decompression_size_limit"
     DANGEROUS_PATH_OR_PAYLOAD = "dangerous_path_or_payload"
     OUTSIDE_APPROVED_ROOT = "outside_approved_root"
@@ -29,6 +31,8 @@ _CATEGORY_LABELS: dict[ImportSafetyCategory, str] = {
     ImportSafetyCategory.PERMISSION_UNREADABLE: "Unreadable or permission denied",
     ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED: "Archive inspection failed",
     ImportSafetyCategory.ZERO_BYTE: "Zero-byte file",
+    ImportSafetyCategory.ARCHIVE_NO_PAGES: "No comic pages",
+    ImportSafetyCategory.SINGLE_PAGE_COMIC: "Possible cover-only file",
     ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT: "Decompression-size limit",
     ImportSafetyCategory.DANGEROUS_PATH_OR_PAYLOAD: "Dangerous link, path, or payload",
     ImportSafetyCategory.OUTSIDE_APPROVED_ROOT: "Outside approved root",
@@ -47,6 +51,14 @@ _SANITIZED_REASONS: dict[ImportSafetyCategory, str] = {
     ),
     ImportSafetyCategory.ZERO_BYTE: (
         "The file is empty (zero bytes). Replace it with a complete file and retry."
+    ),
+    ImportSafetyCategory.ARCHIVE_NO_PAGES: (
+        "The archive contains no non-empty comic image pages. Metadata alone is not a comic. "
+        "Replace the file or skip it; its series identity is preserved."
+    ),
+    ImportSafetyCategory.SINGLE_PAGE_COMIC: (
+        "The archive contains only one image page and may be an alternate cover. "
+        "Review the source and allow once only if this is intentionally a one-page comic."
     ),
     ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT: (
         "The archive exceeds Pullbox's configured decompressed-size limit."
@@ -71,6 +83,7 @@ _RETRYABLE_CATEGORIES = frozenset(
         ImportSafetyCategory.PERMISSION_UNREADABLE,
         ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED,
         ImportSafetyCategory.ZERO_BYTE,
+        ImportSafetyCategory.ARCHIVE_NO_PAGES,
         ImportSafetyCategory.OUTSIDE_APPROVED_ROOT,
         ImportSafetyCategory.SOURCE_CHANGED,
     }
@@ -79,6 +92,7 @@ _RETRYABLE_CATEGORIES = frozenset(
 _PERMISSION_CODES = frozenset({"permission_denied", "source_unreadable", "unreadable"})
 _INSPECTION_CODES = frozenset({"archive_inspection_failed", "corrupt_archive", "inspection_failed"})
 _ZERO_BYTE_CODES = frozenset({"zero_byte", "zero_byte_file", "empty_file"})
+_CONTENT_CODES = frozenset({"archive_no_pages", "single_page_comic"})
 _SIZE_CODES = frozenset(
     {
         "archive_decompressed_size",
@@ -162,6 +176,7 @@ def classify_import_safety_failure(
         _PERMISSION_CODES
         | _INSPECTION_CODES
         | _ZERO_BYTE_CODES
+        | _CONTENT_CODES
         | _SIZE_CODES
         | _DANGEROUS_CODES
         | _OUTSIDE_ROOT_CODES
@@ -222,6 +237,11 @@ def classify_import_safety_failure(
     ):
         category = ImportSafetyCategory.ZERO_BYTE
         stable_code = normalized_code or "zero_byte_file"
+    elif evidence_tokens & _CONTENT_CODES:
+        stable_code = (
+            "archive_no_pages" if "archive_no_pages" in evidence_tokens else "single_page_comic"
+        )
+        category = ImportSafetyCategory(stable_code)
     elif evidence_tokens & _SIZE_CODES or _contains_any(
         normalized_reason,
         (
@@ -282,7 +302,9 @@ def classify_import_safety_failure(
         stable_code = normalized_code or normalized_kind or "unknown_safety_failure"
 
     overrideable = (
-        category is ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT and overrideable_hint is not False
+        category
+        in {ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT, ImportSafetyCategory.SINGLE_PAGE_COMIC}
+        and overrideable_hint is not False
     )
     return ImportSafetyClassification(
         category=category,

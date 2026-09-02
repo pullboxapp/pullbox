@@ -123,6 +123,7 @@ def _write_cbz(path: Path, comicinfo_xml: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
         archive.writestr("page001.jpg", b"\xff\xd8\xff\xd9")
+        archive.writestr("page002.jpg", b"\xff\xd8\xff\xd9")
         if comicinfo_xml is not None:
             archive.writestr("ComicInfo.xml", comicinfo_xml)
 
@@ -1546,6 +1547,125 @@ class TestMylar3Import:
         assert series_item.cv_id == 42721
         assert series_item.cv_match_method == "mylar3_cv_id"
         assert "identity_conflicts" not in series_item.diagnostics
+
+
+@pytest.mark.parametrize("source_type", list(ImportSourceType))
+@pytest.mark.parametrize("pages", [0, 1, 2])
+async def test_mylar_and_folder_share_sidecar_and_content_review(
+    db_session,
+    tmp_path,
+    source_type,
+    pages,
+) -> None:
+    await _setup_comics_directory(db_session, tmp_path / "destination")
+
+    class OfflineProvider:
+        def __getattr__(self, name):
+            async def fail(*args, **kwargs):
+                raise AssertionError(f"Unexpected provider request: {name}")
+
+            return fail
+
+    folder = tmp_path / "comics" / "Firefly (2018)"
+    folder.mkdir(parents=True)
+    (folder / "series.json").write_text(
+        '{"metadata":{"comicid":115251,"name":"Firefly","year":2018,"total_issues":36}}'
+    )
+    (folder / "cvinfo").write_text(
+        "https://comicvine.gamespot.com/firefly/4050-115251/\nseries_id: 7921\n"
+    )
+    comic = folder / "Firefly 007 (2019).cbz"
+    with zipfile.ZipFile(comic, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Firefly</Series><Number>7</Number><PageCount>27</PageCount></ComicInfo>",
+        )
+        for page in range(pages):
+            archive.writestr(f"page{page}.jpg", b"page")
+    source = tmp_path / "comics"
+    if source_type is ImportSourceType.MYLAR3:
+        source = tmp_path / "mylar.db"
+        create_mylar3_db(
+            source,
+            series=[
+                {
+                    "ComicID": "CV-115251",
+                    "ComicName": "Firefly",
+                    "ComicYear": "2018",
+                    "ComicLocation": str(folder),
+                    "Total": 36,
+                }
+            ],
+        )
+    metadata_service = AsyncMock()
+    metadata_service._provider = OfflineProvider()
+    service = _make_import_service(
+        series_service=_mock_series_service({}),
+        metadata_service=metadata_service,
+    )
+    job = await service.create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source),
+            source_type=source_type,
+            mylar3_path_map_confirmed=source_type is ImportSourceType.MYLAR3,
+        ),
+    )
+    before = comic.read_bytes()
+    await service.start_scan(db_session, job.id)
+    assert job.status is ImportJobStatus.REVIEW
+    item = await db_session.scalar(
+        sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+    )
+    file = await db_session.scalar(
+        sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+    )
+    assert item.status is ImportSeriesStatus.MATCHED
+    assert item.cv_id == 115251
+    assert "identity_conflicts" not in item.diagnostics
+    assert file.status is (
+        ImportedFileStatus.SAFETY_BLOCKED if pages < 2 else ImportedFileStatus.MATCHED
+    )
+    assert not file.include_in_import
+    if pages < 2:
+        assert file.diagnostics["safety_block"]["code"] == (
+            "archive_no_pages" if pages == 0 else "single_page_comic"
+        )
+    assert comic.read_bytes() == before
+
+    # Reproduce a saved review created by the old sidecar parser, then resume
+    # using the ordinary recovery pipeline without inventorying the source again.
+    from pullbox.services.import_review_recheck import prepare_review_recheck
+
+    item.status = ImportSeriesStatus.NO_MATCH
+    item.diagnostics = {"reason": "trusted_source_identity_conflict"}
+    file.status = ImportedFileStatus.NO_MATCH
+    await db_session.flush()
+    await prepare_review_recheck(db_session, job.id, source_roots=[tmp_path / "comics"], apply=True)
+    await db_session.commit()
+    await service.resume_scan_phase(db_session, job.id)
+    await db_session.refresh(job)
+    await db_session.refresh(item)
+    await db_session.refresh(file)
+    assert job.status is ImportJobStatus.REVIEW
+    assert item.status is ImportSeriesStatus.MATCHED
+    assert item.cv_id == 115251
+    assert file.status is (
+        ImportedFileStatus.SAFETY_BLOCKED if pages < 2 else ImportedFileStatus.MATCHED
+    )
+    assert comic.read_bytes() == before
+
+    if pages == 1:
+        from pullbox.core.file_safety import is_resource_safety_exception_allowed
+
+        await service.allow_safety_blocked_file_once(db_session, job.id, file.id)
+        await service.rematch_imported_series_files(db_session, job.id, item.id)
+        assert file.status is ImportedFileStatus.MATCHED
+        assert not file.include_in_import
+        assert not is_resource_safety_exception_allowed(file.diagnostics)
+    elif pages == 0:
+        with pytest.raises(ValidationError, match="cannot be overridden"):
+            await service.allow_safety_blocked_file_once(db_session, job.id, file.id)
 
 
 # ── Scenario C: Deduplication ──────────────────────────────────────────

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import zipfile
+import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -268,12 +270,36 @@ def _write_comic_file(path: Path, size: int = 100) -> None:
     if ext in {".cbz", ".zip", ".epub"}:
         with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("page001.jpg", payload)
+            archive.writestr("page002.jpg", payload)
         return
     if ext == ".pdf":
         path.write_bytes(b"%PDF-1.4\n%" + payload)
         return
     if ext == ".cbr":
-        path.write_bytes(b"Rar!\x1a\x07\x00" + payload)
+        # Stored RAR3 entries make the inventory real without an external writer.
+        def header(kind: int, flags: int, body: bytes) -> bytes:
+            data = struct.pack("<BHH", kind, flags, 7 + len(body)) + body
+            return struct.pack("<H", zlib.crc32(data) & 0xFFFF) + data
+
+        archive = b"Rar!\x1a\x07\x00" + header(0x73, 0, b"\x00" * 6)
+        for name in (b"page001.jpg", b"page002.jpg"):
+            file_header = (
+                struct.pack(
+                    "<LLBLLBBHL",
+                    len(payload),
+                    len(payload),
+                    3,
+                    zlib.crc32(payload),
+                    (40 << 25) | (1 << 21) | (1 << 16),
+                    20,
+                    0x30,
+                    len(name),
+                    0o100644,
+                )
+                + name
+            )
+            archive += header(0x74, 0x8000, file_header) + payload
+        path.write_bytes(archive + header(0x7B, 0, b""))
         return
     path.write_bytes(payload)
 
@@ -698,8 +724,12 @@ class TestFullImportWithFiles:
 
         assert job.total_files_found == 0
 
-    async def test_ra_mixed_file_formats(self, db_session: AsyncSession, tmp_path: Path) -> None:
+    async def test_ra_mixed_file_formats(
+        self, db_session: AsyncSession, tmp_path: Path, monkeypatch
+    ) -> None:
         """Files with various formats (CBZ, CBR, PDF, EPUB) all get processed."""
+        # Header inspection is pure Python; this lifecycle test needs no extraction backend.
+        monkeypatch.setattr("pullbox.core.archive.configure_rarfile_backend", lambda: None)
         comics_dir = tmp_path / "library"
         await _setup_comics_directory(db_session, comics_dir)
 
@@ -1562,9 +1592,10 @@ class TestImportWithRename:
             assert Path(lf.file_path).exists()
 
     async def test_rd_rename_preserves_file_extension(
-        self, db_session: AsyncSession, tmp_path: Path
+        self, db_session: AsyncSession, tmp_path: Path, monkeypatch
     ) -> None:
         """Rename keeps original file extension (.cbz stays .cbz, .cbr stays .cbr)."""
+        monkeypatch.setattr("pullbox.core.archive.configure_rarfile_backend", lambda: None)
         comics_dir = tmp_path / "library"
         await _setup_comics_directory(db_session, comics_dir)
         db_session.add(SystemConfig(key="rename_on_import", value="true", value_type="bool"))

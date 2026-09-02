@@ -22,6 +22,7 @@ from pullbox.core.file_safety import (
 from pullbox.core.source_metadata import archive_entry_issue_hint_from_names
 from pullbox.models.import_job import ImportedFile, ImportedSeries, ImportJob
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.services.import_content_inspection import inspect_import_content
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 
 if TYPE_CHECKING:
@@ -118,6 +119,11 @@ async def validate_discovered_files_safety(
     for completed, (file_path, discovered_files) in enumerate(files_by_path.items(), 1):
         try:
             inspection = await effective_check_file_safety(session, Path(file_path))
+            content_diagnostics = (
+                await asyncio.to_thread(inspect_import_content, Path(file_path), inspection)
+                if inspection is not None
+                else {}
+            )
         except FileSafetyError as exc:
             resource_block = classify_resource_safety_exception(exc)
             safety_block = build_import_safety_diagnostics(
@@ -136,6 +142,11 @@ async def validate_discovered_files_safety(
         else:
             if inspection is None:
                 continue
+            for discovered_file in discovered_files:
+                discovered_file.metadata_diagnostics = {
+                    **discovered_file.metadata_diagnostics,
+                    **content_diagnostics,
+                }
             archive_report = next(
                 (
                     report

@@ -7,6 +7,7 @@ import zipfile
 from typing import TYPE_CHECKING
 
 import py7zr
+import pytest
 
 from pullbox.core import source_metadata
 from pullbox.core.source_metadata import MetadataSignal, SourceMetadataExtractor
@@ -14,8 +15,6 @@ from pullbox.models.issue import IssueType
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def _write_cbz(path: Path, comicinfo_xml: str | None = None) -> None:
@@ -47,6 +46,65 @@ def _write_cb7(path: Path, comicinfo_xml: str | None = None) -> None:
 
 class TestArchiveMetadataExtraction:
     """Archive extraction should unify ComicInfo, sidecars, and folder hints."""
+
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_mylar_sidecars_use_explicit_comicvine_identity(
+        self, tmp_path: Path, wrapped: bool
+    ) -> None:
+        data = {
+            "comicid": 115251,
+            "name": "Firefly",
+            "year": 2018,
+            "booktype": "Print",
+            "status": "Ended",
+            "total_issues": 36,
+        }
+        (tmp_path / "series.json").write_text(
+            json.dumps({"version": "1.0.2", "metadata": data} if wrapped else data)
+        )
+        (tmp_path / "cvinfo").write_text(
+            "https://comicvine.gamespot.com/firefly/4050-115251/\nseries_id: 7921\n"
+        )
+        sidecar = SourceMetadataExtractor().read_sidecars(tmp_path)
+        assert sidecar["series_id"] == 115251
+        assert sidecar["series_name"] == "Firefly"
+        assert sidecar["issue_count"] == 36
+        assert sidecar["series_status"] == "Ended"
+        assert sidecar["identity_conflicts"] == []
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("https://comicvine.gamespot.com/firefly/4050-115251/", 115251),
+            ("https://comicvine.gamespot.com/firefly/4050-115251/\nseries_id: 7921", 115251),
+            ("https://comicvine.gamespot.com/firefly-7/4000-711865/", None),
+            ("https://comicvine.gamespot.com.evil.test/firefly/4050-115251/", None),
+            ("series_id: 7921", None),
+        ],
+    )
+    def test_cvinfo_volume_url_and_unscoped_id_are_not_interchangeable(
+        self, tmp_path: Path, text: str, expected: int | None
+    ) -> None:
+        (tmp_path / "cvinfo").write_text(text)
+        assert SourceMetadataExtractor().read_sidecars(tmp_path)["series_id"] == expected
+
+    def test_wrapped_json_and_explicit_volume_url_conflict_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "series.json").write_text(json.dumps({"metadata": {"comicid": 115251}}))
+        (tmp_path / "cvinfo").write_text("https://comicvine.gamespot.com/other/4050-97508/")
+        sidecar = SourceMetadataExtractor().read_sidecars(tmp_path)
+        assert sidecar["series_id"] == 115251
+        assert sidecar["identity_conflicts"] == [
+            {"field": "comicvine_series_id", "series.json": 115251, "cvinfo": 97508}
+        ]
+
+    def test_one_sidecar_does_not_hide_disagreeing_explicit_ids(self, tmp_path: Path) -> None:
+        (tmp_path / "cvinfo").write_text(
+            "https://comicvine.gamespot.com/firefly/4050-115251/\ncomicid: 97508"
+        )
+        sidecar = SourceMetadataExtractor().read_sidecars(tmp_path)
+        assert sidecar["identity_conflicts"]
 
     def test_sidecar_series_id_and_booktype_override_filename(self, tmp_path: Path) -> None:
         folder = tmp_path / "Absolute Martian Manhunter (2025) [TPB]"
