@@ -221,13 +221,14 @@ class TestDatabaseSizeCheck:
         return session
 
     @pytest.mark.asyncio
-    async def test_healthy_small_db(self, settings: MagicMock) -> None:
-        """Database size below 500 MB -> healthy sub-check."""
+    @pytest.mark.parametrize("size_mb", [100, 719, 1000])
+    async def test_healthy_small_db(self, settings: MagicMock, size_mb: int) -> None:
+        """Large collections below 1 GB do not trigger a size warning."""
         session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
         service = _make_service(settings)
 
         mock_stat = MagicMock()
-        mock_stat.st_size = 100 * 1024 * 1024  # 100 MB
+        mock_stat.st_size = size_mb * 1024 * 1024
 
         with patch("pathlib.Path.stat", return_value=mock_stat):
             result = await service._check_db_size(session)
@@ -235,41 +236,65 @@ class TestDatabaseSizeCheck:
         assert result is not None
         assert result.status == HealthStatus.HEALTHY
         assert result.name == "Database size"
-        assert "100.0 MB" in result.message
+        assert f"{size_mb:.1f} MB" in result.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("size_bytes", "expected_status"),
+        [
+            (1024**3 - 1, HealthStatus.HEALTHY),
+            (1024**3, HealthStatus.HEALTHY),
+            (1024**3 + 1, HealthStatus.DEGRADED),
+            (2 * 1024**3, HealthStatus.DEGRADED),
+            (2 * 1024**3 + 1, HealthStatus.UNHEALTHY),
+        ],
+    )
+    async def test_size_threshold_boundaries(
+        self, settings: MagicMock, size_bytes: int, expected_status: HealthStatus
+    ) -> None:
+        session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
+        service = _make_service(settings)
+        mock_stat = MagicMock(st_size=size_bytes)
+
+        with patch("pathlib.Path.stat", return_value=mock_stat):
+            result = await service._check_db_size(session)
+
+        assert result is not None
+        assert result.status == expected_status
 
     @pytest.mark.asyncio
     async def test_degraded_large_db(self, settings: MagicMock) -> None:
-        """Database size 500-1000 MB -> degraded sub-check."""
+        """Database size between 1 GB and 2 GB -> degraded sub-check."""
         session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
         service = _make_service(settings)
 
         mock_stat = MagicMock()
-        mock_stat.st_size = 600 * 1024 * 1024  # 600 MB
+        mock_stat.st_size = 1200 * 1024 * 1024
 
         with patch("pathlib.Path.stat", return_value=mock_stat):
             result = await service._check_db_size(session)
 
         assert result is not None
         assert result.status == HealthStatus.DEGRADED
-        assert "600 MB" in result.message
-        assert "threshold: 500 MB" in result.message
+        assert "1200 MB" in result.message
+        assert "threshold: 1024 MB" in result.message
 
     @pytest.mark.asyncio
     async def test_unhealthy_very_large_db(self, settings: MagicMock) -> None:
-        """Database size above 1000 MB -> unhealthy sub-check."""
+        """Database size above 2 GB -> unhealthy sub-check."""
         session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
         service = _make_service(settings)
 
         mock_stat = MagicMock()
-        mock_stat.st_size = 1200 * 1024 * 1024  # 1200 MB
+        mock_stat.st_size = 2500 * 1024 * 1024
 
         with patch("pathlib.Path.stat", return_value=mock_stat):
             result = await service._check_db_size(session)
 
         assert result is not None
         assert result.status == HealthStatus.UNHEALTHY
-        assert "1200 MB" in result.message
-        assert "threshold: 1000 MB" in result.message
+        assert "2500 MB" in result.message
+        assert "threshold: 2048 MB" in result.message
 
     @pytest.mark.asyncio
     async def test_skipped_for_non_sqlite(self, settings: MagicMock) -> None:
@@ -307,7 +332,7 @@ class TestDatabaseSizeCheck:
         size_result = {
             "name": "Database size",
             "status": "degraded",
-            "message": "600 MB (threshold: 500 MB)",
+            "message": "1200 MB (threshold: 1024 MB)",
         }
         with patch.object(
             service, "_check_db_size", new_callable=AsyncMock, return_value=size_result
@@ -330,7 +355,7 @@ class TestDatabaseSizeCheck:
         size_result = {
             "name": "Database size",
             "status": "unhealthy",
-            "message": "1200 MB (threshold: 1000 MB)",
+            "message": "2500 MB (threshold: 2048 MB)",
         }
         with patch.object(
             service, "_check_db_size", new_callable=AsyncMock, return_value=size_result

@@ -290,57 +290,47 @@ async def load_import_safety_failure_summary(
     *,
     page_size: int = 1_000,
 ) -> list[dict[str, object]]:
-    """Return complete safety categories using bounded keyset pages."""
+    """Return complete safety categories from one bounded, narrow-field stream."""
     if page_size < 1 or page_size > 5_000:
         raise ValueError("Safety summary page_size must be between 1 and 5000")
 
     accumulator = ImportSafetyFailureSummaryAccumulator()
     bulk_overrideable_counts: dict[str, int] = {}
-    cursor = 0
-    while True:
-        result = await session.execute(
-            select(
-                ImportedFile.id,
-                ImportedFile.file_name,
-                ImportedFile.diagnostics,
-                ImportedFile.status,
-            )
-            .where(
-                ImportedFile.import_job_id == job.id,
-                ImportedFile.status.in_(
-                    [ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.FAILED]
-                ),
-                ImportedFile.id > cursor,
-            )
-            .order_by(ImportedFile.id)
-            .limit(page_size)
+    # Avoid rescanning/sorting failures for every page or loading their source metadata.
+    result = await session.stream(
+        select(
+            ImportedFile.file_name,
+            ImportedFile.diagnostics["safety_block"].label("safety_block"),
+            ImportedFile.diagnostics["source_revalidation"].label("source_revalidation"),
+            ImportedFile.status,
         )
-        rows = result.all()
-        if not rows:
-            break
-        for file_id, file_name, diagnostics, status in rows:
-            cursor = int(file_id)
-            if not isinstance(diagnostics, Mapping):
-                continue
-            safety_block = diagnostics.get("safety_block")
-            if isinstance(safety_block, Mapping):
-                accumulator.add(str(file_name), safety_block)
-                normalized = normalize_import_safety_diagnostics(safety_block)
-                category = str(normalized["category"])
-                if (
-                    status == ImportedFileStatus.SAFETY_BLOCKED
-                    and category == ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT.value
-                    and normalized["overrideable"] is True
-                ):
-                    bulk_overrideable_counts[category] = (
-                        bulk_overrideable_counts.get(category, 0) + 1
-                    )
-                continue
-            source_revalidation = diagnostics.get("source_revalidation")
-            if isinstance(source_revalidation, Mapping):
-                accumulator.add(str(file_name), source_revalidation)
-        if len(rows) < page_size:
-            break
+        .where(
+            ImportedFile.import_job_id == job.id,
+            ImportedFile.status.in_([ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.FAILED]),
+        )
+        .order_by(ImportedFile.id)
+        .execution_options(yield_per=page_size)
+    )
+    try:
+        async for rows in result.partitions(page_size):
+            for file_name, safety_block, source_revalidation, status in rows:
+                if isinstance(safety_block, Mapping):
+                    accumulator.add(str(file_name), safety_block)
+                    normalized = normalize_import_safety_diagnostics(safety_block)
+                    category = str(normalized["category"])
+                    if (
+                        status == ImportedFileStatus.SAFETY_BLOCKED
+                        and category == ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT.value
+                        and normalized["overrideable"] is True
+                    ):
+                        bulk_overrideable_counts[category] = (
+                            bulk_overrideable_counts.get(category, 0) + 1
+                        )
+                    continue
+                if isinstance(source_revalidation, Mapping):
+                    accumulator.add(str(file_name), source_revalidation)
+    finally:
+        await result.close()
 
     summaries = accumulator.summaries()
     for summary in summaries:

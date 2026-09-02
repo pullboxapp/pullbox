@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Raised the database-size health warning to above 1 GiB and the critical
+  threshold to above 2 GiB to accommodate large collections and retained logs.
+  Disk-space, integrity, latency, and database-bloat checks remain unchanged.
 - Preserved supported Unicode spaces, joiners, and direction marks in Mylar
   source paths across preview, mapping, and import without renaming files or
   relaxing root-containment protections. Invalid path text no longer reports
@@ -66,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- Streamed complete import-review safety summaries using one narrow-field query
+  instead of repeatedly scanning and sorting blocked files for every batch.
+  Category counts, examples, and bulk-approval eligibility remain unchanged.
 - Moved import archive safety checks off the application event loop and added
   throttled progress and cancellation checkpoints between Mylar file checks.
 - Removed recursive comic-library sizing from diagnostic generation and moved
