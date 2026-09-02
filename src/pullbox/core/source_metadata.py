@@ -390,8 +390,9 @@ class SourceMetadataExtractor:
         *,
         source_path: str | None = None,
         folder_name: str | None = None,
+        expected_series: tuple[str, ...] = (),
     ) -> SourceMetadata:
-        parsed = parse_release_title(title)
+        parsed = parse_release_title(title, expected_series=expected_series)
         folder_issue_type = self._folder_issue_type(folder_name)
         issue_type = IssueType.ISSUE
         if parsed is not None:

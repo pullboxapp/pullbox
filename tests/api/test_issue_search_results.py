@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from datetime import date
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -1029,6 +1030,11 @@ async def test_auto_grabbable_flag(
 ) -> None:
     """Auto-grabbable reflects the standard issue type's medium threshold."""
     issue_id = await _create_issue(_db_factory)
+    async with _db_factory() as session:
+        issue = await session.get(Issue, issue_id)
+        assert issue is not None
+        issue.release_date = date(2016, 6, 1)
+        await session.commit()
 
     mock_results = [
         _make_release("Batman 001 (2016).cbz"),  # HIGH confidence (exact + year)
@@ -1064,6 +1070,42 @@ async def test_auto_grabbable_flag(
     assert len(medium_results) >= 1
     for r in medium_results:
         assert r["auto_grabbable"] is True
+
+
+@pytest.mark.parametrize(
+    "publication_date,confidence", [(date(2026, 6, 17), "high"), (None, "medium")]
+)
+async def test_four_digit_manual_results_keep_safe_date_confidence(
+    client: AsyncClient,
+    _db_factory: async_sessionmaker[AsyncSession],
+    publication_date: date | None,
+    confidence: str,
+) -> None:
+    issue_id = await _create_issue(
+        _db_factory, series_title="2000 AD", year_start=1977, issue_number=2487
+    )
+    async with _db_factory() as session:
+        issue = await session.get(Issue, issue_id)
+        assert issue is not None
+        issue.release_date = publication_date
+        await session.commit()
+    with (
+        patch(
+            "pullbox.composition.providers.build_registry",
+            AsyncMock(return_value=(AsyncMock(), {})),
+        ),
+        patch(
+            "pullbox.services.search_service.SearchService.search_for_issue",
+            AsyncMock(return_value=[_make_release("2000AD 2487 [2026] [Digital-Empire]")]),
+        ),
+    ):
+        response = await client.get(f"/api/v1/issues/{issue_id}/search-results")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rejected"] == []
+    assert len(data["matched"]) == 1
+    assert data["matched"][0]["confidence"] == confidence
+    assert data["matched"][0]["auto_grabbable"] is True
 
 
 @pytest.mark.asyncio

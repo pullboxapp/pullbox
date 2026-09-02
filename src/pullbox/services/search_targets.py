@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from sqlalchemy import and_, exists, func, or_, select
 
 from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.release_year_matching import ReleaseYearContext
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
@@ -50,6 +51,19 @@ class IssueSearchTarget:
     release_year: int | None = None
     alternate_names: list[str] | None = None
     series_issue_count: int | None = None
+    store_year: int | None = None
+    series_continuing: bool = False
+
+    @property
+    def year_context(self) -> ReleaseYearContext:
+        """Use existing catalog dates for confidence, not extra provider lookups."""
+        return ReleaseYearContext(
+            series_year=self.series_year,
+            publication_years=tuple(
+                sorted({year for year in (self.release_year, self.store_year) if year is not None})
+            ),
+            series_continuing=self.series_continuing,
+        )
 
     @property
     def search_year(self) -> int | None:
@@ -82,6 +96,24 @@ class IssueSearchOutcome:
     used_fallback: bool = False
     direct_outcome: DirectSearchOutcome | None = None
     dc_outcome: DcSearchOutcome | None = None
+
+    @property
+    def results_found_count(self) -> int:
+        """Count discovered candidates, independently of acquisition success."""
+        return len(self.raw_results) + sum(
+            len(outcome.matched) + len(outcome.rejected)
+            for outcome in (self.direct_outcome, self.dc_outcome)
+            if outcome is not None
+        )
+
+    @property
+    def results_rejected_count(self) -> int:
+        """Only validation rejections count, not unused or unavailable matches."""
+        return len(self.rejected) + sum(
+            len(outcome.rejected)
+            for outcome in (self.direct_outcome, self.dc_outcome)
+            if outcome is not None
+        )
 
 
 SearchOutcomeCallback = Callable[[IssueSearchOutcome], Awaitable[None]]
@@ -187,6 +219,8 @@ def _target_from_row(row: Any) -> IssueSearchTarget:
     """Build a search target from a SQLAlchemy row with the expected labels."""
     release_date = getattr(row, "release_date", None) or getattr(row, "store_date", None)
     series_issue_count = getattr(row, "series_issue_count", None)
+    store_date = getattr(row, "store_date", None)
+    lifecycle = getattr(row, "status_override", None) or getattr(row, "series_status", None)
     return IssueSearchTarget(
         issue_id=int(row.issue_id),
         series_id=int(row.series_id),
@@ -199,6 +233,8 @@ def _target_from_row(row: Any) -> IssueSearchTarget:
         issue_title=str(row.issue_title) if row.issue_title else None,
         series_year=int(row.series_year) if row.series_year else None,
         release_year=release_date.year if release_date is not None else None,
+        store_year=store_date.year if store_date is not None else None,
+        series_continuing=str(lifecycle).casefold() == "continuing",
         alternate_names=list(row.alternate_names) if row.alternate_names else None,
         series_issue_count=(int(series_issue_count) if series_issue_count is not None else None),
     )
@@ -223,6 +259,8 @@ async def load_issue_search_target(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(Issue.id == issue_id)
@@ -253,6 +291,8 @@ async def load_series_wanted_search_targets(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(Issue.series_id == series_id)
@@ -351,6 +391,8 @@ async def load_wanted_issue_search_targets(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(*filters)
@@ -381,6 +423,8 @@ async def load_wanted_issue_search_targets_by_ids(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(

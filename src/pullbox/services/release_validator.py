@@ -24,6 +24,7 @@ from pullbox.services.semantic_matching import (
 )
 
 if TYPE_CHECKING:
+    from pullbox.core.release_year_matching import ReleaseYearContext
     from pullbox.providers.base import ReleaseResult
     from pullbox.services.search_types import SearchEvalKwargs, ValidatorKwargs
 
@@ -74,6 +75,7 @@ class ValidationResult:
     year_match: bool | None = None
     issue_type_match: bool = False
     size_warning: str | None = None
+    year_match_basis: str | None = None
 
 
 # Confidence sort order for descending sort
@@ -238,6 +240,7 @@ class ReleaseValidator:
         alternate_names: list[str] | None = None,
         wanted_issue_title: str | None = None,
         wanted_series_issue_count: int | None = None,
+        year_context: ReleaseYearContext | None = None,
     ) -> list[ValidationResult]:
         """Validate a list of search results against a wanted issue.
 
@@ -265,6 +268,7 @@ class ReleaseValidator:
                 alternate_names=alternate_names,
                 wanted_issue_title=wanted_issue_title,
                 wanted_series_issue_count=wanted_series_issue_count,
+                year_context=year_context,
             )
             if vr.is_match:
                 validated.append(vr)
@@ -319,6 +323,7 @@ class ReleaseValidator:
         alternate_names: list[str] | None = None,
         wanted_issue_title: str | None = None,
         wanted_series_issue_count: int | None = None,
+        year_context: ReleaseYearContext | None = None,
     ) -> tuple[list[ValidationResult], list[ValidationResult]]:
         """Validate results, returning (matched, rejected) tuples.
 
@@ -351,6 +356,7 @@ class ReleaseValidator:
                 alternate_names=alternate_names,
                 wanted_issue_title=wanted_issue_title,
                 wanted_series_issue_count=wanted_series_issue_count,
+                year_context=year_context,
             )
             if vr.is_match:
                 matched.append(vr)
@@ -379,9 +385,12 @@ class ReleaseValidator:
         alternate_names: list[str] | None,
         wanted_issue_title: str | None = None,
         wanted_series_issue_count: int | None = None,
+        year_context: ReleaseYearContext | None = None,
     ) -> ValidationResult:
         """Run the validation pipeline on a single result."""
-        metadata = self._extractor.from_release_title(result.title)
+        metadata = self._extractor.from_release_title(
+            result.title, expected_series=(wanted_series, *(alternate_names or []))
+        )
         parsed = metadata.parsed_release
         if parsed is None:
             return self._reject(result, "Failed to parse release title")
@@ -471,6 +480,7 @@ class ReleaseValidator:
             alternate_names=alternate_names,
             wanted_issue_title=wanted_issue_title,
             wanted_series_issue_count=wanted_series_issue_count,
+            year_context=year_context,
         )
         if not decision.is_match:
             return self._reject(
@@ -482,9 +492,7 @@ class ReleaseValidator:
                 issue_type_match=decision.match_method != "type_mismatch",
             )
 
-        year_matched: bool | None = None
-        if parsed.year is not None and wanted_year is not None:
-            year_matched = abs(parsed.year - wanted_year) <= self._year_tolerance
+        year_matched = decision.match_diagnostics.get("year_match")
 
         # Step 8: File size heuristic (modifies confidence, never rejects)
         confidence, size_warning = _apply_size_heuristic(
@@ -507,6 +515,7 @@ class ReleaseValidator:
             year_match=year_matched,
             issue_type_match=True,
             size_warning=size_warning,
+            year_match_basis=decision.match_diagnostics.get("year_match_basis"),
         )
 
     @staticmethod
