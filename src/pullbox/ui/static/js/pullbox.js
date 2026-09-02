@@ -13510,7 +13510,10 @@ function dropdownSelectData(config) {
         requestAnimationFrame(function () {
           self.syncPanelControlVars();
           self.updatePanelPosition();
-          self.focusOption(self.activeIndex);
+          // Apply data-ready before focusing: hidden panels reject focus.
+          self.$nextTick(function () {
+            if (self.open) self.focusOption(self.activeIndex);
+          });
         });
       });
     },

@@ -482,7 +482,7 @@
 
   {% call section_card(
     title="Naming behavior",
-    description="Turn automatic renaming on or off, then control how Pullbox sanitizes invalid filename characters.",
+    description="Control automatic renaming for all libraries. Choose global or library-specific formats in Naming templates below.",
     eyebrow="Rename rules",
     title_style="plain",
     body_class="p-0",
@@ -501,32 +501,6 @@
           </div>
         {% endcall %}
 
-        {% call settings_row(label="Replace Illegal Characters", help="Replace filesystem characters such as <code class='text-pb-text-sec font-mono'>&lt; &gt; : &quot; / &#92; | ? *</code> so generated file and folder names stay valid.") %}
-          <div class="flex items-center gap-3">
-            {% set replace_illegal = configs.get('replace_illegal_characters', 'true') %}
-            <label class="relative inline-flex cursor-pointer items-center">
-              <input type="checkbox" name="replace_illegal_characters" value="true" {% if replace_illegal == 'true' %}checked{% endif %} class="peer toggle-input">
-              <span class="toggle-switch"></span>
-            </label>
-            <span class="text-sm text-pb-text-sec">{{ 'Enabled' if replace_illegal == 'true' else 'Disabled' }}</span>
-          </div>
-        {% endcall %}
-
-        {% call settings_row(label="Colon Replacement", help="Choose how Pullbox rewrites colons when illegal-character cleanup is enabled.") %}
-          {% set colon_repl = configs.get('colon_replacement', 'dash') %}
-          {{ dropdown_select(
-            name="colon_replacement",
-            value=colon_repl,
-            options=[
-              ("dash", "Dash ( - )"),
-              ("space", "Space"),
-              ("empty", "Remove"),
-              ("smart", "Em-dash ( — )"),
-            ],
-            root_testid="settings-media-colon-replacement-select",
-            class_name="w-40 text-xs"
-          ) }}
-        {% endcall %}
       </div>
 
       {% call settings_footer(align="end") %}
@@ -542,220 +516,9 @@
     </form>
   {% endcall %}
 
-  {% call section_card(
-    title="Naming templates",
-    description="Preview each template against sample library content before you save it.",
-    eyebrow="Template previews",
-    title_style="plain",
-    body_class="p-0"
-  ) %}
-    <form x-data="dirtyForm()" @input="checkDirty()" @change="checkDirty()" @submit.prevent="saveConfig($el).then(() => markClean())">
-      <div class="settings-rows">
-        {% set folder_tmpl = configs.get('series_folder_template', '{Series} ({Year})') %}
-        {% call settings_row(label="Series Folder Format", help='Tokens: {Series}, {Year}, {Publisher}, {ComicVineId}, {Type}') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="series_folder_template" value="{{ folder_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'folder', 'preview-folder')" class="input-pb font-mono">
-            <div id="preview-folder" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ folder_tmpl|tojson|forceescape }}, "folder", "preview-folder")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-
-        {% set std_tmpl = configs.get('comic_file_template', '{Series} ({Year}) #{Issue:03d}') %}
-        {% call settings_row(label="Standard Comic Format", help='Tokens: {Series}, {Year}, {Issue}, {Issue:03d}, {Publisher}') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="comic_file_template" value="{{ std_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'standard', 'preview-standard')" class="input-pb font-mono">
-            <div id="preview-standard" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ std_tmpl|tojson|forceescape }}, "standard", "preview-standard")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-
-        {% set annual_tmpl = configs.get('annual_file_template', '{Series} ({Year}) Annual #{Issue:03d}') %}
-        {% call settings_row(label="Annual Format", help='Use the same core tokens as the standard comic template and include the annual marker when needed.') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="annual_file_template" value="{{ annual_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'annual', 'preview-annual')" class="input-pb font-mono">
-            <div id="preview-annual" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ annual_tmpl|tojson|forceescape }}, "annual", "preview-annual")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-
-        {% set ns_tmpl = configs.get('non_standard_file_template', '{Series} ({Year}) {Type} {Volume:02d} - {Title}') %}
-        {% call settings_row(label="Collection Non-Standard Format", help='For TPBs, omnibuses, compendiums, hardcovers, and other multi-book collection releases. Extra tokens: {Type}, {Title}, {Volume}, {Volume:02d}.') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="non_standard_file_template" value="{{ ns_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'non_standard_collection', 'preview-nonstandard')" class="input-pb font-mono">
-            <div id="preview-nonstandard" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ ns_tmpl|tojson|forceescape }}, "non_standard_collection", "preview-nonstandard")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-
-        {% set single_ns_tmpl = configs.get('single_non_standard_file_template', '{Series} ({Year}) {Type} - {Title}') %}
-        {% call settings_row(label="Single-Release Non-Standard Format", help='For one-shots, graphic novels, and specials. Extra tokens: {Type}, {Title}.') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="single_non_standard_file_template" value="{{ single_ns_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'non_standard_single', 'preview-nonstandard-single')" class="input-pb font-mono">
-            <div id="preview-nonstandard-single" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ single_ns_tmpl|tojson|forceescape }}, "non_standard_single", "preview-nonstandard-single")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-      </div>
-
-      {% call settings_footer(align="end") %}
-        <div class="settings-footer-actions ml-auto justify-end">
-          <button type="button" x-show="isDirty" x-cloak @click="resetForm()" class="btn-ghost btn-sm">
-            Reset
-          </button>
-          <button type="submit" :disabled="!isDirty" :class="!isDirty && 'opacity-50 cursor-not-allowed'" class="btn-primary">
-            Save naming templates
-          </button>
-        </div>
-      {% endcall %}
-    </form>
-  {% endcall %}
+  {% include "partials/settings_naming.html" %}
 
   {% include "partials/settings_story_arc_files.html" %}
-
-  {% call section_card(
-    title="Library-specific naming",
-    description="Keep the global naming defaults or give one library its own complete folder and filename policy.",
-    eyebrow="Naming scope",
-    title_style="plain",
-    body_class="p-0",
-    class_name="section-card-visible"
-  ) %}
-    <div data-testid="settings-media-root-policy">
-      {% if library_roots %}
-        <div class="settings-rows">
-          {% call settings_row(label="Library", help="Choose the library whose effective naming policy you want to inspect or customize.") %}
-            <div class="max-w-2xl space-y-3">
-              <select
-                x-model.number="selectedRootId"
-                @change="loadRootPolicy()"
-                class="input-pb max-w-lg"
-                data-testid="settings-media-root-policy-library"
-                :disabled="rootPolicySaving"
-              >
-                <template x-for="root in enabledLibraryRoots()" :key="root.id">
-                  <option :value="root.id" x-text="root.name + ' — ' + root.path"></option>
-                </template>
-              </select>
-              <div class="flex flex-wrap items-center gap-3">
-                <span class="text-xs font-semibold uppercase tracking-wide text-pb-text-dim">Current scope</span>
-                <span
-                  data-testid="settings-media-root-policy-scope"
-                  class="rounded-full border border-pb-border bg-pb-surface px-2.5 py-1 text-xs font-semibold text-pb-text-sec"
-                  x-text="rootPolicyScope === 'root_override' ? 'This library' : 'Global default'"
-                ></span>
-                <span class="text-xs text-pb-text-dim" x-show="rootPolicy" x-text="rootPolicy ? 'Revision ' + rootPolicy.revision : ''"></span>
-              </div>
-              {% call field_note(tone="info", icon="information-circle") %}
-                Global changes continue to affect libraries using the default. Saving below creates an independent policy only for the selected library.
-              {% endcall %}
-            </div>
-          {% endcall %}
-
-          {% call settings_row(label="Series Path Format", help='Use forward slashes to create nested folders. Tokens: {Series}, {Year}, {Publisher}, {ComicVineId}, {Type}.') %}
-            <input
-              type="text"
-              x-model="rootPolicyForm.series_path_template"
-              @input.debounce.350ms="previewRootPolicy()"
-              class="input-pb max-w-2xl font-mono"
-              data-testid="settings-media-root-series-path"
-              :disabled="rootPolicyLoading"
-            >
-          {% endcall %}
-
-          {% call settings_row(label="Standard Comic Format", help='Tokens include {Series}, {Year}, {Issue}, {Issue:03d}, {IssueTitle}, {Title}, and {Publisher}.') %}
-            <input type="text" x-model="rootPolicyForm.comic_file_template" @input.debounce.350ms="previewRootPolicy()" class="input-pb max-w-2xl font-mono" :disabled="rootPolicyLoading">
-          {% endcall %}
-
-          {% call settings_row(label="Annual Format", help="Naming template for annual issues in this library.") %}
-            <input type="text" x-model="rootPolicyForm.annual_file_template" @input.debounce.350ms="previewRootPolicy()" class="input-pb max-w-2xl font-mono" :disabled="rootPolicyLoading">
-          {% endcall %}
-
-          {% call settings_row(label="Collection Format", help="Naming template for numbered collections such as TPBs, omnibuses, and hardcovers.") %}
-            <input type="text" x-model="rootPolicyForm.non_standard_file_template" @input.debounce.350ms="previewRootPolicy()" class="input-pb max-w-2xl font-mono" :disabled="rootPolicyLoading">
-          {% endcall %}
-
-          {% call settings_row(label="Single-Release Format", help="Naming template for one-shots, graphic novels, and specials.") %}
-            <input type="text" x-model="rootPolicyForm.single_non_standard_file_template" @input.debounce.350ms="previewRootPolicy()" class="input-pb max-w-2xl font-mono" :disabled="rootPolicyLoading">
-          {% endcall %}
-
-          {% call settings_row(label="Character Cleanup", help="These settings apply only to the selected library when its own policy is saved.") %}
-            <div class="flex flex-wrap items-center gap-5">
-              <label class="flex items-center gap-3 text-sm text-pb-text-sec">
-                <input type="checkbox" x-model="rootPolicyForm.replace_illegal_characters" @change="previewRootPolicy()" class="rounded border-pb-border text-pb-accent focus:ring-pb-accent">
-                Replace illegal characters
-              </label>
-              <label class="flex items-center gap-3 text-sm text-pb-text-sec">
-                <span>Colon replacement</span>
-                <select x-model="rootPolicyForm.colon_replacement" @change="previewRootPolicy()" class="input-pb w-36 text-xs">
-                  <option value="dash">Dash</option>
-                  <option value="space">Space</option>
-                  <option value="empty">Remove</option>
-                  <option value="smart">Em-dash</option>
-                </select>
-              </label>
-            </div>
-          {% endcall %}
-
-          {% call settings_row(label="Preview", help="Compare the policy currently active for this library with the unsaved values above.") %}
-            <div class="grid max-w-4xl gap-3 lg:grid-cols-2" aria-live="polite">
-              <div class="info-panel space-y-2 font-mono text-xs">
-                <p class="font-sans text-xs font-semibold uppercase tracking-wide text-pb-text-dim">Current</p>
-                <template x-for="path in (rootPolicyPreview?.current_series_paths || [])" :key="'current-path-' + path">
-                  <p class="text-pb-text-sec" x-text="path"></p>
-                </template>
-                <template x-for="name in (rootPolicyPreview?.current_file_names || [])" :key="'current-file-' + name">
-                  <p class="text-pb-text-dim" x-text="name"></p>
-                </template>
-              </div>
-              <div class="info-panel space-y-2 font-mono text-xs">
-                <p class="font-sans text-xs font-semibold uppercase tracking-wide text-pb-text-dim">Proposed</p>
-                <template x-for="path in (rootPolicyPreview?.proposed_series_paths || [])" :key="'proposed-path-' + path">
-                  <p class="text-pb-success" x-text="path"></p>
-                </template>
-                <template x-for="name in (rootPolicyPreview?.proposed_file_names || [])" :key="'proposed-file-' + name">
-                  <p class="text-pb-text-sec" x-text="name"></p>
-                </template>
-                <p x-show="rootPolicyLoading" class="font-sans italic text-pb-text-dim">Loading policy…</p>
-                <p x-show="rootPolicyError" class="font-sans text-pb-error" x-text="rootPolicyError"></p>
-              </div>
-            </div>
-          {% endcall %}
-        </div>
-
-        {% call settings_footer(align="end") %}
-          <div class="settings-footer-actions ml-auto justify-end">
-            <button
-              type="button"
-              @click="useGlobalRootPolicy()"
-              :disabled="rootPolicyLoading || rootPolicySaving || rootPolicyScope === 'global_default'"
-              :class="(rootPolicyLoading || rootPolicySaving || rootPolicyScope === 'global_default') && 'opacity-50 cursor-not-allowed'"
-              class="btn-ghost"
-            >
-              Use global defaults
-            </button>
-            <button
-              type="button"
-              @click="saveRootPolicy()"
-              :disabled="rootPolicyLoading || rootPolicySaving"
-              :class="(rootPolicyLoading || rootPolicySaving) && 'opacity-50 cursor-not-allowed'"
-              class="btn-primary"
-            >
-              <span x-text="rootPolicySaving ? 'Saving…' : 'Save for this library'"></span>
-            </button>
-          </div>
-        {% endcall %}
-      {% else %}
-        <div class="p-5 text-sm text-pb-text-sec">
-          No enabled library is available yet. Complete the initial library setup before creating a library-specific naming policy.
-        </div>
-      {% endif %}
-    </div>
-  {% endcall %}
 
   {% include 'components/file_browser.html' %}
 </div>
@@ -770,9 +533,7 @@ function mediaSettings() {
     libraryPermissionsEnabled: {{ 'true' if configs.get('library_permissions_enabled', 'false') == 'true' else 'false' }},
     libraryPermissionsApplyFolders: {{ 'true' if configs.get('library_permissions_apply_to_created_folders', 'true') == 'true' else 'false' }},
     libraryPermissionsApplyFiles: {{ 'true' if configs.get('library_permissions_apply_to_materialized_files', 'true') == 'true' else 'false' }},
-    namingPreviewRequests: {},
     libraryRoots: {{ library_roots|tojson }},
-    selectedRootId: {{ library_roots[0].id if library_roots else 'null' }},
     libraryRootLoading: false,
     libraryRootSaving: false,
     libraryRootError: '',
@@ -789,28 +550,8 @@ function mediaSettings() {
       allow_managed_writes: true,
       is_default_managed_destination: false,
     },
-    rootPolicy: null,
-    rootPolicyScope: 'global_default',
-    rootPolicyLoading: false,
-    rootPolicySaving: false,
-    rootPolicyPreview: null,
-    rootPolicyPreviewRequest: 0,
-    rootPolicyLoadRequest: 0,
-    rootPolicyError: '',
-    rootPolicyForm: {
-      schema_version: 1,
-      series_path_template: {{ configs.get('series_folder_template', '{Series} ({Year})')|tojson }},
-      comic_file_template: {{ configs.get('comic_file_template', '{Series} ({Year}) #{Issue:03d}')|tojson }},
-      annual_file_template: {{ configs.get('annual_file_template', '{Series} ({Year}) Annual #{Issue:03d}')|tojson }},
-      non_standard_file_template: {{ configs.get('non_standard_file_template', '{Series} ({Year}) {Type} {Volume:02d} - {Title}')|tojson }},
-      single_non_standard_file_template: {{ configs.get('single_non_standard_file_template', '{Series} ({Year}) {Type} - {Title}')|tojson }},
-      replace_illegal_characters: {{ 'true' if configs.get('replace_illegal_characters', 'true') == 'true' else 'false' }},
-      colon_replacement: {{ configs.get('colon_replacement', 'dash')|tojson }},
-    },
-
     async initMediaSettings() {
       await this.refreshLibraryRoots();
-      await this.initRootPolicies();
     },
 
     enabledLibraryRoots() {
@@ -842,11 +583,6 @@ function mediaSettings() {
       try {
         const roots = await this.libraryRootRequest("/api/v1/config/library-roots");
         this.libraryRoots = Array.isArray(roots) ? roots : [];
-        if (!this.libraryRoots.some(root => Number(root.id) === Number(this.selectedRootId) && root.enabled)) {
-          const preferred = this.libraryRoots.find(root => root.enabled && root.is_default_managed_destination)
-            || this.libraryRoots.find(root => root.enabled);
-          this.selectedRootId = preferred ? Number(preferred.id) : null;
-        }
       } catch (err) {
         this.libraryRootError = err.message || 'Could not load library roots.';
       } finally {
@@ -887,7 +623,7 @@ function mediaSettings() {
       this.libraryRootSaving = true;
       this.libraryRootError = '';
       try {
-        const created = await this.libraryRootRequest("/api/v1/config/library-roots", {
+        await this.libraryRootRequest("/api/v1/config/library-roots", {
           method: "POST",
           body: JSON.stringify(this.libraryRootPayload()),
         });
@@ -900,8 +636,6 @@ function mediaSettings() {
         };
         this.libraryRootPreview = null;
         await this.refreshLibraryRoots();
-        this.selectedRootId = Number(created.id);
-        await this.loadRootPolicy();
         if (typeof showToast === "function") showToast({ message: "Library root added.", level: "success" });
       } catch (err) {
         this.libraryRootError = err.message || 'Could not add this library root.';
@@ -1043,146 +777,6 @@ function mediaSettings() {
       return status + ' · ' + capacity;
     },
 
-    async initRootPolicies() {
-      if (this.selectedRootId) await this.loadRootPolicy();
-    },
-
-    rootPolicyDefinition() {
-      return {
-        schema_version: 1,
-        series_path_template: this.rootPolicyForm.series_path_template,
-        comic_file_template: this.rootPolicyForm.comic_file_template,
-        annual_file_template: this.rootPolicyForm.annual_file_template,
-        non_standard_file_template: this.rootPolicyForm.non_standard_file_template,
-        single_non_standard_file_template: this.rootPolicyForm.single_non_standard_file_template,
-        replace_illegal_characters: this.rootPolicyForm.replace_illegal_characters,
-        colon_replacement: this.rootPolicyForm.colon_replacement,
-      };
-    },
-
-    async rootPolicyRequest(path, options = {}) {
-      const response = await fetch(path, {
-        ...options,
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": "{{ csrf_token }}",
-          ...(options.headers || {}),
-        },
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        const detail = Array.isArray(data.detail)
-          ? data.detail.map(item => item.msg || String(item)).join('; ')
-          : data.detail;
-        const error = new Error(data.error?.message || detail || "Library naming request failed.");
-        error.code = data.error?.code || null;
-        throw error;
-      }
-      return data;
-    },
-
-    applyRootPolicyState(state) {
-      this.rootPolicy = state;
-      this.rootPolicyScope = state.scope;
-      this.rootPolicyForm = {
-        schema_version: 1,
-        series_path_template: state.effective_policy.series_path_template,
-        comic_file_template: state.effective_policy.comic_file_template,
-        annual_file_template: state.effective_policy.annual_file_template,
-        non_standard_file_template: state.effective_policy.non_standard_file_template,
-        single_non_standard_file_template: state.effective_policy.single_non_standard_file_template,
-        replace_illegal_characters: state.effective_policy.replace_illegal_characters,
-        colon_replacement: state.effective_policy.colon_replacement,
-      };
-    },
-
-    async loadRootPolicy() {
-      if (!this.selectedRootId) return;
-      const rootId = this.selectedRootId;
-      const requestId = ++this.rootPolicyLoadRequest;
-      this.rootPolicyLoading = true;
-      this.rootPolicyPreview = null;
-      this.rootPolicyError = '';
-      try {
-        const state = await this.rootPolicyRequest(
-          `/api/v1/config/library-roots/${rootId}/naming-policy`
-        );
-        if (requestId !== this.rootPolicyLoadRequest || rootId !== this.selectedRootId) return;
-        this.applyRootPolicyState(state);
-        await this.previewRootPolicy();
-      } catch (err) {
-        if (requestId !== this.rootPolicyLoadRequest) return;
-        if (typeof showToast === "function") showToast({ message: err.message, level: "error" });
-      } finally {
-        if (requestId === this.rootPolicyLoadRequest) this.rootPolicyLoading = false;
-      }
-    },
-
-    async previewRootPolicy() {
-      if (!this.selectedRootId) return;
-      const requestId = ++this.rootPolicyPreviewRequest;
-      this.rootPolicyError = '';
-      try {
-        const preview = await this.rootPolicyRequest(
-          `/api/v1/config/library-roots/${this.selectedRootId}/naming-policy/preview`,
-          {
-            method: "POST",
-            body: JSON.stringify({ policy: this.rootPolicyDefinition() }),
-          }
-        );
-        if (requestId === this.rootPolicyPreviewRequest) this.rootPolicyPreview = preview;
-      } catch (err) {
-        if (requestId !== this.rootPolicyPreviewRequest) return;
-        this.rootPolicyError = err.message || 'Preview failed.';
-      }
-    },
-
-    async saveRootPolicy() {
-      if (!this.rootPolicy || this.rootPolicySaving) return;
-      this.rootPolicySaving = true;
-      try {
-        const state = await this.rootPolicyRequest(
-          `/api/v1/config/library-roots/${this.selectedRootId}/naming-policy`,
-          {
-            method: "PUT",
-            body: JSON.stringify({
-              expected_revision: this.rootPolicy.revision,
-              policy: this.rootPolicyDefinition(),
-            }),
-          }
-        );
-        this.applyRootPolicyState(state);
-        await this.previewRootPolicy();
-        if (typeof showToast === "function") showToast({ message: "Library naming policy saved.", level: "success" });
-      } catch (err) {
-        if (typeof showToast === "function") showToast({ message: err.message, level: "error" });
-      } finally {
-        this.rootPolicySaving = false;
-      }
-    },
-
-    async useGlobalRootPolicy() {
-      if (!this.rootPolicy || this.rootPolicyScope === 'global_default' || this.rootPolicySaving) return;
-      if (!window.confirm("Use global naming defaults for this library? Existing files will not be renamed.")) return;
-      this.rootPolicySaving = true;
-      try {
-        const state = await this.rootPolicyRequest(
-          `/api/v1/config/library-roots/${this.selectedRootId}/naming-policy`,
-          {
-            method: "DELETE",
-            body: JSON.stringify({ expected_revision: this.rootPolicy.revision }),
-          }
-        );
-        this.applyRootPolicyState(state);
-        await this.previewRootPolicy();
-        if (typeof showToast === "function") showToast({ message: "This library now uses global naming defaults.", level: "success" });
-      } catch (err) {
-        if (typeof showToast === "function") showToast({ message: err.message, level: "error" });
-      } finally {
-        this.rootPolicySaving = false;
-      }
-    },
-
     saveConfig(formEl) {
       const formData = new FormData(formEl);
       const values = {};
@@ -1218,74 +812,7 @@ function mediaSettings() {
         });
     },
 
-    lockNamingPreviewHeight(el) {
-      const currentHeight = Math.ceil(el.getBoundingClientRect().height);
-      const lockedHeight = Number.parseInt(el.style.minHeight || "0", 10) || 0;
-      if (currentHeight > lockedHeight) {
-        el.style.minHeight = currentHeight + "px";
-      }
-    },
-
-    previewNaming(template, templateType, targetId) {
-      const el = document.getElementById(targetId);
-      if (!el) return;
-      const requestId = (this.namingPreviewRequests[targetId] || 0) + 1;
-      this.namingPreviewRequests[targetId] = requestId;
-      if (!template.trim()) {
-        el.classList.remove("is-loading");
-        el.setAttribute("aria-busy", "false");
-        el.dataset.previewReady = "true";
-        el.innerHTML = '<span class="block text-pb-text-dim italic">Enter a template above.</span>';
-        return;
-      }
-      el.setAttribute("aria-busy", "true");
-      el.classList.add("is-loading");
-      if (el.dataset.previewReady !== 'true') {
-        el.innerHTML = '<span class="block text-pb-text-dim italic">Loading preview...</span>';
-      } else {
-        this.lockNamingPreviewHeight(el);
-      }
-
-      const params = new URLSearchParams({
-        template: template,
-        template_type: templateType,
-      });
-
-      fetch("/api/v1/config/naming/preview?" + params.toString(), {
-        headers: { "X-CSRF-Token": "{{ csrf_token }}" },
-      })
-        .then(r => r.json())
-        .then(data => {
-          if (this.namingPreviewRequests[targetId] !== requestId) return;
-          el.classList.remove("is-loading");
-          el.setAttribute("aria-busy", "false");
-          el.dataset.previewReady = "true";
-          const examples = data.examples || [];
-          if (examples.length === 0) {
-            el.innerHTML = '<span class="block text-pb-text-dim italic">No matching examples.</span>';
-            return;
-          }
-          el.innerHTML = examples.map(ex => {
-            const inputHtml = '<span class="text-pb-text-dim">' + escapeHtml(ex.input || '') + '</span>';
-            const arrow = '<span class="text-pb-text-dim mx-1">→</span>';
-            const outputHtml = '<span class="text-pb-success">' + escapeHtml(ex.output || '') + '</span>';
-            return '<div class="flex items-baseline gap-0 flex-wrap">' + inputHtml + arrow + outputHtml + '</div>';
-          }).join("");
-        })
-        .catch(() => {
-          if (this.namingPreviewRequests[targetId] !== requestId) return;
-          el.classList.remove("is-loading");
-          el.setAttribute("aria-busy", "false");
-          el.dataset.previewReady = "true";
-          el.innerHTML = '<span class="block text-pb-error">Preview failed.</span>';
-        });
-    },
   };
 }
 
-function escapeHtml(value) {
-  const div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(value)));
-  return div.innerHTML;
-}
 </script>

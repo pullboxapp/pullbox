@@ -441,10 +441,10 @@ class TestSettingsRouteContracts:
         response = await authenticated_client.get("/settings?tab=media")
 
         assert response.status_code == 200
-        assert "previewNaming('{{ std_tmpl }}'" not in response.text
-        assert "\\u0027); window.__pullboxXss = true; //" in response.text
-        assert "escapeHtml(ex.input || '')" in response.text
-        assert "escapeHtml(ex.output || '')" in response.text
+        # Templates are loaded as JSON, not interpolated into executable HTML/JS.
+        assert "window.__pullboxXss" not in response.text
+        assert 'x-text="example.input"' in response.text
+        assert 'x-text="example.output"' in response.text
 
     async def test_settings_media_import_save_uses_enabled_pointer_cursor(
         self,
@@ -464,14 +464,14 @@ class TestSettingsRouteContracts:
         response = await authenticated_client.get("/settings?tab=media")
 
         assert response.status_code == 200
-        assert response.text.count("settings-media-preview-panel") == 6
+        assert response.text.count('class="info-panel settings-media-preview-panel') == 6
         assert 'data-testid="arc-files-preview"' in response.text
         assert 'data-preview-ready="false"' in response.text
         assert 'aria-live="polite"' in response.text
-        assert 'aria-busy="false"' in response.text
-        assert "this.namingPreviewRequests" in response.text
-        assert "lockNamingPreviewHeight(el)" in response.text
-        assert "el.dataset.previewReady !==" in response.text
+        assert ":aria-busy=\"namingPreviewLoading ? 'true' : 'false'\"" in response.text
+        assert "this.namingPreviewSequence" in response.text
+        assert "panel.style.minHeight" in response.text
+        assert "snapshot === this.namingSnapshot()" in response.text
         assert "settings-media-preview-panel min-h-[2rem]" not in response.text
 
     async def test_settings_media_exposes_per_library_naming_scope_controls(
@@ -489,13 +489,13 @@ class TestSettingsRouteContracts:
         response = await authenticated_client.get("/settings?tab=media")
 
         assert response.status_code == 200
-        assert 'data-testid="settings-media-root-policy"' in response.text
-        assert 'data-testid="settings-media-root-policy-scope"' in response.text
+        assert 'data-testid="settings-naming-editor"' in response.text
+        assert 'data-testid="settings-naming-scope"' in response.text
         assert "Primary Comics" in response.text
         assert "Use global defaults" in response.text
         assert "Save for this library" in response.text
-        assert "/naming-policy/preview" in response.text
-        assert 'method: "DELETE"' in response.text
+        assert "/api/v1/config/naming/preview" in response.text
+        assert "expected_fingerprint: this.namingState.fingerprint" in response.text
 
     async def test_settings_media_exposes_safe_multi_library_root_management(
         self,

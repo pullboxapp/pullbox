@@ -735,6 +735,9 @@ def format_filename(
 def get_naming_preview(
     template: str,
     template_type: str = "standard",
+    *,
+    replace_illegal: bool = True,
+    colon_replacement: str = "dash",
 ) -> list[dict[str, str]]:
     """Generate preview examples for a naming template.
 
@@ -785,6 +788,8 @@ def get_naming_preview(
                     comicvine_id=ex.comicvine_id,
                     series_type=folder_type,
                     template=segment,
+                    replace_illegal=replace_illegal,
+                    colon_replacement=colon_replacement,
                 )
                 for segment in validate_series_path_template(template)
             )
@@ -798,6 +803,8 @@ def get_naming_preview(
                 title=ex.title,
                 publisher=ex.publisher,
                 template=template,
+                replace_illegal=replace_illegal,
+                colon_replacement=colon_replacement,
             )
 
         # Build a human-readable input description

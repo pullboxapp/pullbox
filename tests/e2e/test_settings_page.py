@@ -962,7 +962,7 @@ class TestSettingsPage:
 
         authed_page.wait_for_function(
             """
-            () => Array.from(document.querySelectorAll(".settings-media-preview-panel"))
+            () => Array.from(document.querySelectorAll("[data-testid='settings-naming-editor'] .settings-media-preview-panel"))
               .every((el) => el.dataset.previewReady === "true")
             """,
             timeout=5000,
@@ -994,17 +994,19 @@ class TestSettingsPage:
                 content_type="application/json",
                 body=json.dumps(
                     {
-                        "examples": [
-                            {
-                                "input": "Batman #1",
-                                "output": "Batman (2016) #001 — revised.cbz",
-                            }
-                        ]
+                        "examples": {
+                            "comic_file_template": [
+                                {
+                                    "input": "Batman #1",
+                                    "output": "Batman (2016) #001 — revised.cbz",
+                                }
+                            ]
+                        }
                     }
                 ),
             )
 
-        authed_page.route("**/api/v1/config/naming/preview?*", handle_preview)
+        authed_page.route("**/api/v1/config/naming/preview", handle_preview)
 
         standard_input.fill("{Series} ({Year}) #{Issue:03d} — revised")
 
@@ -1140,7 +1142,7 @@ class TestSettingsPage:
 
         naming_card = (
             authed_page.locator("[data-testid='settings-panel-media'] .section-card")
-            .filter(has=authed_page.locator(".section-title-plain:text-is('Naming behavior')"))
+            .filter(has=authed_page.locator(".section-title-plain:text-is('Naming templates')"))
             .first
         )
         dropdown = authed_page.locator(
@@ -1159,7 +1161,7 @@ class TestSettingsPage:
         assert panel_box is not None
         assert panel_box["y"] > card_box["y"]
         assert panel_box["y"] + panel_box["height"] > card_box["y"] + card_box["height"], (
-            "Colon replacement dropdown should extend beyond the naming behavior card "
+            "Colon replacement dropdown should extend beyond the naming templates card "
             "instead of being clipped underneath it."
         )
 

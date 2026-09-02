@@ -40,6 +40,10 @@ from pullbox.schemas.config import (
     NamingPreview,
     NamingPreviewEntry,
     NamingPreviewGrouped,
+    NamingSettingsPreview,
+    NamingSettingsPreviewRequest,
+    NamingSettingsState,
+    NamingSettingsUpdate,
 )
 from pullbox.services.library_root_management import (
     create_library_root,
@@ -55,10 +59,46 @@ from pullbox.services.library_root_policy_service import (
     preview_library_root_policy,
     update_library_root_policy,
 )
+from pullbox.services.naming_settings import (
+    get_naming_settings,
+    preview_naming_settings,
+    save_naming_settings,
+)
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/config", tags=["config"], include_in_schema=False)
+
+
+@router.get("/naming", response_model=NamingSettingsState)
+async def naming_settings(
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+    library_root_id: int | None = Query(None, gt=0),
+) -> NamingSettingsState:
+    """Read global defaults or effective naming for a single library."""
+    return await get_naming_settings(session, library_root_id)
+
+
+@router.put("/naming", response_model=NamingSettingsState)
+async def update_naming_settings(
+    payload: NamingSettingsUpdate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> NamingSettingsState:
+    """Save one naming scope without renaming existing files."""
+    state = await save_naming_settings(session, payload)
+    logger.info("naming_settings_updated", library_root_id=state.library_root_id)
+    return state
+
+
+@router.post("/naming/preview", response_model=NamingSettingsPreview)
+async def preview_scoped_naming_settings(
+    payload: NamingSettingsPreviewRequest,
+    _user: InteractiveOperatorUser,
+) -> NamingSettingsPreview:
+    """Preview all naming fields with the proposed character cleanup settings."""
+    return preview_naming_settings(payload.policy)
 
 
 def _validate_library_permission_setting(key: str, value: str) -> None:
