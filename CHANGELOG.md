@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Automatic searches now distinguish valid matches that could not be queued
+  from empty results. Search history counts only validation rejections, not
+  unused alternatives or failed downloads.
+- Opted-in AirDC++ automatic searches now hand accepted matches to the durable
+  queue, with restart-safe intervention for lower-confidence matches and
+  duplicate-download and blocklist checks.
+- SABnzbd NZB retrieval now allows slow indexer proxies a separate bounded
+  timeout without delaying normal client-control requests.
+- Recognized unmarked four-digit issue numbers for known series such as 2000 AD
+  without treating numeric series names as issue numbers. Search confidence now
+  uses known issue publication/store dates instead of comparing every issue to
+  the series start year; undated continuing issues use a medium-confidence,
+  bounded year window while issue, series, and type checks remain required.
 - Corrected Mylar `series.json` metadata wrappers and `cvinfo` volume URL
   parsing in both Mylar and folder imports, without interpreting another
   application's unqualified `series_id` as a ComicVine identity.

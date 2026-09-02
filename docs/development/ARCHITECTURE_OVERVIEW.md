@@ -342,6 +342,16 @@ Search and acquisition are coordinated through several focused service modules:
 - `search_indexers.py` calls configured indexers.
 - `release_parser.py` and matching helpers parse release titles.
 - `release_validator.py` rejects mismatches and unsafe candidates.
+- Date confidence is separate from query identity. Serial queries retain the
+  series start year, but indexer, direct, and Direct Connect results share
+  `release_year_matching.py`: known issue cover/store years use the configured
+  year tolerance; explicitly labeled volume years must match series identity.
+  Only undated regular issues from a continuing series can use the inclusive
+  start-year-to-current-year fallback, capped at medium confidence. This uses
+  existing catalog data without extra metadata requests and never overrides
+  series, issue-number, or issue-type mismatches. Search diagnostics record the
+  date-evidence basis. Bare four-digit issues require a known series prefix so
+  numeric titles such as `Marvel 1602` remain intact.
 - `search_scoring.py` and `search_evaluation.py` rank acceptable releases. The
   configured Search Priority orders the `usenet`, `torrent`, and `direct`
   source lanes. Within each lane, the deterministic quality score includes the
@@ -393,6 +403,17 @@ Wanted issue or manual search
 - Search behavior is intentionally split into smaller modules so parsing,
   validation, scoring, indexing, and orchestration can be tested separately.
 - Manual search may fan out more broadly than automated wanted search.
+- Single-issue automatic search and scheduled search both attach opted-in
+  AirDC++ candidates before shared source ranking. The handoff rechecks the exact
+  client's enabled/search/automatic flags and readiness. High-confidence results
+  use the durable AirDC++ acquisition service; lower-confidence routes are stored
+  encrypted in intervention and can be approved after a restart. Active issue
+  downloads suppress another queue mutation, and ambiguous responses remain owned
+  by reconciliation instead of falling through to a second source.
+- Search history counts validation rejections independently of acquisition.
+  Exhausted source handoffs report `source_unavailable`, not `no_results`, with
+  safe provider notices. SABnzbd NZB retrieval has a 60-second read timeout and
+  90-second total deadline; ordinary client API calls retain their 10-second timeout.
 - Search Wanted snapshots every eligible Wanted issue, processes at most 100
   per batch, and resumes the same restart-safe sweep hourly until complete.
   Never-searched issues run first, followed by least-recently searched issues;

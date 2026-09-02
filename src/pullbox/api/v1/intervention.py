@@ -247,7 +247,7 @@ async def approve_pending_match(
     if pm is None:
         raise NotFoundError("PendingMatch", pending_id)
 
-    if is_direct_pending_match(pm):
+    if is_direct_pending_match(pm) or (pm.match_details or {}).get("source_kind") == "dc":
         svc = InterventionService()
     else:
         from pullbox.composition.services import build_domain_download_service
@@ -286,6 +286,7 @@ async def approve_pending_match(
         issue_id=approved.issue_id,
         title=approved.title,
         status=str(approved.state),
+        source_kind="dc" if (pm.match_details or {}).get("source_kind") == "dc" else "indexer",
     )
 
 

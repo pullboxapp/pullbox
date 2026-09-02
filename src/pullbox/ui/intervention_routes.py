@@ -678,7 +678,7 @@ async def htmx_intervention_approve(
         is_direct_pending_match,
     )
 
-    if is_direct_pending_match(pm):
+    if is_direct_pending_match(pm) or (pm.match_details or {}).get("source_kind") == "dc":
         svc = InterventionService()
     else:
         from pullbox.composition.services import build_domain_download_service

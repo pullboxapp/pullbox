@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy.exc import OperationalError
 
+from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry, load_airdcpp_search_clients
 from pullbox.composition.events import build_domain_event_bus
 from pullbox.config import get_settings
 from pullbox.core.config_resolver import get_int_setting, load_system_config_values, parse_bool
@@ -297,13 +298,7 @@ async def _persist_wanted_search_outcome(
     issue_grabbed = 0
     issue_queued = 0
     best_confidence: str | None = None
-    direct_outcome = outcome.direct_outcome
-    direct_results = (
-        len(direct_outcome.matched) + len(direct_outcome.rejected) if direct_outcome else 0
-    )
-    dc_outcome = outcome.dc_outcome
-    dc_results = len(dc_outcome.matched) + len(dc_outcome.rejected) if dc_outcome else 0
-    total_results = len(outcome.raw_results) + direct_results + dc_results
+    total_results = outcome.results_found_count
     action_status = "no_results" if total_results == 0 else "no_match"
     try:
         search_log = await session.get(SearchLog, pending_log_id) if pending_log_id else None
@@ -349,10 +344,7 @@ async def _persist_wanted_search_outcome(
         search_log.results_found = total_results
         search_log.results_grabbed = issue_grabbed
         search_log.results_queued = issue_queued
-        search_log.results_rejected = max(
-            0,
-            total_results - issue_grabbed - issue_queued,
-        )
+        search_log.results_rejected = outcome.results_rejected_count
         search_log.details = _merge_search_log_details(
             existing_details=search_log.details or {},
             next_details=next_details,
@@ -388,7 +380,7 @@ async def _persist_wanted_search_outcome(
                     results_found=total_results,
                     results_grabbed=0,
                     results_queued=0,
-                    results_rejected=total_results,
+                    results_rejected=outcome.results_rejected_count,
                     details=_merge_search_log_details(
                         existing_details=None,
                         next_details=outcome.search_details,
@@ -521,7 +513,7 @@ async def _persist_series_search_outcome(
             )
         elif routed.source_kind == "dc":
             issue_log.info(
-                "search_series_issue_dc_evaluated",
+                "search_series_issue_dc_routed",
                 action_status=routed.action_status,
                 confidence=routed.best_confidence,
                 search_pass=selected_pass,
@@ -588,14 +580,18 @@ async def _persist_series_search_outcome(
         if routed.source_kind is not None:
             details["acquisition_method"] = routed.source_kind
 
+        rejected_count = selected_outcome.results_rejected_count
+        if fallback_outcome is not None:
+            other_pass = primary_outcome if selected_pass == 2 else fallback_outcome
+            rejected_count += len(other_pass.rejected)
         await _persist_bulk_search_log(
             session,
             target=target,
-            pending_log_id=pending_log_id,
+            pending_log_id=search_log.id,
             results_found=total_found,
             results_grabbed=issue_grabbed,
             results_queued=issue_queued,
-            results_rejected=max(0, total_found - issue_grabbed - issue_queued),
+            results_rejected=rejected_count,
             details=details,
             best_confidence=routed.best_confidence,
             action_status=(
@@ -682,6 +678,11 @@ async def _build_task_search_runtime(
     include_download_clients: bool = True,
 ) -> SearchRuntime | None:
     """Build task runtime state using the task module's registry patch point."""
+    registry = get_airdcpp_supervisor_registry()
+    has_automatic_dc = bool(
+        registry is not None
+        and await load_airdcpp_search_clients(session, registry, automatic=True)
+    )
     return await _search_runtime.build_search_runtime(
         session,
         include_download_clients=include_download_clients,
@@ -689,6 +690,7 @@ async def _build_task_search_runtime(
         default_type_thresholds=DEFAULT_TYPE_THRESHOLDS,
         eval_kwargs_builder=build_eval_kwargs,
         include_direct_providers=True,
+        allow_empty_registry=has_automatic_dc,
     )
 
 

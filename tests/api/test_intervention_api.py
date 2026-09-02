@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.models import Base
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt, DirectAcquisitionState
+from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series, SeriesStatus, SeriesType
@@ -333,6 +334,34 @@ class TestInterventionAPI:
         assert data["status"] == "sent"
 
     @pytest.mark.asyncio
+    async def test_approve_dc_does_not_require_legacy_download_client(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        pm_ids = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pm_ids[0])
+            pending.match_details = {"source_kind": "dc"}
+            await session.commit()
+        history = MagicMock(spec=DownloadHistory)
+        history.id = 12
+        history.issue_id = 1
+        history.title = "Batman 001"
+        history.state = DownloadState.SENT
+        with (
+            patch(
+                "pullbox.composition.services.build_domain_download_service",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as build,
+            patch.object(InterventionService, "approve_match", AsyncMock(return_value=history)),
+        ):
+            response = await client.post(f"/api/v1/intervention/{pm_ids[0]}/approve")
+        assert response.status_code == 201
+        assert response.json()["source_kind"] == "dc"
+        build.assert_not_awaited()
+
     async def test_approve_direct_does_not_require_download_client(
         self,
         client: AsyncClient,

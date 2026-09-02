@@ -18261,13 +18261,19 @@ function seriesDetailPage(config) {
             emitToast("Queued " + issue.label + " for review", "info");
           } else if (data.status === "no_results") {
             emitToast("No results found for " + issue.label, "warning");
+          } else if (data.status === "source_unavailable") {
+            var queueMessage = data.message || "Matches found, but downloads could not be queued.";
+            if (Array.isArray(data.notices) && data.notices.length) {
+              queueMessage += " " + data.notices.join(" ");
+            }
+            emitToast(queueMessage, "warning");
           } else {
             var infoMessage =
               data.error && data.error.message
                 ? data.error.message
                 : typeof data.error === "string"
                   ? data.error
-                  : "Search completed";
+                  : data.message || "Search completed";
             emitToast(infoMessage, "info");
           }
         })
