@@ -114,7 +114,8 @@ async def test_arc_targets_keep_manual_scope_without_mutating_monitoring(
     rest = await load_story_arc_missing_search_targets(
         db_session, arc.id, after_issue_id=first[0].issue_id, limit=1
     )
-    assert rest[0].issue_id == issues[6].id
+    # Legacy flags cannot bypass the release-date policy used by scheduled search.
+    assert rest[0].issue_id == issues[7].id
     scoped = await load_story_arc_missing_search_targets(
         db_session, arc.id, issue_ids=[issues[7].id, issues[9].id], series_id=issues[7].series_id
     )
@@ -142,6 +143,20 @@ async def test_arc_batch_search_reuses_series_runner_with_exact_members(
     ]
     assert sorted(searched) == [issues[0].id, issues[7].id]
     assert all(call.kwargs["story_arc_id"] == arc.id for call in runner.await_args_list)
+
+
+async def test_scheduled_arc_search_protects_the_same_files_skips_and_downloads_as_manual(
+    db_session,
+):
+    from pullbox.services.search_targets import load_wanted_issue_search_targets
+    from pullbox.services.story_arc_search_targets import load_story_arc_missing_search_targets
+
+    arc, _ = await _seed(db_session)
+    arc.monitored = True
+    await db_session.flush()
+    manual = await load_story_arc_missing_search_targets(db_session, arc.id)
+    automatic = await load_wanted_issue_search_targets(db_session, limit=100)
+    assert {target.issue_id for target in automatic} == {target.issue_id for target in manual}
 
 
 async def test_issues_released_today_are_missing_not_upcoming(db_session: AsyncSession) -> None:

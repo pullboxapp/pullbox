@@ -358,11 +358,11 @@ async def test_failed_provider_cleanup_cannot_report_failure_after_committing_ad
     [
         (False, True, True, False),
         (True, False, True, False),
-        (True, True, False, False),
+        (True, True, False, True),
         (True, True, True, True),
     ],
 )
-async def test_add_auto_search_requires_all_optins_and_runs_after_commit(
+async def test_add_auto_search_requires_monitoring_and_global_default_and_runs_after_commit(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],
     catalog_provider: CatalogProvider,
@@ -452,10 +452,10 @@ async def test_refresh_reviews_additions_and_preserves_removed_members_and_order
             await session.scalars(select(IssueStoryArc).order_by(IssueStoryArc.sequence_number))
         )
         assert [member.source_issue_id for member in members] == ["102", "101", "103"]
-        assert members[-1].resolution_state.value == "pending"
+        assert members[-1].resolution_state.value == "resolved"
         assert members[-1].sync_eligible is False
     detail = await authenticated_client.get(f"/story-arcs/{arc_id}")
-    assert "Confirm this member" in detail.text
+    assert "Confirm reading order" in detail.text
     assert "1 no longer listed by Comic Vine but preserved here" in detail.text
     assert 'data-tip="Open issue"' in detail.text
     assert "Open issue / manual search" not in detail.text

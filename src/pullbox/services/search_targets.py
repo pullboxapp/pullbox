@@ -8,11 +8,13 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any, Protocol
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
+from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
+from pullbox.models.library import LibraryFile
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
@@ -85,6 +87,16 @@ class IssueSearchOutcome:
 SearchOutcomeCallback = Callable[[IssueSearchOutcome], Awaitable[None]]
 
 
+def arc_issue_release_filter(*, today: date | None = None) -> Any:
+    """Track upcoming members now, but search on/after their publication date.
+
+    Store date takes precedence over Comic Vine's later cover date. Undated
+    issues remain eligible; a legacy upcoming flag never bypasses this rule.
+    """
+    publication_date = func.coalesce(Issue.store_date, Issue.release_date)
+    return or_(publication_date.is_(None), publication_date <= (today or date.today()))
+
+
 def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
     """Return the shared series-or-story-arc wanted-search eligibility filter.
 
@@ -93,11 +105,6 @@ def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
     normal wanted-search runner, so provider cooldowns, result selection,
     pending intervention suppression, and duplicate acquisition remain shared.
     """
-    today = today or date.today()
-    known_upcoming_issue = or_(
-        and_(Issue.release_date.is_not(None), Issue.release_date >= today),
-        and_(Issue.store_date.is_not(None), Issue.store_date >= today),
-    )
     monitored_story_arc = exists().where(
         and_(
             IssueStoryArc.issue_id == Issue.id,
@@ -105,10 +112,6 @@ def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
             IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
             StoryArc.lifecycle == StoryArcLifecycle.ACTIVE,
             StoryArc.monitored.is_(True),
-            or_(
-                StoryArc.search_missing.is_(True),
-                and_(StoryArc.include_upcoming.is_(True), known_upcoming_issue),
-            ),
         )
     )
     return and_(
@@ -119,9 +122,44 @@ def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
                 Series.monitored.is_(True),
             ),
             and_(
-                Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
+                arc_issue_acquisition_filter(today=today),
                 monitored_story_arc,
             ),
+        ),
+    )
+
+
+def arc_issue_acquisition_filter(*, today: date | None = None) -> Any:
+    """One missing-issue contract for manual and scheduled arc searches."""
+    active_download = exists().where(
+        DownloadHistory.issue_id == Issue.id,
+        or_(
+            DownloadHistory.state.in_(
+                (
+                    DownloadState.QUEUED,
+                    DownloadState.SENT,
+                    DownloadState.DOWNLOADING,
+                    DownloadState.FINALIZING,
+                    DownloadState.PAUSED,
+                    DownloadState.RETRY_PENDING,
+                    DownloadState.POST_PROCESSING,
+                )
+            ),
+            and_(
+                DownloadHistory.state == DownloadState.COMPLETED,
+                DownloadHistory.imported_at.is_(None),
+            ),
+        ),
+    )
+    return and_(
+        arc_issue_release_filter(today=today),
+        Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
+        Issue.manual_skip.is_(False),
+        ~exists().where(LibraryFile.issue_id == Issue.id),
+        ~active_download,
+        ~exists().where(
+            PendingMatch.issue_id == Issue.id,
+            PendingMatch.status == PendingMatchStatus.PENDING,
         ),
     )
 

@@ -280,15 +280,13 @@ async def story_arc_catalog_add(
             skipped_issue_provider_ids=form.skipped_issue_provider_ids,
             library_root_id=form.library_root_id,
             monitored=form.monitored,
-            search_missing=form.search_missing,
-            include_upcoming=form.include_upcoming,
+            search_missing=form.monitored,
+            include_upcoming=form.monitored,
             placement_policy=policy,
         )
         arc_id = arc.id
         initial_pending = _has_initial_work(arc)
-        search_on_add = (
-            arc.monitored and arc.search_missing and await load_search_on_add_default(session)
-        )
+        search_on_add = arc.monitored and await load_search_on_add_default(session)
         await session.commit()
     except (StoryArcServiceError, StoryArcPlacementIntegrationError, IntegrityError):
         await session.rollback()
@@ -421,11 +419,7 @@ async def story_arc_catalog_refresh(
             expected_revision=expected_revision,
             library_root_id=library_root_id,
         )
-        search_on_add = (
-            result.story_arc.monitored
-            and result.story_arc.search_missing
-            and await load_search_on_add_default(session)
-        )
+        search_on_add = result.story_arc.monitored and await load_search_on_add_default(session)
         await session.commit()
     except (StoryArcServiceError, IntegrityError) as exc:
         await session.rollback()

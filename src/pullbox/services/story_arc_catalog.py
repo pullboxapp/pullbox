@@ -357,14 +357,14 @@ class StoryArcCatalogService:
                     member = await self._member(
                         session, arc, preview, issues[provider_id], provider_id, position + offset
                     )
-                    member.resolution_state = StoryArcResolutionState.PENDING
+                    # Exact provider identity is sufficient for acquisition.
+                    # Provider response order is not verified reading order, so
+                    # keep placement paused until the user confirms this entry.
                     member.sync_eligible = False
                     member.evidence = {**member.evidence, "catalog_review_required": True}
                     created.append(member.id)
                 pending = tuple(
-                    row.id
-                    for row in rows
-                    if row.resolution_state is StoryArcResolutionState.PENDING
+                    row.id for row in rows if row.evidence.get("catalog_review_required") is True
                 ) + tuple(created)
                 arc.cover_url = preview.metadata.cover_url
                 self._diagnostics(arc, preview, root.id, delta.removed_issue_provider_ids, pending)
@@ -455,6 +455,7 @@ class StoryArcCatalogService:
     ) -> None:
         arc.diagnostics = {
             **arc.diagnostics,
+            "provider_refresh_error": None,
             "provider_catalog": {
                 "schema_version": 1,
                 "snapshot": catalog_snapshot(preview),

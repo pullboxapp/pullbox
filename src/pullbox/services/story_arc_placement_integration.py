@@ -59,6 +59,7 @@ from pullbox.services.library_root_management import (
     validate_managed_library_root,
     validate_reference_library_root,
 )
+from pullbox.services.story_arc_membership_policy import order_review_filter, requires_order_review
 from pullbox.services.story_arc_placement_preview import (
     StoryArcCollisionKind,
     StoryArcPlacementPreviewState,
@@ -466,6 +467,7 @@ class StoryArcPlacementSyncService:
                     and_(
                         IssueStoryArc.issue_id.is_not(None),
                         IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+                        ~order_review_filter(),
                     )
                     if policy.synchronize
                     else False
@@ -924,6 +926,11 @@ class StoryArcPlacementSyncService:
                 "canonical_file_unavailable",
                 "The resolved story-arc membership has no canonical library file",
                 category="safety",
+            )
+        if requires_order_review(membership):
+            raise StoryArcPlacementIntegrationError(
+                "reading_order_review_required",
+                "Confirm this member's reading order before synchronizing its arc file",
             )
         if membership.resolution_state is not StoryArcResolutionState.RESOLVED:
             raise StoryArcPlacementIntegrationError(

@@ -70,6 +70,27 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     form.get_by_role("button", name="Add reviewed Story Arc").click()
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?notice=catalog-added$"))
     arc_url = page.url.split("?", 1)[0]
+    expect(page.get_by_test_id("story-arc-edit-form")).to_have_count(0)
+    expect(page.get_by_label("Include upcoming issues")).to_have_count(0)
+    monitor = page.get_by_role("switch", name="Toggle monitoring for this Story Arc")
+    expect(monitor).to_be_visible()
+    # Boosted navigation updates the URL before HTMX's settle pass binds the
+    # new form. A keyboard press must wait for that pass as well as visibility.
+    expect(page.locator("body")).not_to_have_attribute("data-shell-pending", "")
+    expect(page.locator("#content .htmx-added, #content.htmx-settling")).to_have_count(0)
+    page.wait_for_load_state("load")
+    assert errors == []
+    with (
+        page.expect_navigation(wait_until="load"),
+        page.expect_response(lambda response: "/monitor" in response.url) as monitored,
+    ):
+        monitor.press("Space")
+    assert monitored.value.status in (204, 303), monitored.value.text()
+    page.wait_for_url(re.compile(r"/story-arcs/\d+\?notice=updated$"))
+    expect(monitor).to_be_checked()
+    with page.expect_navigation(wait_until="load"):
+        monitor.press("Space")
+    expect(monitor).not_to_be_checked()
     members = page.locator("[data-membership-id]")
     expect(members.nth(0)).to_have_attribute("data-exact-issue-number", "1AU")
     expect(members.nth(1)).to_have_attribute("data-exact-issue-number", "1000000")
@@ -92,7 +113,10 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
         "data-exact-issue-number", "1AU"
     )
     page.get_by_role("button", name="Review issue 2 match").click()
-    expect(page.get_by_role("button", name="Confirm this member")).to_be_visible()
+    expect(page.get_by_role("button", name="Confirm reading order")).to_be_visible()
+    page.get_by_role("button", name="Confirm reading order").click()
+    page.wait_for_url(re.compile(r"/story-arcs/\d+\?.*notice=resolved.*$"))
+    expect(page.get_by_role("button", name="Review issue 2 match")).to_have_count(0)
     page.goto(f"{seeded_server}/story-arcs/add")
     page.get_by_label("Comic Vine arc name").fill("Numbering")
     expect(page.get_by_role("link", name="Already added — open arc")).to_have_attribute(

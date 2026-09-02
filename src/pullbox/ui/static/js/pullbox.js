@@ -6987,8 +6987,8 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         expected_policy_digest: digestElement ? digestElement.value : "",
         materialize_filesystem: materialize,
         monitored: monitored,
-        search_missing: monitored && checked("search_missing"),
-        include_upcoming: monitored && checked("include_upcoming"),
+        search_missing: monitored,
+        include_upcoming: monitored,
         placement_policy: {
           mode: mode,
           target_library_root_id: materialize ? rootId : null,

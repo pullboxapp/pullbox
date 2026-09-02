@@ -36,6 +36,7 @@ from pullbox.tasks import metadata_task as metadata_task
 from pullbox.tasks import scan_task as scan_task
 from pullbox.tasks import search_scheduler_task as search_scheduler_task
 from pullbox.tasks import search_task as search_task
+from pullbox.tasks import story_arc_metadata_task as story_arc_metadata_task
 from pullbox.tasks import story_arc_sync_task as story_arc_sync_task
 from pullbox.tasks import update_check_task as update_check_task
 from pullbox.tasks import usage_stats_task as usage_stats_task

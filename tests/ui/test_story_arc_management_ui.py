@@ -678,7 +678,9 @@ class TestStoryArcManagementUI:
         assert "review" in response.text
         assert "cvid" in response.text
         assert "31" in response.text
-        assert 'data-testid="story-arc-edit-form"' in response.text
+        assert 'data-testid="story-arc-edit-form"' not in response.text
+        assert 'name="include_upcoming"' not in response.text
+        assert 'name="search_missing"' not in response.text
         assert 'data-testid="story-arc-add-membership-form"' in response.text
 
         input_css = Path("src/pullbox/ui/static/css/input.css").read_text(encoding="utf-8")
@@ -931,10 +933,10 @@ class TestStoryArcManagementUI:
         assert 'aria-label="Move issue 1000000 down"' in response.text
         assert 'aria-label="Move issue 1AU up"' in response.text
         assert 'aria-label="Move issue 1AU down"' in response.text
-        assert 'data-testid="story-arc-edit-form"' in response.text
-        assert '<label for="story-arc-name"' in response.text
-        assert '<label for="story-arc-description"' in response.text
-        assert '<label for="story-arc-monitored"' in response.text
+        assert 'data-testid="story-arc-edit-form"' not in response.text
+        assert '<label for="story-arc-name"' not in response.text
+        assert '<label for="story-arc-description"' not in response.text
+        assert 'aria-label="Toggle monitoring for this Story Arc"' in response.text
         assert 'data-testid="story-arc-add-membership-form"' in response.text
         assert '<label for="story-arc-add-issue-id"' in response.text
         assert '<label for="story-arc-add-exact-number"' in response.text
@@ -1489,22 +1491,24 @@ class TestStoryArcManagementUI:
         assert summary.total == 250
         assert len(selects) == 1
 
-    async def test_edit_and_add_unresolved_entry_use_service_revision_contracts(
+    async def test_monitor_and_add_unresolved_entry_preserve_metadata(
         self,
         authenticated_client: AsyncClient,
         sec_db: async_sessionmaker[AsyncSession],
     ) -> None:
         ids = await _seed_detail_arc(sec_db)
         async with sec_db() as session:
-            revision = (await session.get(StoryArc, ids["arc"])).revision  # type: ignore[union-attr]
+            original = await session.get(StoryArc, ids["arc"])
+            revision = original.revision
+            metadata = (original.name, original.description)
 
         edited = await authenticated_client.post(
-            f"/story-arcs/{ids['arc']}/edit",
+            f"/story-arcs/{ids['arc']}/monitor",
             data={
                 "expected_revision": revision,
                 "name": "DC Numbering Updated",
                 "description": "Updated metadata",
-                "include_upcoming": "true",
+                "monitored": "true",
             },
             headers=_csrf_header_for(authenticated_client),
             follow_redirects=False,
@@ -1528,11 +1532,8 @@ class TestStoryArcManagementUI:
         async with sec_db() as session:
             arc = await session.get(StoryArc, ids["arc"])
             assert arc is not None
-            assert arc.name == "DC Numbering Updated"
-            assert arc.description == "Updated metadata"
-            assert arc.monitored is False
-            assert arc.search_missing is False
-            assert arc.include_upcoming is True
+            assert (arc.name, arc.description) == metadata
+            assert arc.monitored is True
             exact_values = list(
                 await session.scalars(
                     select(IssueStoryArc.source_issue_number_text)

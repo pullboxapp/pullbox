@@ -159,13 +159,13 @@
                   <td colspan="5" class="border-t border-pb-border bg-pb-bg/40 px-4 py-4">
                     <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.65fr)]">
                       <div class="space-y-3">
-                        {% if membership.issue_id and membership.resolution_state == 'pending' %}
-                          <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" class="space-y-2">
+                        {% if membership.issue_id and (membership.resolution_state == 'pending' or membership.order_review_required) %}
+                          <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" hx-swap="none" class="space-y-2">
                             <input type="hidden" name="issue_id" value="{{ membership.issue_id }}">
                             <input type="hidden" name="return_page" value="{{ story_arc.page }}">
                             <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                            <p class="text-sm text-pb-text-sec">Added by provider refresh; review its identity and reading order before enabling synchronization.</p>
-                            <button type="submit" class="btn-secondary">Confirm this member</button>
+                            <p class="text-sm text-pb-text-sec">This member is matched to its issue. Acquisition can continue; confirm its position in the reading order before synchronizing its arc file.</p>
+                            <button type="submit" class="btn-secondary">Confirm reading order</button>
                           </form>
                         {% endif %}
                         <form

@@ -44,11 +44,18 @@
     {% endif %}
   </div>
 
+  {% if story_arc.catalog_refresh_error %}
+    <p role="status" class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 px-4 py-3 text-sm text-pb-text">
+      {{ story_arc.catalog_refresh_error }}
+      <a href="/story-arcs/{{ story_arc.id }}/catalog-refresh" class="text-pb-interactive hover:underline">Review provider changes</a>
+    </p>
+  {% endif %}
+
   {% if story_arc.catalog_removed_count or story_arc.catalog_added_review_count %}
     <p role="status" class="rounded-lg border border-pb-border bg-pb-card px-4 py-3 text-sm text-pb-text-sec">
-      At last provider refresh: {{ story_arc.catalog_added_review_count }} new members added for review;
+      {{ story_arc.catalog_added_review_count }} members need identity or reading-order review;
       {{ story_arc.catalog_removed_count }} no longer listed by Comic Vine but preserved here.
-      Review pending members below before synchronization.
+      Exact matched members remain eligible for acquisition. Confirm their reading order before arc-file synchronization.
     </p>
   {% endif %}
 
@@ -189,7 +196,7 @@
 
   {% include "partials/story_arc_reading_order.html" %}
 
-  <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
+  <div class="space-y-6">
     <section aria-label="Story Arc placement and issue management" class="space-y-6">
       {% if story_arc.active %}
         <section aria-labelledby="story-arc-add-heading" class="rounded-lg border border-pb-border bg-pb-card p-4">
@@ -638,59 +645,6 @@
       </section>
     </section>
 
-    <aside aria-label="Story Arc settings" class="space-y-6">
-      <section class="rounded-lg border border-pb-border bg-pb-card p-4">
-        <h2 class="font-semibold text-pb-text">Metadata and monitoring</h2>
-        <form
-          action="/story-arcs/{{ story_arc.id }}/edit"
-          method="post"
-          hx-post="/story-arcs/{{ story_arc.id }}/edit"
-          hx-swap="none"
-          data-testid="story-arc-edit-form"
-          class="mt-4 space-y-4"
-        >
-          <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
-          <div>
-            <label for="story-arc-name" class="mb-1 block text-sm font-medium text-pb-text">Name</label>
-            <input
-              id="story-arc-name"
-              name="name"
-              type="text"
-              maxlength="500"
-              value="{{ story_arc.name }}"
-              required
-              class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-            >
-          </div>
-          <div>
-            <label for="story-arc-description" class="mb-1 block text-sm font-medium text-pb-text">Description</label>
-            <textarea
-              id="story-arc-description"
-              name="description"
-              rows="4"
-              class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-            >{{ story_arc.description or "" }}</textarea>
-          </div>
-          <fieldset class="space-y-3"{% if not story_arc.active %} disabled{% endif %}>
-            <legend class="text-sm font-medium text-pb-text">Automation</legend>
-            <label for="story-arc-monitored" class="flex items-start gap-2 text-sm text-pb-text-sec">
-              <input id="story-arc-monitored" type="checkbox" name="monitored" value="true" class="mt-0.5"{% if story_arc.monitored %} checked{% endif %}>
-              <span>Monitor this Story Arc</span>
-            </label>
-            <label for="story-arc-search-missing" class="flex items-start gap-2 text-sm text-pb-text-sec">
-              <input id="story-arc-search-missing" type="checkbox" name="search_missing" value="true" class="mt-0.5"{% if story_arc.search_missing %} checked{% endif %}>
-              <span>Search for missing resolved issues</span>
-            </label>
-            <label for="story-arc-include-upcoming" class="flex items-start gap-2 text-sm text-pb-text-sec">
-              <input id="story-arc-include-upcoming" type="checkbox" name="include_upcoming" value="true" class="mt-0.5"{% if story_arc.include_upcoming %} checked{% endif %}>
-              <span>Include upcoming issues</span>
-            </label>
-          </fieldset>
-          <button type="submit" class="btn-primary">Save settings</button>
-        </form>
-      </section>
-
-    </aside>
   </div>
 
   {% include "components/cover_modal.html" %}

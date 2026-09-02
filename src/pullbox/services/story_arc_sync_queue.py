@@ -46,6 +46,7 @@ from pullbox.services.import_story_arc_placement_completion import (
     ImportStoryArcPlacementCompletionState,
     finalize_import_story_arc_placements,
 )
+from pullbox.services.story_arc_membership_policy import requires_order_review
 from pullbox.services.story_arc_placement_integration import (
     STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION,
     StoryArcPlacementImportProvenance,
@@ -1791,6 +1792,7 @@ async def _load_claimed_context(
         or membership.issue_id != library_file.issue_id
         or membership.resolution_state is not StoryArcResolutionState.RESOLVED
         or work.desired_generation != _desired_generation(library_file, membership, story_arc)[0]
+        or requires_order_review(membership)
     ):
         return None
     if work.origin_import_action_id is None:

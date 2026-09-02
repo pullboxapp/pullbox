@@ -94,7 +94,7 @@ _NOTICE_MESSAGES = {
         "Initial arc-file work queued. Refresh to check progress; canonical files stay unchanged."
     ),
     "created": "Story arc created. Add issues when you are ready.",
-    "updated": "Story arc settings saved.",
+    "updated": "Story arc monitoring updated.",
     "membership-added": "Issue added to the story arc.",
     "moved-up": "Issue moved up in the reading order.",
     "moved-down": "Issue moved down in the reading order.",
@@ -760,34 +760,22 @@ async def story_arc_placement_remove(
     return _redirect(request, _detail_url(story_arc_id, notice=notice))
 
 
-@router.post("/story-arcs/{story_arc_id}/edit", include_in_schema=False)
-async def story_arc_edit(
+@router.post("/story-arcs/{story_arc_id}/monitor", include_in_schema=False)
+async def story_arc_monitor(
     story_arc_id: int,
     request: Request,
     _user: AuthenticatedUser,
     session: DbSession,
     expected_revision: Annotated[int, Form(ge=1)],
-    name: str = Form(""),
-    description: str = Form(""),
     monitored: bool = Form(False),
-    search_missing: bool = Form(False),
-    include_upcoming: bool = Form(False),
 ) -> Response:
-    """Save metadata and monitoring controls under optimistic locking."""
+    """Change monitoring without editing metadata, storage, or parent series."""
     try:
-        existing = await session.get(StoryArc, story_arc_id)
-        if existing is None:
-            raise StoryArcNotFoundError(f"Story arc {story_arc_id} was not found")
         await _story_arc_service.update(
             session,
             story_arc_id,
             expected_revision=expected_revision,
-            name=name,
-            description=description.strip() or None,
             monitored=monitored,
-            search_missing=search_missing,
-            include_upcoming=include_upcoming,
-            sync_enabled=existing.sync_enabled,
         )
         await session.commit()
     except (StoryArcServiceError, IntegrityError) as exc:

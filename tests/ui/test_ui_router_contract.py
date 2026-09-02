@@ -336,10 +336,10 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "story_arc_placement_remove",
         ),
         (
-            "/story-arcs/{story_arc_id}/edit",
+            "/story-arcs/{story_arc_id}/monitor",
             ("POST",),
-            "story_arc_edit",
-            "story_arc_edit",
+            "story_arc_monitor",
+            "story_arc_monitor",
         ),
         (
             "/story-arcs/{story_arc_id}/search",

@@ -257,12 +257,12 @@ async def test_global_wanted_targets_include_one_issue_from_multiple_monitored_a
         enabled = StoryArc(
             name="Enabled Arc",
             monitored=True,
-            search_missing=True,
+            search_missing=False,
         )
         also_enabled = StoryArc(
             name="Also Enabled Arc",
             monitored=True,
-            search_missing=True,
+            search_missing=False,
         )
         disabled = StoryArc(
             name="Disabled Arc",
@@ -299,7 +299,7 @@ async def test_global_wanted_targets_include_one_issue_from_multiple_monitored_a
 
 
 @pytest.mark.asyncio
-async def test_global_wanted_targets_include_only_known_upcoming_arc_members(
+async def test_arc_monitoring_searches_released_members_without_legacy_flags(
     db_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     today = date.today()
@@ -332,7 +332,8 @@ async def test_global_wanted_targets_include_only_known_upcoming_arc_members(
             issue_number_text="2",
             status=IssueStatus.SKIPPED,
             issue_type=IssueType.ISSUE,
-            release_date=today - timedelta(days=1),
+            release_date=today + timedelta(days=60),
+            store_date=today,
         )
         undated = Issue(
             series_id=series.id,
@@ -366,7 +367,7 @@ async def test_global_wanted_targets_include_only_known_upcoming_arc_members(
 
         targets = await load_wanted_issue_search_targets(session, limit=10)
 
-    assert [target.issue_id for target in targets] == [upcoming.id]
+    assert [target.issue_id for target in targets] == [released.id, undated.id]
 
 
 @pytest.mark.asyncio
