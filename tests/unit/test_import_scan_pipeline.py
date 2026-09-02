@@ -723,7 +723,7 @@ async def test_load_mylar3_streams_bounded_pages_to_persistence(
     cancellation_checks = 0
     events: list[tuple[str, dict[str, object]]] = []
 
-    async def validate_batch(_session, batch) -> None:
+    async def validate_batch(_session, batch, **_kwargs) -> None:
         validated_batch_sizes.append(len(batch))
 
     async def materialize_batch(session, import_job, batch):
@@ -787,6 +787,136 @@ async def test_load_mylar3_streams_bounded_pages_to_persistence(
     ]
 
 
+async def test_mylar_scan_checkpoints_progress_between_source_pages(db_session, tmp_path):
+    job = ImportJob(
+        source_path=str(tmp_path / "mylar.db"),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+        mylar3_path_map_confirmed=True,
+        progress_snapshot={"progress": 0},
+    )
+    db_session.add(job)
+    await db_session.commit()
+    checkpoints = []
+
+    class ReaderDouble:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def read_import_metadata(self):
+            return Mylar3ImportMetadataSnapshot(
+                storyarcs_present=False,
+                readlist_present=False,
+                readlist_count=0,
+                arc_settings=Mylar3ArcSettingsSnapshot(False, (), ()),
+            )
+
+        async def iter_import_story_arc_pages(self):
+            if False:
+                yield ()
+
+        async def iter_import_series_pages(self):
+            for index in range(3):
+                if index:
+                    checkpoints.append(dict(job.progress_snapshot))
+                    assert job.progress_snapshot.get("progress", 0) > 0
+                    assert job.progress_snapshot.get("series_found") == index
+                    assert job.scan_completed_at is None
+                yield (
+                    DiscoveredSeries(
+                        raw_series_name=f"Series {index}",
+                        raw_year=2026,
+                        raw_publisher=None,
+                        file_count=0,
+                        sample_paths=[],
+                        source_folder=f"/comics/{index}",
+                        source_folder_relative=str(index),
+                        files=[],
+                    ),
+                )
+
+    async def no_op(*_args, **_kwargs):
+        pass
+
+    await _load_mylar3_discovered_series(
+        db_session,
+        job,
+        job_id=job.id,
+        mylar3_reader_cls=ReaderDouble,
+        auto_detect_mylar3_path_map=lambda _path: None,
+        log_event=no_op,
+        materialize_discovered_scan_results=materialize_discovered_scan_results,
+    )
+    assert len(checkpoints) == 2
+    assert checkpoints[1]["progress_revision"] > checkpoints[0]["progress_revision"]
+    assert job.scan_completed_at is not None
+
+
+async def test_mylar_scan_publishes_real_safety_batch_and_overall_progress(db_session, tmp_path):
+    from pullbox.core.mylar3_reader import Mylar3Reader
+    from pullbox.services.import_scan_helpers import validate_discovered_files_safety
+    from pullbox.ui.import_progress_snapshot import build_import_progress_snapshot
+    from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
+
+    db = tmp_path / "mylar.db"
+    rows = []
+    for i in range(2):
+        folder = tmp_path / f"Series{i}"
+        for issue in range(3):
+            create_minimal_cbz(folder / f"Series{i} {issue}.cbz")
+        rows.append(
+            {"ComicID": f"CV-{100 + i}", "ComicName": f"Series{i}", "ComicLocation": str(folder)}
+        )
+    create_mylar3_db(db, series=rows)
+
+    class SmallPageReader(Mylar3Reader):
+        async def iter_import_series_pages(self):
+            async for page in super().iter_import_series_pages(page_size=1):
+                yield page
+
+    job = ImportJob(
+        source_path=str(db),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.SCANNING,
+        mylar3_path_map_confirmed=True,
+    )
+    db_session.add(job)
+    await db_session.commit()
+    events = []
+
+    async def progress(event):
+        events.append(event)
+        hydrated = build_import_progress_snapshot(
+            job, review_summary={}, recent_logs=[], progress_revision=job.progress_revision
+        )
+        assert hydrated["progress"] == event.progress
+        assert hydrated["series_found"] == event.series_found
+        assert job.scan_completed_at is None
+
+    async def no_op(*_args, **_kwargs):
+        pass
+
+    await _load_mylar3_discovered_series(
+        db_session,
+        job,
+        job_id=job.id,
+        mylar3_reader_cls=SmallPageReader,
+        auto_detect_mylar3_path_map=lambda _path: None,
+        log_event=no_op,
+        validate_discovered_files_safety=validate_discovered_files_safety,
+        materialize_discovered_scan_results=materialize_discovered_scan_results,
+        progress_callback=progress,
+    )
+    assert any(event.progress == 22 and event.series_found == 1 for event in events)
+    assert events[-1].progress == 35
+    assert events[-1].series_found == 2
+    assert events[-1].scan_total_files == 6
+    assert any("3/3" in event.message for event in events)
+    assert not any("1/1" in event.message for event in events)
+    assert [event.progress for event in events] == sorted(event.progress for event in events)
+    assert len({event.progress_revision for event in events}) == len(events)
+
+
 async def test_load_mylar3_cancellation_stops_before_next_page_persistence(
     db_session,
     tmp_path: Path,
@@ -840,7 +970,7 @@ async def test_load_mylar3_cancellation_stops_before_next_page_persistence(
 
     materialized_pages = 0
 
-    async def validate_batch(_session, _batch) -> None:
+    async def validate_batch(_session, _batch, **_kwargs) -> None:
         return None
 
     async def materialize_batch(session, import_job, batch):

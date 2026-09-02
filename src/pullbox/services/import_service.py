@@ -340,9 +340,13 @@ class ImportService(
         self,
         session: AsyncSession,
         discovered_list: list[DiscoveredSeries],
+        *,
+        progress_callback: Callable[[int, int, str], Awaitable[None]] | None = None,
     ) -> None:
         """Run safety checks on discovered source files before review/import."""
-        await validate_import_discovered_files_safety(session, discovered_list)
+        await validate_import_discovered_files_safety(
+            session, discovered_list, progress_callback=progress_callback
+        )
 
     def _build_scan_metadata_provider(self, session: AsyncSession) -> CachedImportMetadataProvider:
         """Return the Step 2 provider stack: persistent cache, then per-job cache."""

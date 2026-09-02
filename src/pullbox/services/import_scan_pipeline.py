@@ -34,6 +34,7 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services.import_mylar_scan_progress import MylarScanProgress
 from pullbox.services.import_progress_runtime import current_item_payload
 from pullbox.services.import_referenced_sources import (
     load_mylar_reference_root_boundaries,
@@ -78,10 +79,7 @@ if TYPE_CHECKING:
     SlowPhaseDelayFunc = Callable[[], Awaitable[None]]
     ResolveFileExtensionsFunc = Callable[[AsyncSession, str | None], Awaitable[frozenset[str]]]
     AutoDetectPathMapFunc = Callable[[Path], dict[str, str] | None]
-    ValidateDiscoveredFilesFunc = Callable[
-        [AsyncSession, list[DiscoveredSeries]],
-        Awaitable[None],
-    ]
+    ValidateDiscoveredFilesFunc = Callable[..., Awaitable[None]]
     MaterializeScanResultsFunc = Callable[..., Awaitable[Any]]
     RaiseIfCancelledFunc = Callable[[AsyncSession, int], Awaitable[None]]
     DeduplicateSeriesFunc = Callable[..., Awaitable[None]]
@@ -332,6 +330,7 @@ async def run_import_scan_pipeline(
                 validate_discovered_files_safety=validate_discovered_files_safety,
                 materialize_discovered_scan_results=materialize_discovered_scan_results,
                 raise_if_cancelled=raise_if_cancelled,
+                progress_callback=progress_callback,
             )
             await emit_scan_progress(
                 status=ImportJobStatus.SCANNING,
@@ -629,6 +628,7 @@ async def _load_mylar3_discovered_series(
     validate_discovered_files_safety: ValidateDiscoveredFilesFunc | None = None,
     materialize_discovered_scan_results: MaterializeScanResultsFunc | None = None,
     raise_if_cancelled: RaiseIfCancelledFunc | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> int:
     db_path = Path(job.source_path)
     if db_path.is_dir():
@@ -680,6 +680,7 @@ async def _load_mylar3_discovered_series(
             readlist_present=legacy_snapshot.readlist_present,
             readlist_count=legacy_snapshot.readlist_count,
             arc_settings=legacy_snapshot.arc_settings,
+            series_count=len(legacy_snapshot.series),
         )
 
     story_arc_staging = StoryArcStagingResult(
@@ -750,6 +751,15 @@ async def _load_mylar3_discovered_series(
         result=story_arc_staging,
         log_event=log_event,
     )
+    await session.commit()
+
+    scan_progress = MylarScanProgress(
+        session,
+        job,
+        metadata.series_count,
+        check_mylar_staging_cancellation,
+        callback=progress_callback,
+    )
 
     path_status_counts: dict[str, int] = {}
     mapping_applied_series = 0
@@ -764,6 +774,14 @@ async def _load_mylar3_discovered_series(
         page = cast("list[DiscoveredSeries]", list(raw_page))
         if not page:
             return
+        page_started_at = time.monotonic()
+        source_rows_read = getattr(reader, "import_series_rows_read", None)
+        scan_progress.source_page_end = (
+            source_rows_read
+            if isinstance(source_rows_read, int)
+            else scan_progress.source_completed + len(page)
+        )
+        await scan_progress.report_safety(0, sum(len(item.files) for item in page), "")
         if in_place:
             await asyncio.to_thread(
                 validate_mylar_in_place_files,
@@ -771,9 +789,12 @@ async def _load_mylar3_discovered_series(
                 in_place_root_boundaries,
             )
         if validate_discovered_files_safety is not None:
-            await validate_discovered_files_safety(session, page)
+            await validate_discovered_files_safety(
+                session, page, progress_callback=scan_progress.report_safety
+            )
         if materialize_discovered_scan_results is not None:
             await materialize_discovered_scan_results(session, job, page)
+        job.scan_completed_at = None
 
         for series in page:
             series_count += 1
@@ -793,7 +814,17 @@ async def _load_mylar3_discovered_series(
 
         job.scan_total_files = file_count
         job.series_found = series_count
-        await session.commit()
+        await log_event(
+            session,
+            job_id,
+            "INFO",
+            "import_mylar_batch_scanned",
+            message=f"Prepared {series_count} series and {file_count} file records from Mylar.",
+            series_found=series_count,
+            files_found=file_count,
+            duration_ms=round((time.monotonic() - page_started_at) * 1000),
+        )
+        await scan_progress.checkpoint_page()
         await check_mylar_staging_cancellation()
 
     if paged_reader:
@@ -826,6 +857,7 @@ async def _load_mylar3_discovered_series(
     )
     job.scan_total_files = file_count
     job.series_found = series_count
+    job.scan_completed_at = datetime.now(UTC)
     await session.commit()
     return series_count
 

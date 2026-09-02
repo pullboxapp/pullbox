@@ -60,6 +60,8 @@ async def test_import_series_pages_bound_source_and_issue_cohorts(
         annuals=[],
     )
     reader = Mylar3Reader(db)
+    metadata = await reader.read_import_metadata()
+    assert getattr(metadata, "series_count", None) == series_count
     source_page_sizes: list[int] = []
     issue_cohort_sizes: list[int] = []
     original_convert = reader._convert_rows
@@ -81,6 +83,7 @@ async def test_import_series_pages_bound_source_and_issue_cohorts(
     assert [item.mylar3_cv_id for item in discovered] == [
         100_000 + index for index in range(series_count)
     ]
+    assert getattr(reader, "import_series_rows_read", None) == series_count
 
 
 def _add_story_arcs(db: Path, *, arc_count: int, entries_per_arc: int) -> None:

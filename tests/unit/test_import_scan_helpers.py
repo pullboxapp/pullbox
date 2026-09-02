@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import func, select
 
 from pullbox.core.collection_scanner import DiscoveredFile, DiscoveredSeries
+from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.file_safety import FileSafetyError
 from pullbox.models.config import SystemConfig
 from pullbox.models.import_job import (
@@ -224,6 +226,50 @@ async def test_validate_discovered_files_safety_reuses_default_policy_for_batch(
         (Path("/tmp/comics/Batman 001.cbz"), False, 123 * 1024 * 1024),
         (Path("/tmp/comics/Batman 002.cbz"), False, 123 * 1024 * 1024),
     ]
+
+
+async def test_default_scan_safety_checks_do_not_run_on_event_loop(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_loop_thread = threading.get_ident()
+    checked_threads: list[int] = []
+
+    def check_archive(*_args, **_kwargs):
+        checked_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(import_scan_helpers, "run_safety_checks", check_archive)
+    await validate_discovered_files_safety(
+        db_session, [_discovered_series("/comics/One.cbz", "/comics/Two.cbz")]
+    )
+
+    assert len(checked_threads) == 2
+    assert all(thread != event_loop_thread for thread in checked_threads)
+
+
+async def test_scan_safety_reports_checked_files_and_can_stop_between_them(db_session):
+    checked = []
+    progress = []
+
+    async def check_archive(_session, path):
+        checked.append(path.name)
+
+    async def report(completed, total, path):
+        progress.append((completed, total, Path(path).name))
+        if completed == 1:
+            raise JobCancelledError("Cancelled during safety checks")
+
+    import pytest
+
+    with pytest.raises(JobCancelledError):
+        await validate_discovered_files_safety(
+            db_session,
+            [_discovered_series("/comics/One.cbz", "/comics/Two.cbz")],
+            check_file_safety=check_archive,
+            progress_callback=report,
+        )
+    assert checked == ["One.cbz"]
+    assert progress == [(0, 2, ""), (1, 2, "One.cbz")]
 
 
 async def test_validate_discovered_files_safety_reuses_compact_archive_evidence(

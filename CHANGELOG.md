@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kept Mylar scan counters, progress bars, and saved checkpoints in sync during
+  file checks and source-page preparation instead of waiting for the full scan.
+- Reconciled unambiguous Mylar filename format, case, and spacing changes within
+  the same folder while retaining original-path evidence and leaving ambiguous
+  or unavailable files for review. Source files and the Mylar database stay untouched.
 - Made Mylar path preflight show searchable, exportable exceptions with exact
   paths and repair guidance, distinguishing missing folders from bad mappings.
   Added explicit, revalidated continuation with available sources while retaining
@@ -57,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- Moved import archive safety checks off the application event loop and added
+  throttled progress and cancellation checkpoints between Mylar file checks.
 - Removed recursive comic-library sizing from diagnostic generation and moved
   blocking filesystem, database snapshot, and ZIP work off the application event
   loop. Mylar preflight filesystem analysis also runs on a worker thread.

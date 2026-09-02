@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
@@ -33,6 +34,7 @@ FileSafetyCheck = Callable[
     ["AsyncSession", Path],
     Awaitable[FileSafetyInspection | None],
 ]
+FileSafetyProgress = Callable[[int, int, str], Awaitable[None]]
 
 
 async def reset_scan_artifacts(session: AsyncSession, job: ImportJob) -> None:
@@ -80,7 +82,8 @@ async def _build_default_file_safety_check(session: AsyncSession) -> FileSafetyC
         _session: AsyncSession,
         path: Path,
     ) -> FileSafetyInspection:
-        return run_safety_checks(
+        return await asyncio.to_thread(
+            run_safety_checks,
             path,
             block_dangerous=block_dangerous,
             max_archive_size=max_archive_size,
@@ -94,6 +97,7 @@ async def validate_discovered_files_safety(
     discovered_list: list[DiscoveredSeries],
     *,
     check_file_safety: FileSafetyCheck | None = None,
+    progress_callback: FileSafetyProgress | None = None,
 ) -> None:
     """Run safety checks once per unique discovered source file."""
     effective_check_file_safety = check_file_safety
@@ -108,7 +112,10 @@ async def validate_discovered_files_safety(
                 continue
             files_by_path.setdefault(discovered_file.file_path, []).append(discovered_file)
 
-    for file_path, discovered_files in files_by_path.items():
+    total = len(files_by_path)
+    if progress_callback is not None:
+        await progress_callback(0, total, "")
+    for completed, (file_path, discovered_files) in enumerate(files_by_path.items(), 1):
         try:
             inspection = await effective_check_file_safety(session, Path(file_path))
         except FileSafetyError as exc:
@@ -170,3 +177,6 @@ async def validate_discovered_files_safety(
                     archive_evidence["comicinfo_error"] = archive_report.comicinfo_error
                 metadata_diagnostics["archive_member_evidence"] = archive_evidence
                 discovered_file.metadata_diagnostics = metadata_diagnostics
+        finally:
+            if progress_callback is not None:
+                await progress_callback(completed, total, file_path)
