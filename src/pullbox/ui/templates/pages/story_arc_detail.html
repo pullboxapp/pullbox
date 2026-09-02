@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "components/pagination.html" import pagination %}
+{% from "components/provider_update_link.html" import provider_update_link %}
 
 {% block title %}{{ story_arc.name }} — Story Arcs — {{ instance_name() }}{% endblock %}
 {% block page_title %}{{ story_arc.name }}{% endblock %}
@@ -47,7 +48,7 @@
   {% if story_arc.catalog_refresh_error %}
     <p role="status" class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 px-4 py-3 text-sm text-pb-text">
       {{ story_arc.catalog_refresh_error }}
-      <a href="/story-arcs/{{ story_arc.id }}/catalog-refresh" class="text-pb-interactive hover:underline">Review provider changes</a>
+      {{ provider_update_link("/story-arcs/" ~ story_arc.id ~ "/catalog-refresh") }}
     </p>
   {% endif %}
 

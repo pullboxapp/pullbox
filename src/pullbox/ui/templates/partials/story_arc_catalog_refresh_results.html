@@ -1,0 +1,36 @@
+{% macro result_card(testid, title, count, description) %}
+<section class="series-domain-section-card min-w-0 space-y-4" data-testid="{{ testid }}" aria-labelledby="{{ testid }}-title">
+  <div class="flex items-center justify-between gap-3">
+    <h2 id="{{ testid }}-title" class="series-domain-section-title">{{ title }}</h2>
+    <span class="pill pill-neutral font-mono">{{ count }}</span>
+  </div>
+  <p class="text-sm text-pb-text-sec">{{ description }}</p>
+  {{ caller() }}
+</section>
+{% endmacro %}
+
+<div data-testid="story-arc-update-results" class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+  {% call result_card("story-arc-update-additions", "New issues", additions|length, "Issues listed by Comic Vine that aren't in this arc yet.") %}
+    {% if additions %}
+      <ul class="divide-y divide-pb-border text-sm">
+        {% for member in members %}{% if member.provider_id in additions %}
+          <li class="space-y-1 py-3 first:pt-0 last:pb-0 break-words">
+            <p class="font-medium text-pb-text">{{ member.series_name }} #{{ member.issue_number }}</p>
+            <p class="text-pb-text-sec">{{ member.title }}</p>
+          </li>
+        {% endif %}{% endfor %}
+      </ul>
+    {% else %}
+      <p class="text-sm text-pb-text-sec">No new issues to add.</p>
+    {% endif %}
+  {% endcall %}
+  {% call result_card("story-arc-update-removals", "No longer listed", removals|length, "These issues stay in your arc. Their memberships and files won't be removed.") %}
+    {% if removals %}
+      <ul class="divide-y divide-pb-border text-sm text-pb-text">
+        {% for provider_id in removals %}<li class="py-3 first:pt-0 last:pb-0 break-words">Comic Vine issue ID {{ provider_id }} — preserved</li>{% endfor %}
+      </ul>
+    {% else %}
+      <p class="text-sm text-pb-text-sec">No issues have been removed from Comic Vine's list.</p>
+    {% endif %}
+  {% endcall %}
+</div>

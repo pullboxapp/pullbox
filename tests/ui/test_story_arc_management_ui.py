@@ -69,6 +69,28 @@ def _csrf_header_for(client: AsyncClient) -> dict[str, str]:
     return {"X-CSRF-Token": csrf}
 
 
+async def test_monitor_help_uses_shared_tooltip_and_screen_reader_description(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+) -> None:
+    ids = await _seed_detail_arc(sec_db)
+    response = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
+    assert response.status_code == 200
+    help_text = (
+        "Monitoring checks for new members and searches missing issues when released. "
+        "Parent series monitoring stays unchanged."
+    )
+    control = re.search(
+        r'<form\b[^>]*data-testid="story-arc-action-monitor-control"[^>]*>(.*?)</form>',
+        response.text,
+        re.DOTALL,
+    )
+    assert control is not None
+    assert f'data-tip="{help_text}"' in control.group(1)
+    assert 'aria-describedby="story-arc-monitor-help"' in control.group(1)
+    assert f'<p id="story-arc-monitor-help" class="sr-only">{help_text}</p>' in response.text
+
+
 @pytest.mark.parametrize("provider_linked", [False, True])
 async def test_provider_authoring_controls_and_direct_posts_are_gated(
     authenticated_client: AsyncClient,

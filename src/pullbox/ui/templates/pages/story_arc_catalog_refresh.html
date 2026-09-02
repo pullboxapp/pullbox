@@ -1,46 +1,134 @@
 {% extends "base.html" %}
-{% block title %}Review provider changes — {{ instance_name() }}{% endblock %}
-{% block content_container_classes %}px-4 sm:px-6 py-5{% endblock %}
+{% from "components/provider_update_link.html" import provider_update_link %}
+{% from "components/dropdown_select.html" import dropdown_select %}
+{% from "components/page_dock.html" import page_dock %}
+
+{% set arc_url = "/story-arcs/" ~ story_arc_id %}
+{% set check_url = arc_url ~ "/catalog-refresh" %}
+{% set additions = changes.added_issue_provider_ids if changes else [] %}
+{% set removals = changes.removed_issue_provider_ids if changes else [] %}
+{% set has_changes = additions or removals %}
+{% set up_to_date = changes and not has_changes and not error_message %}
+{% set check_state = "Check failed" if error_message else "Incomplete response" if not changes else "Changes to review" if has_changes else "Up to date" %}
+
+{% block title %}Check for updates — {{ arc_name }} — {{ instance_name() }}{% endblock %}
+{% block page_title %}Check for updates{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 pt-5 sm:pt-7{% endblock %}
+
 {% block content %}
-<main class="mx-auto max-w-5xl space-y-6" data-testid="story-arc-catalog-refresh">
-  <a href="/story-arcs/{{ story_arc_id }}" class="text-sm text-pb-interactive hover:underline">Back to {{ arc_name }}</a>
-  <h1 class="text-2xl font-bold text-pb-text">Review provider changes</h1>
-  <p class="text-sm text-pb-text-sec">Existing reading order, names, memberships, and files stay unchanged. Exact matched members are appended and become eligible for acquisition. Their arc-file synchronization waits for reading-order confirmation.</p>
-  <p class="text-sm text-pb-text-sec">Comic Vine response order — reading order unverified. Provider reordering never replaces your reading order.</p>
-  {% if error_message %}<p role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 p-4 text-sm text-pb-text">{{ error_message }}</p>{% endif %}
-  {% if preview and not preview.membership_complete %}<p role="alert" class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 p-4 text-sm text-pb-text">Incomplete member list. Nothing can be refreshed until all members load.</p>{% endif %}
-  {% if changes %}
-    <section class="space-y-3 rounded-lg border border-pb-border bg-pb-card p-5" aria-labelledby="refresh-additions-heading">
-      <h2 id="refresh-additions-heading" class="text-lg font-semibold text-pb-text">{{ changes.added_issue_provider_ids|length }} new members to review</h2>
-      <ul class="space-y-2 text-sm text-pb-text-sec">
-        {% for member in members %}{% if member.provider_id in changes.added_issue_provider_ids %}<li>{{ member.series_name }} #{{ member.issue_number }} — {{ member.title }}</li>{% endif %}{% endfor %}
-      </ul>
-      {% if not changes.added_issue_provider_ids %}<p class="text-sm text-pb-text-sec">No new members.</p>{% endif %}
-    </section>
-    <section class="space-y-3 rounded-lg border border-pb-border bg-pb-card p-5" aria-labelledby="refresh-removals-heading">
-      <h2 id="refresh-removals-heading" class="text-lg font-semibold text-pb-text">{{ changes.removed_issue_provider_ids|length }} no longer listed by Comic Vine</h2>
-      <p class="text-sm text-pb-text-sec">These memberships and their files will be preserved. Remove an entry yourself only after reviewing it.</p>
-      <ul class="space-y-2 text-sm text-pb-text-sec">{% for provider_id in changes.removed_issue_provider_ids %}<li>Comic Vine issue ID {{ provider_id }} — preserved</li>{% endfor %}</ul>
-    </section>
-    <form action="/story-arcs/{{ story_arc_id }}/catalog-refresh" method="post" class="space-y-4">
-      <input type="hidden" name="expected_revision" value="{{ changes.revision }}">
-      <input type="hidden" name="fingerprint" value="{{ preview.fingerprint }}">
-      {% if needs_library_root %}
-        <div>
-          <label for="refresh-library-root" class="mb-1 block text-sm font-medium text-pb-text">Library root for new series</label>
-          <select id="refresh-library-root" name="library_root_id" required class="input-pb w-full">
-            <option value="">Choose a library root</option>
-            {% for root in placement_roots %}<option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>{% endfor %}
-          </select>
-          <p class="mt-1 text-sm text-pb-text-sec">Choose where any new parent series will keep future downloads. Existing series paths and arc storage stay unchanged.</p>
-          {% if not placement_roots %}<p role="status" class="text-sm text-pb-text-sec">Configure an available managed library root in Settings before refreshing.</p>{% endif %}
-          {% if placement_roots_truncated %}<p class="text-sm text-pb-text-sec">Only the first library roots are shown. Review your roots in Settings if one is missing.</p>{% endif %}
+<div class="series-domain-page space-y-4" data-testid="story-arc-catalog-refresh" hx-history="false">
+  <div class="series-domain-breadcrumb-row">
+    <a href="{{ arc_url }}" class="series-domain-back-link">
+      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+      </svg>
+      Back to story arc
+    </a>
+    <nav class="series-domain-breadcrumbs" aria-label="Breadcrumb">
+      <a href="/story-arcs">All Story Arcs</a>
+      <span class="series-domain-breadcrumb-sep" aria-hidden="true">›</span>
+      <a href="{{ arc_url }}">{{ arc_name }}</a>
+      <span class="series-domain-breadcrumb-sep" aria-hidden="true">›</span>
+      <span class="current" aria-current="page">Check for updates</span>
+    </nav>
+  </div>
+
+  <section data-testid="story-arc-update-hero" class="detail-hero-shell">
+    <div class="series-domain-hero-inner">
+      <div class="series-domain-cover-column">
+        <a href="{{ arc_url }}" class="series-domain-cover-frame" aria-label="Open {{ arc_name }}">
+          {% if arc_cover_src %}
+            <img src="{{ arc_cover_src }}" alt="{{ arc_name }}" class="series-domain-cover-image">
+          {% else %}
+            <span class="series-domain-cover-placeholder">
+              <svg class="h-9 w-9" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 5.25A2.25 2.25 0 016.25 3h11.5A2.25 2.25 0 0120 5.25v13.5A2.25 2.25 0 0117.75 21H6.25A2.25 2.25 0 014 18.75V5.25zM8 7h8M8 11h8M8 15h5" />
+              </svg>
+            </span>
+          {% endif %}
+        </a>
+      </div>
+      <div class="detail-summary-panel">
+        <p class="series-domain-info-label mb-2">Check for updates</p>
+        {% set title_parts = arc_name.split(" ", 1) %}
+        <h1 class="series-domain-hero-title">
+          <a href="{{ arc_comicvine_url }}" class="series-domain-hero-title-link" target="_blank" rel="noopener" aria-label="Open {{ arc_name }} on ComicVine">
+            {{ title_parts[0]|upper }}{% if title_parts|length > 1 %} <span>{{ title_parts[1]|upper }}</span>{% endif %}
+          </a>
+        </h1>
+        <p class="series-domain-hero-description">Compare Comic Vine's issue list with this story arc. Your existing reading order and files stay unchanged.</p>
+        <div class="series-domain-status-row">
+          <span class="pill {{ 'pill-danger' if error_message else 'pill-success' if up_to_date else 'pill-warning' if not changes else 'pill-info' }}">{{ check_state }}</span>
+          <span class="pill pill-neutral">Comic Vine</span>
         </div>
-      {% endif %}
-      <label class="flex items-start gap-2 text-sm text-pb-text"><input type="checkbox" name="confirm_refresh" value="true" required class="mt-0.5">I reviewed these provider changes</label>
-      <button type="submit" class="btn-primary"{% if needs_library_root and not placement_roots %} disabled{% endif %}>Save reviewed provider changes</button>
-    </form>
+      </div>
+      <aside class="series-domain-actions-panel" aria-labelledby="story-arc-update-actions-title">
+        <p id="story-arc-update-actions-title" class="series-domain-actions-title">Review <span>updates</span></p>
+        <div class="series-domain-actions-buttons">
+          {{ provider_update_link(check_url, label="Check again", testid="story-arc-update-retry") }}
+          <a href="{{ arc_url }}" class="btn-ghost">Back to story arc</a>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  {% if error_message %}
+    <div role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 px-4 py-3 text-sm text-pb-text">
+      <p class="font-semibold">Couldn't finish the update check</p>
+      <p class="mt-1">{{ error_message }}</p>
+    </div>
+  {% elif preview and not preview.membership_complete %}
+    <div role="alert" class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 px-4 py-3 text-sm text-pb-text">
+      <p class="font-semibold">Incomplete member list</p>
+      <p class="mt-1">Comic Vine didn't return a complete issue list. Nothing has changed. Check again before saving updates.</p>
+    </div>
+  {% elif up_to_date %}
+    <div role="status" class="rounded-lg border border-pb-success/40 bg-pb-success/10 px-4 py-3 text-sm text-pb-text">
+      <p class="font-semibold">This story arc is up to date</p>
+      <p class="mt-1">Its issue list matches Comic Vine. There's nothing to save.</p>
+    </div>
   {% endif %}
-  <a href="/story-arcs/{{ story_arc_id }}/catalog-refresh" class="btn-secondary">Retry preview</a>
-</main>
+
+  {% if changes %}
+    {% include "partials/story_arc_catalog_refresh_results.html" %}
+    {% if has_changes %}
+      <form action="{{ check_url }}" method="post" class="series-domain-section-card space-y-4" aria-labelledby="story-arc-update-confirm-title" x-data="{ rootId: '', saving: false }" @htmx:before-request="saving = true" @htmx:after-request="saving = false" :aria-busy="saving.toString()" hx-disabled-elt="find button[type='submit']">
+        <h2 id="story-arc-update-confirm-title" class="series-domain-section-title">Save reviewed changes</h2>
+        <p class="text-sm text-pb-text-sec">New issues are appended and become eligible for acquisition. Confirm their reading order before files are synchronized to an arc folder. Existing names, memberships, reading order, and files stay unchanged.</p>
+        <input type="hidden" name="expected_revision" value="{{ changes.revision }}">
+        <input type="hidden" name="fingerprint" value="{{ preview.fingerprint }}">
+        {% if needs_library_root %}
+          <div class="max-w-xl">
+            <label for="refresh-library-root" class="mb-1 block text-sm font-medium text-pb-text">Library root for new series</label>
+            {% set root_options = [("", "Choose a library root")] %}
+            {% for root in placement_roots %}{% set _ = root_options.append((root.id|string, root.name ~ " — " ~ root.path)) %}{% endfor %}
+            {{ dropdown_select(name="library_root_id", options=root_options, trigger_id="refresh-library-root", local_model="rootId", describedby="refresh-library-root-help", class_name="w-full", disabled=not placement_roots, wrap_options=true) }}
+            <p id="refresh-library-root-help" class="mt-1 text-sm text-pb-text-sec">Choose where any new parent series will keep future downloads. Existing series paths and arc storage stay unchanged.</p>
+            {% if not placement_roots %}<p role="status" class="mt-2 text-sm text-pb-text-sec">Configure an available managed library root in Settings before refreshing.</p>{% endif %}
+            {% if placement_roots_truncated %}<p class="mt-2 text-sm text-pb-text-sec">Only the first library roots are shown. Review your roots in Settings if one is missing.</p>{% endif %}
+          </div>
+        {% endif %}
+        <label class="flex items-start gap-2 text-sm text-pb-text"><input type="checkbox" name="confirm_refresh" value="true" required class="checkbox-pb mt-0.5 shrink-0">I reviewed these provider changes</label>
+        <div class="flex flex-wrap gap-2">
+          <button type="submit" class="btn-primary" :disabled="saving{% if needs_library_root %} || !rootId{% endif %}"{% if needs_library_root %} disabled{% endif %}>
+            <span x-show="!saving">Save reviewed changes</span>
+            <span x-show="saving" x-cloak>Saving…</span>
+          </button>
+          <a href="{{ arc_url }}" class="btn-ghost">Cancel</a>
+        </div>
+      </form>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block footer_dock %}
+  <div data-testid="story-arc-update-footer-dock">
+    {{ page_dock(status_items=[
+      {"label": "status", "value": check_state},
+      {"label": "new issues", "value": additions|length if changes else "—"},
+      {"label": "no longer listed", "value": removals|length if changes else "—"},
+      {"label": "source", "value": "Comic Vine"},
+    ]) }}
+  </div>
 {% endblock %}

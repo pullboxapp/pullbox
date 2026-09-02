@@ -1060,11 +1060,11 @@ def _catalog_refresh_error(arc: StoryArc) -> str | None:
     if error.get("code") in {"canonical_root_required", "canonical_root_unavailable"}:
         return (
             "New member discovery needs an available managed library root. "
-            "Review provider changes to choose a root, or restore the saved root in Settings."
+            "Check for updates to choose a root, or restore the saved root in Settings."
         )
     return (
         "Comic Vine member refresh didn't finish. Existing members are unchanged; "
-        "review provider changes to retry."
+        "check for updates to retry."
     )
 
 

@@ -1,4 +1,6 @@
+{% from "components/provider_update_link.html" import provider_update_link %}
 {% set story_arc_title_parts = story_arc.name.split(" ", 1) %}
+{% set monitor_help = "Monitoring checks for new members and searches missing issues when released. Parent series monitoring stays unchanged." %}
 
 <section data-testid="story-arc-detail-hero" class="detail-hero-shell">
   <div class="series-domain-hero-inner story-arc-detail-hero-inner">
@@ -79,7 +81,7 @@
         >
           <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
           <span class="series-domain-inline-toggle-label">Monitored</span>
-          <label class="relative inline-flex shrink-0 items-center">
+          <label class="relative inline-flex shrink-0 items-center" data-tip="{{ monitor_help }}">
             <input
               type="checkbox"
               role="switch"
@@ -94,7 +96,7 @@
             <span class="toggle-switch"></span>
           </label>
         </form>
-        <p id="story-arc-monitor-help" class="text-xs text-pb-text-sec">Monitoring checks for new members and searches missing issues when released. Parent series monitoring stays unchanged.</p>
+        <p id="story-arc-monitor-help" class="sr-only">{{ monitor_help }}</p>
 
         <form
           action="/story-arcs/{{ story_arc.id }}/search"
@@ -113,9 +115,7 @@
         </form>
 
         {% if story_arc.comicvine_id %}
-          <a data-testid="story-arc-action-provider-review" href="/story-arcs/{{ story_arc.id }}/catalog-refresh" class="btn-ghost">
-            Review provider changes
-          </a>
+          {{ provider_update_link("/story-arcs/" ~ story_arc.id ~ "/catalog-refresh", testid="story-arc-action-provider-review") }}
         {% endif %}
 
         {% if story_arc.active %}

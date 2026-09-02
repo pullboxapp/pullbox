@@ -19,6 +19,7 @@ from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_policy import load_search_on_add_default
 from pullbox.models.story_arc import StoryArc, StoryArcLifecycle
 from pullbox.providers.metadata.comicvine import ComicVineError
+from pullbox.services.cover_url_service import build_story_arc_cover_url
 from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
 from pullbox.services.story_arc_service import StoryArcServiceError, StoryArcValidationError
@@ -41,7 +42,7 @@ _get_templates: Callable[[], Jinja2Templates] | None = None
 _build_context: Callable[..., dict[str, object]] | None = None
 _ProviderId = Annotated[str, Path(pattern=r"^[1-9][0-9]{0,18}$")]
 _ERRORS = {
-    "provider": "Comic Vine couldn't load this arc. Check the provider settings and retry preview.",
+    "provider": "Comic Vine couldn't load this arc. Check the provider settings and try again.",
     "validation": (
         "The arc wasn't added. Review the reading order and storage choices, then confirm again."
     ),
@@ -374,6 +375,10 @@ async def story_arc_catalog_refresh_preview(
     username = user.username
     arc = await _provider_arc(session, story_arc_id)
     name, provider_id = arc.name, str(arc.comicvine_id)
+    cover_src = build_story_arc_cover_url(arc)
+    comicvine_url = arc.comicvine_url or (
+        f"https://comicvine.gamespot.com/story-arc/4045-{provider_id}/"
+    )
     catalog = (arc.diagnostics or {}).get("provider_catalog")
     saved_root = catalog.get("canonical_library_root_id") if isinstance(catalog, dict) else None
     needs_library_root = not (type(saved_root) is int and saved_root > 0)
@@ -396,6 +401,8 @@ async def story_arc_catalog_refresh_preview(
         "pages/story_arc_catalog_refresh.html",
         story_arc_id=story_arc_id,
         arc_name=name,
+        arc_cover_src=cover_src,
+        arc_comicvine_url=comicvine_url,
         preview=preview,
         changes=changes,
         error_message=message,
