@@ -24,6 +24,7 @@ from pullbox.models.import_job import ImportedFile, ImportedSeries, ImportJob
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.import_content_inspection import inspect_import_content
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
+from pullbox.services.import_scan_reconciliation import reconcile_discovered_mylar_paths
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -191,3 +192,5 @@ async def validate_discovered_files_safety(
         finally:
             if progress_callback is not None:
                 await progress_callback(completed, total, file_path)
+
+    await asyncio.to_thread(reconcile_discovered_mylar_paths, discovered_list)

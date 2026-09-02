@@ -66,7 +66,7 @@ def _preserve_mylar_identity(base: SourceMetadata, fresh: SourceMetadata) -> Sou
     return fresh.model_copy(update={**updates, "signals": signals, "diagnostics": diagnostics})
 
 
-def _read_file(
+def inspect_review_source(
     path: Path,
     base: SourceMetadata,
     signature: dict[str, Any],
@@ -287,7 +287,7 @@ async def prepare_review_recheck(
                 break
             for file in files:
                 metadata, content, signature = await asyncio.to_thread(
-                    _read_file,
+                    inspect_review_source,
                     Path(file.file_path),
                     source_metadata_for_import_file(item, file),
                     dict(file.source_signature or {}),

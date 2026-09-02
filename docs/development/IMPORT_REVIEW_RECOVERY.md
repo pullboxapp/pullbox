@@ -74,6 +74,71 @@ Then repeat the reviewed command with `--apply` if appropriate.
 A renamed file at a different path is not automatically discovered by this
 command. Do not use broad filename guessing to repair ownership.
 
+## Stale Mylar Filenames
+
+Use `reconcile-import-paths` for a different problem: Mylar remembers a filename
+such as `Firefly Bad Company #1 (2019).cbr`, while the saved review already has
+`Firefly Bad Company 001 (2019).cbz` matched in the same folder. This command
+does not enumerate the library or restart matching. The job stays in Step 3.
+
+The image must include this command. Stop Pullbox and back up its database as
+above, keeping the deployment's existing mounts on the maintenance container.
+Preview first:
+
+```bash
+docker compose -f pullbox.yml run --rm --no-deps --entrypoint python pullbox \
+  -m pullbox.cli reconcile-import-paths --job 1 --source-root /mnt/comics --offline
+```
+
+Repeat `--source-root` for additional approved mounts. Use `--series-id` to
+limit the preview to particular **import-review series IDs**, not ComicVine IDs.
+The report includes:
+
+- `missing_references`: missing entries in the requested scope.
+- `candidates_checked`: entries with one matched same-folder counterpart and
+  the same stored ComicVine issue ID. This alone does not authorize a repair.
+- `references_reconciled`: entries that pass current filesystem, signature,
+  archive safety, content, and independent ComicInfo identity checks.
+- `remaining_missing_references`: entries that would remain after applying.
+- `retained_reasons`: counts explaining why entries remain, including
+  `no_unique_matched_counterpart`, `review_or_source_protected`,
+  `source_check_failed`, `file_safety_review`, and `identity_unconfirmed`.
+- `samples` and `retained_samples`: bounded examples, including original paths.
+
+After reviewing the preview, repeat with `--apply`:
+
+```bash
+docker compose -f pullbox.yml run --rm --no-deps --entrypoint python pullbox \
+  -m pullbox.cli reconcile-import-paths --job 1 --source-root /mnt/comics --offline --apply
+docker compose -f pullbox.yml start pullbox
+```
+
+Only the obsolete review reference is removed. Its original path and review ID
+remain in the real file's reconciliation diagnostics. The real file keeps its
+match and selection state; counters are recomputed and a summary is logged.
+An interrupted command rolls back; repeating a successful command is safe.
+The grouped candidate query runs once and streams bounded batches rather than
+rescanning the database for every page.
+
+Safeguards:
+
+- Require independent, equal ComicVine issue IDs from Mylar and inspected
+  ComicInfo, compatible series/issue/type evidence, and no identity conflicts.
+- Require one missing reference and one existing counterpart in the same
+  folder. Ambiguous copies and cross-folder guesses remain unresolved.
+- Refuse changed files, symlinks, root escapes, unreadable files, corrupt or
+  content-blocked archives, and files requiring a safety override.
+- Leave an entire series alone when it has manual matches, selections, skips,
+  approvals, or completed decisions. Never delete a referenced review row.
+- Do not edit Mylar's database, rename files, rewrite ComicInfo, download
+  metadata, or import anything. Existing source files remain untouched.
+
+New scans perform the same identity check after archive inspection, reusing
+the cached member evidence. Folder imports share the identity/content safety
+rules but have no stale Mylar database references to repair. Missing-path copy
+does not assume a file disappeared after the scan: it may never have existed
+under the database's recorded name.
+
 ## Content Outcomes
 
 - `archive_no_pages`: there are no non-empty supported image members. A

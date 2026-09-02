@@ -381,7 +381,7 @@ async def load_deferred_source_metadata_for_import_file(
     if not import_file_has_deferred_archive_metadata(imp_file):
         return base_metadata
 
-    cached_sidecar = _cached_mylar_sidecar_data(base_metadata.diagnostics)
+    cached_sidecar = cached_mylar_sidecar_data(base_metadata.diagnostics)
     archive_member_evidence = _archive_member_evidence_for_import_file(imp_file)
     loaded_metadata = await asyncio.to_thread(
         SourceMetadataExtractor().from_path,
@@ -398,9 +398,14 @@ async def load_deferred_source_metadata_for_import_file(
     if loaded_metadata.year is None and base_metadata.year is not None:
         update["year"] = base_metadata.year
     identity_conflicts = _reconcile_loaded_exact_identities(base_metadata, loaded_metadata)
+    reconciliation = base_metadata.diagnostics.get("mylar3_path_reconciliation")
+    diagnostics = dict(loaded_metadata.diagnostics)
+    if isinstance(reconciliation, dict):
+        diagnostics["mylar3_path_reconciliation"] = dict(reconciliation)
+        update["diagnostics"] = diagnostics
     if identity_conflicts:
         update["diagnostics"] = {
-            **loaded_metadata.diagnostics,
+            **diagnostics,
             "identity_conflicts": identity_conflicts,
         }
     base_series_signal = base_metadata.signals.get("comicvine_series_id")
@@ -441,7 +446,7 @@ def _archive_member_evidence_for_import_file(
     return dict(evidence) if isinstance(evidence, dict) else None
 
 
-def _cached_mylar_sidecar_data(diagnostics: dict[str, object]) -> dict[str, Any] | None:
+def cached_mylar_sidecar_data(diagnostics: dict[str, object]) -> dict[str, Any] | None:
     """Restore the normalized folder evidence Mylar already read once."""
     if diagnostics.get("mylar3_folder_metadata_scanned") is not True:
         return None

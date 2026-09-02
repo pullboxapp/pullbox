@@ -24,6 +24,7 @@ class ImportSafetyCategory(enum.StrEnum):
     OUTSIDE_APPROVED_ROOT = "outside_approved_root"
     UNSUPPORTED_FILE_TYPE = "unsupported_file_type"
     SOURCE_CHANGED = "source_changed"
+    SOURCE_MISSING = "source_missing"
     UNKNOWN = "unknown"
 
 
@@ -38,6 +39,7 @@ _CATEGORY_LABELS: dict[ImportSafetyCategory, str] = {
     ImportSafetyCategory.OUTSIDE_APPROVED_ROOT: "Outside approved root",
     ImportSafetyCategory.UNSUPPORTED_FILE_TYPE: "Unsupported file type",
     ImportSafetyCategory.SOURCE_CHANGED: "Source changed or unavailable",
+    ImportSafetyCategory.SOURCE_MISSING: "Recorded file not found",
     ImportSafetyCategory.UNKNOWN: "Other safety failure",
 }
 
@@ -73,6 +75,11 @@ _SANITIZED_REASONS: dict[ImportSafetyCategory, str] = {
     ImportSafetyCategory.SOURCE_CHANGED: (
         "The source changed or became unavailable after scanning. Rescan before retrying."
     ),
+    ImportSafetyCategory.SOURCE_MISSING: (
+        "No file was found at the recorded path. The saved filename may be outdated, "
+        "or the file may have been moved or removed. Verify the source location; "
+        "reconcile a proven replacement or skip this missing reference."
+    ),
     ImportSafetyCategory.UNKNOWN: (
         "Pullbox blocked this file because its safety inspection did not complete safely."
     ),
@@ -86,6 +93,7 @@ _RETRYABLE_CATEGORIES = frozenset(
         ImportSafetyCategory.ARCHIVE_NO_PAGES,
         ImportSafetyCategory.OUTSIDE_APPROVED_ROOT,
         ImportSafetyCategory.SOURCE_CHANGED,
+        ImportSafetyCategory.SOURCE_MISSING,
     }
 )
 
@@ -283,6 +291,9 @@ def classify_import_safety_failure(
     ):
         category = ImportSafetyCategory.UNSUPPORTED_FILE_TYPE
         stable_code = normalized_code or "unsupported_file_type"
+    elif "source_missing" in evidence_tokens:
+        category = ImportSafetyCategory.SOURCE_MISSING
+        stable_code = "source_missing"
     elif evidence_tokens & _SOURCE_CHANGED_CODES or _contains_any(
         normalized_reason,
         (

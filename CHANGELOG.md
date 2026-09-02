@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reconciled stale Mylar filenames with uniquely verified same-folder comic
+  files, including `#1` versus `001` naming changes, without weakening identity
+  or archive safety checks. Added a dry-run-first offline repair for saved
+  reviews that preserves matches and source files, and clarified missing-path
+  errors without claiming the source changed after scanning.
 - Automatic searches now distinguish valid matches that could not be queued
   from empty results. Search history counts only validation rejections, not
   unused alternatives or failed downloads.
