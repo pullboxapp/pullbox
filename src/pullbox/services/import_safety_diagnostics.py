@@ -95,6 +95,7 @@ _DANGEROUS_CODES = frozenset(
         "path_traversal",
         "source_path_unsafe",
         "unsafe_path_mapping",
+        "invalid_path_text",
     }
 )
 _OUTSIDE_ROOT_CODES = frozenset(

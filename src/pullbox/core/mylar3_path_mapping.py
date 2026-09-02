@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from pullbox.core.filesystem_policy import is_invalid_path_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
 MAX_MYLAR3_PATH_MAPPINGS = 16
-_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f]")
-_MAX_MAPPING_PATH_LENGTH = 4096
 
 
 def normalize_mylar3_path_map(path_map: dict[str, str]) -> dict[str, str]:
@@ -75,13 +74,7 @@ def ordered_mylar3_path_map_items(path_map: dict[str, str]) -> list[tuple[str, s
 
 
 def _normalize_mapping_path(value: str, *, role: str) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > _MAX_MAPPING_PATH_LENGTH
-        or not value.isprintable()
-        or _CONTROL_CHARACTER_RE.search(value)
-    ):
+    if not isinstance(value, str) or is_invalid_path_text(value):
         raise ValueError(f"Mylar path mapping {role} prefix is invalid.")
     path = Path(value)
     if not path.is_absolute() or ".." in path.parts or path == Path("/"):

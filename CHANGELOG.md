@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserved supported Unicode spaces, joiners, and direction marks in Mylar
+  source paths across preview, mapping, and import without renaming files or
+  relaxing root-containment protections. Invalid path text no longer reports
+  a misleading outside-root error.
 - Kept Mylar scan counters, progress bars, and saved checkpoints in sync during
   file checks and source-page preparation instead of waiting for the full scan.
 - Reconciled unambiguous Mylar filename format, case, and spacing changes within

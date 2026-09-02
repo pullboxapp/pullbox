@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
 
-from pullbox.core.filesystem_policy import is_sensitive_path, resolve_preview_source
+from pullbox.core.filesystem_policy import (
+    is_invalid_path_text,
+    is_sensitive_path,
+    resolve_preview_source,
+)
 from pullbox.core.mylar3_path_mapping import (
     has_conflicting_overlapping_mappings,
     normalize_mylar3_path_map,
@@ -421,12 +425,7 @@ class Mylar3PathPreflightAnalyzer:
         _MappingState | None,
         str,
     ]:
-        if (
-            not raw_location
-            or len(raw_location) > 4096
-            or not raw_location.isprintable()
-            or ".." in Path(raw_location).parts
-        ):
+        if is_invalid_path_text(raw_location) or ".." in Path(raw_location).parts:
             return "invalid", None, None, "Unavailable example"
         location = Path(raw_location)
         if not location.is_absolute():

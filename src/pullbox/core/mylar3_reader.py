@@ -21,6 +21,7 @@ import structlog
 
 from pullbox.core.collection_scanner import COMIC_EXTENSIONS, DiscoveredFile, DiscoveredSeries
 from pullbox.core.exceptions import ConfigurationError, MylarReadError
+from pullbox.core.filesystem_policy import is_invalid_path_text
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.library_layout import (
@@ -1124,7 +1125,18 @@ class Mylar3Reader:
                 reason="invalid_location",
                 rejection_reason="The Mylar comic folder must be an absolute path.",
             )
-        if ".." in location_path.parts or self._path_text_is_invalid(location):
+        if self._path_text_is_invalid(location):
+            return _ResolvedMylarPath(
+                path=None,
+                status="invalid",
+                mapping_applied=bool(self._path_map),
+                reason="invalid_path_text",
+                rejection_reason=(
+                    "The Mylar comic folder contains unsupported control or formatting "
+                    "characters, or exceeds the maximum path length."
+                ),
+            )
+        if ".." in location_path.parts:
             return _ResolvedMylarPath(
                 path=None,
                 status="invalid",
@@ -1287,7 +1299,7 @@ class Mylar3Reader:
 
     @staticmethod
     def _path_text_is_invalid(value: str) -> bool:
-        return len(value) > 4096 or not value.isprintable()
+        return is_invalid_path_text(value)
 
     def _build_files(
         self,
