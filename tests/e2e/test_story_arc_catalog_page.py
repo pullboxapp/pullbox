@@ -10,6 +10,7 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests.e2e.accessibility import assert_no_axe_violations
+from tests.e2e.story_arc_file_helpers import configure_arc_file_defaults
 from tests.story_arc_catalog_fixtures import CatalogProvider
 
 pytestmark = pytest.mark.e2e
@@ -33,6 +34,7 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     page = authed_page
     errors: list[str] = []
     page.on("pageerror", lambda error: errors.append(str(error)))
+    configure_arc_file_defaults(page, seeded_server, prefix=True)
     page.goto(f"{seeded_server}/story-arcs/add", wait_until="domcontentloaded")
     query = page.get_by_label("Comic Vine arc name")
     query.fill("Numbering")
@@ -51,13 +53,11 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     root_option = canonical_root.locator("option").nth(1)
     root_id = root_option.get_attribute("value")
     assert root_id is not None
-    root_path = root_option.inner_text().split(" — ", 1)[1]
     canonical_root.select_option(root_id)
-    form.get_by_label("Separate folder").select_option("copy")
-    form.get_by_label("Library root", exact=True).select_option(root_id)
-    form.get_by_label("Arc folder location").fill(root_path)
-    form.get_by_label("Prefix arc filenames with the reading order").check()
-    expect(form.get_by_label("Reading-order digits")).to_have_value("2")
+    expect(form.get_by_label("Separate folder")).to_have_count(0)
+    expect(form.get_by_test_id("story-arc-create-storage")).to_contain_text(
+        "Copy issues into arc folders"
+    )
     form.get_by_role("button", name="Add reviewed Story Arc").click()
     expect(page).to_have_url(re.compile(r"/story-arcs/catalog/42$"))
     assert form.get_by_label("I reviewed the reading order").evaluate(
@@ -71,6 +71,8 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?notice=catalog-added$"))
     arc_url = page.url.split("?", 1)[0]
     expect(page.get_by_test_id("story-arc-edit-form")).to_have_count(0)
+    expect(page.get_by_test_id("story-arc-add-membership-form")).to_have_count(0)
+    expect(page.locator('[data-testid^="story-arc-remove-membership-"]')).to_have_count(0)
     expect(page.get_by_label("Include upcoming issues")).to_have_count(0)
     monitor = page.get_by_role("switch", name="Toggle monitoring for this Story Arc")
     expect(monitor).to_be_visible()
@@ -94,8 +96,9 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     members = page.locator("[data-membership-id]")
     expect(members.nth(0)).to_have_attribute("data-exact-issue-number", "1AU")
     expect(members.nth(1)).to_have_attribute("data-exact-issue-number", "1000000")
-    expect(page.get_by_label("Issue file template")).to_have_value(
-        "{ReadingOrder:02d} - {OriginalFilename}"
+    expect(page.get_by_label("Issue file template")).to_have_count(0)
+    expect(page.get_by_test_id("story-arc-arc-files-summary")).to_contain_text(
+        "Copied to arc folder"
     )
     expect(page.get_by_role("link", name="Open issue 1AU")).to_have_attribute(
         "href", re.compile(r"/issues/\d+\?source=story-arc&story_arc_id=\d+")
@@ -114,6 +117,7 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     )
     page.get_by_role("button", name="Review issue 2 match").click()
     expect(page.get_by_role("button", name="Confirm reading order")).to_be_visible()
+    expect(page.get_by_role("button", name="Search local issues")).to_have_count(0)
     page.get_by_role("button", name="Confirm reading order").click()
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?.*notice=resolved.*$"))
     expect(page.get_by_role("button", name="Review issue 2 match")).to_have_count(0)

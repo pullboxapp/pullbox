@@ -53,6 +53,7 @@ class PullboxSettings(BaseSettings):
     startup_update_check_enabled: bool = True
     airdcpp_enabled: bool = False
     story_arc_manual_create_enabled: bool = False
+    story_arc_manual_edit_enabled: bool = False
 
     # ── Database ───────────────────────────────────────────────────────
     db_url: str = "sqlite+aiosqlite:////data/pullbox.db"

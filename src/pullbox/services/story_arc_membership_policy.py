@@ -3,7 +3,17 @@
 from sqlalchemy import func
 from sqlalchemy.sql.elements import ColumnElement
 
-from pullbox.models.story_arc import IssueStoryArc
+from pullbox.models.story_arc import IssueStoryArc, StoryArcSourceKind
+
+
+def provider_issue_identity(member: IssueStoryArc) -> str | None:
+    """Return the exact provider identity, without interpreting import-local IDs."""
+    if (
+        member.source_kind == StoryArcSourceKind.PROVIDER
+        or (member.evidence or {}).get("provider") == "comicvine"
+    ):
+        return member.source_issue_id
+    return None
 
 
 def requires_order_review(member: IssueStoryArc) -> bool:

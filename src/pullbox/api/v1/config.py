@@ -172,6 +172,22 @@ async def update_config(
     runtime_managed_keys = {"logs_dir", "backup_dir"}
     runtime_managed_https = https_runtime_config_values()
 
+    from pullbox.services.story_arc_file_defaults import (
+        STORY_ARC_FILE_DEFAULT_KEYS,
+        validate_story_arc_file_defaults,
+    )
+    from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
+
+    # Validate the complete group before any update or runtime side effect.
+    if body.values.keys() & set(STORY_ARC_FILE_DEFAULT_KEYS):
+        effective_arc_files = await _effective_config_values(
+            session, body.values, STORY_ARC_FILE_DEFAULT_KEYS
+        )
+        try:
+            await validate_story_arc_file_defaults(session, effective_arc_files)
+        except StoryArcPlacementIntegrationError as exc:
+            raise ValidationError(str(exc)) from exc
+
     actually_changed: set[str] = set()
     old_values: dict[str, str] = {}
 
@@ -653,6 +669,22 @@ async def update_config(
 
 
 # ── ComicVine API Key ────────────────────────────────────────────────
+
+
+@router.post("/story-arc-files/preview")
+async def preview_story_arc_file_defaults(
+    body: ConfigUpdate,
+    _user: InteractiveOperatorUser,
+) -> dict[str, str]:
+    """Render sample naming with the real placement renderer; never touch disk."""
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.story_arc_file_defaults import parse_story_arc_file_defaults
+    from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
+
+    try:
+        return {"path": parse_story_arc_file_defaults(body.values).naming_preview()}
+    except StoryArcPlacementIntegrationError as exc:
+        raise ValidationError(str(exc)) from exc
 
 
 @router.post("/comicvine/test")

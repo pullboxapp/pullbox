@@ -28,7 +28,12 @@ from pullbox.services.reading_query_service import (
     load_story_arc_reading_aggregates,
     load_visible_issue_states,
 )
-from pullbox.services.story_arc_membership_policy import order_review_filter, requires_order_review
+from pullbox.services.story_arc_editing_policy import can_manually_edit_arc
+from pullbox.services.story_arc_membership_policy import (
+    order_review_filter,
+    provider_issue_identity,
+    requires_order_review,
+)
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicy,
     StoryArcPlacementPolicyInput,
@@ -128,6 +133,7 @@ class StoryArcMembershipView:
     metadata_add_url: str
     is_first: bool
     is_last: bool
+    can_rematch: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +188,7 @@ class StoryArcDetailView:
     catalog_added_review_count: int = 0
     catalog_refresh_error: str | None = None
     initial_placements: StoryArcInitialPlacementView | None = None
+    manual_editable: bool = True
 
     @property
     def active(self) -> bool:
@@ -762,6 +769,7 @@ def _present_membership(
         ),
         is_first=position == 1,
         is_last=position == membership_total,
+        can_rematch=membership.issue_id is None or provider_issue_identity(membership) is None,
     )
 
 
@@ -1041,6 +1049,7 @@ async def load_story_arc_detail(
         catalog_added_review_count=pending_count if arc.comicvine_id else 0,
         catalog_refresh_error=_catalog_refresh_error(arc),
         initial_placements=_initial_placement_view(arc),
+        manual_editable=can_manually_edit_arc(arc),
     )
 
 

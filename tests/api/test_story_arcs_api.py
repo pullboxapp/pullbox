@@ -15,9 +15,16 @@ from pullbox.api.v1 import story_arcs as story_arcs_api
 from pullbox.models import Base
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
-from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcLifecycle
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcLifecycle,
+    StoryArcResolutionState,
+    StoryArcSourceKind,
+)
 from pullbox.models.user import APIKey, User
 from pullbox.services.auth_service import AuthService
+from pullbox.services.story_arc_service import StoryArcService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -153,6 +160,132 @@ async def _seed_issue(
         issue_id = issue.id
         await session.commit()
     return issue_id
+
+
+async def _seed_provider_arc(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> tuple[int, int, int, int, int]:
+    async with db_factory() as session:
+        issue = Issue(
+            series=Series(title="Provider Series", sort_title="provider series"),
+            issue_number=1,
+            comicvine_id=411,
+        )
+        other = Issue(series=issue.series, issue_number=2, comicvine_id=412)
+        session.add_all([issue, other])
+        await session.flush()
+        service = StoryArcService()
+        arc = await service.create(
+            session, name="Provider Arc", source_kind=StoryArcSourceKind.PROVIDER
+        )
+        arc.comicvine_id = 31
+        member = await service.add_membership(
+            session,
+            arc.id,
+            issue_id=issue.id,
+            sequence_number=1,
+            source_kind=StoryArcSourceKind.PROVIDER,
+        )
+        member.source_issue_id = "411"
+        member.evidence = {"provider": "comicvine", "catalog_review_required": True}
+        await session.commit()
+        return arc.id, member.id, issue.id, other.id, arc.revision
+
+
+@pytest.mark.parametrize("operation", ["name", "description", "add", "remove", "issue_number"])
+async def test_provider_manual_edits_are_rejected_without_partial_writes(
+    client: AsyncClient, db_factory: async_sessionmaker[AsyncSession], operation: str
+) -> None:
+    arc_id, member_id, issue_id, _, revision = await _seed_provider_arc(db_factory)
+    url = f"/api/v1/story-arcs/{arc_id}"
+    if operation in {"name", "description"}:
+        response = await client.patch(
+            url, json={"expected_revision": revision, operation: "Edited", "monitored": True}
+        )
+    elif operation == "add":
+        response = await client.post(
+            f"{url}/memberships", json={"sequence_number": 2, "source_issue_number_text": "99"}
+        )
+    elif operation == "remove":
+        response = await client.delete(f"{url}/memberships/{member_id}")
+    else:
+        response = await client.patch(
+            f"{url}/memberships/{member_id}",
+            json={"source_issue_number_text": "99", "intentionally_skipped": True},
+        )
+    assert response.status_code == 403, response.text
+    async with db_factory() as session:
+        arc = await session.get(StoryArc, arc_id)
+        member = await session.get(IssueStoryArc, member_id)
+        assert arc.name == "Provider Arc"
+        assert arc.description is None
+        assert arc.monitored is False
+        assert arc.revision == revision
+        assert member.issue_id == issue_id
+        assert member.source_issue_number_text == "1"
+        assert member.resolution_state is StoryArcResolutionState.RESOLVED
+        assert await session.scalar(select(func.count(IssueStoryArc.id))) == 1
+
+
+async def test_provider_identity_cannot_be_replaced_but_order_confirmation_works(
+    client: AsyncClient, db_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    arc_id, member_id, issue_id, other_id, revision = await _seed_provider_arc(db_factory)
+    url = f"/api/v1/story-arcs/{arc_id}/memberships/{member_id}/resolve"
+    rejected = await client.post(url, json={"issue_id": other_id})
+    assert rejected.status_code == 422, rejected.text
+    async with db_factory() as session:
+        assert (await session.get(StoryArc, arc_id)).revision == revision
+        assert (await session.get(IssueStoryArc, member_id)).issue_id == issue_id
+    confirmed = await client.post(url, json={"issue_id": issue_id})
+    assert confirmed.status_code == 200, confirmed.text
+    async with db_factory() as session:
+        member = await session.get(IssueStoryArc, member_id)
+        assert member.evidence["catalog_review_required"] is False
+
+
+async def test_provider_monitoring_order_and_skip_preferences_remain_editable(
+    client: AsyncClient, db_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    arc_id, member_id, _, _, revision = await _seed_provider_arc(db_factory)
+    url = f"/api/v1/story-arcs/{arc_id}"
+    monitored = await client.patch(url, json={"expected_revision": revision, "monitored": True})
+    assert monitored.status_code == 200, monitored.text
+    assert monitored.json()["monitored"] is True
+    reordered = await client.put(
+        f"{url}/memberships/reorder",
+        json={"expected_revision": monitored.json()["revision"], "membership_ids": [member_id]},
+    )
+    assert reordered.status_code == 200, reordered.text
+    skipped = await client.patch(
+        f"{url}/memberships/{member_id}", json={"intentionally_skipped": True}
+    )
+    assert skipped.status_code == 200, skipped.text
+    assert skipped.json()["resolution_state"] == "skipped"
+
+
+async def test_manual_edit_flag_preserves_future_provider_authoring(
+    client: AsyncClient,
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pullbox.services import story_arc_editing_policy
+
+    monkeypatch.setattr(
+        story_arc_editing_policy,
+        "get_settings",
+        lambda: SimpleNamespace(story_arc_manual_edit_enabled=True),
+    )
+    arc_id, member_id, _, _, revision = await _seed_provider_arc(db_factory)
+    url = f"/api/v1/story-arcs/{arc_id}"
+    edited = await client.patch(url, json={"expected_revision": revision, "name": "Local override"})
+    assert edited.status_code == 200, edited.text
+    added = await client.post(
+        f"{url}/memberships", json={"sequence_number": 2, "source_issue_number_text": "99"}
+    )
+    assert added.status_code == 201, added.text
+    removed = await client.delete(f"{url}/memberships/{member_id}")
+    assert removed.status_code == 204, removed.text
 
 
 async def test_story_arc_routes_require_auth_and_keep_existing_routes(

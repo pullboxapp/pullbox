@@ -174,9 +174,13 @@ class StoryArcCatalogService:
             )
         root = await canonical_root(session, library_root_id)
         try:
+            if placement_policy is None:
+                from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
+
+                placement_policy = (await load_story_arc_file_defaults(session)).proposal()
             policy = await validate_story_arc_placement_policy_input(
                 session,
-                placement_policy or StoryArcPlacementPolicyInput("logical", None, None),
+                placement_policy,
                 revision=1,
             )
         except StoryArcPlacementIntegrationError as exc:

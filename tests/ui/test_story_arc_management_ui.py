@@ -28,6 +28,7 @@ from pullbox.models.story_arc import (
     StoryArcPlacementOwnership,
     StoryArcPlacementState,
     StoryArcResolutionState,
+    StoryArcSourceKind,
     StoryArcSymlinkStyle,
 )
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
@@ -66,6 +67,108 @@ def _csrf_header_for(client: AsyncClient) -> dict[str, str]:
     token = client.cookies.get(SESSION_COOKIE_NAME) or ""
     csrf = AuthService.get_csrf_token_from_session(token) or ""
     return {"X-CSRF-Token": csrf}
+
+
+@pytest.mark.parametrize("provider_linked", [False, True])
+async def test_provider_authoring_controls_and_direct_posts_are_gated(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    provider_linked: bool,
+) -> None:
+    ids = await _seed_detail_arc(sec_db)
+    async with sec_db() as session:
+        arc = await session.get(StoryArc, ids["arc"])
+        arc.source_kind = (
+            StoryArcSourceKind.MYLAR3 if provider_linked else StoryArcSourceKind.PROVIDER
+        )
+        arc.comicvine_id = 31 if provider_linked else None
+        await session.commit()
+    url = f"/story-arcs/{ids['arc']}"
+    page = await authenticated_client.get(url)
+    assert page.status_code == 200
+    assert 'data-testid="story-arc-add-membership-form"' not in page.text
+    assert 'data-testid="story-arc-remove-membership-' not in page.text
+    assert 'data-testid="story-arc-action-monitor-control"' in page.text
+    assert 'aria-label="Move issue 1000000 down"' in page.text
+    assert 'data-testid="story-arc-resolve-membership-' in page.text
+    for action, data in [
+        ("memberships", {"sequence_number": "99", "source_issue_number_text": "99"}),
+        (f"memberships/{ids['million_membership']}/remove", {}),
+    ]:
+        blocked = await authenticated_client.post(
+            f"{url}/{action}",
+            data=data,
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+        assert blocked.status_code == 303
+        assert "error=provider-managed" in blocked.headers["location"]
+    async with sec_db() as session:
+        assert await session.get(IssueStoryArc, ids["million_membership"]) is not None
+        assert await session.get(Issue, ids["million_issue"]) is not None
+
+
+async def test_manual_edit_flag_restores_provider_membership_controls(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pullbox.services import story_arc_editing_policy
+
+    monkeypatch.setattr(
+        story_arc_editing_policy,
+        "get_settings",
+        lambda: SimpleNamespace(story_arc_manual_edit_enabled=True),
+    )
+    ids = await _seed_detail_arc(sec_db)
+    async with sec_db() as session:
+        arc = await session.get(StoryArc, ids["arc"])
+        arc.comicvine_id = 31
+        await session.commit()
+    page = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
+    assert 'data-testid="story-arc-add-membership-form"' in page.text
+    assert 'data-testid="story-arc-remove-membership-' in page.text
+
+
+async def test_provider_review_confirms_order_without_offering_unrelated_replacements(
+    authenticated_client: AsyncClient, sec_db: async_sessionmaker[AsyncSession]
+) -> None:
+    ids = await _seed_detail_arc(sec_db)
+    async with sec_db() as session:
+        arc = await session.get(StoryArc, ids["arc"])
+        arc.comicvine_id = 31
+        member = await session.get(IssueStoryArc, ids["million_membership"])
+        member.source_kind = StoryArcSourceKind.PROVIDER
+        member.source_issue_id = "411"
+        member.evidence = {"provider": "comicvine", "catalog_review_required": True}
+        issue = await session.get(Issue, ids["million_issue"])
+        issue.comicvine_id = 411
+        await session.commit()
+    url = f"/story-arcs/{ids['arc']}"
+    page = await authenticated_client.get(url)
+    assert "Confirm reading order" in page.text
+    assert (
+        f'data-testid="story-arc-resolve-membership-{ids["million_membership"]}"' not in page.text
+    )
+    assert f'data-testid="story-arc-resolve-membership-{ids["annual_membership"]}"' in page.text
+    rejected = await authenticated_client.post(
+        f"{url}/memberships/{ids['million_membership']}/resolve",
+        data={"issue_id": ids["annual_issue"]},
+        headers=_csrf_header_for(authenticated_client),
+        follow_redirects=False,
+    )
+    assert "error=provider-identity" in rejected.headers["location"]
+    confirmed = await authenticated_client.post(
+        f"{url}/memberships/{ids['million_membership']}/resolve",
+        data={"issue_id": ids["million_issue"]},
+        headers=_csrf_header_for(authenticated_client),
+        follow_redirects=False,
+    )
+    assert "notice=resolved" in confirmed.headers["location"]
+    async with sec_db() as session:
+        member = await session.get(IssueStoryArc, ids["million_membership"])
+        assert member.issue_id == ids["million_issue"]
+        assert member.evidence["catalog_review_required"] is False
 
 
 def _copy_policy_form(
@@ -681,7 +784,8 @@ class TestStoryArcManagementUI:
         assert 'data-testid="story-arc-edit-form"' not in response.text
         assert 'name="include_upcoming"' not in response.text
         assert 'name="search_missing"' not in response.text
-        assert 'data-testid="story-arc-add-membership-form"' in response.text
+        assert 'data-testid="story-arc-add-membership-form"' not in response.text
+        assert 'data-testid="story-arc-remove-membership-' not in response.text
 
         input_css = Path("src/pullbox/ui/static/css/input.css").read_text(encoding="utf-8")
         assert ".series-domain-actions-panel-wide" in input_css
@@ -796,17 +900,20 @@ class TestStoryArcManagementUI:
             root_id = root.id
         destination = tmp_path / "Story Arcs"
         destination.mkdir()
-        form = {
-            "name": "New copy arc",
-            "mode": "copy",
-            "target_library_root_id": str(root_id),
-            "destination_root": str(destination),
-            "filename_style": "original",
-            "reading_order_width": "2",
-            "synchronize": "true",
-        }
-        if prefix:
-            form["prefix_reading_order"] = "true"
+        saved = await authenticated_client.put(
+            "/api/v1/config",
+            json={
+                "values": {
+                    "story_arc_files_enabled": "true",
+                    "story_arc_files_library_root_id": str(root_id),
+                    "story_arc_files_destination": str(destination),
+                    "story_arc_files_prefix_reading_order": str(prefix).lower(),
+                }
+            },
+            headers=_csrf_header_for(authenticated_client),
+        )
+        assert saved.status_code == 200
+        form = {"name": "New copy arc"}
         response = await authenticated_client.post(
             "/story-arcs",
             data=form,
@@ -828,11 +935,12 @@ class TestStoryArcManagementUI:
 
         page = await authenticated_client.get("/story-arcs/add")
         assert 'data-testid="story-arc-create-storage"' in page.text
-        assert 'name="prefix_reading_order"' in page.text
-        assert 'name="filename_style"' in page.text
+        assert 'name="prefix_reading_order"' not in page.text
+        assert 'name="filename_style"' not in page.text
+        assert 'name="file_defaults_fingerprint"' in page.text
         assert "Original files stay in their series folders" in page.text
 
-    async def test_invalid_create_copy_destination_does_not_leave_an_arc(
+    async def test_unavailable_saved_default_destination_does_not_leave_an_arc(
         self,
         authenticated_client: AsyncClient,
         sec_db: async_sessionmaker[AsyncSession],
@@ -847,6 +955,19 @@ class TestStoryArcManagementUI:
             session.add(root)
             await session.commit()
             root_id = root.id
+        saved = await authenticated_client.put(
+            "/api/v1/config",
+            json={
+                "values": {
+                    "story_arc_files_enabled": "true",
+                    "story_arc_files_library_root_id": str(root_id),
+                    "story_arc_files_destination": str(root_path),
+                }
+            },
+            headers=_csrf_header_for(authenticated_client),
+        )
+        assert saved.status_code == 200
+        root_path.rename(tmp_path / "offline")
         response = await authenticated_client.post(
             "/story-arcs",
             data={
@@ -1039,24 +1160,10 @@ class TestStoryArcManagementUI:
         response = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
 
         assert response.status_code == 200
-        assert 'data-testid="story-arc-placement-policy"' in response.text
-        assert 'data-testid="story-arc-placement-policy-form"' in response.text
-        assert "x-data='{ placementMode: \"logical\" }'" in response.text
-        assert "<legend" in response.text
-        assert "Logical only" in response.text
-        assert "Separate Story Arc folder" in response.text
-        assert '<option value="logical" selected' in response.text
-        assert '<option value="copy"' in response.text
-        assert '<option value="hardlink"' in response.text
-        assert '<option value="symlink"' in response.text
-        assert '<option value="reference_only"' in response.text
-        assert 'value="move"' not in response.text
-        assert '<label for="story-arc-placement-root"' in response.text
-        assert '<label for="story-arc-destination-root"' in response.text
-        assert '<label for="story-arc-folder-template"' in response.text
-        assert '<label for="story-arc-file-template"' in response.text
-        assert '<label for="story-arc-symlink-style"' in response.text
-        assert '<label for="story-arc-synchronize"' in response.text
+        assert 'data-testid="story-arc-placement-policy"' not in response.text
+        assert 'data-testid="story-arc-placement-policy-form"' not in response.text
+        assert "No separate folder" in response.text
+        assert 'href="/settings?tab=media#story-arc-files"' in response.text
         assert 'data-testid="story-arc-placement-preview"' in response.text
         assert 'data-classification="logical_only"' in response.text
         assert 'data-exact-issue-number="1000000"' in response.text
@@ -1096,8 +1203,8 @@ class TestStoryArcManagementUI:
         assert preview.status_code == 200, preview.text
         assert 'data-testid="story-arc-placement-preview-only"' in preview.text
         assert "Preview only — no policy or files were changed." in preview.text
-        assert '<option value="copy" selected' in preview.text
-        assert f'value="{ids["destination"]}"' in preview.text
+        assert "Copy" in preview.text
+        assert str(ids["destination"]) in preview.text
         assert 'data-classification="will_materialize"' in preview.text
         assert "001 - DC One Million 1000000 - The Final Hour.cbz" in preview.text
         assert "Copy" in preview.text
@@ -1141,13 +1248,11 @@ class TestStoryArcManagementUI:
 
         detail = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
         assert detail.status_code == 200
-        assert "Separate Story Arc folder" in detail.text
-        assert '<option value="copy" selected' in detail.text
-        assert 'id="story-arc-synchronize"' in detail.text
-        assert 'id="story-arc-synchronize" type="checkbox"' in detail.text
-        assert "checked" in detail.text
-        assert f'<option value="{ids["root"]}" selected' in detail.text
-        assert "Approved Comics" in detail.text
+        assert "Copied to arc folder" in detail.text
+        assert "Synchronized" in detail.text
+        assert 'data-testid="story-arc-placement-policy-form"' not in detail.text
+        assert str(ids["destination"]) in detail.text
+        assert "Defaults for new arcs" in detail.text
 
     async def test_managed_placement_state_can_sync_and_repair_from_detail(
         self,
@@ -1209,7 +1314,7 @@ class TestStoryArcManagementUI:
         assert missing.status_code == 200
         assert 'data-classification="managed_missing"' in missing.text
         assert f'data-testid="story-arc-placement-repair-{placement_id}"' in missing.text
-        assert "Canonical and referenced files will not be changed." in missing.text
+        assert "Canonical library files are never moved by Story Arc placement." in missing.text
 
         repaired = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/placements/{placement_id}/repair",

@@ -19,6 +19,7 @@ from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_policy import load_search_on_add_default
 from pullbox.models.story_arc import StoryArc, StoryArcLifecycle
 from pullbox.providers.metadata.comicvine import ComicVineError
+from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
 from pullbox.services.story_arc_service import StoryArcServiceError, StoryArcValidationError
 from pullbox.ui.story_arc_catalog_forms import StoryArcCatalogAddForm  # noqa: TC001
@@ -48,6 +49,10 @@ _ERRORS = {
         "The provider membership changed after preview. Review the latest list before confirming."
     ),
     "conflict": "This arc changed in another tab. Review the latest changes before confirming.",
+    "file-defaults": (
+        "Story Arc file defaults changed or are unavailable. "
+        "Review Settings → Media Management, then preview this arc again."
+    ),
     "catalog_limit_exceeded": (
         "This arc exceeds the supported review limit. Nothing was added or changed."
     ),
@@ -249,6 +254,7 @@ async def story_arc_catalog_preview(
         placement_roots=roots,
         managed_roots=managed_roots,
         placement_roots_truncated=truncated,
+        arc_file_defaults=await load_story_arc_file_defaults(session),
     )
 
 
@@ -267,7 +273,14 @@ async def story_arc_catalog_add(
     code = "validation"
     try:
         order = form.reviewed_order()
-        policy = form.placement_policy()
+        defaults = await load_story_arc_file_defaults(session)
+        if (
+            form.file_defaults_fingerprint
+            and form.file_defaults_fingerprint != defaults.fingerprint
+        ):
+            code = "file-defaults"
+            raise StoryArcValidationError("File defaults changed")
+        policy = defaults.proposal()
         async with _catalog_service(session) as service:
             preview = await service.preview(provider_id)
             if preview.fingerprint != form.fingerprint:
@@ -288,7 +301,10 @@ async def story_arc_catalog_add(
         initial_pending = _has_initial_work(arc)
         search_on_add = arc.monitored and await load_search_on_add_default(session)
         await session.commit()
-    except (StoryArcServiceError, StoryArcPlacementIntegrationError, IntegrityError):
+    except StoryArcPlacementIntegrationError:
+        await session.rollback()
+        return _redirect(request, f"/story-arcs/catalog/{provider_id}?error=file-defaults")
+    except (StoryArcServiceError, IntegrityError):
         await session.rollback()
         return _redirect(request, f"/story-arcs/catalog/{provider_id}?error={code}")
     except ComicVineError:

@@ -21,7 +21,11 @@ from pullbox.models.story_arc import (
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
-from pullbox.services.story_arc_membership_policy import order_review_filter, requires_order_review
+from pullbox.services.story_arc_membership_policy import (
+    order_review_filter,
+    provider_issue_identity,
+    requires_order_review,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +41,10 @@ class StoryArcNotFoundError(StoryArcServiceError):
 
 class StoryArcValidationError(StoryArcServiceError):
     """Raised when a requested story-arc mutation is invalid."""
+
+
+class StoryArcProviderIdentityError(StoryArcValidationError):
+    """A canonical issue cannot replace a different exact provider identity."""
 
 
 class StoryArcConflictError(StoryArcServiceError):
@@ -362,6 +370,12 @@ class StoryArcService:
         issue = await session.get(Issue, issue_id)
         if issue is None:
             raise StoryArcNotFoundError(f"Issue {issue_id} was not found")
+
+        provider_id = provider_issue_identity(membership)
+        if provider_id is not None and str(issue.comicvine_id) != provider_id:
+            raise StoryArcProviderIdentityError(
+                "The selected issue does not match this member's exact provider identity"
+            )
 
         duplicate_id = await session.scalar(
             select(IssueStoryArc.id).where(

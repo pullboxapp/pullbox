@@ -198,7 +198,7 @@
 
   <div class="space-y-6">
     <section aria-label="Story Arc placement and issue management" class="space-y-6">
-      {% if story_arc.active %}
+      {% if story_arc.active and story_arc.manual_editable %}
         <section aria-labelledby="story-arc-add-heading" class="rounded-lg border border-pb-border bg-pb-card p-4">
           <h3 id="story-arc-add-heading" class="font-semibold text-pb-text">Add issue</h3>
           <p id="story-arc-add-help" class="mt-1 text-sm text-pb-text-sec">
@@ -256,170 +256,13 @@
         </section>
       {% endif %}
 
-      <section
-        data-testid="story-arc-placement-policy"
-        aria-labelledby="story-arc-placement-policy-heading"
-        class="rounded-lg border border-pb-border bg-pb-card p-4"
-      >
-        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <h2 id="story-arc-placement-policy-heading" class="text-lg font-semibold text-pb-text">Placement policy</h2>
-            <p class="mt-1 text-sm text-pb-text-sec">
-              Current layout: <span class="font-medium text-pb-text">{{ placement_ui.policy.layout_label }}</span>
-            </p>
-          </div>
-          <span class="pill {{ 'pill-info' if placement_ui.policy.configured else 'pill-neutral' }}">
-            {{ 'Saved policy' if placement_ui.policy.configured else 'Default policy' }}
-          </span>
-        </div>
-
-        <div class="mt-3 space-y-1 text-sm text-pb-text-sec">
-          <p>Canonical library files are never moved by Story Arc placement.</p>
-          <p>Referenced artifacts remain user-owned and are never overwritten or deleted.</p>
-        </div>
-
-        {% if placement_message %}
-          <div
-            {% if placement_ui.preview_only %}data-testid="story-arc-placement-preview-only" role="status"{% else %}data-testid="story-arc-placement-error" role="alert"{% endif %}
-            aria-live="polite"
-            class="mt-4 rounded-lg border {{ 'border-pb-interactive/40 bg-pb-interactive/10' if placement_ui.preview_only else 'border-pb-error/40 bg-pb-error/10' }} px-4 py-3 text-sm text-pb-text"
-          >
-            {{ placement_message }}
-          </div>
-        {% endif %}
-
-        <form
-          action="/story-arcs/{{ story_arc.id }}/placement-policy"
-          method="post"
-          data-testid="story-arc-placement-policy-form"
-          class="mt-4 space-y-4"
-          x-data='{ placementMode: {{ placement_ui.policy.mode|tojson }} }'
-        >
-          <input type="hidden" name="expected_revision" value="{{ placement_ui.policy.revision }}">
-          <fieldset class="space-y-4"{% if not story_arc.active %} disabled{% endif %}>
-            <legend class="text-sm font-semibold text-pb-text">Logical only or Separate Story Arc folder</legend>
-
-            <div>
-              <label for="story-arc-placement-mode" class="mb-1 block text-sm font-medium text-pb-text">Placement method</label>
-              <select
-                id="story-arc-placement-mode"
-                name="mode"
-                x-model="placementMode"
-                class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-              >
-                <option value="logical"{% if placement_ui.policy.mode == 'logical' %} selected{% endif %}>Logical only</option>
-                <option value="copy"{% if placement_ui.policy.mode == 'copy' %} selected{% endif %}>Copy to a separate Story Arc folder</option>
-                <option value="hardlink"{% if placement_ui.policy.mode == 'hardlink' %} selected{% endif %}>Hardlink in a separate Story Arc folder</option>
-                <option value="symlink"{% if placement_ui.policy.mode == 'symlink' %} selected{% endif %}>Symlink in a separate Story Arc folder</option>
-                <option value="reference_only"{% if placement_ui.policy.mode == 'reference_only' %} selected{% endif %}>Reference an existing user-owned artifact</option>
-              </select>
-              <p class="mt-1 text-xs text-pb-text-dim">Logical only keeps the reading list in Pullbox without creating another file.</p>
-            </div>
-
-            <div class="grid gap-4 md:grid-cols-2">
-              <div>
-                <label for="story-arc-placement-root" class="mb-1 block text-sm font-medium text-pb-text">Approved library root</label>
-                <select
-                  id="story-arc-placement-root"
-                  name="target_library_root_id"
-                  class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-                >
-                  <option value=""{% if placement_ui.policy.target_library_root_id is none %} selected{% endif %}>Select an approved root</option>
-                  {% for root in placement_ui.roots %}
-                    <option value="{{ root.id }}"{% if placement_ui.policy.target_library_root_id == root.id %} selected{% endif %}{% if not root.enabled %} disabled{% endif %}
-                      :disabled="placementMode === 'reference_only' ? {{ 'false' if root.can_reference else 'true' }} : (placementMode === 'logical' ? false : {{ 'false' if root.can_manage else 'true' }})">
-                      {{ root.name }} — {{ root.path }}{% if root.can_manage and root.can_reference %}{% elif root.can_manage %} (managed only){% elif root.can_reference %} (reference only){% else %} (unavailable; current policy){% endif %}
-                    </option>
-                  {% endfor %}
-                </select>
-                {% if placement_ui.roots_truncated %}
-                  <p class="mt-1 text-xs text-pb-text-dim">Showing the first 100 approved roots. Narrow the configured roots before changing this policy.</p>
-                {% endif %}
-              </div>
-
-              <div>
-                <label for="story-arc-destination-root" class="mb-1 block text-sm font-medium text-pb-text">Destination within approved root</label>
-                <input
-                  id="story-arc-destination-root"
-                  name="destination_root"
-                  type="text"
-                  maxlength="1000"
-                  value="{{ placement_ui.policy.destination_root }}"
-                  autocomplete="off"
-                  class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 font-mono text-sm text-pb-text"
-                >
-              </div>
-            </div>
-
-            <div class="grid gap-4 md:grid-cols-2">
-              <div>
-                <label for="story-arc-folder-template" class="mb-1 block text-sm font-medium text-pb-text">Story Arc folder template</label>
-                <input
-                  id="story-arc-folder-template"
-                  name="folder_template"
-                  type="text"
-                  maxlength="1024"
-                  value="{{ placement_ui.policy.folder_template }}"
-                  required
-                  autocomplete="off"
-                  class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 font-mono text-sm text-pb-text"
-                >
-              </div>
-
-              <div>
-                <label for="story-arc-file-template" class="mb-1 block text-sm font-medium text-pb-text">Issue file template</label>
-                <input
-                  id="story-arc-file-template"
-                  name="file_template"
-                  type="text"
-                  maxlength="1024"
-                  value="{{ placement_ui.policy.file_template }}"
-                  required
-                  autocomplete="off"
-                  class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 font-mono text-sm text-pb-text"
-                >
-              </div>
-            </div>
-
-            <div class="grid gap-4 md:grid-cols-2">
-              <div>
-                <label for="story-arc-symlink-style" class="mb-1 block text-sm font-medium text-pb-text">Symlink style</label>
-                <select
-                  id="story-arc-symlink-style"
-                  name="symlink_style"
-                  class="w-full rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text"
-                >
-                  <option value=""{% if not placement_ui.policy.symlink_style %} selected{% endif %}>Not applicable</option>
-                  <option value="relative"{% if placement_ui.policy.symlink_style == 'relative' %} selected{% endif %}>Relative</option>
-                  <option value="absolute"{% if placement_ui.policy.symlink_style == 'absolute' %} selected{% endif %}>Absolute</option>
-                </select>
-              </div>
-
-              <label for="story-arc-synchronize" class="flex items-start gap-2 self-end rounded-md border border-pb-border bg-pb-bg px-3 py-2 text-sm text-pb-text-sec">
-                <input id="story-arc-synchronize" type="checkbox" name="synchronize" value="true" class="mt-0.5"{% if placement_ui.policy.synchronize %} checked{% endif %}>
-                <span>
-                  <span class="block font-medium text-pb-text">Synchronize placement</span>
-                  <span class="block text-xs text-pb-text-dim">Apply this policy when eligible Story Arc issues are processed.</span>
-                </span>
-              </label>
-            </div>
-          </fieldset>
-
-          {% if story_arc.active %}
-            <div class="flex flex-wrap gap-2">
-              <button
-                type="submit"
-                formaction="/story-arcs/{{ story_arc.id }}/placement-policy/preview"
-                formmethod="post"
-                class="btn-secondary"
-              >
-                Preview policy
-              </button>
-              <button type="submit" class="btn-primary">Save policy</button>
-            </div>
-          {% endif %}
-        </form>
-      </section>
+      {% if placement_message %}
+        <div
+          {% if placement_ui.preview_only %}data-testid="story-arc-placement-preview-only" role="status"{% else %}data-testid="story-arc-placement-error" role="alert"{% endif %}
+          aria-live="polite"
+          class="info-panel"
+        >{{ placement_message }}</div>
+      {% endif %}
 
       <section
         data-testid="story-arc-placement-preview"
@@ -431,7 +274,7 @@
           <div>
             <h2 id="story-arc-placement-preview-heading" class="text-lg font-semibold text-pb-text">Representative placement preview</h2>
             <p class="mt-1 text-sm text-pb-text-sec">
-              A read-only, bounded view of {{ placement_ui.preview.total }} entr{{ 'y' if placement_ui.preview.total == 1 else 'ies' }} under the policy shown above.
+              A read-only, bounded view of {{ placement_ui.preview.total }} entr{{ 'y' if placement_ui.preview.total == 1 else 'ies' }} under this arc's saved file policy.
             </p>
           </div>
           {% if placement_ui.preview.total %}
@@ -439,7 +282,7 @@
           {% endif %}
         </div>
 
-        <p class="mt-3 text-sm text-pb-text-sec">Canonical and referenced files will not be changed.</p>
+        <p class="mt-3 text-sm text-pb-text-sec">Canonical library files are never moved by Story Arc placement. Referenced artifacts remain user-owned and are never overwritten or deleted.</p>
 
         {% if placement_ui.preview.items %}
           <div class="mt-4 overflow-x-auto">

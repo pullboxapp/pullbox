@@ -144,9 +144,10 @@ async def test_catalog_preview_requires_order_review_and_separate_canonical_root
     assert 'name="reading_orders"' in response.text
     assert "Library root for new series" in response.text
     assert 'name="library_root_id"' in response.text
-    assert 'name="target_library_root_id"' in response.text
-    assert "Keep the original filename" in response.text
-    assert "Prefix arc filenames with the reading order" in response.text
+    assert 'name="target_library_root_id"' not in response.text
+    assert 'name="file_defaults_fingerprint"' in response.text
+    assert "No separate folder" in response.text
+    assert 'href="/settings?tab=media#story-arc-files"' in response.text
 
 
 async def test_catalog_preview_lists_only_managed_roots_with_default_first(
@@ -202,10 +203,10 @@ async def test_catalog_preview_lists_only_managed_roots_with_default_first(
     response = await authenticated_client.get("/story-arcs/catalog/42")
 
     assert response.status_code == 200
-    assert response.text.count("Zulu default managed") == 2
-    assert response.text.count("Alpha managed") == 2
+    assert response.text.count("Zulu default managed") == 1
+    assert response.text.count("Alpha managed") == 1
     assert response.text.index("Zulu default managed") < response.text.index("Alpha managed")
-    assert response.text.count("Reference only") == 1
+    assert "Reference only" not in response.text
     assert "Disabled managed" not in response.text
     assert "Offline managed" not in response.text
 
@@ -283,6 +284,19 @@ async def test_add_persists_reviewed_order_and_independent_copy_settings(
     tmp_path,
 ):
     root_id = await _root(sec_db, str(tmp_path))
+    saved = await authenticated_client.put(
+        "/api/v1/config",
+        json={
+            "values": {
+                "story_arc_files_enabled": "true",
+                "story_arc_files_library_root_id": str(root_id),
+                "story_arc_files_destination": str(tmp_path),
+                "story_arc_files_prefix_reading_order": "true",
+            }
+        },
+        headers=_csrf(authenticated_client),
+    )
+    assert saved.status_code == 200
     response = await authenticated_client.get("/story-arcs/catalog/42")
     assert response.status_code == 200
     token = re.search(r'name="fingerprint" value="([^"]+)"', response.text)
@@ -295,12 +309,8 @@ async def test_add_persists_reviewed_order_and_independent_copy_settings(
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["2", "1"],
-            "mode": "copy",
-            "target_library_root_id": str(root_id),
-            "destination_root": str(tmp_path),
-            "prefix_reading_order": "true",
-            "reading_order_width": "2",
-            "synchronize": "true",
+            "mode": "symlink",  # obsolete browser storage fields cannot override defaults
+            "destination_root": "/not-approved",
         },
         headers=_csrf(authenticated_client),
         follow_redirects=False,
@@ -320,6 +330,39 @@ async def test_add_persists_reviewed_order_and_independent_copy_settings(
         assert arc.policy_snapshot["file_template"] == "{ReadingOrder:02d} - {OriginalFilename}"
         assert arc.policy_snapshot["mode"] == "copy"
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_changed_file_defaults_require_repreview_before_adding(
+    authenticated_client: AsyncClient, sec_db, catalog_provider: CatalogProvider, tmp_path: Path
+):
+    root_id = await _root(sec_db, str(tmp_path))
+    preview = await authenticated_client.get("/story-arcs/catalog/42")
+    token = re.search(r'name="fingerprint" value="([^"]+)"', preview.text)
+    defaults = re.search(r'name="file_defaults_fingerprint" value="([^"]+)"', preview.text)
+    assert token and defaults
+    saved = await authenticated_client.put(
+        "/api/v1/config",
+        json={"values": {"story_arc_files_prefix_reading_order": "true"}},
+        headers=_csrf(authenticated_client),
+    )
+    assert saved.status_code == 200
+    added = await authenticated_client.post(
+        "/story-arcs/catalog/42",
+        data={
+            "fingerprint": token.group(1),
+            "file_defaults_fingerprint": defaults.group(1),
+            "order_reviewed": "true",
+            "library_root_id": str(root_id),
+            "issue_provider_ids": ["101", "102"],
+            "reading_orders": ["1", "2"],
+        },
+        headers=_csrf(authenticated_client),
+        follow_redirects=False,
+    )
+    assert added.status_code == 303
+    assert added.headers["location"].endswith("?error=file-defaults")
+    async with sec_db() as session:
+        assert list(await session.scalars(select(StoryArc))) == []
 
 
 async def test_failed_provider_cleanup_cannot_report_failure_after_committing_add(

@@ -164,6 +164,10 @@
       <div data-testid="story-arc-arc-files-summary">
         <p class="series-domain-info-value">{{ placement_ui.policy.summary_label }}</p>
         <p class="mt-1 text-xs text-pb-text-dim">{{ placement_ui.policy.synchronization_label }}</p>
+        {% if placement_ui.policy.destination_root %}
+          <p class="mt-1 break-all font-mono text-xs text-pb-text-dim">{{ placement_ui.policy.destination_root }}</p>
+        {% endif %}
+        <p class="mt-1 text-xs text-pb-text-dim">Saved for this arc. <a href="/settings?tab=media#story-arc-files" class="text-pb-interactive hover:underline">Defaults for new arcs</a></p>
       </div>
     </div>
   </div>

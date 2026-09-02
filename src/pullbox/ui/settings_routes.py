@@ -268,6 +268,9 @@ async def load_settings_tab(request: Request, session: DbSession, tab: str) -> d
             )
         )
         ctx["library_roots"] = root_states
+        from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
+
+        ctx["arc_file_defaults"] = await load_story_arc_file_defaults(session)
     elif tab == "metadata":
         result = await session.execute(select(SystemConfig).order_by(SystemConfig.key))
         ctx["configs"] = {c.key: c.value for c in result.scalars().all()}

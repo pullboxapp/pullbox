@@ -464,7 +464,8 @@ class TestSettingsRouteContracts:
         response = await authenticated_client.get("/settings?tab=media")
 
         assert response.status_code == 200
-        assert response.text.count("settings-media-preview-panel") == 5
+        assert response.text.count("settings-media-preview-panel") == 6
+        assert 'data-testid="arc-files-preview"' in response.text
         assert 'data-preview-ready="false"' in response.text
         assert 'aria-live="polite"' in response.text
         assert 'aria-busy="false"' in response.text
