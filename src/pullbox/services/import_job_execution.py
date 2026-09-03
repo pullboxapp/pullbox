@@ -91,7 +91,7 @@ from pullbox.services.import_progress_runtime import (
     ImportProgressSettings,
     current_item_payload,
     import_group_progress_plan,
-    weighted_import_progress_pct,
+    import_work_progress,
 )
 from pullbox.services.import_root_policy_activation import (
     RootPolicyActivationConflictError,
@@ -343,6 +343,8 @@ async def execute_import_job(
             runtime_revision_state=runtime_revision_state,
         )
 
+    # Execution plans contain only remaining work, including after pause/restart.
+    work_started_at = datetime.now(UTC)
     _prime_series_prefetch_window(
         series_service=series_service,
         execution_items=execution_items,
@@ -356,10 +358,10 @@ async def execute_import_job(
         job_id=job_id,
         job=job,
         job_started_at=job_started_at,
+        work_started_at=work_started_at,
         progress_callback=progress_callback,
         emit_progress=emit_progress,
         emit_live_progress=emit_live_progress,
-        estimate_remaining_seconds=estimate_remaining_seconds,
         group_progress_plans=group_progress_plans,
         shared_progress_settings=shared_progress_settings,
         group_progress_weights=group_progress_weights,
@@ -403,9 +405,9 @@ async def execute_import_job(
                 job_id=job_id,
                 job=job,
                 job_started_at=job_started_at,
+                work_started_at=work_started_at,
                 progress_callback=progress_callback,
                 progress_session_factory=progress_session_factory,
-                estimate_remaining_seconds=estimate_remaining_seconds,
                 group_progress_plans=group_progress_plans,
                 shared_progress_settings=shared_progress_settings,
                 group_progress_weights=group_progress_weights,
@@ -608,10 +610,10 @@ async def execute_import_job(
                 item = refreshed_item
 
             if progress_callback:
-                progress = weighted_import_progress_pct(
+                work_progress = import_work_progress(
                     group_progress_weights,
                     current_group_index=idx,
-                    current_group_progress_pct=100,
+                    current_group_completed_weight=group_progress_weights[idx],
                 )
                 job.series_imported = imported_count
                 job.series_failed = failed_count
@@ -626,15 +628,14 @@ async def execute_import_job(
                         job_id=job_id,
                         status=ImportJobStatus.IMPORTING,
                         phase="importing",
-                        progress=progress,
+                        progress=work_progress.progress_pct,
                         message=f"Processed {idx + 1}/{len(execution_items)} review groups",
                         current_series=item_raw_series_name,
                         current_series_status=(
                             item.status if item is not None else ImportSeriesStatus.FAILED
                         ),
-                        estimated_seconds_remaining=estimate_remaining_seconds(
-                            job_started_at,
-                            progress,
+                        estimated_seconds_remaining=work_progress.remaining_seconds(
+                            work_started_at
                         ),
                         series_imported=imported_count,
                         series_failed=failed_count,

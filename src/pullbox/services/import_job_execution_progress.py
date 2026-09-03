@@ -31,10 +31,10 @@ from pullbox.services.import_progress_runtime import (
     ImportProgressFileProfile,
     ImportProgressSettings,
     current_item_payload,
-    import_group_file_progress_pct,
-    import_group_metadata_progress_pct,
+    import_group_file_completed_weight,
+    import_group_metadata_completed_weight,
     import_group_progress_plan,
-    weighted_import_progress_pct,
+    import_work_progress,
 )
 
 if TYPE_CHECKING:
@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.services.import_job_execution_types import (
-        EstimateRemainingFunc,
         ExecutionItemPlan,
         RaiseIfCancelledFunc,
         ReportFileProgressFunc,
@@ -206,9 +205,9 @@ def build_report_file_progress_callback(
     job_id: int,
     job: ImportJob,
     job_started_at: datetime | None,
+    work_started_at: datetime,
     progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None,
     progress_session_factory: async_sessionmaker[AsyncSession] | None,
-    estimate_remaining_seconds: EstimateRemainingFunc,
     group_progress_plans: dict[int, ImportGroupProgressPlan],
     shared_progress_settings: ImportProgressSettings,
     group_progress_weights: list[float],
@@ -251,15 +250,15 @@ def build_report_file_progress_callback(
             series_id,
             import_group_progress_plan(shared_progress_settings, []),
         )
-        group_progress_pct = import_group_file_progress_pct(
+        group_completed_weight = import_group_file_completed_weight(
             group_plan,
             file_index=file_index,
             current_file_pct=current_file_pct,
         )
-        overall_progress = weighted_import_progress_pct(
+        work_progress = import_work_progress(
             group_progress_weights,
             current_group_index=group_index,
-            current_group_progress_pct=group_progress_pct,
+            current_group_completed_weight=group_completed_weight,
         )
         loop_now = monotonic_time()
         emitted_at_value = progress_state.get("emitted_at")
@@ -297,7 +296,7 @@ def build_report_file_progress_callback(
             ephemeral_progress=not persist_progress,
             mode="import",
             phase="importing",
-            progress=overall_progress,
+            progress=work_progress.progress_pct,
             message=(
                 f"Processing file {file_index}/{max(total_files, 1)} "
                 f"in review group {group_index + 1}/{max(total_groups, 1)}"
@@ -313,10 +312,7 @@ def build_report_file_progress_callback(
             current_file_progress_unit=unit,
             current_series=series_name,
             current_series_status=ImportSeriesStatus.IMPORTING,
-            estimated_seconds_remaining=estimate_remaining_seconds(
-                job_started_at,
-                overall_progress,
-            ),
+            estimated_seconds_remaining=work_progress.remaining_seconds(work_started_at),
             series_imported=int(stats["series_imported"]),
             series_failed=int(stats["series_failed"]),
             series_found=series_found,
@@ -361,10 +357,10 @@ def build_series_metadata_progress_emitter(
     job_id: int,
     job: ImportJob,
     job_started_at: datetime | None,
+    work_started_at: datetime,
     progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None,
     emit_progress: Callable[..., Awaitable[None]],
     emit_live_progress: Callable[..., Awaitable[None]],
-    estimate_remaining_seconds: EstimateRemainingFunc,
     group_progress_plans: dict[int, ImportGroupProgressPlan],
     shared_progress_settings: ImportProgressSettings,
     group_progress_weights: list[float],
@@ -392,14 +388,14 @@ def build_series_metadata_progress_emitter(
             series_id,
             import_group_progress_plan(shared_progress_settings, []),
         )
-        group_progress = import_group_metadata_progress_pct(
+        group_completed_weight = import_group_metadata_completed_weight(
             group_plan,
             metadata_progress_pct=current_item_progress_pct,
         )
-        progress = weighted_import_progress_pct(
+        work_progress = import_work_progress(
             group_progress_weights,
             current_group_index=group_index,
-            current_group_progress_pct=group_progress,
+            current_group_completed_weight=group_completed_weight,
         )
         current_stats = stats()
         event = ImportProgressEvent(
@@ -407,16 +403,13 @@ def build_series_metadata_progress_emitter(
             status=ImportJobStatus.IMPORTING,
             mode="import",
             phase="importing",
-            progress=progress,
+            progress=work_progress.progress_pct,
             message=message,
             current_series_id=series_id,
             current_series_name=series_name,
             current_series=series_name,
             current_series_status=ImportSeriesStatus.IMPORTING,
-            estimated_seconds_remaining=estimate_remaining_seconds(
-                job_started_at,
-                progress,
-            ),
+            estimated_seconds_remaining=work_progress.remaining_seconds(work_started_at),
             series_imported=current_stats["series_imported"],
             series_failed=current_stats["series_failed"],
             series_found=series_found,

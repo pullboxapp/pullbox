@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -45,6 +46,79 @@ from pullbox.services.import_job_execution import (
 )
 from pullbox.services.import_job_execution_types import ExecutionItemPlan
 from pullbox.services.import_workflow_state import emit_progress
+
+
+@pytest.mark.parametrize("source_type", [ImportSourceType.MYLAR3, ImportSourceType.FILESYSTEM])
+async def test_completed_group_eta_uses_remaining_work_before_one_percent(
+    db_session, monkeypatch, source_type
+):
+    from pullbox.services import import_progress_runtime
+    from pullbox.services.import_operation_progress import build_import_operation_update
+    from pullbox.services.import_workflow_state import estimate_remaining_seconds
+    from pullbox.ui.import_progress_snapshot import build_import_progress_snapshot
+
+    job = ImportJob(
+        source_path="/tmp/imports",
+        source_type=source_type,
+        import_started_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    db_session.add(job)
+    await db_session.flush()
+    db_session.add_all(
+        ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name=f"Series {index:04d}",
+            status=ImportSeriesStatus.CONFIRMED,
+            cv_id=900_000 + index,
+        )
+        for index in range(300)
+    )
+    await db_session.commit()
+    events = []
+    measured_starts = []
+    invocation_start = datetime.now(UTC)
+
+    def elapsed(started_at):
+        measured_starts.append(started_at)
+        return 20
+
+    async def complete_group(_session, _job, item, **kwargs):
+        item.status = ImportSeriesStatus.IMPORTED
+        return 0, 0, kwargs["imported_count"] + 1, 0, True
+
+    async def capture(event):
+        events.append(event.model_copy(deep=True))
+
+    async def stop_after_group():
+        raise JobCancelledError()
+
+    monkeypatch.setattr(import_progress_runtime, "elapsed_seconds_since", elapsed)
+    monkeypatch.setattr(import_job_execution, "_execute_new_series", complete_group)
+    with pytest.raises(JobCancelledError):
+        await execute_import_job(
+            db_session,
+            job.id,
+            series_service=object(),
+            process_series_files=AsyncMock(),
+            raise_if_cancelled=AsyncMock(),
+            record_action=AsyncMock(),
+            log_event=AsyncMock(),
+            emit_progress=emit_progress,
+            estimate_remaining_seconds=estimate_remaining_seconds,
+            maybe_slow_item_delay=stop_after_group,
+            progress_callback=capture,
+        )
+
+    completed = next(event for event in events if event.message == "Processed 1/300 review groups")
+    assert completed.progress == 0
+    assert completed.estimated_seconds_remaining == 5980
+    assert measured_starts and all(start >= invocation_start for start in measured_starts)
+    await db_session.refresh(job)
+    hydrated = build_import_progress_snapshot(
+        job, review_summary={}, recent_logs=[], progress_revision=job.progress_revision
+    )
+    assert hydrated["estimated_seconds_remaining"] == 5980
+    assert build_import_operation_update(job, completed).eta_seconds == 5980
 
 
 @pytest.fixture(autouse=True)

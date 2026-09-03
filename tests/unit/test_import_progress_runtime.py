@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from pullbox.services.import_progress_runtime import (
+    ImportGroupProgressPlan,
     ImportProgressFileProfile,
     ImportProgressSettings,
     ScanReviewFileMatchProfile,
@@ -13,9 +14,12 @@ from pullbox.services.import_progress_runtime import (
     default_phase_message,
     elapsed_seconds_since,
     estimate_remaining_work_seconds,
+    import_group_file_completed_weight,
     import_group_file_progress_pct,
+    import_group_metadata_completed_weight,
     import_group_metadata_progress_pct,
     import_group_progress_plan,
+    import_work_progress,
     phase_label,
     phase_range,
     scan_review_completed_weight,
@@ -26,6 +30,52 @@ from pullbox.services.import_progress_runtime import (
     stage_label,
     weighted_import_progress_pct,
 )
+
+
+def test_import_work_keeps_precision_separate_from_display_percentage(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pullbox.services.import_progress_runtime.elapsed_seconds_since", lambda _start: 20
+    )
+    work = import_work_progress(
+        [10.0] * 50_000, current_group_index=0, current_group_completed_weight=2.0
+    )
+    assert work.completed_weight == 2.0
+    assert work.total_weight == 500_000.0
+    assert work.progress_pct == 0
+    assert work.remaining_seconds(datetime.now(UTC)) == 4_999_980
+
+
+def test_import_work_does_not_round_away_files_within_large_group() -> None:
+    plan = ImportGroupProgressPlan(2.0, tuple((idx, 3.5) for idx in range(2000)))
+    metadata = import_group_metadata_completed_weight(plan, metadata_progress_pct=10)
+    file_work = import_group_file_completed_weight(plan, file_index=1, current_file_pct=100)
+    assert metadata == 0.2
+    assert file_work == 5.5
+    assert import_group_file_progress_pct(plan, file_index=1, current_file_pct=100) == 0
+    work = import_work_progress(
+        [plan.total_weight], current_group_index=0, current_group_completed_weight=file_work
+    )
+    assert work.completed_weight == 5.5
+    assert work.progress_pct == 0
+
+
+def test_import_work_keeps_unknown_and_completion_bounds() -> None:
+    started = datetime.now(UTC) - timedelta(seconds=20)
+    empty = import_work_progress([], current_group_index=0, current_group_completed_weight=0)
+    assert empty.progress_pct == 0
+    assert empty.remaining_seconds(started) is None
+    pending = import_work_progress(
+        [10.0], current_group_index=-1, current_group_completed_weight=-5
+    )
+    assert pending.completed_weight == 0
+    assert pending.remaining_seconds(started) is None
+    done = import_work_progress([10.0], current_group_index=0, current_group_completed_weight=1000)
+    assert done.completed_weight == 10
+    assert done.progress_pct == 99
+    assert done.remaining_seconds(started) is None
+    active = import_work_progress([10.0], current_group_index=0, current_group_completed_weight=1)
+    assert active.remaining_seconds(None) is None
+    assert active.remaining_seconds(datetime.now(UTC)) is None
 
 
 def test_shared_progress_spec_owns_phase_ranges_labels_and_defaults() -> None:
