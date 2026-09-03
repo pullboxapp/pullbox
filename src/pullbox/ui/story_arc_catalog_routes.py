@@ -19,6 +19,8 @@ from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_policy import load_search_on_add_default
 from pullbox.models.story_arc import StoryArc, StoryArcLifecycle
 from pullbox.providers.metadata.comicvine import ComicVineError
+from pullbox.services.cover_url_service import build_story_arc_cover_url
+from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
 from pullbox.services.story_arc_service import StoryArcServiceError, StoryArcValidationError
 from pullbox.ui.story_arc_catalog_forms import StoryArcCatalogAddForm  # noqa: TC001
@@ -40,7 +42,7 @@ _get_templates: Callable[[], Jinja2Templates] | None = None
 _build_context: Callable[..., dict[str, object]] | None = None
 _ProviderId = Annotated[str, Path(pattern=r"^[1-9][0-9]{0,18}$")]
 _ERRORS = {
-    "provider": "Comic Vine couldn't load this arc. Check the provider settings and retry preview.",
+    "provider": "Comic Vine couldn't load this arc. Check the provider settings and try again.",
     "validation": (
         "The arc wasn't added. Review the reading order and storage choices, then confirm again."
     ),
@@ -48,6 +50,10 @@ _ERRORS = {
         "The provider membership changed after preview. Review the latest list before confirming."
     ),
     "conflict": "This arc changed in another tab. Review the latest changes before confirming.",
+    "file-defaults": (
+        "Story Arc file defaults changed or are unavailable. "
+        "Review Settings → Media Management, then preview this arc again."
+    ),
     "catalog_limit_exceeded": (
         "This arc exceeds the supported review limit. Nothing was added or changed."
     ),
@@ -249,6 +255,7 @@ async def story_arc_catalog_preview(
         placement_roots=roots,
         managed_roots=managed_roots,
         placement_roots_truncated=truncated,
+        arc_file_defaults=await load_story_arc_file_defaults(session),
     )
 
 
@@ -267,7 +274,14 @@ async def story_arc_catalog_add(
     code = "validation"
     try:
         order = form.reviewed_order()
-        policy = form.placement_policy()
+        defaults = await load_story_arc_file_defaults(session)
+        if (
+            form.file_defaults_fingerprint
+            and form.file_defaults_fingerprint != defaults.fingerprint
+        ):
+            code = "file-defaults"
+            raise StoryArcValidationError("File defaults changed")
+        policy = defaults.proposal()
         async with _catalog_service(session) as service:
             preview = await service.preview(provider_id)
             if preview.fingerprint != form.fingerprint:
@@ -280,17 +294,18 @@ async def story_arc_catalog_add(
             skipped_issue_provider_ids=form.skipped_issue_provider_ids,
             library_root_id=form.library_root_id,
             monitored=form.monitored,
-            search_missing=form.search_missing,
-            include_upcoming=form.include_upcoming,
+            search_missing=form.monitored,
+            include_upcoming=form.monitored,
             placement_policy=policy,
         )
         arc_id = arc.id
         initial_pending = _has_initial_work(arc)
-        search_on_add = (
-            arc.monitored and arc.search_missing and await load_search_on_add_default(session)
-        )
+        search_on_add = arc.monitored and await load_search_on_add_default(session)
         await session.commit()
-    except (StoryArcServiceError, StoryArcPlacementIntegrationError, IntegrityError):
+    except StoryArcPlacementIntegrationError:
+        await session.rollback()
+        return _redirect(request, f"/story-arcs/catalog/{provider_id}?error=file-defaults")
+    except (StoryArcServiceError, IntegrityError):
         await session.rollback()
         return _redirect(request, f"/story-arcs/catalog/{provider_id}?error={code}")
     except ComicVineError:
@@ -360,6 +375,10 @@ async def story_arc_catalog_refresh_preview(
     username = user.username
     arc = await _provider_arc(session, story_arc_id)
     name, provider_id = arc.name, str(arc.comicvine_id)
+    cover_src = build_story_arc_cover_url(arc)
+    comicvine_url = arc.comicvine_url or (
+        f"https://comicvine.gamespot.com/story-arc/4045-{provider_id}/"
+    )
     catalog = (arc.diagnostics or {}).get("provider_catalog")
     saved_root = catalog.get("canonical_library_root_id") if isinstance(catalog, dict) else None
     needs_library_root = not (type(saved_root) is int and saved_root > 0)
@@ -382,6 +401,8 @@ async def story_arc_catalog_refresh_preview(
         "pages/story_arc_catalog_refresh.html",
         story_arc_id=story_arc_id,
         arc_name=name,
+        arc_cover_src=cover_src,
+        arc_comicvine_url=comicvine_url,
         preview=preview,
         changes=changes,
         error_message=message,
@@ -421,11 +442,7 @@ async def story_arc_catalog_refresh(
             expected_revision=expected_revision,
             library_root_id=library_root_id,
         )
-        search_on_add = (
-            result.story_arc.monitored
-            and result.story_arc.search_missing
-            and await load_search_on_add_default(session)
-        )
+        search_on_add = result.story_arc.monitored and await load_search_on_add_default(session)
         await session.commit()
     except (StoryArcServiceError, IntegrityError) as exc:
         await session.rollback()

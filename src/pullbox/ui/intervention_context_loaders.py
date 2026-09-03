@@ -214,6 +214,7 @@ async def load_intervention_queue_context(
             ("usenet", "Usenet"),
             ("torrent", "Torrent"),
             ("direct", "Direct"),
+            ("dc", "Direct Connect"),
         ],
         "high_count": confidence_counts.get("high", 0),
         "medium_count": confidence_counts.get("medium", 0),
@@ -345,6 +346,7 @@ async def load_intervention_history_context(
             ("usenet", "Usenet"),
             ("torrent", "Torrent"),
             ("direct", "Direct"),
+            ("dc", "Direct Connect"),
         ],
     }
 

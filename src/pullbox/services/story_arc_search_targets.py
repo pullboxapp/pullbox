@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import exists, func, select
 
-from pullbox.models.download import DownloadHistory, DownloadState
-from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import LibraryFile
-from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
+from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -18,7 +14,11 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcResolutionState,
 )
-from pullbox.services.search_targets import IssueSearchTarget, _target_from_row
+from pullbox.services.search_targets import (
+    IssueSearchTarget,
+    _target_from_row,
+    arc_issue_acquisition_filter,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,29 +43,6 @@ async def load_story_arc_search_eligible_counts(
         return {}
     if len(story_arc_ids) > 100:
         raise ValueError("Story Arc search eligibility is limited to 100 visible arcs")
-    today = date.today()
-    publication_date = func.coalesce(Issue.store_date, Issue.release_date)
-    upcoming = and_(publication_date.is_not(None), publication_date > today)
-    active_download = exists().where(
-        DownloadHistory.issue_id == Issue.id,
-        or_(
-            DownloadHistory.state.in_(
-                (
-                    DownloadState.QUEUED,
-                    DownloadState.SENT,
-                    DownloadState.DOWNLOADING,
-                    DownloadState.FINALIZING,
-                    DownloadState.PAUSED,
-                    DownloadState.RETRY_PENDING,
-                    DownloadState.POST_PROCESSING,
-                )
-            ),
-            and_(
-                DownloadHistory.state == DownloadState.COMPLETED,
-                DownloadHistory.imported_at.is_(None),
-            ),
-        ),
-    )
     result = await session.execute(
         select(IssueStoryArc.story_arc_id, func.count(func.distinct(Issue.id)))
         .join(StoryArc, StoryArc.id == IssueStoryArc.story_arc_id)
@@ -74,15 +51,7 @@ async def load_story_arc_search_eligible_counts(
             IssueStoryArc.story_arc_id.in_(story_arc_ids),
             IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
             StoryArc.lifecycle == StoryArcLifecycle.ACTIVE,
-            or_(StoryArc.include_upcoming.is_(True), ~upcoming),
-            Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
-            Issue.manual_skip.is_(False),
-            ~exists().where(LibraryFile.issue_id == Issue.id),
-            ~active_download,
-            ~exists().where(
-                PendingMatch.issue_id == Issue.id,
-                PendingMatch.status == PendingMatchStatus.PENDING,
-            ),
+            arc_issue_acquisition_filter(),
         )
         .group_by(IssueStoryArc.story_arc_id)
     )
@@ -102,7 +71,7 @@ async def load_story_arc_missing_search_targets(
     """Search only resolved, missing arc members while preserving explicit skips.
 
     Manual arc searches need not enable whole-series or arc monitoring. They
-    still respect the arc's upcoming option, existing files, active downloads,
+    still respect publication dates, existing files, active downloads,
     unresolved memberships, and pending intervention decisions.
     """
     if not 1 <= limit <= 100 or after_issue_id < 0:
@@ -111,39 +80,12 @@ async def load_story_arc_missing_search_targets(
         if not issue_ids:
             return []
         raise ValueError("Story Arc search ID batches must not exceed 100")
-    today = date.today()
-    # Comic Vine's release_date is the cover date, often months after stores
-    # receive an issue. Prefer a known store date; today's releases are missing,
-    # not upcoming, and an undated issue must not be excluded by SQL NULL logic.
-    publication_date = func.coalesce(Issue.store_date, Issue.release_date)
-    upcoming = and_(publication_date.is_not(None), publication_date > today)
     membership = exists().where(
         IssueStoryArc.story_arc_id == story_arc_id,
         IssueStoryArc.issue_id == Issue.id,
         IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
         StoryArc.id == IssueStoryArc.story_arc_id,
         StoryArc.lifecycle == StoryArcLifecycle.ACTIVE,
-        or_(StoryArc.include_upcoming.is_(True), ~upcoming),
-    )
-    active_download = exists().where(
-        DownloadHistory.issue_id == Issue.id,
-        or_(
-            DownloadHistory.state.in_(
-                (
-                    DownloadState.QUEUED,
-                    DownloadState.SENT,
-                    DownloadState.DOWNLOADING,
-                    DownloadState.FINALIZING,
-                    DownloadState.PAUSED,
-                    DownloadState.RETRY_PENDING,
-                    DownloadState.POST_PROCESSING,
-                )
-            ),
-            and_(
-                DownloadHistory.state == DownloadState.COMPLETED,
-                DownloadHistory.imported_at.is_(None),
-            ),
-        ),
     )
     statement = (
         select(
@@ -159,19 +101,14 @@ async def load_story_arc_missing_search_targets(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(
             Issue.id > after_issue_id,
-            Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
-            Issue.manual_skip.is_(False),
+            arc_issue_acquisition_filter(),
             membership,
-            ~exists().where(LibraryFile.issue_id == Issue.id),
-            ~active_download,
-            ~exists().where(
-                PendingMatch.issue_id == Issue.id,
-                PendingMatch.status == PendingMatchStatus.PENDING,
-            ),
         )
         .order_by(Issue.id)
         .limit(limit)

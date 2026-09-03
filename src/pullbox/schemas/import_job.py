@@ -65,6 +65,15 @@ class ImportJobCreate(BaseModel):
         False,
         description="Whether Step 1 preview confirmation froze this exact mapping snapshot",
     )
+    mylar3_allow_unresolved_paths: bool = Field(
+        False,
+        description="Explicitly acknowledge unavailable sources retained as review exceptions",
+    )
+    mylar3_unresolved_fingerprint: str | None = Field(
+        None,
+        pattern=r"^[a-f0-9]{64}$",
+        description="The reviewed unavailable-path set, revalidated when the scan starts",
+    )
     cv_match_threshold: float = Field(
         0.70, ge=0.50, le=1.00, description="Minimum CV match score to accept"
     )
@@ -119,6 +128,8 @@ class ImportJobCreate(BaseModel):
             raise ValueError("Mylar path mapping is only supported for Mylar imports.")
         if self.mylar3_path_map_confirmed and self.source_type != ImportSourceType.MYLAR3:
             raise ValueError("Mylar path mapping confirmation is only supported for Mylar imports.")
+        if self.mylar3_allow_unresolved_paths and self.source_type != ImportSourceType.MYLAR3:
+            raise ValueError("Unresolved Mylar paths can only be acknowledged for Mylar imports.")
         if self.source_type == ImportSourceType.MYLAR3 and not self.mylar3_path_map_confirmed:
             raise ValueError("Review and confirm the Mylar path mapping before starting the scan.")
         return self

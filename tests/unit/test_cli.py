@@ -9,6 +9,38 @@ import pytest
 from pullbox import cli
 
 
+def test_reconcile_paths_cli_defaults_to_preview_and_requires_offline():
+    parser = cli.build_parser()
+    assert "reconcile-import-paths" in parser.format_help()
+    args = parser.parse_args(
+        ["reconcile-import-paths", "--job", "1", "--source-root", "/comics", "--offline"]
+    )
+    assert args.apply is False
+    assert args.source_root == ["/comics"]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["reconcile-import-paths", "--job", "1", "--source-root", "/comics"])
+
+
+def test_recheck_cli_defaults_to_dry_run_and_requires_offline_acknowledgement():
+    args = cli.build_parser().parse_args(
+        [
+            "recheck-import",
+            "--job",
+            "1",
+            "--source-root",
+            "/comics",
+            "--offline",
+        ]
+    )
+    assert args.apply is False
+    assert args.accept_replaced_files is False
+    assert args.source_root == ["/comics"]
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["recheck-import", "--job", "1", "--source-root", "/comics", "--apply"]
+        )
+
+
 def test_reset_password_parser_does_not_accept_cleartext_password_argument() -> None:
     parser = cli.build_parser()
     args = parser.parse_args(["reset-password", "--user", "admin", "--password-stdin"])

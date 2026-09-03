@@ -19,7 +19,6 @@ from pullbox.config import get_settings
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
-    ORIGINAL_STORY_ARC_FILE_TEMPLATE,
 )
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -27,12 +26,18 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcSourceKind,
 )
+from pullbox.services.story_arc_editing_policy import (
+    StoryArcManualEditingDisabledError,
+    require_manual_arc_edit,
+)
+from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
 from pullbox.services.story_arc_managed_reorder import (
     StoryArcManagedReorderError,
     StoryArcManagedReorderService,
     StoryArcReorderPreview,
 )
 from pullbox.services.story_arc_placement_integration import (
+    STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION,
     StoryArcPlacementIntegrationError,
     StoryArcPlacementPolicyInput,
     StoryArcPlacementPolicyMode,
@@ -42,6 +47,7 @@ from pullbox.services.story_arc_placement_integration import (
 from pullbox.services.story_arc_service import (
     StoryArcConflictError,
     StoryArcNotFoundError,
+    StoryArcProviderIdentityError,
     StoryArcService,
     StoryArcServiceError,
     StoryArcValidationError,
@@ -49,11 +55,9 @@ from pullbox.services.story_arc_service import (
 from pullbox.ui import story_arc_catalog_routes
 from pullbox.ui.story_arc_local_issue_search import search_story_arc_local_issues
 from pullbox.ui.story_arc_presenters import (
-    StoryArcPlacementRootView,
     load_story_arc_detail,
     load_story_arc_list_page,
     load_story_arc_placement_context,
-    load_story_arc_placement_roots,
 )
 
 router = APIRouter()
@@ -94,7 +98,7 @@ _NOTICE_MESSAGES = {
         "Initial arc-file work queued. Refresh to check progress; canonical files stay unchanged."
     ),
     "created": "Story arc created. Add issues when you are ready.",
-    "updated": "Story arc settings saved.",
+    "updated": "Story arc monitoring updated.",
     "membership-added": "Issue added to the story arc.",
     "moved-up": "Issue moved up in the reading order.",
     "moved-down": "Issue moved down in the reading order.",
@@ -115,6 +119,14 @@ _NOTICE_MESSAGES = {
     ),
 }
 _ERROR_MESSAGES = {
+    "provider-managed": (
+        "This story arc is managed by its metadata provider. Manual membership edits "
+        "are not enabled."
+    ),
+    "provider-identity": (
+        "That issue does not match this member's provider identity. Review the provider "
+        "changes instead."
+    ),
     "conflict": "This story arc changed in another tab. Review the latest state and try again.",
     "not-found": "That story arc entry is no longer available.",
     "validation": "That change could not be saved. Review the fields and try again.",
@@ -201,6 +213,10 @@ def _add_url(*, error: str | None = None) -> str:
 def _error_code(
     exc: StoryArcServiceError | StoryArcPlacementIntegrationError | IntegrityError,
 ) -> str:
+    if isinstance(exc, StoryArcManualEditingDisabledError):
+        return "provider-managed"
+    if isinstance(exc, StoryArcProviderIdentityError):
+        return "provider-identity"
     if isinstance(exc, (StoryArcConflictError, IntegrityError)):
         return "conflict"
     if isinstance(exc, StoryArcNotFoundError):
@@ -440,12 +456,6 @@ async def story_arc_add(
 ) -> Response:
     """Render provider-first Story Arc discovery on its own add page."""
     manual_create_enabled = get_settings().story_arc_manual_create_enabled
-    placement_roots: tuple[StoryArcPlacementRootView, ...] = ()
-    placement_roots_truncated = False
-    if manual_create_enabled:
-        placement_roots, placement_roots_truncated = await load_story_arc_placement_roots(
-            session, selected_root_id=None
-        )
     search_context = await story_arc_catalog_routes.load_story_arc_catalog_search_context(
         session,
         q=q,
@@ -459,8 +469,7 @@ async def story_arc_add(
         request,
         user,
         **search_context,
-        placement_roots=placement_roots,
-        placement_roots_truncated=placement_roots_truncated,
+        arc_file_defaults=await load_story_arc_file_defaults(session),
         story_arc_manual_create_enabled=manual_create_enabled,
     )
     template = (
@@ -481,36 +490,18 @@ async def story_arc_create(
     monitored: bool = Form(False),
     search_missing: bool = Form(False),
     include_upcoming: bool = Form(False),
-    mode: Annotated[str, Form(max_length=50)] = "logical",
-    target_library_root_id: str = Form(""),
-    destination_root: Annotated[str, Form(max_length=1000)] = "",
-    folder_template: Annotated[str, Form(max_length=1024)] = DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
-    filename_style: Literal["original", "custom"] = Form("original"),
-    prefix_reading_order: bool = Form(False),
-    reading_order_width: Annotated[int, Form(ge=2, le=6)] = 2,
-    file_template: Annotated[str, Form(max_length=1024)] = DEFAULT_STORY_ARC_FILE_TEMPLATE,
-    symlink_style: Annotated[str, Form(max_length=50)] = "",
-    synchronize: bool = Form(False),
+    file_defaults_fingerprint: Annotated[str, Form(max_length=128)] = "",
 ) -> Response:
-    """Create an empty arc with an optional validated, source-preserving storage policy."""
+    """Create an empty arc with a snapshot of the global, source-preserving defaults."""
     if not get_settings().story_arc_manual_create_enabled:
         raise HTTPException(status_code=404, detail="Not found")
     try:
-        if filename_style == "original":
-            file_template = ORIGINAL_STORY_ARC_FILE_TEMPLATE
-            if prefix_reading_order:
-                file_template = f"{{ReadingOrder:0{reading_order_width}d}} - {file_template}"
-        proposal = _placement_policy_input(
-            mode=mode,
-            target_library_root_id=target_library_root_id,
-            destination_root=destination_root,
-            folder_template=folder_template,
-            file_template=file_template,
-            symlink_style=symlink_style,
-            synchronize=synchronize,
-        )
+        defaults = await load_story_arc_file_defaults(session)
+        if file_defaults_fingerprint and file_defaults_fingerprint != defaults.fingerprint:
+            raise StoryArcValidationError("Story Arc file defaults changed. Review them again.")
+        proposal = defaults.proposal()
         # Validate before creating anything, so an invalid destination cannot leave an arc behind.
-        await validate_story_arc_placement_policy_input(session, proposal, revision=1)
+        policy = await validate_story_arc_placement_policy_input(session, proposal, revision=1)
         arc = await _story_arc_service.create(
             session,
             name=name,
@@ -521,10 +512,10 @@ async def story_arc_create(
             source_kind=StoryArcSourceKind.PULLBOX,
         )
         story_arc_id = arc.id
-        if proposal.mode is not StoryArcPlacementPolicyMode.LOGICAL:
-            await _placement_service.update_policy(
-                session, story_arc_id, expected_revision=arc.revision, proposal=proposal
-            )
+        arc.target_library_root_id = policy.target_library_root_id
+        arc.policy_snapshot = policy.snapshot
+        arc.policy_schema_version = STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION
+        arc.sync_enabled = policy.synchronize
         await session.commit()
     except (StoryArcServiceError, StoryArcPlacementIntegrationError, IntegrityError) as exc:
         await session.rollback()
@@ -760,34 +751,22 @@ async def story_arc_placement_remove(
     return _redirect(request, _detail_url(story_arc_id, notice=notice))
 
 
-@router.post("/story-arcs/{story_arc_id}/edit", include_in_schema=False)
-async def story_arc_edit(
+@router.post("/story-arcs/{story_arc_id}/monitor", include_in_schema=False)
+async def story_arc_monitor(
     story_arc_id: int,
     request: Request,
     _user: AuthenticatedUser,
     session: DbSession,
     expected_revision: Annotated[int, Form(ge=1)],
-    name: str = Form(""),
-    description: str = Form(""),
     monitored: bool = Form(False),
-    search_missing: bool = Form(False),
-    include_upcoming: bool = Form(False),
 ) -> Response:
-    """Save metadata and monitoring controls under optimistic locking."""
+    """Change monitoring without editing metadata, storage, or parent series."""
     try:
-        existing = await session.get(StoryArc, story_arc_id)
-        if existing is None:
-            raise StoryArcNotFoundError(f"Story arc {story_arc_id} was not found")
         await _story_arc_service.update(
             session,
             story_arc_id,
             expected_revision=expected_revision,
-            name=name,
-            description=description.strip() or None,
             monitored=monitored,
-            search_missing=search_missing,
-            include_upcoming=include_upcoming,
-            sync_enabled=existing.sync_enabled,
         )
         await session.commit()
     except (StoryArcServiceError, IntegrityError) as exc:
@@ -828,6 +807,10 @@ async def story_arc_add_membership(
 ) -> Response:
     """Add one resolved or unresolved logical membership."""
     try:
+        arc = await session.get(StoryArc, story_arc_id)
+        if arc is None:
+            raise StoryArcNotFoundError("Story arc not found")
+        require_manual_arc_edit(arc)
         await _story_arc_service.add_membership(
             session,
             story_arc_id,
@@ -1075,11 +1058,15 @@ async def story_arc_remove_membership(
 ) -> Response:
     """Remove an association while preserving its canonical issue and file."""
     try:
-        await _nested_memberships(
+        await _bounded_nested_membership(
             session,
             story_arc_id=story_arc_id,
             membership_id=membership_id,
         )
+        arc = await session.get(StoryArc, story_arc_id)
+        if arc is None:
+            raise StoryArcNotFoundError("Story arc not found")
+        require_manual_arc_edit(arc)
         await _story_arc_service.remove_membership(session, membership_id)
         await session.commit()
     except (StoryArcServiceError, IntegrityError) as exc:

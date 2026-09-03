@@ -163,6 +163,8 @@ class StoryArc(Base, IdentityMixin, TimestampMixin):
         nullable=False,
     )
     monitored: Mapped[bool] = mapped_column(default=False, server_default="0", nullable=False)
+    # Legacy import/API preferences remain round-trippable for rollback and
+    # compatibility. Acquisition and provider discovery use monitored alone.
     search_missing: Mapped[bool] = mapped_column(default=False, server_default="0", nullable=False)
     include_upcoming: Mapped[bool] = mapped_column(
         default=False, server_default="0", nullable=False

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+import pytest
+
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.encryption import _get_fernet
 from pullbox.models.direct_acquisition import (
@@ -65,6 +67,39 @@ def _target() -> IssueSearchTarget:
 
 def _large_issue_target() -> IssueSearchTarget:
     return replace(_target(), issue_number=1_000_000.0)
+
+
+@pytest.mark.parametrize("release_year", [2026, None])
+async def test_direct_results_use_publication_evidence_or_bounded_series_window(
+    release_year: int | None,
+) -> None:
+    _reset()
+    provider = _provider("pullbox.getcomics", 10)
+    target = replace(
+        _target(),
+        series_title="2000 AD",
+        series_year=1977,
+        issue_number=2487,
+        release_year=release_year,
+        series_continuing=True,
+        alternate_names=None,
+    )
+    candidate = _candidate(provider, "2000AD 2487 [2026] [Digital-Empire]").model_copy(
+        update={
+            "parsed": DirectParsedCandidate(
+                series_title="2000 AD", issue_numbers=["2487"], year=2026, format="cbz"
+            )
+        }
+    )
+    _Client.responses = {provider.provider_identity: [candidate]}
+    outcome = await search_direct_issue_target(target, [provider], client_factory=_factory)
+    assert not outcome.rejected
+    assert len(outcome.matched) == 1
+    validation = outcome.matched[0].validation
+    assert validation.confidence is (
+        MatchConfidence.HIGH if release_year else MatchConfidence.MEDIUM
+    )
+    assert validation.year_match_basis == ("publication_year" if release_year else "series_window")
 
 
 def _provider(identity: str, priority: int) -> DirectSearchProvider:

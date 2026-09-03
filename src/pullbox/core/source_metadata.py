@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import enum
-import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -15,15 +14,12 @@ from pullbox.core.comicinfo import ComicInfoData
 from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
 from pullbox.core.naming import detect_issue_type
 from pullbox.core.release_parser import ParsedRelease, normalize_issue_number, parse_release_title
+from pullbox.core.source_sidecars import parse_source_sidecar
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.issue import IssueType
 
 _CV_ISSUE_URL_RE = re.compile(r"comicvine\.gamespot\.com/.*?/4000-(\d+)", re.IGNORECASE)
 _CV_SERIES_URL_RE = re.compile(r"comicvine\.gamespot\.com/.*?/4050-(\d+)", re.IGNORECASE)
-_CV_ANY_ID_RE = re.compile(
-    r"\b(?:comicid|comicvineid|cv_vol_id|cvid|issueid)\s*[:=]\s*(\d+)\b",
-    re.I,
-)
 _CV_NOTES_PATTERNS = (
     re.compile(r"\[cv_vol_id:(\d+)\]", re.IGNORECASE),
     re.compile(r"\[cvid:(\d+)\]", re.IGNORECASE),
@@ -394,8 +390,9 @@ class SourceMetadataExtractor:
         *,
         source_path: str | None = None,
         folder_name: str | None = None,
+        expected_series: tuple[str, ...] = (),
     ) -> SourceMetadata:
-        parsed = parse_release_title(title)
+        parsed = parse_release_title(title, expected_series=expected_series)
         folder_issue_type = self._folder_issue_type(folder_name)
         issue_type = IssueType.ISSUE
         if parsed is not None:
@@ -837,11 +834,8 @@ class SourceMetadataExtractor:
             payload["files_present"].append(sidecar_name)
             raw_text = path.read_text(errors="replace")
             sidecar_data = self._parse_sidecar(raw_text)
-            sidecar_series_id = _as_int(
-                sidecar_data.get("comicid")
-                or sidecar_data.get("comicvine_id")
-                or sidecar_data.get("series_id")
-            )
+            payload["identity_conflicts"].extend(sidecar_data.get("_identity_conflicts", []))
+            sidecar_series_id = _as_int(sidecar_data.get("comicid"))
             if (
                 sidecar_series_id is not None
                 and payload["series_id"] is not None
@@ -882,29 +876,7 @@ class SourceMetadataExtractor:
 
     @staticmethod
     def _parse_sidecar(raw_text: str) -> dict[str, Any]:
-        raw_text = raw_text.strip()
-        if not raw_text:
-            return {}
-        try:
-            parsed = json.loads(raw_text)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            return {str(key).lower(): value for key, value in parsed.items()}
-        data: dict[str, Any] = {}
-        for line in raw_text.splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-            elif "=" in line:
-                key, value = line.split("=", 1)
-            else:
-                continue
-            data[key.strip().lower()] = value.strip()
-        if not data:
-            match = _CV_ANY_ID_RE.search(raw_text)
-            if match:
-                data["comicid"] = match.group(1)
-        return data
+        return parse_source_sidecar(raw_text)
 
 
 def _extract_issue_id_from_web(web: str | None) -> int | None:

@@ -29,6 +29,16 @@ from pullbox.schemas.story_arc import (
     StoryArcResponse,
     StoryArcUpdate,
 )
+from pullbox.services.story_arc_editing_policy import (
+    StoryArcManualEditingDisabledError,
+    require_manual_arc_edit,
+)
+from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
+from pullbox.services.story_arc_placement_integration import (
+    STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION,
+    StoryArcPlacementIntegrationError,
+    validate_story_arc_placement_policy_input,
+)
 from pullbox.services.story_arc_service import (
     StoryArcConflictError,
     StoryArcNotFoundError,
@@ -166,6 +176,8 @@ async def _require_membership(
 
 def _raise_service_error(exc: StoryArcServiceError) -> NoReturn:
     """Translate domain failures into deterministic REST responses."""
+    if isinstance(exc, StoryArcManualEditingDisabledError):
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     if isinstance(exc, StoryArcNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if isinstance(exc, StoryArcConflictError):
@@ -254,10 +266,14 @@ async def create_story_arc(
     _user: AuthenticatedUser,
     session: DbSession,
 ) -> StoryArcResponse:
-    """Create and commit one Pullbox-owned logical story arc."""
+    """Create one Pullbox-owned arc with a snapshot of global file defaults."""
     if not get_settings().story_arc_manual_create_enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     try:
+        defaults = await load_story_arc_file_defaults(session)
+        policy = await validate_story_arc_placement_policy_input(
+            session, defaults.proposal(), revision=1
+        )
         arc = await _story_arc_service.create(
             session,
             name=body.name,
@@ -265,11 +281,18 @@ async def create_story_arc(
             monitored=body.monitored,
             search_missing=body.search_missing,
             include_upcoming=body.include_upcoming,
-            sync_enabled=body.sync_enabled,
+            sync_enabled=policy.synchronize,
             source_kind=StoryArcSourceKind.PULLBOX,
         )
         story_arc_id = arc.id
+        arc.target_library_root_id = policy.target_library_root_id
+        arc.policy_schema_version = STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION
+        arc.policy_snapshot = policy.snapshot
         await session.commit()
+    except StoryArcPlacementIntegrationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
     except StoryArcServiceError as exc:
         _raise_service_error(exc)
     except IntegrityError as exc:
@@ -298,6 +321,8 @@ async def update_story_arc(
     existing = await _require_arc(session, story_arc_id)
     fields = body.model_fields_set
     try:
+        if fields & {"name", "description"}:
+            require_manual_arc_edit(existing)
         await _story_arc_service.update(
             session,
             story_arc_id,
@@ -403,6 +428,7 @@ async def add_story_arc_membership(
 ) -> StoryArcMembershipResponse:
     """Add one resolved or unresolved membership and commit it."""
     try:
+        require_manual_arc_edit(await _require_arc(session, story_arc_id))
         membership = await _story_arc_service.add_membership(
             session,
             story_arc_id,
@@ -465,6 +491,8 @@ async def update_story_arc_membership(
     """Patch order, exact source number, or intentional skip state."""
     await _require_membership(session, story_arc_id, membership_id)
     try:
+        if "source_issue_number_text" in body.model_fields_set:
+            require_manual_arc_edit(await _require_arc(session, story_arc_id))
         membership = await _story_arc_service.update_membership(
             session,
             membership_id,
@@ -521,6 +549,7 @@ async def remove_story_arc_membership(
     """Remove only the association, never its canonical issue."""
     await _require_membership(session, story_arc_id, membership_id)
     try:
+        require_manual_arc_edit(await _require_arc(session, story_arc_id))
         await _story_arc_service.remove_membership(session, membership_id)
         await session.commit()
     except StoryArcServiceError as exc:

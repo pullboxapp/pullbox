@@ -104,7 +104,11 @@ async def test_provider_arc_detail_offers_review_before_refresh(
 
     assert response.status_code == 200
     assert f'href="/story-arcs/{arc_id}/catalog-refresh"' in response.text
-    assert "Review provider changes" in response.text
+    assert "Check for updates" in response.text
+    assert 'data-testid="story-arc-action-provider-review"' in response.text
+    assert '@htmx:before-request="checking = true"' in response.text
+    assert ':aria-busy="checking.toString()"' in response.text
+    assert "Checking Comic Vine for updates" in response.text
     assert f'action="/story-arcs/{arc_id}/search"' in response.text
     assert "Search missing issues" in response.text
     assert 'href="https://comicvine.gamespot.com/story-arc/4045-42/"' in response.text
@@ -144,9 +148,10 @@ async def test_catalog_preview_requires_order_review_and_separate_canonical_root
     assert 'name="reading_orders"' in response.text
     assert "Library root for new series" in response.text
     assert 'name="library_root_id"' in response.text
-    assert 'name="target_library_root_id"' in response.text
-    assert "Keep the original filename" in response.text
-    assert "Prefix arc filenames with the reading order" in response.text
+    assert 'name="target_library_root_id"' not in response.text
+    assert 'name="file_defaults_fingerprint"' in response.text
+    assert "No separate folder" in response.text
+    assert 'href="/settings?tab=media#story-arc-files"' in response.text
 
 
 async def test_catalog_preview_lists_only_managed_roots_with_default_first(
@@ -202,10 +207,10 @@ async def test_catalog_preview_lists_only_managed_roots_with_default_first(
     response = await authenticated_client.get("/story-arcs/catalog/42")
 
     assert response.status_code == 200
-    assert response.text.count("Zulu default managed") == 2
-    assert response.text.count("Alpha managed") == 2
+    assert response.text.count("Zulu default managed") == 1
+    assert response.text.count("Alpha managed") == 1
     assert response.text.index("Zulu default managed") < response.text.index("Alpha managed")
-    assert response.text.count("Reference only") == 1
+    assert "Reference only" not in response.text
     assert "Disabled managed" not in response.text
     assert "Offline managed" not in response.text
 
@@ -283,6 +288,19 @@ async def test_add_persists_reviewed_order_and_independent_copy_settings(
     tmp_path,
 ):
     root_id = await _root(sec_db, str(tmp_path))
+    saved = await authenticated_client.put(
+        "/api/v1/config",
+        json={
+            "values": {
+                "story_arc_files_enabled": "true",
+                "story_arc_files_library_root_id": str(root_id),
+                "story_arc_files_destination": str(tmp_path),
+                "story_arc_files_prefix_reading_order": "true",
+            }
+        },
+        headers=_csrf(authenticated_client),
+    )
+    assert saved.status_code == 200
     response = await authenticated_client.get("/story-arcs/catalog/42")
     assert response.status_code == 200
     token = re.search(r'name="fingerprint" value="([^"]+)"', response.text)
@@ -295,12 +313,8 @@ async def test_add_persists_reviewed_order_and_independent_copy_settings(
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["2", "1"],
-            "mode": "copy",
-            "target_library_root_id": str(root_id),
-            "destination_root": str(tmp_path),
-            "prefix_reading_order": "true",
-            "reading_order_width": "2",
-            "synchronize": "true",
+            "mode": "symlink",  # obsolete browser storage fields cannot override defaults
+            "destination_root": "/not-approved",
         },
         headers=_csrf(authenticated_client),
         follow_redirects=False,
@@ -320,6 +334,39 @@ async def test_add_persists_reviewed_order_and_independent_copy_settings(
         assert arc.policy_snapshot["file_template"] == "{ReadingOrder:02d} - {OriginalFilename}"
         assert arc.policy_snapshot["mode"] == "copy"
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_changed_file_defaults_require_repreview_before_adding(
+    authenticated_client: AsyncClient, sec_db, catalog_provider: CatalogProvider, tmp_path: Path
+):
+    root_id = await _root(sec_db, str(tmp_path))
+    preview = await authenticated_client.get("/story-arcs/catalog/42")
+    token = re.search(r'name="fingerprint" value="([^"]+)"', preview.text)
+    defaults = re.search(r'name="file_defaults_fingerprint" value="([^"]+)"', preview.text)
+    assert token and defaults
+    saved = await authenticated_client.put(
+        "/api/v1/config",
+        json={"values": {"story_arc_files_prefix_reading_order": "true"}},
+        headers=_csrf(authenticated_client),
+    )
+    assert saved.status_code == 200
+    added = await authenticated_client.post(
+        "/story-arcs/catalog/42",
+        data={
+            "fingerprint": token.group(1),
+            "file_defaults_fingerprint": defaults.group(1),
+            "order_reviewed": "true",
+            "library_root_id": str(root_id),
+            "issue_provider_ids": ["101", "102"],
+            "reading_orders": ["1", "2"],
+        },
+        headers=_csrf(authenticated_client),
+        follow_redirects=False,
+    )
+    assert added.status_code == 303
+    assert added.headers["location"].endswith("?error=file-defaults")
+    async with sec_db() as session:
+        assert list(await session.scalars(select(StoryArc))) == []
 
 
 async def test_failed_provider_cleanup_cannot_report_failure_after_committing_add(
@@ -358,11 +405,11 @@ async def test_failed_provider_cleanup_cannot_report_failure_after_committing_ad
     [
         (False, True, True, False),
         (True, False, True, False),
-        (True, True, False, False),
+        (True, True, False, True),
         (True, True, True, True),
     ],
 )
-async def test_add_auto_search_requires_all_optins_and_runs_after_commit(
+async def test_add_auto_search_requires_monitoring_and_global_default_and_runs_after_commit(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],
     catalog_provider: CatalogProvider,
@@ -429,7 +476,8 @@ async def test_refresh_reviews_additions_and_preserves_removed_members_and_order
     )
     response = await authenticated_client.get(f"/story-arcs/{arc_id}/catalog-refresh")
     assert response.status_code == 200
-    assert "1 new members to review" in response.text
+    assert 'data-testid="story-arc-update-additions"' in response.text
+    assert "Exact Comics #2" in response.text
     assert "Comic Vine issue ID 102 — preserved" in response.text
     token = re.search(r'name="fingerprint" value="([^"]+)"', response.text)
     revision = re.search(r'name="expected_revision" value="([^"]+)"', response.text)
@@ -452,13 +500,76 @@ async def test_refresh_reviews_additions_and_preserves_removed_members_and_order
             await session.scalars(select(IssueStoryArc).order_by(IssueStoryArc.sequence_number))
         )
         assert [member.source_issue_id for member in members] == ["102", "101", "103"]
-        assert members[-1].resolution_state.value == "pending"
+        assert members[-1].resolution_state.value == "resolved"
         assert members[-1].sync_eligible is False
     detail = await authenticated_client.get(f"/story-arcs/{arc_id}")
-    assert "Confirm this member" in detail.text
+    assert "Confirm reading order" in detail.text
     assert "1 no longer listed by Comic Vine but preserved here" in detail.text
     assert 'data-tip="Open issue"' in detail.text
     assert "Open issue / manual search" not in detail.text
+
+
+@pytest.mark.parametrize("state", ["current", "changes", "incomplete", "error"])
+async def test_refresh_page_contract_and_read_only_results(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    catalog_provider: CatalogProvider,
+    tmp_path: Path,
+    state: str,
+) -> None:
+    root_id = await _root(sec_db, str(tmp_path))
+    service = StoryArcCatalogService(catalog_provider)
+    preview = await service.preview("42")
+    async with sec_db() as session:
+        arc = await service.add(
+            session, preview, ordered_issue_provider_ids=["102", "101"], library_root_id=root_id
+        )
+        await session.commit()
+        arc_id, revision = arc.id, arc.revision
+    if state == "changes":
+        catalog_provider.metadata = replace(
+            catalog_provider.metadata, issue_provider_ids=("101", "103")
+        )
+    elif state == "incomplete":
+        catalog_provider.metadata = replace(catalog_provider.metadata, membership_complete=False)
+    elif state == "error":
+        catalog_provider.fail = True
+
+    response = await authenticated_client.get(f"/story-arcs/{arc_id}/catalog-refresh")
+
+    assert response.status_code == 200
+    html = response.text
+    assert 'class="series-domain-page space-y-4"' in html
+    assert 'class="series-domain-breadcrumb-row"' in html
+    assert 'class="series-domain-breadcrumbs"' in html
+    assert f'href="/story-arcs/{arc_id}">Numbering Event</a>' in html
+    assert 'aria-current="page">Check for updates</span>' in html
+    assert 'data-testid="story-arc-update-hero" class="detail-hero-shell"' in html
+    assert 'data-testid="story-arc-update-footer-dock"' in html
+    assert 'class="btn-secondary"' not in html
+    assert 'data-testid="story-arc-catalog-refresh"' in html
+    assert '<main class="mx-auto' not in html
+    if state in {"current", "changes"}:
+        assert 'data-testid="story-arc-update-results"' in html
+        assert "lg:grid-cols-2" in html
+        assert 'data-testid="story-arc-update-additions"' in html
+        assert 'data-testid="story-arc-update-removals"' in html
+    else:
+        assert 'data-testid="story-arc-update-results"' not in html
+        assert 'role="alert"' in html
+        assert "secret-bearing" not in html
+    if state == "current":
+        assert "This story arc is up to date" in html
+    else:
+        assert "This story arc is up to date" not in html
+    assert ('name="confirm_refresh"' in html) == (state == "changes")
+    async with sec_db() as session:
+        arc = await session.get(StoryArc, arc_id)
+        assert arc is not None and arc.revision == revision
+        members = await session.scalars(
+            select(IssueStoryArc).order_by(IssueStoryArc.sequence_number)
+        )
+        assert [member.source_issue_id for member in members] == ["102", "101"]
 
 
 async def test_manual_arc_search_is_authenticated_csrf_protected_and_active_only(

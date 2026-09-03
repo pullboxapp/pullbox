@@ -46,6 +46,7 @@
   wrap_options=false,
   local_model="",
   local_on_change="",
+  options_expression="",
   on_change=""
 ) %}
 {%- set normalized_size = namespace(value=size) -%}
@@ -83,7 +84,7 @@
 <div
   x-data='dropdownSelectData({
     value: {{ value|default("", true)|string|tojson }},
-    options: {{ options|tojson }},
+    options: {% if options_expression %}{{ options_expression }}{% else %}{{ options|tojson }}{% endif %},
     disabled: {{ "true" if disabled else "false" }},
     fitWidth: {{ "true" if fit_width else "false" }},
     wrapOptions: {{ "true" if wrap_options else "false" }},
@@ -190,6 +191,22 @@
       {% if panel_testid %}data-testid="{{ panel_testid }}"{% endif %}
       class="dropdown-select-panel {{ panel_class_name }}"
     >
+      {% if options_expression %}
+      <template x-for="(option, index) in options" :key="option.value">
+        <button type="button" role="option" tabindex="-1" data-dropdown-option
+                :data-value="option.value" :aria-disabled="option.disabled ? 'true' : 'false'"
+                :aria-selected="isSelected(index) ? 'true' : 'false'" :disabled="option.disabled"
+                @click="selectByIndex(index)" @mouseenter="setActive(index)"
+                @mouseover="setActive(index)" @mousemove="setActive(index)" @focus="setActive(index)"
+                class="dropdown-select-option" :class="optionClasses(index)">
+          <span class="dropdown-select-option-label" x-text="option.label"></span>
+          <svg x-cloak x-show="!option.disabled && isSelected(index)" class="dropdown-select-option-check"
+               fill="none" stroke="currentColor" stroke-width="2.25" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>
+          </svg>
+        </button>
+      </template>
+      {% else %}
       {% for option in options %}
       {% if option is mapping %}
       {% set opt_value = option.value|default("", true)|string %}
@@ -233,6 +250,7 @@
         </svg>
       </button>
       {% endfor %}
+      {% endif %}
     </div>
   </template>
 </div>

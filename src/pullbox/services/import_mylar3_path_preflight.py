@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import sqlite3
 from dataclasses import asdict, dataclass, field
@@ -11,7 +13,11 @@ from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
 
-from pullbox.core.filesystem_policy import is_sensitive_path, resolve_preview_source
+from pullbox.core.filesystem_policy import (
+    is_invalid_path_text,
+    is_sensitive_path,
+    resolve_preview_source,
+)
 from pullbox.core.mylar3_path_mapping import (
     has_conflicting_overlapping_mappings,
     normalize_mylar3_path_map,
@@ -23,6 +29,7 @@ from pullbox.models.library import LibraryRoot
 from pullbox.schemas.import_mylar3_path_preflight import (
     MylarIdentityGroupPreview,
     MylarPathExample,
+    MylarPathException,
     MylarPathMappingDraft,
     MylarPathMappingPreview,
     MylarPathOutcome,
@@ -55,6 +62,7 @@ class _MutableCounts:
     identity_resolved: int = 0
     mapped_existing: int = 0
     mapped_missing: int = 0
+    missing: int = 0
     unmapped: int = 0
     outside_root: int = 0
     unreadable: int = 0
@@ -84,6 +92,13 @@ class _IdentityState:
     examples: list[MylarPathExample] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class _Location:
+    path: str
+    series_id: str
+    series_name: str
+
+
 class Mylar3PathPreflightAnalyzer:
     """Analyze all bounded Mylar series locations without creating a job."""
 
@@ -108,19 +123,33 @@ class Mylar3PathPreflightAnalyzer:
         root_models = list(
             (await session.execute(root_query.order_by(LibraryRoot.id.asc()))).scalars().all()
         )
-        roots, root_warnings = await asyncio.to_thread(self._snapshot_roots, root_models)
-        locations, partial = await asyncio.to_thread(self._read_locations, database)
+        return await asyncio.to_thread(
+            self._analyze,
+            database,
+            root_models,
+            auto_detect,
+            mappings,
+            file_handling_mode,
+        )
+
+    def _analyze(
+        self,
+        database: Path,
+        root_models: list[LibraryRoot],
+        auto_detect: bool,
+        mappings: list[MylarPathMappingDraft],
+        file_handling_mode: ImportFileHandlingMode,
+    ) -> MylarPathPreviewResponse:
+        roots, root_warnings = self._snapshot_roots(root_models)
+        inventory, partial = self._read_locations(database)
+        locations = [entry.path for entry in inventory]
 
         supplied_map = normalize_mylar3_path_mapping_items(
             (mapping.stored_prefix, mapping.pullbox_prefix) for mapping in mappings
         )
         ambiguous_auto_locations: set[str] = set()
         if auto_detect and not supplied_map:
-            supplied_map, ambiguous_auto_locations = await asyncio.to_thread(
-                self._auto_detect_map,
-                locations,
-                roots,
-            )
+            supplied_map, ambiguous_auto_locations = self._auto_detect_map(locations, roots)
         provenance: Literal["automatic", "manual"] = "automatic" if auto_detect else "manual"
 
         total = _MutableCounts(locations=len(locations))
@@ -133,10 +162,13 @@ class Mylar3PathPreflightAnalyzer:
         )
         identity_states: dict[int, _IdentityState] = {}
         ordered_map = ordered_mylar3_path_map_items(supplied_map)
+        exceptions: list[MylarPathException] = []
 
-        for location in locations:
+        for entry in inventory:
+            location = entry.path
             if location in ambiguous_auto_locations:
                 total.ambiguous += 1
+                exceptions.append(_path_exception(entry, "ambiguous", location))
                 continue
             outcome, root, mapping_state, relative = self._resolve_location(
                 location,
@@ -146,6 +178,13 @@ class Mylar3PathPreflightAnalyzer:
                 require_library_root=require_library_root,
             )
             setattr(total, _count_field(outcome), getattr(total, _count_field(outcome)) + 1)
+            if outcome not in {"identity", "mapped"}:
+                attempted = (
+                    str(Path(mapping_state.pullbox_prefix) / relative)
+                    if mapping_state
+                    else location
+                )
+                exceptions.append(_path_exception(entry, outcome, attempted))
             if outcome == "identity" and root is not None:
                 identity = identity_states.setdefault(root.root_id, _IdentityState(root=root))
                 identity.counts.locations += 1
@@ -166,6 +205,8 @@ class Mylar3PathPreflightAnalyzer:
             warnings.append("no_enabled_library_roots")
         if total.unmapped:
             warnings.append("unmapped_locations")
+        if total.missing:
+            warnings.append("missing_locations")
         if ambiguous_auto_locations:
             warnings.append("ambiguous_mapping_candidates")
         if partial:
@@ -183,17 +224,21 @@ class Mylar3PathPreflightAnalyzer:
             warning in {"library_root_alias", "nested_library_roots_ambiguous"}
             for warning in root_warnings
         )
+        unresolved = total.missing + total.mapped_missing + total.unmapped
+        unavailable_roots = any(
+            warning in {"library_root_unavailable", "library_root_unreadable"}
+            for warning in root_warnings
+        )
         automatic_evidence_blocked = provenance == "automatic" and bool(
-            total.mapped_missing
-            or total.unmapped
-            or any(
-                warning in {"library_root_unavailable", "library_root_unreadable"}
-                for warning in root_warnings
-            )
+            unresolved or unavailable_roots
         )
         if automatic_evidence_blocked:
             warnings.append("automatic_mapping_incomplete")
-        can_confirm = bool(locations) and not any(
+        has_available = total.identity_resolved + total.mapped_existing > 0
+        safe = has_available and not any(
+            (partial, blocking_counts, mapping_blocked, root_contract_blocked, unavailable_roots)
+        )
+        can_confirm = safe and not any(
             (
                 partial,
                 blocking_counts,
@@ -219,12 +264,29 @@ class Mylar3PathPreflightAnalyzer:
             path_map=supplied_map,
             requires_confirmation=bool(supplied_map),
             can_confirm=can_confirm,
+            can_continue_with_unresolved=bool(safe and unresolved),
+            requires_unresolved_acknowledgement=bool(unresolved),
+            unresolved_fingerprint=_exception_fingerprint(exceptions) if unresolved else None,
+            exceptions=exceptions,
+            exception_count=len(exceptions),
+            blocking_reasons=[
+                f"Library root '{root.name}' ({root.path}) is unavailable or unreadable. "
+                "Check its mount and permissions."
+                for root in root_models
+                if root.id not in {snapshot.root_id for snapshot in roots}
+            ]
+            + [
+                f"Mapping {state.stored_prefix} to {state.pullbox_prefix}: "
+                f"{reason.replace('_', ' ')}."
+                for state in mapping_states.values()
+                for reason in state.blockers
+            ],
             partial=partial,
             warnings=list(dict.fromkeys(warnings)),
         )
 
     @staticmethod
-    def _read_locations(database: Path) -> tuple[list[str], bool]:
+    def _read_locations(database: Path) -> tuple[list[_Location], bool]:
         uri = f"{database.resolve().as_uri()}?mode=ro"
         try:
             connection = sqlite3.connect(uri, uri=True)
@@ -233,9 +295,13 @@ class Mylar3PathPreflightAnalyzer:
                 comics_columns = _sqlite_table_columns(connection, "comics")
                 if "ComicLocation" not in comics_columns:
                     raise sqlite3.DatabaseError("comics.ComicLocation is unavailable")
+                # Only these fixed SQL expressions are interpolated, never source column text.
+                name_column = "comic.ComicName" if "ComicName" in comics_columns else "''"
+                id_column = "comic.ComicID" if "ComicID" in comics_columns else "''"
                 inventory_queries = [
-                    "SELECT ComicLocation AS stored_location, "
-                    "0 AS source_kind, rowid AS source_rowid FROM comics "
+                    "SELECT ComicLocation AS stored_location, "  # nosec B608
+                    f"{id_column} AS series_id, {name_column} AS series_name, "
+                    "0 AS source_kind, comic.rowid AS source_rowid FROM comics AS comic "
                     "WHERE ComicLocation IS NOT NULL AND ComicLocation != ''"
                 ]
                 issues_columns = _sqlite_table_columns(connection, "issues")
@@ -243,8 +309,10 @@ class Mylar3PathPreflightAnalyzer:
                     comics_columns
                 ):
                     inventory_queries.append(
-                        "SELECT issue.Location AS stored_location, "
+                        "SELECT issue.Location AS stored_location, "  # nosec B608
+                        f"{id_column} AS series_id, {name_column} AS series_name, "
                         "1 AS source_kind, issue.rowid AS source_rowid FROM issues AS issue "
+                        "JOIN comics AS comic ON comic.ComicID = issue.ComicID "
                         "WHERE issue.Location IS NOT NULL AND issue.Location != '' "
                         "AND substr(issue.Location, 1, 1) = '/' "
                         "AND EXISTS ("
@@ -253,7 +321,7 @@ class Mylar3PathPreflightAnalyzer:
                         ")"
                     )
                 query = (
-                    "SELECT stored_location FROM ("
+                    "SELECT stored_location, series_id, series_name FROM ("
                     + " UNION ALL ".join(inventory_queries)
                     + ") ORDER BY stored_location, source_kind, source_rowid LIMIT ?"
                 )
@@ -264,7 +332,10 @@ class Mylar3PathPreflightAnalyzer:
         except sqlite3.DatabaseError as exc:
             raise ValueError("Mylar database does not expose ComicLocation values") from exc
         partial = len(rows) > _MAX_LOCATIONS
-        return [str(row[0]) for row in rows[:_MAX_LOCATIONS]], partial
+        return [
+            _Location(str(row[0]), str(row[1] or ""), str(row[2] or ""))
+            for row in rows[:_MAX_LOCATIONS]
+        ], partial
 
     @staticmethod
     def _snapshot_roots(
@@ -354,12 +425,7 @@ class Mylar3PathPreflightAnalyzer:
         _MappingState | None,
         str,
     ]:
-        if (
-            not raw_location
-            or len(raw_location) > 4096
-            or not raw_location.isprintable()
-            or ".." in Path(raw_location).parts
-        ):
+        if is_invalid_path_text(raw_location) or ".." in Path(raw_location).parts:
             return "invalid", None, None, "Unavailable example"
         location = Path(raw_location)
         if not location.is_absolute():
@@ -368,9 +434,15 @@ class Mylar3PathPreflightAnalyzer:
         identity_outside_root = False
         try:
             resolved_identity = location.resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
+        except PermissionError:
+            return "unreadable", None, None, location.name
+        except FileNotFoundError:
             resolved_identity = None
+        except (OSError, RuntimeError, ValueError):
+            return "invalid", None, None, location.name
         if resolved_identity is not None and _supported_location_kind(resolved_identity):
+            if is_sensitive_path(resolved_identity):
+                return "invalid", None, None, location.name
             if not _location_is_readable(resolved_identity):
                 return "unreadable", None, None, location.name
             containing = _containing_roots(location.absolute(), resolved_identity, roots)
@@ -395,6 +467,8 @@ class Mylar3PathPreflightAnalyzer:
             try:
                 mapped_root = Path(pullbox_prefix).resolve(strict=True)
                 resolved_mapped = mapped.resolve(strict=False)
+            except PermissionError:
+                return "unreadable", state.root, state, str(relative)
             except (OSError, RuntimeError, ValueError):
                 return "mapped_missing", state.root, state, str(relative)
             if not resolved_mapped.is_relative_to(mapped_root):
@@ -413,6 +487,26 @@ class Mylar3PathPreflightAnalyzer:
             return "mapped", None, state, str(relative)
         if identity_outside_root:
             return "outside_root", None, None, location.name
+        try:
+            resolved_missing = location.resolve(strict=False)
+            if is_sensitive_path(resolved_missing):
+                return "invalid", None, None, location.name
+            containing = _containing_roots(location.absolute(), resolved_missing, roots)
+            if len(containing) == 1:
+                return (
+                    "missing",
+                    containing[0],
+                    None,
+                    _safe_relative(location, containing[0].lexical),
+                )
+            if len(containing) > 1:
+                return "ambiguous", None, None, location.name
+            if any(location.is_relative_to(root.lexical) for root in roots):
+                return "outside_root", None, None, location.name
+        except PermissionError:
+            return "unreadable", None, None, location.name
+        except (OSError, RuntimeError, ValueError):
+            return "invalid", None, None, location.name
         return "unmapped", None, None, location.name
 
     def _auto_detect_map(
@@ -496,12 +590,73 @@ def _count_field(outcome: MylarPathOutcome) -> str:
         "identity": "identity_resolved",
         "mapped": "mapped_existing",
         "mapped_missing": "mapped_missing",
+        "missing": "missing",
         "unmapped": "unmapped",
         "outside_root": "outside_root",
         "unreadable": "unreadable",
         "ambiguous": "ambiguous",
         "invalid": "invalid",
     }[outcome]
+
+
+def _exception_fingerprint(exceptions: list[MylarPathException]) -> str:
+    """Bind acknowledgement to paths and outcomes, not just an unchanged count."""
+    entries = sorted(
+        (item.series_id, item.stored_path, item.attempted_path, item.outcome) for item in exceptions
+    )
+    return hashlib.sha256(json.dumps(entries, ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def _path_exception(
+    entry: _Location, outcome: MylarPathOutcome, attempted: str
+) -> MylarPathException:
+    explanations = {
+        "missing": (
+            "The stored location is missing inside a visible library root.",
+            "Check for a renamed or deleted folder. Correct the Mylar path or continue "
+            "and review this unavailable source later.",
+        ),
+        "mapped_missing": (
+            "The mapping target is visible, but this translated location is missing.",
+            "Check the translated path and mapping prefix. Correct it or acknowledge "
+            "the unavailable source.",
+        ),
+        "unmapped": (
+            "The stored location is unavailable and no mapping resolves it.",
+            "Check the Docker mount. Map the Mylar prefix to the verified container path, "
+            "not the host path.",
+        ),
+        "unreadable": (
+            "Pullbox cannot read or traverse this location.",
+            "Grant the container user read access to the source and traverse access "
+            "to its parent directories, then analyze again.",
+        ),
+        "ambiguous": (
+            "More than one root or automatic mapping could claim this location.",
+            "Choose an explicit mapping and remove overlapping or duplicate roots, "
+            "then analyze again.",
+        ),
+        "outside_root": (
+            "This location escapes its mapped root or is outside an allowed reference root.",
+            "Check symlinks and root boundaries. Configure the correct permitted root; "
+            "do not map the whole filesystem.",
+        ),
+        "invalid": (
+            "This location is not a safe absolute path or could not be resolved safely.",
+            "Correct the stored path, including traversal components, invalid characters, "
+            "or symlink loops, then analyze again.",
+        ),
+    }
+    reason, action = explanations[outcome]
+    return MylarPathException(
+        series_id=entry.series_id[:255],
+        series_name=entry.series_name[:1000],
+        stored_path=entry.path[:4096],
+        attempted_path=attempted[:4096],
+        outcome=outcome,
+        reason=reason,
+        suggested_action=action,
+    )
 
 
 def _append_example(

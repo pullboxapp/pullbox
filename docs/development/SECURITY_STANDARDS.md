@@ -790,6 +790,12 @@ default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; 
   becomes public, but remains informational unless `PULLBOX_REQUIRE_CODEQL=true`.
 - Safety's legacy command still needs valid JSON artifact generation while it
   remains advisory.
+- Local and GitHub dependency audits use `scripts/run_dependency_audit.py`.
+  Temporary exceptions must be scoped to the reviewed package/version,
+  advisory, dependency use, and a fixed UTC expiry. See
+  [Dependency Audit Exceptions](DEPENDENCY_AUDIT_EXCEPTIONS.md) for the current
+  Safety/NLTK development-only risk acceptance. Production image validation
+  rejects either package; neither belongs in the shipped runtime.
 - Before public visibility, scan the current tree, full Git history, release
   notes, PR/issue metadata, and refs for secrets and internal tool/provenance
   references.

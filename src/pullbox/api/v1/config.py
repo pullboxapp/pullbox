@@ -40,6 +40,10 @@ from pullbox.schemas.config import (
     NamingPreview,
     NamingPreviewEntry,
     NamingPreviewGrouped,
+    NamingSettingsPreview,
+    NamingSettingsPreviewRequest,
+    NamingSettingsState,
+    NamingSettingsUpdate,
 )
 from pullbox.services.library_root_management import (
     create_library_root,
@@ -55,10 +59,46 @@ from pullbox.services.library_root_policy_service import (
     preview_library_root_policy,
     update_library_root_policy,
 )
+from pullbox.services.naming_settings import (
+    get_naming_settings,
+    preview_naming_settings,
+    save_naming_settings,
+)
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/config", tags=["config"], include_in_schema=False)
+
+
+@router.get("/naming", response_model=NamingSettingsState)
+async def naming_settings(
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+    library_root_id: int | None = Query(None, gt=0),
+) -> NamingSettingsState:
+    """Read global defaults or effective naming for a single library."""
+    return await get_naming_settings(session, library_root_id)
+
+
+@router.put("/naming", response_model=NamingSettingsState)
+async def update_naming_settings(
+    payload: NamingSettingsUpdate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> NamingSettingsState:
+    """Save one naming scope without renaming existing files."""
+    state = await save_naming_settings(session, payload)
+    logger.info("naming_settings_updated", library_root_id=state.library_root_id)
+    return state
+
+
+@router.post("/naming/preview", response_model=NamingSettingsPreview)
+async def preview_scoped_naming_settings(
+    payload: NamingSettingsPreviewRequest,
+    _user: InteractiveOperatorUser,
+) -> NamingSettingsPreview:
+    """Preview all naming fields with the proposed character cleanup settings."""
+    return preview_naming_settings(payload.policy)
 
 
 def _validate_library_permission_setting(key: str, value: str) -> None:
@@ -171,6 +211,22 @@ async def update_config(
     secret_keys = {"comicvine_api_key"}
     runtime_managed_keys = {"logs_dir", "backup_dir"}
     runtime_managed_https = https_runtime_config_values()
+
+    from pullbox.services.story_arc_file_defaults import (
+        STORY_ARC_FILE_DEFAULT_KEYS,
+        validate_story_arc_file_defaults,
+    )
+    from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
+
+    # Validate the complete group before any update or runtime side effect.
+    if body.values.keys() & set(STORY_ARC_FILE_DEFAULT_KEYS):
+        effective_arc_files = await _effective_config_values(
+            session, body.values, STORY_ARC_FILE_DEFAULT_KEYS
+        )
+        try:
+            await validate_story_arc_file_defaults(session, effective_arc_files)
+        except StoryArcPlacementIntegrationError as exc:
+            raise ValidationError(str(exc)) from exc
 
     actually_changed: set[str] = set()
     old_values: dict[str, str] = {}
@@ -653,6 +709,22 @@ async def update_config(
 
 
 # ── ComicVine API Key ────────────────────────────────────────────────
+
+
+@router.post("/story-arc-files/preview")
+async def preview_story_arc_file_defaults(
+    body: ConfigUpdate,
+    _user: InteractiveOperatorUser,
+) -> dict[str, str]:
+    """Render sample naming with the real placement renderer; never touch disk."""
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.story_arc_file_defaults import parse_story_arc_file_defaults
+    from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
+
+    try:
+        return {"path": parse_story_arc_file_defaults(body.values).naming_preview()}
+    except StoryArcPlacementIntegrationError as exc:
+        raise ValidationError(str(exc)) from exc
 
 
 @router.post("/comicvine/test")

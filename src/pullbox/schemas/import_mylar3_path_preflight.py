@@ -17,6 +17,7 @@ MylarPathOutcome = Literal[
     "identity",
     "mapped",
     "mapped_missing",
+    "missing",
     "unmapped",
     "outside_root",
     "unreadable",
@@ -78,6 +79,7 @@ class MylarPathResolutionCounts(BaseModel):
     identity_resolved: int = Field(0, ge=0)
     mapped_existing: int = Field(0, ge=0)
     mapped_missing: int = Field(0, ge=0)
+    missing: int = Field(0, ge=0)
     unmapped: int = Field(0, ge=0)
     outside_root: int = Field(0, ge=0)
     unreadable: int = Field(0, ge=0)
@@ -90,6 +92,18 @@ class MylarPathExample(BaseModel):
 
     relative_path: str
     outcome: MylarPathOutcome
+
+
+class MylarPathException(BaseModel):
+    """An unresolved location, with enough context for an operator to repair it."""
+
+    series_id: str
+    series_name: str
+    stored_path: str
+    attempted_path: str
+    outcome: MylarPathOutcome
+    reason: str
+    suggested_action: str
 
 
 class MylarIdentityGroupPreview(BaseModel):
@@ -127,5 +141,12 @@ class MylarPathPreviewResponse(BaseModel):
     path_map: dict[str, str] = Field(default_factory=dict)
     requires_confirmation: bool
     can_confirm: bool
+    can_continue_with_unresolved: bool = False
+    requires_unresolved_acknowledgement: bool = False
+    unresolved_fingerprint: str | None = None
+    exception_count: int = 0
+    exceptions: list[MylarPathException] = Field(default_factory=list)
+    report_id: str | None = None
+    blocking_reasons: list[str] = Field(default_factory=list)
     partial: bool = False
     warnings: list[str] = Field(default_factory=list)

@@ -88,6 +88,8 @@ async def apply_manual_file_match(
     confidence: str = "high",
 ) -> tuple[str, str | None]:
     """Apply a manual issue assignment, respecting duplicate-series merge rules."""
+    if imp_file.status == ImportedFileStatus.SAFETY_BLOCKED:
+        raise ValidationError("Resolve this file's safety review before assigning an issue.")
     imp_series = await session.get(ImportedSeries, imp_file.import_series_id)
     duplicate_series = is_duplicate_series(imp_series)
     has_library_file = False
@@ -158,6 +160,9 @@ async def override_file_match(
     if imp_file is None or imp_file.import_job_id != job_id:
         raise NotFoundError("ImportedFile", file_id)
 
+    if imp_file.status == ImportedFileStatus.SAFETY_BLOCKED:
+        raise ValidationError("Resolve this file's safety review before assigning an issue.")
+
     issue = await session.get(Issue, issue_id)
     if issue is None:
         raise NotFoundError("Issue", issue_id)
@@ -222,6 +227,9 @@ async def repair_file_metadata(
     imp_file = await session.get(ImportedFile, file_id)
     if imp_file is None or imp_file.import_job_id != job_id:
         raise NotFoundError("ImportedFile", file_id)
+
+    if imp_file.status == ImportedFileStatus.SAFETY_BLOCKED:
+        raise ValidationError("Resolve this file's safety review before repairing metadata.")
 
     target_issue_id = issue_id or imp_file.matched_issue_id
     if target_issue_id is None:

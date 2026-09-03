@@ -342,6 +342,16 @@ Search and acquisition are coordinated through several focused service modules:
 - `search_indexers.py` calls configured indexers.
 - `release_parser.py` and matching helpers parse release titles.
 - `release_validator.py` rejects mismatches and unsafe candidates.
+- Date confidence is separate from query identity. Serial queries retain the
+  series start year, but indexer, direct, and Direct Connect results share
+  `release_year_matching.py`: known issue cover/store years use the configured
+  year tolerance; explicitly labeled volume years must match series identity.
+  Only undated regular issues from a continuing series can use the inclusive
+  start-year-to-current-year fallback, capped at medium confidence. This uses
+  existing catalog data without extra metadata requests and never overrides
+  series, issue-number, or issue-type mismatches. Search diagnostics record the
+  date-evidence basis. Bare four-digit issues require a known series prefix so
+  numeric titles such as `Marvel 1602` remain intact.
 - `search_scoring.py` and `search_evaluation.py` rank acceptable releases. The
   configured Search Priority orders the `usenet`, `torrent`, and `direct`
   source lanes. Within each lane, the deterministic quality score includes the
@@ -393,6 +403,17 @@ Wanted issue or manual search
 - Search behavior is intentionally split into smaller modules so parsing,
   validation, scoring, indexing, and orchestration can be tested separately.
 - Manual search may fan out more broadly than automated wanted search.
+- Single-issue automatic search and scheduled search both attach opted-in
+  AirDC++ candidates before shared source ranking. The handoff rechecks the exact
+  client's enabled/search/automatic flags and readiness. High-confidence results
+  use the durable AirDC++ acquisition service; lower-confidence routes are stored
+  encrypted in intervention and can be approved after a restart. Active issue
+  downloads suppress another queue mutation, and ambiguous responses remain owned
+  by reconciliation instead of falling through to a second source.
+- Search history counts validation rejections independently of acquisition.
+  Exhausted source handoffs report `source_unavailable`, not `no_results`, with
+  safe provider notices. SABnzbd NZB retrieval has a 60-second read timeout and
+  90-second total deadline; ordinary client API calls retain their 10-second timeout.
 - Search Wanted snapshots every eligible Wanted issue, processes at most 100
   per batch, and resumes the same restart-safe sweep hourly until complete.
   Never-searched issues run first, followed by least-recently searched issues;
@@ -436,6 +457,38 @@ Step 3 is the active decision point:
   choice.
 - Matched and In Library rows can be selected only by the user; state changes
   must not silently auto-select files for import.
+
+Mylar Step 1 analyzes stored locations before creating a job. Missing folders
+inside a visible root are distinct from unmapped prefixes, unreadable paths,
+ambiguous roots, and unsafe paths. The preview exposes series identity, stored
+and attempted paths, the reason, and a suggested action for every exception.
+Its searchable 25-row pages and full JSON export read a saved report instead of
+rescanning the filesystem. The most recent report is included in diagnostic
+packages even when preflight prevented job creation.
+
+If some locations are accessible and the only exceptions are missing or
+unmapped sources, the user can explicitly acknowledge continuing with available
+sources. The acknowledgement is bound to the reviewed exception set and is
+revalidated at job creation. Unavailable Mylar records remain review exceptions;
+they are not silently dropped or treated as owned files. Permission failures,
+unsafe paths, ambiguous roots, unavailable configured roots, and truncated
+previews still block starting. Preflight never modifies the Mylar database or
+creates, renames, or changes permissions on source folders.
+
+Both Mylar and folder imports use the same sidecar parser and comic-content
+review policy. Mylar's nested `series.json` metadata and explicit `cvinfo`
+ComicVine volume URLs are authoritative local evidence; an unqualified
+`series_id` is not. Conflicting explicit identities remain review exceptions.
+Archive member inventories, not declared ComicInfo page counts or minimum file
+sizes, identify metadata-only and possible cover-only CBZ/CBR/CB7/CBT files.
+No-page archives cannot be imported; single-page archives require individual
+approval without disabling resource or dangerous-file checks. PDF and EPUB do
+not use this image-member heuristic. These checks neither extract page payloads
+nor fetch provider metadata.
+
+Affected saved reviews can be rechecked with the offline, dry-run-first
+maintenance procedure in [Import Review Recovery](IMPORT_REVIEW_RECOVERY.md).
+It does not silently repair existing reviews during an upgrade.
 
 Step 4 is the only place files move into the library. It may reuse Step 2/3
 matched summaries, create targeted series and issue rows first, and then mark

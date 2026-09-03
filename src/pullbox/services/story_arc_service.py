@@ -21,6 +21,11 @@ from pullbox.models.story_arc import (
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
+from pullbox.services.story_arc_membership_policy import (
+    order_review_filter,
+    provider_issue_identity,
+    requires_order_review,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +41,10 @@ class StoryArcNotFoundError(StoryArcServiceError):
 
 class StoryArcValidationError(StoryArcServiceError):
     """Raised when a requested story-arc mutation is invalid."""
+
+
+class StoryArcProviderIdentityError(StoryArcValidationError):
+    """A canonical issue cannot replace a different exact provider identity."""
 
 
 class StoryArcConflictError(StoryArcServiceError):
@@ -339,6 +348,7 @@ class StoryArcService:
                     not intentionally_skipped
                     and membership.issue_id is not None
                     and arc.sync_enabled
+                    and not requires_order_review(membership)
                 )
                 changed = True
 
@@ -361,6 +371,12 @@ class StoryArcService:
         if issue is None:
             raise StoryArcNotFoundError(f"Issue {issue_id} was not found")
 
+        provider_id = provider_issue_identity(membership)
+        if provider_id is not None and str(issue.comicvine_id) != provider_id:
+            raise StoryArcProviderIdentityError(
+                "The selected issue does not match this member's exact provider identity"
+            )
+
         duplicate_id = await session.scalar(
             select(IssueStoryArc.id).where(
                 IssueStoryArc.story_arc_id == membership.story_arc_id,
@@ -375,6 +391,7 @@ class StoryArcService:
         if (
             membership.issue_id == issue_id
             and membership.resolution_state == StoryArcResolutionState.RESOLVED
+            and not requires_order_review(membership)
         ):
             return membership
         if await self._has_managed_placements(session, membership_id=membership.id):
@@ -385,6 +402,8 @@ class StoryArcService:
         membership.issue_id = issue_id
         membership.resolution_state = StoryArcResolutionState.RESOLVED
         membership.sync_eligible = bool(arc.sync_enabled)
+        if requires_order_review(membership):
+            membership.evidence = {**membership.evidence, "catalog_review_required": False}
         if membership.source_issue_number_text is None:
             membership.source_issue_number_text = issue.effective_issue_number_text
         arc.revision += 1
@@ -602,14 +621,16 @@ class StoryArcService:
         story_arc_id: int,
         enabled: bool,
     ) -> None:
-        await session.execute(
-            sa_update(IssueStoryArc)
-            .where(
-                IssueStoryArc.story_arc_id == story_arc_id,
-                IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
-            )
-            .values(sync_eligible=enabled)
+        statement = sa_update(IssueStoryArc).where(
+            IssueStoryArc.story_arc_id == story_arc_id,
+            IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
         )
+        # Constant values keep already-loaded ORM members coherent on both DBs.
+        await session.execute(statement.values(sync_eligible=False))
+        if enabled:
+            await session.execute(
+                statement.where(~order_review_filter()).values(sync_eligible=True)
+            )
 
     @staticmethod
     def _assert_revision(arc: StoryArc, expected_revision: int) -> None:

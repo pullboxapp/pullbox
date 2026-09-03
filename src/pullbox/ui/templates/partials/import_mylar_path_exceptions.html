@@ -1,0 +1,39 @@
+<section x-data="mylarPathProblemsData()" x-show="mylarPathPreview && mylarPathPreview.exception_count"
+         x-cloak class="downloads-table-wrap w-full min-w-0 max-w-full"
+         data-testid="import-mylar-path-exceptions" aria-label="Mylar path exceptions">
+  <div class="flex flex-wrap items-end justify-between gap-3 border-b border-pb-border p-4">
+    <div class="min-w-0">
+      <label for="mylar-path-exception-search" class="block text-xs font-semibold text-pb-text">Find a series, path, or reason</label>
+      <input id="mylar-path-exception-search" type="search" maxlength="200" x-model="search"
+             @input.debounce.300ms="load(1)" :disabled="!reportId" class="input-pb mt-2 w-full"
+             data-testid="import-mylar-exception-search">
+    </div>
+    <a x-show="reportId" :href="exportUrl" hx-boost="false" download
+       class="btn-ghost btn-sm" data-testid="import-mylar-exception-export">Export full report</a>
+  </div>
+  <div x-show="error" role="alert" class="inline-alert inline-alert-warning m-4" x-text="error"></div>
+  <div class="overflow-x-auto" :aria-busy="loading">
+    <table class="downloads-table w-full text-sm">
+      <caption class="sr-only">Unavailable Mylar locations and the action needed to resolve each one.</caption>
+      <thead><tr><th scope="col">Series</th><th scope="col">Stored path</th><th scope="col">Attempted Pullbox path</th><th scope="col">Reason and next step</th></tr></thead>
+      <tbody>
+        <template x-for="(item, index) in items" :key="page + ':' + index">
+          <tr>
+            <td><span class="font-medium" x-text="item.series_name || 'Unnamed series'"></span><p class="text-xs text-pb-text-sec" x-text="item.series_id ? 'Mylar ID: ' + item.series_id : ''"></p></td>
+            <td class="max-w-xs break-all font-mono text-xs" x-text="item.stored_path"></td>
+            <td class="max-w-xs break-all font-mono text-xs" x-text="item.attempted_path"></td>
+            <td class="max-w-sm"><p x-text="item.reason"></p><p class="mt-1 text-xs text-pb-text-sec" x-text="item.suggested_action"></p></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <p x-show="!items.length && !loading" class="p-4 text-sm text-pb-text-sec">No exceptions match this search.</p>
+  </div>
+  <nav class="flex flex-wrap items-center justify-between gap-3 border-t border-pb-border p-3" aria-label="Mylar exception pages">
+    <p class="text-xs text-pb-text-sec" role="status" x-text="loading ? 'Loading exceptions...' : total + ' exceptions - Page ' + page + ' of ' + pages"></p>
+    <div class="flex gap-2">
+      <button type="button" class="btn-ghost btn-sm" @click="load(page - 1)" :disabled="!reportId || loading || page <= 1">Previous</button>
+      <button type="button" class="btn-ghost btn-sm" @click="load(page + 1)" :disabled="!reportId || loading || page >= pages">Next</button>
+    </div>
+  </nav>
+</section>

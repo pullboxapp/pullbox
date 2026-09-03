@@ -120,6 +120,7 @@ from pullbox.schemas.import_story_arc_preflight import (
     StoryArcPreflightRequest,
     StoryArcPreflightResponse,
 )
+from pullbox.services import import_mylar3_path_reports as path_reports
 from pullbox.services.import_layout_analysis import ImportLayoutAnalyzer
 from pullbox.services.import_mylar3_path_preflight import Mylar3PathPreflightAnalyzer
 from pullbox.services.import_story_arc_preflight import StoryArcPreflightAnalyzer
@@ -261,10 +262,10 @@ async def preview_import_mylar_paths(
     session: DbSession,
     body: MylarPathPreviewRequest,
 ) -> MylarPathPreviewResponse:
-    """Analyze Mylar path coverage without creating a job or mutating files."""
+    """Analyze source paths read-only and retain a private report without creating a job."""
     analyzer = Mylar3PathPreflightAnalyzer()
     try:
-        return await analyzer.analyze(
+        result = await analyzer.analyze(
             session,
             body.source_path,
             auto_detect=body.auto_detect,
@@ -275,6 +276,55 @@ async def preview_import_mylar_paths(
         raise ValidationError(
             "The Mylar path preview source is no longer available or readable."
         ) from exc
+    try:
+        result.report_id = await asyncio.to_thread(
+            path_reports.save_report, result, body.source_path
+        )
+    except (OSError, ValueError):
+        logger.warning("mylar_preflight_report_unavailable", exc_info=True)
+        result.warnings.append("report_unavailable")
+    logger.info(
+        "mylar_path_preflight_completed",
+        report_id=result.report_id,
+        resolution=result.resolution.model_dump(),
+        warnings=result.warnings,
+        can_confirm=result.can_confirm,
+        can_continue_with_unresolved=result.can_continue_with_unresolved,
+    )
+    return result.model_copy(update={"exceptions": result.exceptions[: path_reports.PAGE_SIZE]})
+
+
+@router.get("/mylar-path-reports/{report_id}/export")
+async def export_mylar_path_report(_user: AuthenticatedUser, report_id: str) -> JSONResponse:
+    try:
+        report = await asyncio.to_thread(path_reports.load_report, report_id)
+    except (OSError, ValueError):
+        return JSONResponse(
+            {"detail": "Report unavailable or expired. Analyze Mylar paths again."}, status_code=404
+        )
+    return JSONResponse(
+        report,
+        headers={
+            "Content-Disposition": 'attachment; filename="mylar-path-preflight.json"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/mylar-path-reports/{report_id}")
+async def get_mylar_path_report(
+    _user: AuthenticatedUser,
+    report_id: str,
+    page: int = Query(1, ge=1),
+    search: str = Query("", max_length=200),
+) -> JSONResponse:
+    try:
+        result = await asyncio.to_thread(path_reports.report_page, report_id, page, search)
+    except (OSError, ValueError):
+        return JSONResponse(
+            {"detail": "Report unavailable or expired. Analyze Mylar paths again."}, status_code=404
+        )
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/story-arc-preview", response_model=StoryArcPreflightResponse)

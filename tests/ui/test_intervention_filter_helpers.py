@@ -27,6 +27,7 @@ def test_intervention_filter_normalizers_keep_invalid_values_safe() -> None:
     assert normalize_intervention_reason_filter("needs_review") == ""
     assert normalize_intervention_protocol_filter("TORRENT") == "torrent"
     assert normalize_intervention_protocol_filter("DIRECT") == "direct"
+    assert normalize_intervention_protocol_filter("DC") == "dc"
     assert normalize_intervention_protocol_filter("magnet") == ""
     assert normalize_intervention_outcome_filter("APPROVED") == "approved"
     assert normalize_intervention_outcome_filter("pending") == ""
@@ -35,6 +36,12 @@ def test_intervention_filter_normalizers_keep_invalid_values_safe() -> None:
     assert normalize_intervention_history_sort("created_at") == "-resolved_at"
     assert normalize_intervention_lane("recovery") == "recovery"
     assert normalize_intervention_lane("unexpected") == "review"
+
+
+def test_dc_intervention_protocol_label_is_not_usenet() -> None:
+    from pullbox.ui.intervention_filter_helpers import intervention_protocol_label
+
+    assert intervention_protocol_label(False, "dc") == "Direct Connect"
 
 
 def test_intervention_review_reason_labels_and_summaries() -> None:

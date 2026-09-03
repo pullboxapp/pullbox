@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -11,10 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.models import Base
-from pullbox.models.airdcpp import AirDcppAcquisition
+from pullbox.models.airdcpp import AirDcppAcquisition, AirDcppClientSettings
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
+from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
+from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.providers.airdcpp.contracts import (
     AirDcppQueueBundleAddInfo,
@@ -24,10 +30,19 @@ from pullbox.providers.airdcpp.errors import (
     AirDcppEntityNotFoundError,
     AirDcppUnavailableError,
 )
+from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
 from pullbox.providers.base import ReleaseResult
 from pullbox.services.airdcpp_acquisition import AirDcppQueueAcquisitionService
-from pullbox.services.airdcpp_search_types import DcMetrics, DcRoute, DcValidatedCandidate
+from pullbox.services.airdcpp_search_types import (
+    DcMetrics,
+    DcRoute,
+    DcSearchOutcome,
+    DcValidatedCandidate,
+)
+from pullbox.services.intervention_service import InterventionService
 from pullbox.services.release_validator import ReleaseValidator
+from pullbox.services.search_acquisition_router import route_search_acquisition
+from pullbox.services.search_targets import IssueSearchOutcome, IssueSearchTarget
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -114,6 +129,237 @@ def _candidate(client_id: int) -> DcValidatedCandidate:
         ),
         metrics=DcMetrics(2, 1, 2, 1_000_000),
     )
+
+
+@pytest.mark.parametrize("confidence", [MatchConfidence.HIGH, MatchConfidence.MEDIUM])
+@pytest.mark.parametrize("queue_timeout", [False, True])
+async def test_automatic_dc_routes_to_queue_or_restart_safe_intervention(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    confidence: MatchConfidence,
+    queue_timeout: bool,
+) -> None:
+    client_id, issue_id = await _seed(db_factory)
+    async with db_factory() as session:
+        session.add(
+            AirDcppClientSettings(
+                client_config_id=client_id,
+                search_enabled=True,
+                automatic_search_enabled=True,
+                queue_priority=3,
+            )
+        )
+        log = SearchLog(
+            issue_id=issue_id,
+            series_title="Example Comic",
+            issue_number=1,
+            search_type=SearchType.AUTOMATED,
+        )
+        session.add(log)
+        await session.commit()
+        log_id = log.id
+        candidate = _candidate(client_id)
+        candidate = replace(
+            candidate, validation=replace(candidate.validation, confidence=confidence)
+        )
+        outcome = IssueSearchOutcome(
+            IssueSearchTarget(issue_id, 1, "Example Comic", 1, IssueType.ISSUE),
+            "fast",
+            0,
+            [],
+            [],
+            [],
+            [],
+            None,
+            None,
+            {},
+            1,
+            dc_outcome=DcSearchOutcome((candidate,), (), (), 1, 1, 0, 1, False),
+        )
+        api = _FakeApi(session, failure=AirDcppUnavailableError() if queue_timeout else None)
+        supervisor = SimpleNamespace(state=AirDcppSupervisorState.READY, api_client=api)
+        monkeypatch.setattr(
+            "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+            lambda: SimpleNamespace(
+                get=lambda identity: supervisor if identity == client_id else None
+            ),
+        )
+        routed = await route_search_acquisition(
+            session,
+            outcome=outcome,
+            search_log_id=log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=AsyncMock(),
+            intervention_service=InterventionService(),
+            runner=None,
+        )
+        await session.commit()
+        if confidence is MatchConfidence.HIGH:
+            assert routed.grabbed == 1
+            assert routed.action_status == ("retry_pending" if queue_timeout else "downloading")
+            assert routed.download_id is not None
+            assert api.mutations == 1
+            replay = await route_search_acquisition(
+                session,
+                outcome=outcome,
+                search_log_id=log_id,
+                eval_kwargs={},
+                type_thresholds={"issue": "high"},
+                download_service=AsyncMock(),
+                intervention_service=InterventionService(),
+                runner=None,
+            )
+            assert replay.action_status == "already_downloading"
+            assert replay.grabbed == 0
+            assert api.mutations == 1
+        else:
+            assert routed.queued == 1
+            assert api.mutations == 0
+            pending = (await session.scalars(select(PendingMatch))).one()
+            assert pending.match_details["source_kind"] == "dc"
+            assert candidate.route.tth not in str(pending.match_details)
+            assert await session.scalar(select(DownloadHistory.id)) is None
+            pending_id = pending.id
+            await session.commit()
+            # A fresh session/service must not depend on an in-memory route grant.
+            async with db_factory() as restarted:
+                api.session = restarted
+                downloaded = await InterventionService().approve_match(restarted, pending_id)
+                assert downloaded.download_client is DownloadClientType.AIRDCPP
+                assert api.mutations == 1
+                restored_pending = await restarted.get(PendingMatch, pending_id)
+                assert restored_pending.status == PendingMatchStatus.APPROVED
+                await restarted.commit()
+        assert len((await session.scalars(select(DownloadHistory))).all()) == 1
+
+
+async def test_automatic_dc_rechecks_client_opt_in_before_mutation(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client_id, issue_id = await _seed(db_factory)
+    async with db_factory() as session:
+        session.add(
+            AirDcppClientSettings(client_config_id=client_id, automatic_search_enabled=False)
+        )
+        await session.commit()
+        candidate = _candidate(client_id)
+        outcome = IssueSearchOutcome(
+            IssueSearchTarget(issue_id, 1, "Example Comic", 1, IssueType.ISSUE),
+            "fast",
+            0,
+            [],
+            [],
+            [],
+            [],
+            None,
+            None,
+            {},
+            1,
+            dc_outcome=DcSearchOutcome((candidate,), (), (), 1, 1, 0, 1, False),
+        )
+        routed = await route_search_acquisition(
+            session,
+            outcome=outcome,
+            search_log_id=1,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=AsyncMock(),
+            intervention_service=InterventionService(),
+            runner=None,
+        )
+        assert routed.action_status == "source_unavailable"
+        assert routed.notices
+        assert await session.scalar(select(DownloadHistory.id)) is None
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_automatic_dc_never_queues_a_blocklisted_or_owned_candidate(
+    db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    owned: bool,
+) -> None:
+    from pullbox.models.blocklist import BlocklistReason
+    from pullbox.services.blocklist_service import BlocklistService
+
+    client_id, issue_id = await _seed(db_factory)
+    candidate = _candidate(client_id)
+    async with db_factory() as session:
+        session.add(
+            AirDcppClientSettings(client_config_id=client_id, automatic_search_enabled=True)
+        )
+        if owned:
+            root = LibraryRoot(name="Test library", path="/test-library")
+            session.add(root)
+            await session.flush()
+            session.add(
+                LibraryFile(
+                    issue_id=issue_id,
+                    library_root_id=root.id,
+                    file_path="/test-library/owned.cbz",
+                    file_name="owned.cbz",
+                    file_size=10,
+                    file_format=FileFormat.CBZ,
+                    file_modified_at=datetime.now(UTC),
+                )
+            )
+        else:
+            await BlocklistService.add_entry(
+                session, candidate.release.title, BlocklistReason.REJECTED
+            )
+        await session.commit()
+        api = _FakeApi(session)
+        supervisor = SimpleNamespace(state=AirDcppSupervisorState.READY, api_client=api)
+        monkeypatch.setattr(
+            "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+            lambda: SimpleNamespace(get=lambda _: supervisor),
+        )
+        outcome = IssueSearchOutcome(
+            IssueSearchTarget(issue_id, 1, "Example Comic", 1, IssueType.ISSUE),
+            "fast",
+            0,
+            [],
+            [],
+            [],
+            [],
+            None,
+            None,
+            {},
+            1,
+            dc_outcome=DcSearchOutcome((candidate,), (), (), 1, 1, 0, 1, False),
+        )
+        routed = await route_search_acquisition(
+            session,
+            outcome=outcome,
+            search_log_id=1,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=AsyncMock(),
+            intervention_service=InterventionService(),
+            runner=None,
+        )
+        assert routed.grabbed == 0
+        if owned:
+            assert routed.action_status == "already_owned"
+        assert api.mutations == 0
+        assert await session.scalar(select(DownloadHistory.id)) is None
+
+
+@pytest.mark.parametrize("mutation", ["plaintext", "another_issue", "size"])
+def test_dc_review_route_rejects_modified_ownership(mutation: str) -> None:
+    from pullbox.services.airdcpp_search_acquisition import dc_review_candidate, dc_review_snapshot
+
+    candidate = _candidate(1)
+    snapshot = dc_review_snapshot(candidate, issue_id=1, search_log_id=2)
+    pending = PendingMatch(
+        issue_id=2 if mutation == "another_issue" else 1,
+        release_title=candidate.release.title,
+        file_size=1 if mutation == "size" else candidate.route.size_bytes,
+        match_details={"dc_route_snapshot": "{}" if mutation == "plaintext" else snapshot},
+    )
+    with pytest.raises(ValueError):
+        dc_review_candidate(pending)
 
 
 class _FakeApi:

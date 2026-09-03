@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import configparser
 import os
+import re
 import sqlite3
 import stat
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ import structlog
 
 from pullbox.core.collection_scanner import COMIC_EXTENSIONS, DiscoveredFile, DiscoveredSeries
 from pullbox.core.exceptions import ConfigurationError, MylarReadError
+from pullbox.core.filesystem_policy import is_invalid_path_text
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.library_layout import (
@@ -128,6 +130,7 @@ class Mylar3ImportMetadataSnapshot:
     readlist_present: bool
     readlist_count: int
     arc_settings: Mylar3ArcSettingsSnapshot
+    series_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +300,7 @@ class Mylar3Reader:
         self._config_path = Path(config_path) if config_path is not None else None
         self._path_map = path_map or {}
         self._include_missing_files = include_missing_files
+        self.import_series_rows_read = 0
         self._reference_root_boundaries = (
             None
             if reference_root_boundaries is None
@@ -351,9 +355,10 @@ class Mylar3Reader:
         self._require_database()
         self._require_import_page_size(page_size)
         after_rowid = 0
+        self.import_series_rows_read = 0
         seen_cv_ids: set[int] = set()
         while True:
-            page, next_rowid = await asyncio.to_thread(
+            page, next_rowid, source_count = await asyncio.to_thread(
                 self._read_import_series_page_sync,
                 after_rowid,
                 page_size,
@@ -361,6 +366,7 @@ class Mylar3Reader:
             if next_rowid == after_rowid:
                 break
             after_rowid = next_rowid
+            self.import_series_rows_read += source_count
             filtered: list[DiscoveredSeries] = []
             for series in page:
                 cv_id = series.mylar3_cv_id
@@ -482,6 +488,7 @@ class Mylar3Reader:
                 raise MylarReadError(msg)
             storyarcs_present = self._table_exists(conn, "storyarcs")
             readlist_present, readlist_count = self._read_readlist_count(conn)
+            series_count = int(conn.execute("SELECT COUNT(*) FROM comics").fetchone()[0])
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"
             raise MylarReadError(msg) from exc
@@ -493,13 +500,14 @@ class Mylar3Reader:
             readlist_present=readlist_present,
             readlist_count=readlist_count,
             arc_settings=self._read_arc_settings(),
+            series_count=series_count,
         )
 
     def _read_import_series_page_sync(
         self,
         after_rowid: int,
         page_size: int,
-    ) -> tuple[tuple[DiscoveredSeries, ...], int]:
+    ) -> tuple[tuple[DiscoveredSeries, ...], int, int]:
         """Read and normalize one bounded rowid-keyset Comic cohort."""
         try:
             conn = sqlite3.connect(f"{self._db_path.resolve().as_uri()}?mode=ro", uri=True)
@@ -523,7 +531,7 @@ class Mylar3Reader:
             )
             rows = list(cursor)
             if not rows:
-                return (), after_rowid
+                return (), after_rowid, 0
             comic_ids = {
                 cv_id for row in rows if (cv_id := self._parse_cv_id(row["ComicID"])) is not None
             }
@@ -562,7 +570,7 @@ class Mylar3Reader:
             raise MylarReadError(msg) from exc
         finally:
             conn.close()
-        return page, next_rowid
+        return page, next_rowid, len(rows)
 
     def _read_import_story_arc_page_sync(
         self,
@@ -1117,7 +1125,18 @@ class Mylar3Reader:
                 reason="invalid_location",
                 rejection_reason="The Mylar comic folder must be an absolute path.",
             )
-        if ".." in location_path.parts or self._path_text_is_invalid(location):
+        if self._path_text_is_invalid(location):
+            return _ResolvedMylarPath(
+                path=None,
+                status="invalid",
+                mapping_applied=bool(self._path_map),
+                reason="invalid_path_text",
+                rejection_reason=(
+                    "The Mylar comic folder contains unsupported control or formatting "
+                    "characters, or exceeds the maximum path length."
+                ),
+            )
+        if ".." in location_path.parts:
             return _ResolvedMylarPath(
                 path=None,
                 status="invalid",
@@ -1280,7 +1299,7 @@ class Mylar3Reader:
 
     @staticmethod
     def _path_text_is_invalid(value: str) -> bool:
-        return len(value) > 4096 or not value.isprintable()
+        return is_invalid_path_text(value)
 
     def _build_files(
         self,
@@ -1300,6 +1319,11 @@ class Mylar3Reader:
         issue_by_file_name = self._issue_records_by_file_name(issue_records)
         series_resolution = self._resolve_location_details(source_location)
         issue_by_path = self._issue_records_by_path(issue_records, series_resolution)
+        reconciled = self._reconcile_missing_recorded_paths(comic_paths, issue_by_path)
+        for actual, recorded in reconciled.items():
+            issue_by_path[str(actual)] = issue_by_path[str(recorded)]
+        replaced_paths = set(reconciled.values())
+        comic_paths = [path for path in comic_paths if path not in replaced_paths]
         extractor = SourceMetadataExtractor()
         sidecars_by_folder = {
             folder: extractor.read_sidecars(folder)
@@ -1362,6 +1386,12 @@ class Mylar3Reader:
                 "has_comicinfo": False,
                 "mylar3_folder_metadata_scanned": True,
             }
+            if fpath in reconciled:
+                metadata_diagnostics["mylar3_path_reconciliation"] = {
+                    "recorded_path": str(reconciled[fpath]),
+                    "actual_path": str(fpath),
+                    "method": "unique_same_folder_normalized_stem",
+                }
             if sidecar_data is not None and (
                 sidecar_data.get("files_present")
                 or sidecar_data.get("series_id") is not None
@@ -1524,6 +1554,36 @@ class Mylar3Reader:
             )
         return results
 
+    @staticmethod
+    def _reconcile_missing_recorded_paths(
+        comic_paths: list[Path],
+        issue_by_path: dict[str, _MylarIssueRecord],
+    ) -> dict[Path, Path]:
+        """Accept only unambiguous case/spacing/extension drift, never issue-number guesses."""
+        existing: dict[tuple[Path, str], list[Path]] = {}
+        missing: dict[tuple[Path, str], list[Path]] = {}
+        for path in comic_paths:
+            normalized = " ".join(path.stem.casefold().split())
+            normalized = re.sub(r"\s*([.()\[\]])\s*", r"\1", normalized)
+            key = (path.parent, normalized)
+            try:
+                if path.is_file() and not path.is_symlink():
+                    existing.setdefault(key, []).append(path)
+                elif not path.exists() and str(path) in issue_by_path:
+                    missing.setdefault(key, []).append(path)
+            except OSError:
+                continue
+        reconciled: dict[Path, Path] = {}
+        for key, recorded in missing.items():
+            candidates = existing.get(key, [])
+            if len(recorded) != 1 or len(candidates) != 1:
+                continue
+            actual = candidates[0]
+            if str(actual) in issue_by_path:
+                continue
+            reconciled[actual] = recorded[0]
+        return reconciled
+
     def _include_recorded_issue_paths(
         self,
         comic_paths: list[Path],
@@ -1553,6 +1613,7 @@ class Mylar3Reader:
     ) -> dict[str, _MylarIssueRecord]:
         """Index issue identities by their exact selected source path."""
         records: dict[str, _MylarIssueRecord] = {}
+        ambiguous: set[str] = set()
         for record in issue_records:
             if not record.location:
                 continue
@@ -1561,7 +1622,13 @@ class Mylar3Reader:
                 series_resolution,
             )
             if resolution is not None and resolution.path is not None:
-                records[str(resolution.path)] = record
+                path = str(resolution.path)
+                existing = records.get(path)
+                if existing is not None and existing.issue_id != record.issue_id:
+                    ambiguous.add(path)
+                records[path] = record
+        for path in ambiguous:
+            records.pop(path, None)
         return records
 
     def _selected_recorded_issue_path_details(

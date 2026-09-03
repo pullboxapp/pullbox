@@ -141,7 +141,7 @@
                         <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
                       </button>
                     {% endif %}
-                    {% if story_arc.active %}
+                    {% if story_arc.active and story_arc.manual_editable %}
                       <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/remove" method="post" hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/remove" hx-swap="none" x-data="{}" data-testid="story-arc-remove-membership-{{ membership.id }}">
                         <input type="hidden" name="return_page" value="{{ story_arc.page }}">
                         <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
@@ -157,17 +157,18 @@
               {% if story_arc.active and membership.can_resolve %}
                 <tr x-show="reviewOpen" x-cloak data-testid="story-arc-membership-review-panel-{{ membership.id }}">
                   <td colspan="5" class="border-t border-pb-border bg-pb-bg/40 px-4 py-4">
-                    <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.65fr)]">
+                    <div class="grid gap-4{% if membership.can_rematch %} lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.65fr)]{% endif %}">
                       <div class="space-y-3">
-                        {% if membership.issue_id and membership.resolution_state == 'pending' %}
-                          <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" class="space-y-2">
+                        {% if membership.issue_id and (membership.resolution_state == 'pending' or membership.order_review_required) %}
+                          <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" hx-swap="none" class="space-y-2">
                             <input type="hidden" name="issue_id" value="{{ membership.issue_id }}">
                             <input type="hidden" name="return_page" value="{{ story_arc.page }}">
                             <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                            <p class="text-sm text-pb-text-sec">Added by provider refresh; review its identity and reading order before enabling synchronization.</p>
-                            <button type="submit" class="btn-secondary">Confirm this member</button>
+                            <p class="text-sm text-pb-text-sec">This member is matched to its issue. Acquisition can continue; confirm its position in the reading order before synchronizing its arc file.</p>
+                            <button type="submit" class="btn-secondary">Confirm reading order</button>
                           </form>
                         {% endif %}
+                        {% if membership.can_rematch %}
                         <form
                           action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/local-issues"
                           method="get"
@@ -187,7 +188,9 @@
                         </form>
                         <div id="story-arc-local-issue-results-{{ membership.id }}"></div>
                         <p class="text-xs text-pb-text-sec">Not in this library? <a href="{{ membership.metadata_add_url }}" class="text-pb-interactive hover:underline">Open Add Series with this evidence</a>.</p>
+                        {% endif %}
                       </div>
+                      {% if membership.can_rematch %}
                       <details class="text-sm text-pb-text-sec">
                         <summary class="cursor-pointer font-medium text-pb-text">Resolve by known issue ID</summary>
                         <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" method="post" hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/resolve" hx-swap="none" data-testid="story-arc-resolve-membership-{{ membership.id }}" class="mt-3 space-y-2">
@@ -198,6 +201,7 @@
                           <button type="submit" class="btn-secondary">Resolve</button>
                         </form>
                       </details>
+                      {% endif %}
                     </div>
                   </td>
                 </tr>
@@ -209,7 +213,7 @@
     {% else %}
       <div class="series-empty-state">
         <p class="font-semibold text-pb-text">This Story Arc is empty</p>
-        <p class="series-empty-state-copy">Add a canonical issue or an unresolved exact issue number to start the reading order.</p>
+        <p class="series-empty-state-copy">{% if story_arc.manual_editable %}Add a canonical issue or an unresolved exact issue number to start the reading order.{% else %}Members are supplied by the metadata provider. Choose Check for updates to look for new issues.{% endif %}</p>
       </div>
     {% endif %}
   </div>

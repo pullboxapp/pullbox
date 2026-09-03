@@ -14,6 +14,7 @@ from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.models import Base
+from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.publisher import Publisher
@@ -116,6 +117,48 @@ def _copy_policy(root_id: int, arc_root: Path) -> StoryArcPlacementPolicyInput:
         symlink_style=None,
         synchronize=True,
     )
+
+
+async def test_later_acquisition_uses_saved_arc_policy_after_global_defaults_change(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    arc_id, member_id, root_id, canonical, arc_root = await _seed_membership(db_factory, tmp_path)
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        saved = await service.update_policy(
+            session, arc_id, expected_revision=1, proposal=_copy_policy(root_id, arc_root)
+        )
+    another_destination = canonical.parent / "New Arcs"
+    another_destination.mkdir()
+    async with db_factory() as session:
+        session.add_all(
+            [
+                SystemConfig(key="story_arc_files_enabled", value="true", value_type="bool"),
+                SystemConfig(key="story_arc_files_method", value="symlink", value_type="string"),
+                SystemConfig(
+                    key="story_arc_files_library_root_id", value=str(root_id), value_type="string"
+                ),
+                SystemConfig(
+                    key="story_arc_files_destination",
+                    value=str(another_destination),
+                    value_type="string",
+                ),
+                SystemConfig(key="story_arc_files_synchronize", value="false", value_type="bool"),
+            ]
+        )
+        await session.commit()
+        result = await service.sync_membership(session, arc_id, member_id)
+        assert result.placement is not None
+        placement = result.placement
+        target = Path(placement.placement_path)
+        assert placement.mode is StoryArcPlacementMode.COPY
+        assert target.is_relative_to(arc_root)
+        assert target.name.startswith("001 - Batman 1000000")
+        assert target.read_bytes() == canonical.read_bytes() == b"canonical archive"
+        assert not target.is_symlink()
+        assert list(another_destination.iterdir()) == []
+        assert (await service.get_policy(session, arc_id)).snapshot == saved.snapshot
 
 
 async def test_policy_freezes_complete_snapshot_and_rejects_stale_revision(

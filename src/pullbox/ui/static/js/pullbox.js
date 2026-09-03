@@ -2915,6 +2915,75 @@ function importCollectionFooterData(config) {
   };
 }
 
+function mylarPathProblemsData() {
+  return {
+    reportId: null,
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: 25,
+    search: "",
+    loading: false,
+    error: "",
+    controller: null,
+    requestId: 0,
+    init() {
+      this.setReport(this.mylarPathPreview);
+      this.$watch("mylarPathPreview", (preview) => this.setReport(preview));
+    },
+    destroy() {
+      this.requestId += 1;
+      if (this.controller) this.controller.abort();
+    },
+    setReport(preview) {
+      this.destroy();
+      this.reportId = preview && preview.report_id;
+      this.items = (preview && preview.exceptions) || [];
+      this.total = (preview && preview.exception_count) || 0;
+      this.page = 1;
+      this.search = "";
+      this.error = "";
+      this.loading = false;
+    },
+    get pages() {
+      return Math.max(1, Math.ceil(this.total / this.pageSize));
+    },
+    get exportUrl() {
+      return this.reportId
+        ? "/api/v1/import/mylar-path-reports/" + encodeURIComponent(this.reportId) + "/export"
+        : "";
+    },
+    async load(page) {
+      if (!this.reportId) return;
+      if (this.controller) this.controller.abort();
+      const controller = new AbortController();
+      this.controller = controller;
+      const requestId = ++this.requestId;
+      this.loading = true;
+      this.error = "";
+      try {
+        const query = new URLSearchParams({ page: String(page), search: this.search });
+        const response = await fetch(
+          "/api/v1/import/mylar-path-reports/" + encodeURIComponent(this.reportId) + "?" + query,
+          { signal: controller.signal },
+        );
+        if (!response.ok) throw new Error("Report unavailable or expired. Analyze Mylar paths again.");
+        const data = await response.json();
+        if (requestId !== this.requestId) return;
+        this.items = data.items;
+        this.total = data.total;
+        this.page = data.page;
+      } catch (error) {
+        if (error.name !== "AbortError" && requestId === this.requestId) {
+          this.error = error.message;
+        }
+      } finally {
+        if (requestId === this.requestId) this.loading = false;
+      }
+    },
+  };
+}
+
 function importSourceData(config) {
   var cfg = config || {};
   var libraryRoots = Array.isArray(cfg.libraryRoots) ? cfg.libraryRoots : [];
@@ -2994,6 +3063,7 @@ function importSourceData(config) {
     mylarPathMappingId: 0,
     mylarPathAutoDetect: true,
     mylarPathConfirmed: false,
+    mylarUnresolvedConfirmed: false,
     storyArcPreview: emptyStoryArcPreview(),
     storyArcPreviewLoading: false,
     storyArcPreviewError: "",
@@ -3436,7 +3506,8 @@ function importSourceData(config) {
       if (
         this.sourceType === "mylar3" &&
         (!this.mylarPathPreview ||
-          !this.mylarPathPreview.can_confirm ||
+          !(this.mylarPathPreview.can_confirm || this.mylarPathPreview.can_continue_with_unresolved) ||
+          (this.mylarPathPreview.requires_unresolved_acknowledgement && !this.mylarUnresolvedConfirmed) ||
           (this.mylarPathPreview.requires_confirmation && !this.mylarPathConfirmed))
       ) {
         return false;
@@ -3476,6 +3547,7 @@ function importSourceData(config) {
       this.mylarPathPreviewLoading = false;
       this.mylarPathPreviewError = "";
       this.mylarPathConfirmed = false;
+      this.mylarUnresolvedConfirmed = false;
       if (resetMappings) {
         this.mylarPathMappings = [];
         this.mylarPathAutoDetect = true;
@@ -3545,6 +3617,7 @@ function importSourceData(config) {
       this.mylarPathPreviewError = "";
       this.mylarPathPreview = null;
       this.mylarPathConfirmed = false;
+      this.mylarUnresolvedConfirmed = false;
       try {
         var response = await fetch("/api/v1/import/mylar-path-preview", {
           method: "POST",
@@ -3913,6 +3986,9 @@ function importSourceData(config) {
               ? Object.assign({}, this.mylarPathPreview.path_map || {})
               : {},
             mylar3_path_map_confirmed: this.sourceType === "mylar3",
+            mylar3_allow_unresolved_paths: this.sourceType === "mylar3" && this.mylarUnresolvedConfirmed,
+            mylar3_unresolved_fingerprint: this.sourceType === "mylar3" && this.mylarUnresolvedConfirmed
+              ? this.mylarPathPreview.unresolved_fingerprint : null,
           }),
         });
 
@@ -6987,8 +7063,8 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         expected_policy_digest: digestElement ? digestElement.value : "",
         materialize_filesystem: materialize,
         monitored: monitored,
-        search_missing: monitored && checked("search_missing"),
-        include_upcoming: monitored && checked("include_upcoming"),
+        search_missing: monitored,
+        include_upcoming: monitored,
         placement_policy: {
           mode: mode,
           target_library_root_id: materialize ? rootId : null,
@@ -13510,7 +13586,10 @@ function dropdownSelectData(config) {
         requestAnimationFrame(function () {
           self.syncPanelControlVars();
           self.updatePanelPosition();
-          self.focusOption(self.activeIndex);
+          // Apply data-ready before focusing: hidden panels reject focus.
+          self.$nextTick(function () {
+            if (self.open) self.focusOption(self.activeIndex);
+          });
         });
       });
     },
@@ -18182,13 +18261,19 @@ function seriesDetailPage(config) {
             emitToast("Queued " + issue.label + " for review", "info");
           } else if (data.status === "no_results") {
             emitToast("No results found for " + issue.label, "warning");
+          } else if (data.status === "source_unavailable") {
+            var queueMessage = data.message || "Matches found, but downloads could not be queued.";
+            if (Array.isArray(data.notices) && data.notices.length) {
+              queueMessage += " " + data.notices.join(" ");
+            }
+            emitToast(queueMessage, "warning");
           } else {
             var infoMessage =
               data.error && data.error.message
                 ? data.error.message
                 : typeof data.error === "string"
                   ? data.error
-                  : "Search completed";
+                  : data.message || "Search completed";
             emitToast(infoMessage, "info");
           }
         })

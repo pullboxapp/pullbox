@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
@@ -21,7 +22,9 @@ from pullbox.core.file_safety import (
 from pullbox.core.source_metadata import archive_entry_issue_hint_from_names
 from pullbox.models.import_job import ImportedFile, ImportedSeries, ImportJob
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.services.import_content_inspection import inspect_import_content
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
+from pullbox.services.import_scan_reconciliation import reconcile_discovered_mylar_paths
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +36,7 @@ FileSafetyCheck = Callable[
     ["AsyncSession", Path],
     Awaitable[FileSafetyInspection | None],
 ]
+FileSafetyProgress = Callable[[int, int, str], Awaitable[None]]
 
 
 async def reset_scan_artifacts(session: AsyncSession, job: ImportJob) -> None:
@@ -80,7 +84,8 @@ async def _build_default_file_safety_check(session: AsyncSession) -> FileSafetyC
         _session: AsyncSession,
         path: Path,
     ) -> FileSafetyInspection:
-        return run_safety_checks(
+        return await asyncio.to_thread(
+            run_safety_checks,
             path,
             block_dangerous=block_dangerous,
             max_archive_size=max_archive_size,
@@ -94,6 +99,7 @@ async def validate_discovered_files_safety(
     discovered_list: list[DiscoveredSeries],
     *,
     check_file_safety: FileSafetyCheck | None = None,
+    progress_callback: FileSafetyProgress | None = None,
 ) -> None:
     """Run safety checks once per unique discovered source file."""
     effective_check_file_safety = check_file_safety
@@ -108,9 +114,17 @@ async def validate_discovered_files_safety(
                 continue
             files_by_path.setdefault(discovered_file.file_path, []).append(discovered_file)
 
-    for file_path, discovered_files in files_by_path.items():
+    total = len(files_by_path)
+    if progress_callback is not None:
+        await progress_callback(0, total, "")
+    for completed, (file_path, discovered_files) in enumerate(files_by_path.items(), 1):
         try:
             inspection = await effective_check_file_safety(session, Path(file_path))
+            content_diagnostics = (
+                await asyncio.to_thread(inspect_import_content, Path(file_path), inspection)
+                if inspection is not None
+                else {}
+            )
         except FileSafetyError as exc:
             resource_block = classify_resource_safety_exception(exc)
             safety_block = build_import_safety_diagnostics(
@@ -129,6 +143,11 @@ async def validate_discovered_files_safety(
         else:
             if inspection is None:
                 continue
+            for discovered_file in discovered_files:
+                discovered_file.metadata_diagnostics = {
+                    **discovered_file.metadata_diagnostics,
+                    **content_diagnostics,
+                }
             archive_report = next(
                 (
                     report
@@ -170,3 +189,8 @@ async def validate_discovered_files_safety(
                     archive_evidence["comicinfo_error"] = archive_report.comicinfo_error
                 metadata_diagnostics["archive_member_evidence"] = archive_evidence
                 discovered_file.metadata_diagnostics = metadata_diagnostics
+        finally:
+            if progress_callback is not None:
+                await progress_callback(completed, total, file_path)
+
+    await asyncio.to_thread(reconcile_discovered_mylar_paths, discovered_list)

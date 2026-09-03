@@ -134,6 +134,7 @@ def _build_tree(
                     f"{title} #{file_idx:03d}.jpg",
                     b"benchmark-page",
                 )
+                archive.writestr(f"{title} #{file_idx:03d} p002.jpg", b"benchmark-page")
                 if trusted_comicinfo:
                     issue_provider_id = (series_provider_id * 1000) + file_idx
                     archive.writestr(

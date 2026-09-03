@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from pullbox.models.import_job import (
     ImportedFile,
@@ -298,3 +300,177 @@ async def test_bulk_overrideability_counts_only_current_safety_blocked_rows(
     failed_only = await load_import_safety_failure_summary(db_session, job, page_size=1)
     assert failed_only[0]["bulk_overrideable_count"] == 0
     assert failed_only[0]["bulk_overrideable"] is False
+
+
+@pytest.mark.asyncio
+async def test_safety_summary_streams_complete_counts_in_one_query(
+    db_session,
+    async_engine,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_review_summary import load_import_safety_failure_summary
+
+    job = ImportJob(
+        source_path="/tmp/import",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.REVIEW,
+    )
+    other_job = ImportJob(
+        source_path="/tmp/other",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.REVIEW,
+    )
+    series = ImportedSeries(import_job=job, raw_series_name="Safety Review")
+    other_series = ImportedSeries(import_job=other_job, raw_series_name="Other")
+    size_block = {
+        "kind": "archive_decompressed_size",
+        "reason": "Archive decompressed size exceeds limit",
+        "overrideable": True,
+    }
+    db_session.add_all([job, other_job, series, other_series])
+    for index in range(9):
+        db_session.add(
+            ImportedFile(
+                import_job=other_job if index == 8 else job,
+                import_series=other_series if index == 8 else series,
+                file_path=f"/private/{index}.cbz",
+                file_name=f"{index}.cbz",
+                file_format="cbz",
+                status=(
+                    ImportedFileStatus.FAILED
+                    if index == 6
+                    else ImportedFileStatus.MATCHED
+                    if index == 7
+                    else ImportedFileStatus.SAFETY_BLOCKED
+                ),
+                diagnostics={
+                    "safety_block": size_block,
+                    "source_revalidation": {"reason": "source_changed"},
+                    "unrelated_metadata": {"description": "x" * 10_000},
+                },
+            )
+        )
+    await db_session.flush()
+
+    queries = []
+    fetch_sizes = []
+
+    def record_select(_conn, _cursor, statement, _parameters, _context, _executemany):  # type: ignore[no-untyped-def]
+        if statement.lstrip().upper().startswith("SELECT"):
+            queries.append(statement)
+            fetch_sizes.append(_context.execution_options.get("yield_per"))
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", record_select)
+    try:
+        summary = await load_import_safety_failure_summary(db_session, job, page_size=2)
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", record_select)
+
+    assert len(summary) == 1
+    assert summary[0]["count"] == 7
+    assert summary[0]["overrideable_count"] == 7
+    assert summary[0]["bulk_overrideable_count"] == 6
+    assert summary[0]["examples"] == ["0.cbz", "1.cbz", "2.cbz"]
+    assert len(queries) == 1
+    assert fetch_sizes == [2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("safety_block", [None, "legacy", [], 3])
+async def test_safety_summary_falls_back_to_source_revalidation(
+    db_session,
+    safety_block,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_review_summary import load_import_safety_failure_summary
+
+    job = ImportJob(
+        source_path="/tmp/import",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.REVIEW,
+    )
+    series = ImportedSeries(import_job=job, raw_series_name="Changed Source")
+    db_session.add_all(
+        [
+            job,
+            series,
+            ImportedFile(
+                import_job=job,
+                import_series=series,
+                file_path="/private/changed.cbz",
+                file_name="changed.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.FAILED,
+                diagnostics={
+                    "safety_block": safety_block,
+                    "source_revalidation": {"reason": "source_changed"},
+                },
+            ),
+            ImportedFile(
+                import_job=job,
+                import_series=series,
+                file_path="/private/empty.cbz",
+                file_name="empty.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.FAILED,
+                diagnostics=None,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    summary = await load_import_safety_failure_summary(db_session, job, page_size=1)
+
+    assert len(summary) == 1
+    assert summary[0]["category"] == "source_changed"
+    assert summary[0]["count"] == 1
+    assert summary[0]["bulk_overrideable_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_safety_summary_closes_stream_on_cancellation(
+    db_session,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.services.import_safety_diagnostics import ImportSafetyFailureSummaryAccumulator
+    from pullbox.ui.import_review_summary import load_import_safety_failure_summary
+
+    job = ImportJob(
+        source_path="/tmp/import",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.REVIEW,
+    )
+    series = ImportedSeries(import_job=job, raw_series_name="Changed Source")
+    db_session.add_all(
+        [
+            job,
+            series,
+            ImportedFile(
+                import_job=job,
+                import_series=series,
+                file_path="/private/changed.cbz",
+                file_name="changed.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.FAILED,
+                diagnostics={"source_revalidation": {"reason": "source_changed"}},
+            ),
+        ]
+    )
+    await db_session.flush()
+    stream = db_session.stream
+    results = []
+
+    async def track_stream(*args, **kwargs):  # type: ignore[no-untyped-def]
+        result = await stream(*args, **kwargs)
+        results.append(result)
+        return result
+
+    def cancel(*_args):  # type: ignore[no-untyped-def]
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(db_session, "stream", track_stream)
+    monkeypatch.setattr(ImportSafetyFailureSummaryAccumulator, "add", cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await load_import_safety_failure_summary(db_session, job, page_size=1)
+
+    assert len(results) == 1
+    assert results[0].closed

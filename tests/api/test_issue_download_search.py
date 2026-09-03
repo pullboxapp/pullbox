@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -13,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.api.v1 import issues as issues_api
+from pullbox.core.exceptions import ProviderError
 from pullbox.models import Base
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import MatchConfidence
@@ -22,6 +24,7 @@ from pullbox.models.user import APIKey, User
 from pullbox.providers.base import ProviderRegistry, ReleaseResult
 from pullbox.services.auth_service import AuthService
 from pullbox.services.direct_search_coordinator import DirectSearchOutcome
+from pullbox.services.release_validator import ReleaseValidator
 from pullbox.services.search_acquisition_router import SearchAcquisitionRoutingResult
 from pullbox.services.search_service import IssueSearchOutcome, IssueSearchTarget, SearchRuntime
 
@@ -473,3 +476,125 @@ async def test_issue_download_returns_the_source_metadata_selected_after_fallbac
     payload = response.json()
     assert payload["source_kind"] == "indexer"
     assert payload["release_title"] == "Fallback Indexer Candidate"
+
+
+@pytest.mark.parametrize("queue_fails", [True, False])
+async def test_issue_download_preserves_matches_and_reports_queue_failure(
+    client: AsyncClient,
+    _db_factory: async_sessionmaker[AsyncSession],
+    queue_fails: bool,
+) -> None:
+    issue_id = await _create_issue(_db_factory)
+    runtime = SearchRuntime(ProviderRegistry(), {}, None, {}, {}, {"issue": "high"}, 3)
+    target = _bundle(issue_id, runtime=runtime, outcome=None).target
+    releases = [
+        _make_release("Absolute Superman 009 (2025)"),
+        _make_release("Absolute Superman 009 (2025) (Digital-Empire)"),
+        _make_release("Absolute Superman 010 (2025)"),
+    ]
+    matched, rejected = ReleaseValidator().validate_all_results(
+        releases, target.series_title, target.issue_number, target.series_year
+    )
+    assert len(matched) == 2 and len(rejected) == 1
+    outcome = IssueSearchOutcome(
+        target,
+        "fast",
+        1,
+        releases,
+        releases,
+        matched,
+        rejected,
+        matched[0].release,
+        matched[0],
+        {},
+        1,
+    )
+    with (
+        patch.object(
+            issues_api,
+            "_run_issue_search",
+            AsyncMock(return_value=_bundle(issue_id, runtime=runtime, outcome=outcome)),
+        ),
+        patch("pullbox.services.download_service.DownloadService") as download_cls,
+    ):
+        send = AsyncMock(return_value=SimpleNamespace(id=123))
+        if queue_fails:
+            send.side_effect = ProviderError("SABnzbd", "Private upstream failure")
+        download_cls.return_value.send_to_client = send
+        response = await client.post(f"/api/v1/issues/{issue_id}/download")
+
+    assert response.status_code == 200
+    data = response.json()
+    if queue_fails:
+        assert data["status"] == "source_unavailable"
+        assert data["message"] == "Matches found, but downloads could not be queued."
+        assert data["notices"]
+        assert "Private upstream failure" not in response.text
+        assert send.await_count == 2
+    else:
+        assert data["status"] == "downloading"
+    async with _db_factory() as session:
+        log = await session.scalar(select(SearchLog).where(SearchLog.issue_id == issue_id))
+        assert log is not None
+        assert log.results_found == 3
+        assert log.results_rejected == 1
+        assert log.results_grabbed == (0 if queue_fails else 1)
+
+
+async def test_single_issue_download_attaches_automatic_dc_search_before_selection(
+    client: AsyncClient,
+    _db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pullbox.services import airdcpp_automatic_search
+
+    issue_id = await _create_issue(_db_factory)
+    runtime = SearchRuntime(ProviderRegistry(), {}, None, {}, {}, {"issue": "high"}, 3)
+    target = _bundle(issue_id, runtime=runtime, outcome=None).target
+    original = IssueSearchOutcome(target, "fast", 0, [], [], [], [], None, None, {}, 1)
+    attached = replace(original, search_details={"dc_results_count": 0})
+    attach = AsyncMock(return_value=attached)
+    monkeypatch.setattr(airdcpp_automatic_search, "attach_automatic_airdcpp_search", attach)
+    # Patch the boundary in either import style without requiring new production symbols.
+    monkeypatch.setattr(issues_api, "attach_automatic_airdcpp_search", attach, raising=False)
+    monkeypatch.setattr(
+        issues_api,
+        "_run_issue_search",
+        AsyncMock(return_value=_bundle(issue_id, runtime=runtime, outcome=original)),
+    )
+    with patch.object(issues_api, "select_search_source", return_value=None) as select_source:
+        response = await client.post(f"/api/v1/issues/{issue_id}/download")
+    assert response.status_code == 200
+    attach.assert_awaited_once()
+    assert attach.await_args.args[1] is original
+    assert select_source.call_args.args[0] is attached
+
+
+@pytest.mark.parametrize("automatic_enabled", [True, False])
+async def test_automatic_search_can_build_airdcpp_only_runtime(
+    _db_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    automatic_enabled: bool,
+) -> None:
+    issue_id = await _create_issue(_db_factory)
+    runtime = SearchRuntime(ProviderRegistry(), {}, None, {}, {}, {"issue": "high"}, 3)
+    target = _bundle(issue_id, runtime=runtime, outcome=None).target
+    outcome = IssueSearchOutcome(target, "fast", 0, [], [], [], [], None, None, {}, 1)
+    load_clients = AsyncMock(return_value=[object()] if automatic_enabled else [])
+    monkeypatch.setattr(issues_api, "get_airdcpp_supervisor_registry", lambda: object())
+    monkeypatch.setattr(issues_api, "load_airdcpp_search_clients", load_clients, raising=False)
+
+    async def build_runtime(session, **kwargs):
+        return runtime if kwargs.get("allow_empty_registry") else None
+
+    monkeypatch.setattr(issues_api, "build_search_runtime", build_runtime)
+    monkeypatch.setattr(
+        issues_api.SearchService, "search_issue_target", AsyncMock(return_value=outcome)
+    )
+    async with _db_factory() as session:
+        bundle = await issues_api._run_issue_search(
+            session, issue_id, include_download_clients=True
+        )
+    assert (bundle.runtime is runtime) is automatic_enabled
+    load_clients.assert_awaited_once()
+    assert load_clients.call_args.kwargs["automatic"] is True

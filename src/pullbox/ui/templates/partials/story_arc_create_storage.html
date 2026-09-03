@@ -1,97 +1,13 @@
-<fieldset
-  x-data="{ storageMode: 'logical', filenameStyle: 'original', prefixOrder: false }"
-  class="space-y-3 border-t border-pb-border pt-4"
-  data-testid="story-arc-create-storage"
->
-  <legend class="text-sm font-medium text-pb-text">Story arc files</legend>
+<section class="space-y-2 border-t border-pb-border pt-4" data-testid="story-arc-create-storage">
+  <h3 class="text-sm font-medium text-pb-text">Story arc files</h3>
+  <input type="hidden" name="file_defaults_fingerprint" value="{{ arc_file_defaults.fingerprint }}">
+  <p class="text-sm text-pb-text">{{ arc_file_defaults.summary_label }}</p>
+  {% if arc_file_defaults.enabled %}
+    <p class="break-all font-mono text-xs text-pb-text-sec">{{ arc_file_defaults.destination }}/{{ arc_file_defaults.naming_preview() }}</p>
+    <p class="text-xs text-pb-text-sec">Example only. {{ 'Newly acquired issues are added automatically after reading-order review.' if arc_file_defaults.synchronize else 'Automatic file synchronization is off.' }}</p>
+  {% endif %}
   <p class="text-xs leading-5 text-pb-text-sec">
-    Original files stay in their series folders. A separate arc folder holds extra copies or links.
-    Choose its storage policy now; moving an established arc to another destination isn't available yet.
+    Original files stay in their series folders. This arc saves the current defaults when added; later settings changes won't alter it.
   </p>
-  <div>
-    <label for="story-arc-create-mode" class="mb-1 block text-sm font-medium text-pb-text">Separate folder</label>
-    <select id="story-arc-create-mode" name="mode" x-model="storageMode" class="input-pb w-full">
-      <option value="logical">No separate folder</option>
-      <option value="copy">Copy issues into an arc folder</option>
-      <option value="hardlink">Hardlink issues into an arc folder</option>
-      <option value="symlink">Symlink issues into an arc folder</option>
-      <option value="reference_only">Reference existing arc files only</option>
-    </select>
-  </div>
-  <div x-show="storageMode !== 'logical'" x-cloak class="space-y-3">
-    <div>
-      <label for="story-arc-create-root" class="mb-1 block text-sm font-medium text-pb-text">Library root</label>
-      <select id="story-arc-create-root" name="target_library_root_id" :required="storageMode !== 'logical'" class="input-pb w-full">
-        <option value="">Choose a library root</option>
-        {% for root in placement_roots %}
-          <option
-            value="{{ root.id }}"
-            :disabled="storageMode === 'reference_only' ? {{ 'false' if root.can_reference else 'true' }} : {{ 'false' if root.can_manage else 'true' }}"
-          >{{ root.name }} — {{ root.path }}{% if root.can_manage and root.can_reference %}{% elif root.can_manage %} (managed only){% elif root.can_reference %} (reference only){% else %} (unavailable){% endif %}</option>
-        {% endfor %}
-      </select>
-      {% if not placement_roots %}
-        <p class="mt-1 text-xs text-pb-text-sec">Configure an available managed library root before creating separate arc files.</p>
-      {% elif placement_roots_truncated %}
-        <p class="mt-1 text-xs text-pb-text-sec">Only the first library roots are shown. Review your roots in Settings if one is missing.</p>
-      {% endif %}
-    </div>
-    <div>
-      <label for="story-arc-create-destination" class="mb-1 block text-sm font-medium text-pb-text">Arc folder location</label>
-      <input id="story-arc-create-destination" name="destination_root" type="text" maxlength="1000"
-             :required="storageMode !== 'logical'" placeholder="/comics/Story Arcs" class="input-pb w-full font-mono">
-      <p class="mt-1 text-xs text-pb-text-sec">Choose an existing directory inside the selected library root. Pullbox creates the named arc folder inside it.</p>
-    </div>
-    <div>
-      <label for="story-arc-create-folder-template" class="mb-1 block text-sm font-medium text-pb-text">Arc folder name</label>
-      <input id="story-arc-create-folder-template" name="folder_template" type="text" maxlength="1024"
-             value="{StoryArc}" class="input-pb w-full font-mono">
-    </div>
-    <div>
-      <label for="story-arc-create-filename-style" class="mb-1 block text-sm font-medium text-pb-text">Issue filenames</label>
-      <select id="story-arc-create-filename-style" name="filename_style" x-model="filenameStyle" class="input-pb w-full">
-        <option value="original">Keep the original filename</option>
-        <option value="custom">Use a custom naming template</option>
-      </select>
-    </div>
-    <div x-show="filenameStyle === 'original'" class="space-y-2">
-      <label class="flex items-start gap-2 text-sm text-pb-text-sec">
-        <input type="checkbox" name="prefix_reading_order" value="true" x-model="prefixOrder" class="mt-0.5">
-        <span>Prefix arc filenames with the reading order</span>
-      </label>
-      <div x-show="prefixOrder">
-        <label for="story-arc-create-order-width" class="mb-1 block text-sm font-medium text-pb-text">Reading-order digits</label>
-        <select id="story-arc-create-order-width" name="reading_order_width" class="input-pb w-full">
-          <option value="2">2 — 01, 02, 03</option>
-          <option value="3">3 — 001, 002, 003</option>
-          <option value="4">4 — 0001, 0002, 0003</option>
-          <option value="5">5 — 00001, 00002, 00003</option>
-          <option value="6">6 — 000001, 000002, 000003</option>
-        </select>
-        <p class="mt-1 text-xs text-pb-text-sec">Example with two digits: 01 - Batman 001.cbz. Choose enough digits for the arc's reading order.</p>
-      </div>
-    </div>
-    <div x-show="filenameStyle === 'custom'" x-cloak>
-      <label for="story-arc-create-file-template" class="mb-1 block text-sm font-medium text-pb-text">Filename template</label>
-      <input id="story-arc-create-file-template" name="file_template" type="text" maxlength="1024"
-             value="{ReadingOrder:03d} - {Series} {IssueNumber}{IssueTitleOptional}" class="input-pb w-full font-mono">
-      <p class="mt-1 text-xs text-pb-text-sec">Include {ReadingOrder:02d} at the start for a reading-order prefix, or end with {OriginalFilename} to keep the current filename and extension.</p>
-    </div>
-    <div x-show="storageMode === 'symlink'" x-cloak>
-      <label for="story-arc-create-symlink-style" class="mb-1 block text-sm font-medium text-pb-text">Symlink style</label>
-      <select id="story-arc-create-symlink-style" name="symlink_style" class="input-pb w-full">
-        <option value="relative">Relative</option>
-        <option value="absolute">Absolute</option>
-      </select>
-    </div>
-    <label class="flex items-start gap-2 text-sm text-pb-text-sec">
-      <input type="checkbox" name="synchronize" value="true" checked class="mt-0.5">
-      <span>Keep arc files synchronized as issues are added or downloaded</span>
-    </label>
-    <p class="text-xs leading-5 text-pb-text-sec">
-      {% if arc_creation_has_members|default(false) %}Adding confirms the selected storage for available issues. Synchronization also applies it to later additions and downloads.
-      {% else %}An empty arc creates no files. When synchronization is enabled, this policy applies as issues are added or downloaded.{% endif %}
-      Copies use additional disk space; original names and contents stay unchanged.
-    </p>
-  </div>
-</fieldset>
+  <a href="/settings?tab=media#story-arc-files" class="text-sm text-pb-interactive hover:underline">Configure Story Arc Files in Media Management</a>
+</section>

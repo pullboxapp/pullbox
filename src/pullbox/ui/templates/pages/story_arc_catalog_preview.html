@@ -50,9 +50,7 @@
           <fieldset class="space-y-2">
             <legend class="mb-2 text-sm font-medium text-pb-text">Independent arc monitoring</legend>
             <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="monitored" value="true" class="mt-0.5">Monitor this story arc</label>
-            <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="search_missing" value="true" class="mt-0.5">Search for missing resolved issues</label>
-            <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="include_upcoming" value="true" class="mt-0.5">Include upcoming known members</label>
-            <p class="text-xs text-pb-text-sec">Automatic search also follows your global search-on-add setting. Refresh and review provider changes to discover new members.</p>
+            <p class="text-xs text-pb-text-sec">Monitoring checks Comic Vine daily for new members and searches missing issues when released. Your global search-on-add setting controls the initial search.</p>
           </fieldset>
           {% set arc_creation_has_members = true %}
           {% include "partials/story_arc_create_storage.html" %}

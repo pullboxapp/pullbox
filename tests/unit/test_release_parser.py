@@ -136,6 +136,76 @@ class TestParseReleaseTitle:
         assert r.issue_number == 2483.0
         assert r.year == 2026
 
+    @pytest.mark.parametrize(
+        ("title", "series", "issue", "year"),
+        [
+            ("2000AD 2487 [2026] [Digital-Empire]", "2000AD", 2487, 2026),
+            ("2000 AD 2489 (2026) (digital-Empire).cbz", "2000 AD", 2489, 2026),
+            ("2000AD.2490.2026.digital.Shan-Empire.cbz", "2000AD", 2490, 2026),
+            ("2000AD 2487", "2000AD", 2487, None),
+            ("Action Comics 1000 [2018] [Digital]", "Action Comics", 1000, 2018),
+            ("Detective Comics 1027 (2020) (Digital).cbr", "Detective Comics", 1027, 2020),
+            ("Weekly Anthology 1899 [2026]", "Weekly Anthology", 1899, 2026),
+            ("2000AD 2001 [2016]", "2000AD", 2001, 2016),
+            ("Weekly Anthology 2100 [2026]", "Weekly Anthology", 2100, 2026),
+            ("Weekly Anthology 9999 [2026]", "Weekly Anthology", 9999, 2026),
+            ("District 13 2487 [2026]", "District 13", 2487, 2026),
+        ],
+    )
+    def test_bare_four_digit_issue_number(self, title, series, issue, year) -> None:
+        parsed = parse_release_title(title, expected_series=(series,))
+        assert parsed is not None
+        assert parsed.series_name == series
+        assert parsed.issue_number == issue
+        assert parsed.issue_number_text == str(issue)
+        assert parsed.year == year
+        assert not parsed.is_pack
+
+    @pytest.mark.parametrize(
+        ("title", "series", "issue", "year"),
+        [
+            ("Spider-Man 2099 [2026]", "Spider-Man 2099", None, 2026),
+            ("Spider-Man 2099 1 [2026]", "Spider-Man 2099", 1, 2026),
+            ("Marvel 1602 1 [2003]", "Marvel 1602", 1, 2003),
+            ("Marvel 1602 [2003]", "Marvel 1602", None, 2003),
+            ("Batman 3000 [2026]", "Batman 3000", None, 2026),
+            ("2000 AD 005 [2026]", "2000 AD", 5, 2026),
+            ("2000AD [2026] [Digital-Empire]", "2000AD", None, 2026),
+            ("Weekly Anthology 2026", "Weekly Anthology", None, 2026),
+            ("Weekly Anthology 2026 [2025]", "Weekly Anthology", None, 2025),
+            ("2000AD 2487-2490 [2026]", "2000AD 2487-2490", None, 2026),
+            ("2000AD 2487 - 2490 [2026]", "2000AD 2487 - 2490", None, 2026),
+            ("2000AD 2487 of 2490 [2026]", "2000AD 2487 of 2490", None, 2026),
+            ("2000AD 12345 [2026]", "2000AD 12345", None, 2026),
+        ],
+    )
+    def test_four_digit_issue_heuristic_preserves_ambiguous_tokens(
+        self, title, series, issue, year
+    ) -> None:
+        parsed = parse_release_title(title)
+        assert parsed is not None
+        assert parsed.series_name == series
+        assert parsed.issue_number == issue
+        assert parsed.year == year
+
+    @pytest.mark.parametrize("series", ["Marvel 1602", "Batman 3000", "Spider-Man 2099"])
+    def test_known_numeric_title_does_not_become_an_issue(self, series) -> None:
+        parsed = parse_release_title(f"{series} [2026]", expected_series=(series,))
+        assert parsed is not None
+        assert parsed.series_name == series
+        assert parsed.issue_number is None
+
+    def test_explicit_volume_year_is_distinct_from_publication_year(self) -> None:
+        parsed = parse_release_title(
+            "2000AD v1977 2487 [2026] [Digital-Empire]", expected_series=("2000 AD",)
+        )
+        assert parsed is not None
+        assert parsed.series_name == "2000AD"
+        assert parsed.issue_number == 2487
+        assert parsed.issue_type is IssueType.ISSUE
+        assert parsed.year == 2026
+        assert parsed.volume_year == 1977
+
     def test_annual_issue_type_paren(self) -> None:
         r = parse_release_title("Batman Annual 003 (2018) (digital) (Son of Ultron-Empire).cbr")
         assert r is not None

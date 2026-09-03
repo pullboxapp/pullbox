@@ -50,6 +50,130 @@ async def test_mylar_reader_preserves_literal_uri_characters(
     assert sorted(path.name for path in tmp_path.iterdir()) == [file_name]
 
 
+@pytest.mark.parametrize("actual_name", ["Firefly 007 (2019).cbz", "FIREFLY 007  (2019).cbz"])
+async def test_in_place_reconciles_unique_stale_mylar_filename(tmp_path, actual_name):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "Firefly (2018)"
+    comic = folder / actual_name
+    create_minimal_cbz(comic)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-115251",
+                "ComicName": "Firefly",
+                "ComicYear": "2018",
+                "ComicLocation": "/comics/Firefly (2018)",
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "711865",
+                "ComicID": "115251",
+                "ComicName": "Firefly",
+                "Issue_Number": "7",
+                "Location": "Firefly 007 (2019).cbr",
+                "IssueDate": "2019-06-19",
+            }
+        ],
+    )
+    original_db = db.read_bytes()
+    original_comic = comic.read_bytes()
+    results = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(tmp_path / "comics")},
+        include_missing_files=True,
+    ).read_series()
+
+    assert [file.file_path for file in results[0].files] == [str(comic)]
+    file = results[0].files[0]
+    assert file.comicvine_issue_id == 711865
+    assert file.source_signature
+    assert file.metadata_diagnostics["mylar3_path_reconciliation"]["recorded_path"].endswith(
+        "Firefly 007 (2019).cbr"
+    )
+    assert db.read_bytes() == original_db
+    assert comic.read_bytes() == original_comic
+
+
+@pytest.mark.parametrize(
+    "actual_names",
+    [
+        ["Firefly 007 (2019).cbz", "Firefly 007 (2019).pdf"],
+        ["Firefly Annual 007 (2019).cbz"],
+        ["Firefly 007 (2020).cbz"],
+        ["Firefly 007 Variant (2019).cbz"],
+        ["Firefly 00 7 (2019).cbz"],
+        ["Other/Firefly 007 (2019).cbz"],
+    ],
+)
+async def test_in_place_does_not_guess_stale_mylar_identity(tmp_path, actual_names):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "Firefly"
+    folder.mkdir(parents=True)
+    for name in actual_names:
+        create_minimal_cbz(folder / name)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-115251",
+                "ComicName": "Firefly",
+                "ComicYear": "2018",
+                "ComicLocation": str(folder),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "711865",
+                "ComicID": "115251",
+                "ComicName": "Firefly",
+                "Issue_Number": "7",
+                "Location": "Firefly 007 (2019).cbr",
+            }
+        ],
+    )
+    results = await Mylar3Reader(db, include_missing_files=True).read_series()
+    missing = next((file for file in results[0].files if file.file_name.endswith(".cbr")), None)
+    assert missing is not None
+    assert missing.source_signature == {}
+    assert missing.comicvine_issue_id == 711865
+    assert not any(
+        "mylar3_path_reconciliation" in file.metadata_diagnostics for file in results[0].files
+    )
+
+
+async def test_stale_path_reconciliation_does_not_merge_conflicting_records(tmp_path):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics"
+    create_minimal_cbz(folder / "Firefly 007 (2019).cbz")
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-115251",
+                "ComicName": "Firefly",
+                "ComicLocation": str(folder),
+            }
+        ],
+        issues=[
+            {
+                "IssueID": str(issue_id),
+                "ComicID": "115251",
+                "Issue_Number": "7",
+                "Location": "Firefly 007 (2019).cbr",
+            }
+            for issue_id in [711865, 711866]
+        ],
+    )
+    results = await Mylar3Reader(db, include_missing_files=True).read_series()
+    actual = next(file for file in results[0].files if file.file_format == "cbz")
+    assert actual.comicvine_issue_id is None
+    assert "mylar3_path_reconciliation" not in actual.metadata_diagnostics
+
+
 @pytest.mark.asyncio
 async def test_selected_layout_applies_to_mapped_mylar_paths_without_overriding_identity(
     tmp_path: Path,

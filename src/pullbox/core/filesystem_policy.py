@@ -1,11 +1,38 @@
-"""Shared sensitive-directory policy for browsing and import previews."""
+"""Shared import path-text and sensitive-directory policy."""
 
+import unicodedata
 from pathlib import Path
 
+_SUPPORTED_PATH_FORMAT_CHARACTERS = frozenset(
+    "\u00ad\u061c\u200b\u200c\u200d\u200e\u200f\u2060\ufeff"
+)
+_MAX_PATH_TEXT_LENGTH = 4096
 _BLOCKED_DIRS = ("/etc", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/var/log", "/var/run")
 BLOCKED_DIRECTORY_PREFIXES = frozenset(
     prefix for directory in _BLOCKED_DIRS for prefix in (directory, str(Path(directory).resolve()))
 )
+
+
+def is_invalid_path_text(value: str) -> bool:
+    """Accept literal multilingual paths without weakening containment checks.
+
+    Existing filenames may contain nonbreaking spaces, soft hyphens, joiners,
+    zero-width spaces, or Arabic/left-to-right/right-to-left marks. Preserve
+    those characters exactly; stripping them could select a different file.
+    Other non-printable characters, including controls, surrogates, line/paragraph
+    separators, and bidi embeddings/overrides/isolates, remain rejected.
+    Callers must still resolve paths and check root containment separately.
+    """
+    if not value or len(value) > _MAX_PATH_TEXT_LENGTH:
+        return True
+    if value.isprintable():
+        return False
+    return any(
+        not character.isprintable()
+        and character not in _SUPPORTED_PATH_FORMAT_CHARACTERS
+        and unicodedata.category(character) != "Zs"
+        for character in value
+    )
 
 
 def is_sensitive_path(path: Path) -> bool:
@@ -33,7 +60,7 @@ def resolve_preview_source(source: str | Path) -> Path:
     enabled library root. Validation is repeated by analyzers before use.
     """
     raw = str(source)
-    if not raw or len(raw) > 4096 or not raw.isprintable() or ".." in Path(raw).parts:
+    if is_invalid_path_text(raw) or ".." in Path(raw).parts:
         raise ValueError("Import preview source contains unsafe path components")
     try:
         # Resolution only probes the path. Sensitive aliases are rejected below

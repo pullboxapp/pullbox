@@ -116,14 +116,15 @@
             <p class="mt-2 max-w-3xl text-xs leading-5 text-pb-text-sec">
               Pullbox checks every stored series path unchanged first. If Mylar used a different
               container path, map that prefix to the path visible inside this Pullbox container.
-              This preview reads the database and filesystem without changing either one.
+              Mylar and source files stay unchanged. A private diagnostic report of the analysis
+              is available for up to 24 hours.
             </p>
           </div>
           <button
             type="button"
             @click="previewMylarPaths()"
             :disabled="!canAnalyzeMylarPaths() || mylarPathPreviewLoading"
-            class="btn-secondary btn-sm inline-flex shrink-0 items-center gap-2 disabled:opacity-40"
+            class="btn-ghost btn-sm shrink-0 gap-2 disabled:opacity-40"
             data-testid="import-mylar-path-analyze"
           >
             <svg x-show="mylarPathPreviewLoading" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
@@ -283,7 +284,7 @@
               </div>
               <div>
                 <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Missing</p>
-                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && mylarPathPreview.resolution.mapped_missing"></p>
+                <p class="mt-1 text-sm font-semibold text-pb-text" x-text="mylarPathPreview && ((mylarPathPreview.resolution.missing || 0) + mylarPathPreview.resolution.mapped_missing)"></p>
               </div>
               <div>
                 <p class="text-[10px] uppercase tracking-wide text-pb-text-dim">Outside root</p>
@@ -323,34 +324,37 @@
 
             <ul
               x-show="mylarPathPreview && mylarPathPreview.warnings.length"
-              class="space-y-1 text-xs text-amber-200"
+              class="space-y-1 text-xs text-pb-warning"
               data-testid="import-mylar-path-warnings"
             >
               <template x-for="warning in (mylarPathPreview ? mylarPathPreview.warnings : [])" :key="warning">
-                <li x-text="String(warning).split('_').join(' ')"></li>
+                <li x-text="({unmapped_locations: 'Some stored locations need a verified container-path mapping or are no longer available.', missing_locations: 'Some folders or files are missing inside an accessible library root.', automatic_mapping_incomplete: 'Automatic analysis could not resolve every location. Review the exceptions below.', report_unavailable: 'The full report could not be saved. Only the first 25 exceptions are shown; check free space and permissions for the data directory.', partial_preview: 'This database exceeds the preview limit. Narrow the source before continuing.'})[warning] || String(warning).split('_').join(' ')"></li>
               </template>
             </ul>
 
             <div
-              x-show="mylarPathPreview && !mylarPathPreview.can_confirm"
+              x-show="mylarPathPreview && !mylarPathPreview.can_confirm && !mylarPathPreview.can_continue_with_unresolved"
               class="inline-alert inline-alert-warning"
               role="alert"
             >
-              Pullbox cannot safely use this mapping yet. Correct the blocked path or choose an
-              enabled library root, then analyze again.
+              Pullbox cannot safely start this import. Resolve the listed safety, access, or
+              mapping problems and analyze again. At least one source location must be available.
             </div>
             <div
-              x-show="mylarPathPreview && mylarPathPreview.can_confirm && !mylarPathPreview.requires_confirmation"
+              x-show="mylarPathPreview && mylarPathPreview.can_confirm && !mylarPathPreview.requires_confirmation && !mylarPathPreview.requires_unresolved_acknowledgement"
               class="inline-alert inline-alert-success"
             >
-              Every available path resolves directly inside an enabled library root. No mapping
-              is required.
+              Every stored path is directly accessible to Pullbox. No mapping is required.
             </div>
+            <template x-for="reason in (mylarPathPreview ? mylarPathPreview.blocking_reasons || [] : [])" :key="reason">
+              <p class="text-xs text-pb-warning" x-text="reason"></p>
+            </template>
+            {% include "partials/import_mylar_path_exceptions.html" %}
           </div>
         </div>
 
         <label
-          x-show="mylarPathPreview && mylarPathPreview.can_confirm && mylarPathPreview.requires_confirmation"
+          x-show="mylarPathPreview && (mylarPathPreview.can_confirm || mylarPathPreview.can_continue_with_unresolved) && mylarPathPreview.requires_confirmation"
           x-cloak
           class="flex cursor-pointer items-start gap-3 rounded-xl border border-pb-border bg-pb-bg/40 p-4"
         >
@@ -367,6 +371,21 @@
             <span class="mt-1 block text-xs leading-5 text-pb-text-sec">
               Pullbox will freeze and use this exact mapping for the import. Mylar and the source
               files remain unchanged.
+            </span>
+          </span>
+        </label>
+        <label
+          x-show="mylarPathPreview && mylarPathPreview.can_continue_with_unresolved"
+          x-cloak
+          class="flex cursor-pointer items-start gap-3 rounded-xl border border-pb-border bg-pb-bg/40 p-4"
+        >
+          <input type="checkbox" x-model="mylarUnresolvedConfirmed" class="checkbox-pb mt-0.5 shrink-0"
+                 data-testid="import-mylar-unresolved-confirm">
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold text-pb-text">Continue with available locations</span>
+            <span class="mt-1 block text-xs leading-5 text-pb-text-sec">
+              I reviewed the unavailable sources. Their Mylar records will remain in import review;
+              their missing files will not be imported or marked as owned. This does not bypass safety checks.
             </span>
           </span>
         </label>

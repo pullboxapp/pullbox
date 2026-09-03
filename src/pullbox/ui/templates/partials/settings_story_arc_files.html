@@ -1,0 +1,117 @@
+{% call section_card(
+  title="Story Arc Files",
+  description="Defaults for newly added arcs only. Existing arcs keep their saved file policy, including future downloads. Imported arcs retain their import choices.",
+  eyebrow="Story arcs", title_style="plain", body_class="p-0",
+  attrs='id="story-arc-files" data-testid="settings-story-arc-files"'
+) %}
+  <form x-data='storyArcFileSettings({{ arc_file_defaults.model_dump()|tojson }})'
+        x-init="$nextTick(() => previewArcFiles())"
+        @input="checkDirty()" @change="checkDirty()"
+        @submit.prevent="saveConfig($el).then(() => markClean())">
+    <div class="settings-rows">
+      {% call settings_row(label="Create separate story arc folders", help="Original files stay in their series folders. Turn this on to create extra copies or links for new arcs.") %}
+        <div class="flex items-center gap-3">
+          <label class="relative inline-flex cursor-pointer items-center">
+            <input type="checkbox" name="story_arc_files_enabled" x-model="arcFiles.enabled" class="peer toggle-input" aria-label="Create separate story arc folders">
+            <span class="toggle-switch"></span>
+          </label>
+          <span class="text-sm text-pb-text-sec" x-text="arcFiles.enabled ? 'Enabled' : 'Disabled'"></span>
+        </div>
+      {% endcall %}
+    </div>
+    <div class="settings-rows" x-show="arcFiles.enabled" x-cloak>
+      {% call settings_row(label="File method", help="Copy uses extra disk space. Hardlinks require the same filesystem and share contents with the original. Symlinks depend on the original path staying available.") %}
+        {{ dropdown_select(name="story_arc_files_method", value=arc_file_defaults.method, options=[("copy", "Copy"), ("hardlink", "Hardlink"), ("symlink", "Symlink")], local_model="arcFiles.method", root_testid="arc-files-method", class_name="w-full max-w-lg") }}
+      {% endcall %}
+      {% call settings_row(label="Library root", help="Choose an enabled library that allows managed writes. The destination must be inside this root.") %}
+        {% set roots = namespace(options=[("", "Choose a library root")], found=false) %}
+        {% for root in library_roots if root.enabled and root.allow_managed_writes %}
+          {% set roots.options = roots.options + [(root.id|string, root.name ~ ' — ' ~ root.path)] %}
+          {% if root.id|string == arc_file_defaults.library_root_id %}{% set roots.found = true %}{% endif %}
+        {% endfor %}
+        {% if arc_file_defaults.library_root_id and not roots.found %}
+          {% set roots.options = roots.options + [(arc_file_defaults.library_root_id, "Saved root unavailable — choose another")] %}
+        {% endif %}
+        {{ dropdown_select(name="story_arc_files_library_root_id", value=arc_file_defaults.library_root_id, options=roots.options, local_model="arcFiles.library_root_id", root_testid="arc-files-root", class_name="w-full max-w-lg") }}
+      {% endcall %}
+      {% call settings_row(label="Arc folder location", help="An existing, container-visible directory inside the chosen library root. Pullbox creates each named arc folder inside it.") %}
+        <input type="text" name="story_arc_files_destination" x-model="arcFiles.destination" :required="arcFiles.enabled" maxlength="1000" placeholder="/comics/Story Arcs" class="input-pb w-full max-w-lg font-mono" aria-label="Arc folder location">
+      {% endcall %}
+      {% call settings_row(label="Arc folder name", help="Tokens: {StoryArc}, {Publisher}, {StartYear}, {EndYear}, {SpanYears}. Use a single folder name, not a path.") %}
+        <input type="text" name="story_arc_files_folder_template" x-model="arcFiles.folder_template" @input.debounce.300ms="previewArcFiles()" maxlength="1024" class="input-pb w-full max-w-lg font-mono" aria-label="Arc folder name">
+      {% endcall %}
+      {% call settings_row(label="Issue filenames", help="Rename only the extra arc copy or link; canonical series filenames stay unchanged.") %}
+        {{ dropdown_select(name="story_arc_files_filename_style", value=arc_file_defaults.filename_style, options=[("original", "Keep the original filename"), ("custom", "Use a custom naming template")], local_model="arcFiles.filename_style", local_on_change="previewArcFiles()", root_testid="arc-files-filename-style", class_name="w-full max-w-lg") }}
+      {% endcall %}
+      <div x-show="arcFiles.filename_style === 'original'">
+        {% call settings_row(label="Reading-order prefix", help="Place the reading-order number first, for example: 01 - Batman 001.cbz.") %}
+          <label class="relative inline-flex cursor-pointer items-center">
+            <input type="checkbox" name="story_arc_files_prefix_reading_order" x-model="arcFiles.prefix_reading_order" @change="previewArcFiles()" class="peer toggle-input" aria-label="Prefix arc filenames with the reading order">
+            <span class="toggle-switch"></span>
+          </label>
+          <div class="mt-3" x-show="arcFiles.prefix_reading_order">
+            {{ dropdown_select(name="story_arc_files_reading_order_width", value=arc_file_defaults.reading_order_width, options=[("2", "2 digits — 01"), ("3", "3 digits — 001"), ("4", "4 digits — 0001"), ("5", "5 digits — 00001"), ("6", "6 digits — 000001")], local_model="arcFiles.reading_order_width", local_on_change="previewArcFiles()", root_testid="arc-files-order-width", class_name="w-full max-w-lg") }}
+          </div>
+        {% endcall %}
+      </div>
+      <div x-show="arcFiles.filename_style === 'custom'">
+        {% call settings_row(label="Filename template", help="Tokens: {ReadingOrder:02d}, {Series}, {IssueNumber}, {IssueTitle}, {IssueTitleOptional}, {Year}, {Extension}, {OriginalFilename}. Put {ReadingOrder:02d} first for a reading-order prefix. Extensions are added automatically; {OriginalFilename} must be last.") %}
+          <input type="text" name="story_arc_files_file_template" x-model="arcFiles.file_template" @input.debounce.300ms="previewArcFiles()" maxlength="1024" class="input-pb w-full max-w-lg font-mono" aria-label="Arc filename template">
+        {% endcall %}
+      </div>
+      <div x-show="arcFiles.method === 'symlink'">
+        {% call settings_row(label="Symlink style", help="Relative links work only where the relative source path remains valid. Absolute links depend on the original container path.") %}
+          {{ dropdown_select(name="story_arc_files_symlink_style", value=arc_file_defaults.symlink_style, options=[("relative", "Relative"), ("absolute", "Absolute")], local_model="arcFiles.symlink_style", root_testid="arc-files-symlink-style", class_name="w-full max-w-lg") }}
+        {% endcall %}
+      </div>
+      {% call settings_row(label="Automatically add newly acquired issues", help="Adding a provider arc creates copies or links for its available issues. This also handles future downloads and additions, once their reading order is confirmed.") %}
+        <label class="relative inline-flex cursor-pointer items-center">
+          <input type="checkbox" name="story_arc_files_synchronize" x-model="arcFiles.synchronize" class="peer toggle-input" aria-label="Automatically add newly acquired issues">
+          <span class="toggle-switch"></span>
+        </label>
+      {% endcall %}
+      {% call settings_row(label="Naming preview", help="Example only; no files or folders are created. Reference-only arc folders are configured during import, not here.") %}
+        <div class="info-panel settings-media-preview-panel break-all font-mono text-xs" data-testid="arc-files-preview" aria-live="polite" :aria-busy="arcPreviewBusy">
+          <span x-text="arcPreviewError || arcPreviewPath"></span>
+        </div>
+      {% endcall %}
+    </div>
+    {% call settings_footer(align="end") %}
+      <button type="submit" class="btn-primary" :disabled="!isDirty">Save story arc defaults</button>
+    {% endcall %}
+  </form>
+{% endcall %}
+
+<script>
+function storyArcFileSettings(initial) {
+  return {
+    ...dirtyForm(),
+    arcFiles: initial,
+    arcPreviewPath: '',
+    arcPreviewError: '',
+    arcPreviewBusy: false,
+    arcPreviewRequest: 0,
+    async previewArcFiles() {
+      const requestId = ++this.arcPreviewRequest;
+      this.arcPreviewBusy = true;
+      this.arcPreviewError = '';
+      const values = Object.fromEntries(Object.entries(this.arcFiles).map(([key, value]) => ['story_arc_files_' + key, String(value)]));
+      try {
+        const response = await fetch('/api/v1/config/story-arc-files/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '{{ csrf_token }}' },
+          body: JSON.stringify({ values }),
+        });
+        const data = await response.json();
+        if (requestId !== this.arcPreviewRequest) return;
+        if (!response.ok) throw new Error(data.error?.message || 'Unable to preview Story Arc filenames.');
+        this.arcPreviewPath = data.path;
+      } catch (error) {
+        if (requestId === this.arcPreviewRequest) this.arcPreviewError = error.message;
+      } finally {
+        if (requestId === this.arcPreviewRequest) this.arcPreviewBusy = false;
+      }
+    },
+  };
+}
+</script>

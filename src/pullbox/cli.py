@@ -12,7 +12,9 @@ Usage::
 import argparse
 import asyncio
 import getpass
+import json
 import sys
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -21,6 +23,8 @@ from pullbox.config import get_settings
 from pullbox.core.password_policy import validate_password
 from pullbox.models.user import User
 from pullbox.services.auth_service import AuthService
+from pullbox.services.import_path_reconciliation import reconcile_saved_mylar_paths
+from pullbox.services.import_review_recheck import prepare_review_recheck
 
 
 async def _reset_password(username: str, candidate_secret: str) -> None:
@@ -77,6 +81,40 @@ def _read_password(*, password_stdin: bool) -> str:
     return secret
 
 
+async def _recheck_import(args: argparse.Namespace) -> None:
+    """Run maintenance against a stopped app; default is a non-mutating preview."""
+    engine = create_async_engine(get_settings().db_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            options = dict(
+                source_roots=[Path(root) for root in args.source_root],
+                series_ids=args.series_id,
+                apply=args.apply,
+            )
+            if args.command == "reconcile-import-paths":
+                report = await reconcile_saved_mylar_paths(session, args.job, **options)
+            else:
+                report = await prepare_review_recheck(
+                    session,
+                    args.job,
+                    **options,
+                    accept_replaced_files=args.accept_replaced_files,
+                )
+            if args.apply:
+                await session.commit()
+            else:
+                await session.rollback()
+            print(json.dumps({"applied": args.apply, **report}, sort_keys=True))
+            if args.apply and report.get("series_prepared"):
+                print(
+                    "Restart Pullbox to resume local matching of the saved review. "
+                    "Sources were not modified."
+                )
+    finally:
+        await engine.dispose()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the Pullbox management CLI parser."""
     parser = argparse.ArgumentParser(
@@ -96,6 +134,55 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read the new password from stdin instead of prompting",
     )
+    recheck = subparsers.add_parser(
+        "recheck-import", help="Recheck saved import evidence while Pullbox is stopped"
+    )
+    recheck.add_argument("--job", required=True, type=int, help="Saved REVIEW job ID")
+    recheck.add_argument(
+        "--source-root",
+        required=True,
+        action="append",
+        help="Permitted container-visible source directory; repeat as needed",
+    )
+    recheck.add_argument(
+        "--series-id",
+        type=int,
+        action="append",
+        help="Limit to these review series IDs; otherwise check automatic identity conflicts",
+    )
+    recheck.add_argument(
+        "--offline",
+        required=True,
+        action="store_true",
+        help="Acknowledge the Pullbox app is stopped and its database is backed up",
+    )
+    recheck.add_argument(
+        "--apply", action="store_true", help="Persist changes; omitted means dry run"
+    )
+    recheck.add_argument(
+        "--accept-replaced-files",
+        action="store_true",
+        help=(
+            "Explicitly re-inspect changed or formerly missing files "
+            "rather than retain a source-changed block"
+        ),
+    )
+    reconcile = subparsers.add_parser(
+        "reconcile-import-paths",
+        help="Reconcile proven stale Mylar paths in an offline saved review",
+    )
+    reconcile.add_argument("--job", required=True, type=int)
+    reconcile.add_argument("--source-root", required=True, action="append")
+    reconcile.add_argument("--series-id", type=int, action="append")
+    reconcile.add_argument(
+        "--offline",
+        required=True,
+        action="store_true",
+        help="Acknowledge Pullbox is stopped and its database is backed up",
+    )
+    reconcile.add_argument(
+        "--apply", action="store_true", help="Persist repairs; default is preview only"
+    )
     return parser
 
 
@@ -108,6 +195,8 @@ def main() -> None:
     if args.command == "reset-password":
         candidate_secret = _read_password(password_stdin=args.password_stdin)
         asyncio.run(_reset_password(args.user, candidate_secret))
+    elif args.command in {"recheck-import", "reconcile-import-paths"}:
+        asyncio.run(_recheck_import(args))
 
 
 if __name__ == "__main__":

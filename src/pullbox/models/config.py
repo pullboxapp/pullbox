@@ -67,6 +67,21 @@ DEFAULT_SYSTEM_CONFIG: dict[str, tuple[str, str]] = {
     "rename_on_import": ("true", "bool"),
     "replace_illegal_characters": ("true", "bool"),
     "colon_replacement": ("dash", "string"),
+    # Story Arc Files — defaults captured only when adding a new arc.
+    "story_arc_files_enabled": ("false", "bool"),
+    "story_arc_files_method": ("copy", "string"),
+    "story_arc_files_library_root_id": ("", "string"),
+    "story_arc_files_destination": ("", "string"),
+    "story_arc_files_folder_template": ("{StoryArc}", "string"),
+    "story_arc_files_filename_style": ("original", "string"),
+    "story_arc_files_prefix_reading_order": ("false", "bool"),
+    "story_arc_files_reading_order_width": ("2", "int"),
+    "story_arc_files_file_template": (
+        "{ReadingOrder:03d} - {Series} {IssueNumber}{IssueTitleOptional}",
+        "string",
+    ),
+    "story_arc_files_symlink_style": ("relative", "string"),
+    "story_arc_files_synchronize": ("true", "bool"),
     # Naming — Folder Management
     "create_empty_series_folders": ("false", "bool"),
     "delete_empty_folders": ("true", "bool"),

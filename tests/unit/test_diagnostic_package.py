@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -267,9 +268,78 @@ class TestDiagnosticPackageIntegration:
             assert "download_history.json" in base_files
             assert "installed_packages.json" in base_files
             assert "import_story_arc_diagnostics.json" in base_files
+            assert "mylar_path_preflight.json" in base_files
             assert "utility_jobs.json" in base_files
             assert "utility_job_logs.json" in base_files
             assert any(name.endswith("/logs/startup.log") for name in names)
+
+    async def test_blocking_packaging_work_does_not_run_on_event_loop(
+        self,
+        db_session,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from pullbox.services import diagnostic_service as service
+
+        self._patch_runtime_settings(monkeypatch, tmp_path)
+        owner = threading.get_ident()
+        calls: list[tuple[str, int]] = []
+        for name in ("_collect_log_files", "_create_sanitized_db_copy", "build_diagnostic_zip"):
+            original = getattr(service, name)
+
+            def wrap(*args, _name=name, _original=original, **kwargs):
+                calls.append((_name, threading.get_ident()))
+                return _original(*args, **kwargs)
+
+            monkeypatch.setattr(service, name, wrap)
+        await service.create_diagnostic_package(db_session)
+        assert {name for name, _ in calls} == {
+            "_collect_log_files",
+            "_create_sanitized_db_copy",
+            "build_diagnostic_zip",
+        }
+        assert all(thread != owner for _, thread in calls)
+
+    async def test_package_includes_preflight_report_before_a_job_exists(
+        self,
+        db_session,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from pullbox.schemas.import_mylar3_path_preflight import (
+            MylarPathException,
+            MylarPathPreviewResponse,
+            MylarPathResolutionCounts,
+        )
+        from pullbox.services.diagnostic_service import create_diagnostic_package
+        from pullbox.services.import_mylar3_path_reports import save_report
+
+        self._patch_runtime_settings(monkeypatch, tmp_path)
+        report = MylarPathPreviewResponse(
+            resolution=MylarPathResolutionCounts(locations=2, identity_resolved=1, missing=1),
+            requires_confirmation=False,
+            can_confirm=False,
+            exception_count=1,
+            exceptions=[
+                MylarPathException(
+                    series_id="42",
+                    series_name="Missing Series",
+                    stored_path="/comics/Missing",
+                    attempted_path="/comics/Missing",
+                    outcome="missing",
+                    reason="Missing folder",
+                    suggested_action="Check the stored path",
+                )
+            ],
+        )
+        report_id = save_report(report, "/imports/mylar.db")
+        package, _ = await create_diagnostic_package(db_session)
+        with zipfile.ZipFile(io.BytesIO(package)) as archive:
+            name = next(n for n in archive.namelist() if n.endswith("mylar_path_preflight.json"))
+            evidence = json.loads(archive.read(name))
+            assert evidence["report_id"] == report_id
+            assert evidence["exceptions"][0]["stored_path"] == "/comics/Missing"
+            assert evidence["exceptions"][0]["series_name"] == "Missing Series"
 
     async def test_system_info_has_expected_fields(
         self,

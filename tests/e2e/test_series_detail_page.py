@@ -16,6 +16,31 @@ pytestmark = pytest.mark.e2e
 class TestSeriesDetailPage:
     """Behavior-first E2E coverage for /series/{id}."""
 
+    def test_automatic_search_reports_queue_failure_instead_of_no_results(
+        self,
+        authed_page,
+        seeded_server: str,
+    ) -> None:
+        series = SeriesDetailPage(authed_page, seeded_server)
+        series.goto(1)
+        authed_page.route(
+            "**/api/v1/issues/*/download",
+            lambda route: route.fulfill(
+                json={
+                    "status": "source_unavailable",
+                    "message": "Matches found, but downloads could not be queued.",
+                    "notices": ["NZBgeek could not be queued; continuing with other sources."],
+                }
+            ),
+        )
+        authed_page.get_by_test_id("series-issue-auto-search").first.click()
+        expect(
+            authed_page.get_by_text(
+                "Matches found, but downloads could not be queued.", exact=False
+            )
+        ).to_be_visible()
+        expect(authed_page.get_by_text("No results found", exact=False)).to_have_count(0)
+
     def test_monitored_indicator_tooltip_renders_on_hover(
         self,
         authed_page,

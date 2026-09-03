@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -20,6 +21,7 @@ from pullbox.models.library import MatchConfidence
 from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.providers.base import ReleaseResult
+from pullbox.services.search_acquisition_router import SearchAcquisitionRoutingResult
 from pullbox.services.search_service import IssueSearchOutcome, IssueSearchTarget
 from pullbox.tasks import search_task
 
@@ -165,6 +167,88 @@ async def test_build_task_search_runtime_handles_invalid_source_priority(
 
     assert runtime is not None
     assert runtime.source_priority is None
+
+
+@pytest.mark.parametrize("automatic_enabled", [True, False])
+async def test_task_runtime_supports_opted_in_dc_without_indexers(
+    task_db: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    automatic_enabled: bool,
+) -> None:
+    monkeypatch.setattr(search_task, "build_registry", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        search_task, "get_airdcpp_supervisor_registry", lambda: object(), raising=False
+    )
+    load = AsyncMock(return_value=(object(),) if automatic_enabled else ())
+    monkeypatch.setattr(search_task, "load_airdcpp_search_clients", load, raising=False)
+    async with task_db["factory"]() as session:
+        runtime = await search_task._build_task_search_runtime(session)
+    assert (runtime is not None) is automatic_enabled
+    load.assert_awaited_once()
+    assert load.call_args.kwargs["automatic"] is True
+
+
+@pytest.mark.parametrize("scope", ["wanted", "series"])
+@pytest.mark.parametrize("action", ["source_unavailable", "grabbed", "queued"])
+async def test_search_history_rejections_count_validation_not_acquisition(
+    task_db: dict[str, object], monkeypatch: pytest.MonkeyPatch, scope: str, action: str
+) -> None:
+    target = IssueSearchTarget(
+        issue_id=task_db["wanted_issue_id"],
+        series_id=2,
+        series_title="Search Task Wanted",
+        issue_number=9,
+        issue_type=IssueType.ISSUE,
+    )
+    release = _make_release()
+    validation = _make_validation(release)
+    rejected = _make_validation(_make_release("Absolute Superman 010"))
+    outcome = replace(
+        _make_outcome(target, release=release, validation=validation, mode="fast"),
+        raw_results=[release, release, rejected.release],
+        matched=[validation, validation],
+        rejected=[rejected],
+        search_details={"results_count": 3},
+    )
+    runtime = search_task.SearchRuntime(MagicMock(), {}, None, {}, {}, {"issue": "high"}, 3)
+    monkeypatch.setattr(
+        search_task, "attach_automatic_airdcpp_search", AsyncMock(return_value=outcome)
+    )
+    monkeypatch.setattr(
+        search_task,
+        "route_search_acquisition",
+        AsyncMock(
+            return_value=SearchAcquisitionRoutingResult(
+                int(action == "grabbed"), int(action == "queued"), action, "high", "indexer"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        search_task,
+        "select_search_source",
+        MagicMock(return_value=SimpleNamespace(release=release, validation=validation)),
+    )
+    async with task_db["factory"]() as session:
+        kwargs = dict(
+            session=session,
+            pending_log_id=None,
+            runtime=runtime,
+            download_svc=MagicMock(),
+            intervention_svc=MagicMock(),
+        )
+        if scope == "wanted":
+            result = await search_task._persist_wanted_search_outcome(outcome=outcome, **kwargs)
+        else:
+            result = await search_task._persist_series_search_outcome(
+                primary_outcome=outcome, fallback_outcome=None, log=MagicMock(), **kwargs
+            )
+        assert result == (int(action == "grabbed"), int(action == "queued"), 0)
+        log = (
+            await session.scalars(select(SearchLog).where(SearchLog.issue_id == target.issue_id))
+        ).one()
+        assert log.results_found == 3
+        assert log.results_rejected == 1
+        assert log.details["action_status"] == action
 
 
 @pytest.mark.asyncio

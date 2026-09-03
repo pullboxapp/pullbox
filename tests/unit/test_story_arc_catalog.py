@@ -220,7 +220,7 @@ async def test_add_fails_closed_and_leaves_no_arc_or_partial_catalog(db_session,
     assert await db_session.scalar(select(func.count(Series.id))) == original_series_count
 
 
-async def test_refresh_preserves_user_edits_and_appends_pending_without_removing_members(
+async def test_refresh_resolves_identity_but_requires_order_review_without_removing_members(
     db_session, tmp_path
 ):
     from pullbox.services.story_arc_catalog import StoryArcCatalogService
@@ -251,7 +251,7 @@ async def test_refresh_preserves_user_edits_and_appends_pending_without_removing
         ).all()
     )
     assert [m.source_issue_id for m in members] == ["12", "11", "13"]
-    assert members[-1].resolution_state is StoryArcResolutionState.PENDING
+    assert members[-1].resolution_state is StoryArcResolutionState.RESOLVED
     assert (
         members[-1].sync_eligible is False
         and members[-1].evidence["catalog_review_required"] is True
@@ -264,6 +264,10 @@ async def test_refresh_preserves_user_edits_and_appends_pending_without_removing
     assert arc.diagnostics["user_evidence"] == {"keep": True}
     assert result.removed_issue_provider_ids == ("12",)
     assert len(result.added_membership_ids) == 1
+    from pullbox.services.story_arc_search_targets import load_story_arc_missing_search_targets
+
+    targets = await load_story_arc_missing_search_targets(db_session, arc.id)
+    assert members[-1].issue_id in {target.issue_id for target in targets}
     again = await service.refresh(db_session, arc.id, preview, expected_revision=arc.revision)
     assert again.added_membership_ids == ()
 
@@ -645,7 +649,7 @@ async def test_imported_provider_arc_refresh_requires_explicit_new_parent_root(
     appended = await db_session.get(IssueStoryArc, result.added_membership_ids[0])
     assert (
         appended.sequence_number == 20
-        and appended.resolution_state is StoryArcResolutionState.PENDING
+        and appended.resolution_state is StoryArcResolutionState.RESOLVED
     )
 
 

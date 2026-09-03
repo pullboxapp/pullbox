@@ -1,0 +1,295 @@
+{# One editor; inheritance and explicit library policies remain distinct stores. #}
+{% call section_card(
+  title="Naming templates",
+  description="Choose global defaults or customize one library. Preview the resulting paths before saving.",
+  eyebrow="Folder and file names",
+  title_style="plain",
+  body_class="p-0",
+  class_name="section-card-visible", attrs='id="naming-templates"'
+) %}
+  <form x-data="namingSettings()" x-init="loadNamingScope('global')" x-ref="namingEditor"
+        @submit.prevent="saveNaming()" data-testid="settings-naming-editor"
+        :aria-busy="namingLoading || namingSaving ? 'true' : 'false'">
+    <div class="settings-rows">
+      {% call settings_row(label="Applies to", help="Global defaults apply to libraries without their own naming settings.", label_for="naming-scope-dropdown-trigger") %}
+        <div class="max-w-2xl space-y-3">
+          <fieldset :disabled="namingLoading || namingSaving || namingConfirming">
+            <template x-for="scopeOptionsKey in [JSON.stringify(libraryRoots)]" :key="scopeOptionsKey">
+              <div>
+                {{ dropdown_select(
+                  name="naming_scope", value="global", options=[("global", "Global defaults")],
+                  options_expression="namingScopeOptions()", local_model="namingScopePicker",
+                  local_on_change="changeNamingScope($event.detail.value)",
+                  trigger_id="naming-scope-dropdown-trigger", root_testid="settings-naming-scope",
+                  wrap_options=true, class_name="w-full"
+                ) }}
+              </div>
+            </template>
+          </fieldset>
+          <p class="text-sm text-pb-text-sec" data-testid="settings-naming-scope-status"
+             x-text="namingScope === 'global' ? 'Editing global defaults' : (namingInherit ? 'Using global naming defaults' : 'Using this library’s naming settings')"></p>
+          <p class="text-xs text-pb-text-dim" x-show="namingState?.source === 'import_adoption'">
+            This library’s current naming settings were adopted during import.
+          </p>
+          {% call field_note(tone="info", icon="information-circle") %}
+            Saving affects future managed files only. Existing files are not renamed or moved, and keep-in-place imports remain unchanged.
+          {% endcall %}
+        </div>
+      {% endcall %}
+      <div x-show="namingScope !== 'global'" x-cloak>
+        {% call settings_row(label="Use global naming defaults", help="Turn off to customize this library. Libraries with their own settings do not follow future global changes.", label_for="naming-inherit") %}
+          <label class="relative inline-flex cursor-pointer items-center">
+            <input id="naming-inherit" type="checkbox" class="peer toggle-input"
+                   :checked="namingInherit" @change="changeNamingInheritance($event.target.checked)"
+                   :disabled="namingLoading || namingSaving || namingConfirming || !namingState">
+            <span class="toggle-switch"></span>
+          </label>
+        {% endcall %}
+      </div>
+    </div>
+    <fieldset :disabled="namingReadOnly">
+      <div class="settings-rows">
+        {% set naming_fields = [
+          ('series_path_template', 'series_folder_template', 'Series Folder Format', 'Use / for nested folders, for example {Publisher}/{Series} ({Year}). Tokens: {Series}, {Year}, {Publisher}, {ComicVineId}, {Type}.', 'preview-folder'),
+          ('comic_file_template', 'comic_file_template', 'Standard Comic Format', 'Tokens: {Series}, {Year}, {Issue}, {Issue:03d}, {IssueTitle}, {Title}, {Publisher}.', 'preview-standard'),
+          ('annual_file_template', 'annual_file_template', 'Annual Format', 'Use the same core tokens as the standard comic template and include the annual marker when needed.', 'preview-annual'),
+          ('non_standard_file_template', 'non_standard_file_template', 'Collection Non-Standard Format', 'For TPBs, omnibuses, compendiums, and hardcovers. Extra tokens: {Type}, {Title}, {Volume}, {Volume:02d}.', 'preview-nonstandard'),
+          ('single_non_standard_file_template', 'single_non_standard_file_template', 'Single-Release Non-Standard Format', 'For one-shots, graphic novels, and specials. Extra tokens: {Type}, {Title}.', 'preview-nonstandard-single')
+        ] %}
+        {% for field, input_name, label, help, preview_id in naming_fields %}
+          {% call settings_row(label=label, help=help, label_for="naming-" ~ field) %}
+            <div class="max-w-2xl space-y-2 min-w-0">
+              <input id="naming-{{ field }}" type="text" name="{{ input_name }}" required maxlength="1024"
+                     x-model="namingForm.{{ field }}" @input="scheduleNamingPreview()"
+                     class="input-pb font-mono" aria-describedby="{{ preview_id }}">
+              <div id="{{ preview_id }}" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1 break-words"
+                   :class="namingPreviewLoading && 'is-loading'" data-preview-ready="false"
+                   :data-preview-ready="namingPreviewLoading ? 'false' : 'true'" aria-live="polite" :aria-busy="namingPreviewLoading ? 'true' : 'false'">
+                <span x-show="!namingExamples.{{ field }}" class="block italic text-pb-text-dim"
+                      x-text="namingExamples.{{ field }} ? '' : (namingPreviewError ? 'Correct the template to preview names.' : 'Loading preview…')"></span>
+                <template x-for="(example, index) in (namingExamples.{{ field }} || [])" :key="index">
+                  <div class="flex items-baseline flex-wrap gap-x-1">
+                    <span class="text-pb-text-sec" x-text="example.input"></span>
+                    <span aria-hidden="true">→</span>
+                    <span class="text-pb-success" x-text="example.output"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          {% endcall %}
+        {% endfor %}
+        {% call settings_row(label="Replace Illegal Characters", help="Replace characters that are invalid in file and folder names, such as &lt; &gt; : &quot; / &#92; | ? *.", label_for="naming-replace-illegal") %}
+          <label class="relative inline-flex cursor-pointer items-center">
+            <input id="naming-replace-illegal" type="checkbox" name="replace_illegal_characters"
+                   x-model="namingForm.replace_illegal_characters" @change="scheduleNamingPreview()" class="peer toggle-input">
+            <span class="toggle-switch"></span>
+          </label>
+        {% endcall %}
+        {% call settings_row(label="Colon Replacement", help="Choose how colons are rewritten when illegal-character cleanup is enabled.", label_for="naming-colon-dropdown-trigger") %}
+          {{ dropdown_select(
+            name="colon_replacement", value="dash",
+            options=[("dash", "Dash ( - )"), ("space", "Space"), ("empty", "Remove"), ("smart", "Em-dash ( — )")],
+            local_model="namingForm.colon_replacement", local_on_change="scheduleNamingPreview()",
+            trigger_id="naming-colon-dropdown-trigger", root_testid="settings-media-colon-replacement-select", class_name="w-40 text-xs"
+          ) }}
+        {% endcall %}
+      </div>
+    </fieldset>
+    <div class="px-5 py-3 space-y-2" x-show="namingError || namingPreviewError" x-cloak role="alert">
+      <p class="text-sm text-pb-error" x-text="namingError || namingPreviewError"></p>
+      <button type="button" x-show="namingError" @click="reloadNaming()"
+              :disabled="namingLoading || namingSaving || namingConfirming" class="btn-ghost btn-sm">Reload this scope</button>
+    </div>
+    {% call settings_footer(align="end") %}
+      <div class="settings-footer-actions ml-auto justify-end">
+        <button type="button" x-show="namingDirty" x-cloak @click="resetNaming()"
+                :disabled="namingLoading || namingSaving || namingConfirming" class="btn-ghost btn-sm">Reset</button>
+        <button type="submit" :disabled="!namingDirty || !namingState || namingLoading || namingSaving || namingConfirming || !!namingPreviewError"
+                class="btn-primary" x-text="namingSaving ? 'Saving…' : (namingScope === 'global' ? 'Save global defaults' : 'Save for this library')">Save global defaults</button>
+      </div>
+    {% endcall %}
+  </form>
+{% endcall %}
+
+<script>
+function namingSettings() {
+  return {
+    namingScope: 'global',
+    namingScopePicker: 'global',
+    namingState: null,
+    namingForm: {},
+    namingInherit: false,
+    namingBaseline: '',
+    namingLoading: true,
+    namingSaving: false,
+    namingConfirming: false,
+    namingError: '',
+    namingPreviewError: '',
+    namingExamples: {},
+    namingPreviewLoading: true,
+    namingLoadSequence: 0,
+    namingPreviewSequence: 0,
+    namingPreviewTimer: null,
+
+    get namingDirty() {
+      return !!this.namingState && this.namingSnapshot() !== this.namingBaseline;
+    },
+    get namingReadOnly() {
+      return !this.namingState || this.namingLoading || this.namingSaving || this.namingConfirming
+        || (this.namingScope !== 'global' && this.namingInherit);
+    },
+    namingScopeOptions() {
+      return [{ value: 'global', label: 'Global defaults' }, ...this.libraryRoots
+        .filter(root => root.enabled || String(root.id) === this.namingScope)
+        .map(root => ({ value: String(root.id), label: root.name + ' — ' + root.path }))];
+    },
+    namingSnapshot() {
+      return JSON.stringify({ policy: this.namingForm, use_global: this.namingInherit });
+    },
+    async namingRequest(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': {{ csrf_token|tojson }} },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = Array.isArray(data.detail) ? data.detail.map(item => item.msg).join('; ') : data.detail;
+        throw new Error(data.error?.message || detail || 'Could not load or save naming settings.');
+      }
+      return data;
+    },
+    applyNamingState(state) {
+      this.namingState = state;
+      this.namingScope = state.library_root_id == null ? 'global' : String(state.library_root_id);
+      this.namingScopePicker = this.namingScope;
+      this.namingForm = { ...state.policy };
+      this.namingInherit = state.use_global;
+      this.namingBaseline = this.namingSnapshot();
+    },
+    async loadNamingScope(scope) {
+      const sequence = ++this.namingLoadSequence;
+      ++this.namingPreviewSequence;
+      clearTimeout(this.namingPreviewTimer);
+      this.namingLoading = true;
+      this.namingError = '';
+      this.namingExamples = {};
+      try {
+        const query = scope === 'global' ? '' : '?library_root_id=' + encodeURIComponent(scope);
+        const state = await this.namingRequest('/api/v1/config/naming' + query);
+        if (sequence !== this.namingLoadSequence) return;
+        this.applyNamingState(state);
+      } catch (error) {
+        if (sequence !== this.namingLoadSequence) return;
+        this.namingScopePicker = this.namingScope;
+        this.namingError = error.message;
+      } finally {
+        if (sequence === this.namingLoadSequence) {
+          this.namingLoading = false;
+          this.scheduleNamingPreview();
+        }
+      }
+    },
+    async confirmNaming(title, message, confirmText) {
+      this.namingConfirming = true;
+      try { return await pbConfirm({ title, message, confirmText, destructive: false }); }
+      finally { this.namingConfirming = false; }
+    },
+    async changeNamingScope(scope) {
+      if (scope === this.namingScope) return;
+      if (this.namingLoading || this.namingSaving || this.namingConfirming) {
+        this.namingScopePicker = this.namingScope;
+        return;
+      }
+      if (this.namingDirty && !await this.confirmNaming('Discard naming changes?', 'Your unsaved changes will be lost when you switch scopes.', 'Discard changes')) {
+        this.namingScopePicker = this.namingScope;
+        return;
+      }
+      await this.loadNamingScope(scope);
+    },
+    async changeNamingInheritance(inherit) {
+      if (this.namingLoading || this.namingSaving || this.namingConfirming) return;
+      this.namingError = '';
+      if (inherit) {
+        this.namingLoading = true;
+        ++this.namingPreviewSequence;
+        try {
+          const defaults = await this.namingRequest('/api/v1/config/naming');
+          this.namingForm = { ...defaults.policy };
+          this.namingInherit = true;
+        } catch (error) {
+          this.namingError = error.message;
+          // Trigger the checkbox binding even when its previous value was false.
+          this.namingInherit = true;
+          await this.$nextTick();
+          this.namingInherit = false;
+        } finally { this.namingLoading = false; }
+      } else {
+        this.namingInherit = false;
+      }
+      this.scheduleNamingPreview();
+    },
+    resetNaming() {
+      this.applyNamingState(this.namingState);
+      this.namingError = '';
+      this.scheduleNamingPreview();
+    },
+    async reloadNaming() {
+      if (this.namingDirty && !await this.confirmNaming('Discard naming changes?', 'Reloading replaces your unsaved changes with the currently saved settings.', 'Reload settings')) return;
+      await this.loadNamingScope(this.namingScope);
+    },
+    scheduleNamingPreview() {
+      clearTimeout(this.namingPreviewTimer);
+      const sequence = ++this.namingPreviewSequence;
+      this.namingPreviewError = '';
+      this.namingPreviewLoading = true;
+      if (!this.namingState) return;
+      this.namingPreviewTimer = setTimeout(() => this.previewNamingSettings(sequence), 300);
+    },
+    async previewNamingSettings(sequence) {
+      const snapshot = this.namingSnapshot();
+      const scope = this.namingScope;
+      this.$refs.namingEditor.querySelectorAll('.settings-media-preview-panel').forEach(panel => {
+        panel.style.minHeight = Math.ceil(panel.getBoundingClientRect().height) + 'px';
+      });
+      const current = () => sequence === this.namingPreviewSequence && scope === this.namingScope && snapshot === this.namingSnapshot();
+      try {
+        const result = await this.namingRequest('/api/v1/config/naming/preview', {
+          method: 'POST', body: JSON.stringify({ policy: this.namingForm }),
+        });
+        if (current()) this.namingExamples = result.examples;
+      } catch (error) {
+        if (current()) {
+          this.namingExamples = {};
+          this.namingPreviewError = error.message;
+        }
+      } finally {
+        if (current()) this.namingPreviewLoading = false;
+      }
+    },
+    async saveNaming() {
+      if (!this.namingDirty || this.namingLoading || this.namingSaving || this.namingConfirming) return;
+      if (this.namingScope !== 'global' && this.namingInherit && !this.namingState.use_global
+          && !await this.confirmNaming('Use global naming defaults?', 'This removes this library’s custom naming settings after saving. Future global changes will apply to this library. Existing files will not be renamed or moved.', 'Use global defaults')) return;
+      this.namingSaving = true;
+      this.namingError = '';
+      try {
+        const state = await this.namingRequest('/api/v1/config/naming', {
+          method: 'PUT',
+          body: JSON.stringify({ library_root_id: this.namingState.library_root_id,
+            expected_fingerprint: this.namingState.fingerprint,
+            policy: this.namingForm, use_global: this.namingInherit }),
+        });
+        this.applyNamingState(state);
+        this.scheduleNamingPreview();
+        showToast({ message: this.namingScope === 'global' ? 'Global naming defaults saved.' : 'Library naming settings saved.', level: 'success' });
+      } catch (error) { this.namingError = error.message; }
+      finally { this.namingSaving = false; }
+    },
+    destroy() {
+      ++this.namingLoadSequence;
+      ++this.namingPreviewSequence;
+      clearTimeout(this.namingPreviewTimer);
+    },
+  };
+}
+</script>

@@ -8,11 +8,14 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any, Protocol
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 
 from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.release_year_matching import ReleaseYearContext
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
+from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
+from pullbox.models.library import LibraryFile
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
@@ -48,6 +51,19 @@ class IssueSearchTarget:
     release_year: int | None = None
     alternate_names: list[str] | None = None
     series_issue_count: int | None = None
+    store_year: int | None = None
+    series_continuing: bool = False
+
+    @property
+    def year_context(self) -> ReleaseYearContext:
+        """Use existing catalog dates for confidence, not extra provider lookups."""
+        return ReleaseYearContext(
+            series_year=self.series_year,
+            publication_years=tuple(
+                sorted({year for year in (self.release_year, self.store_year) if year is not None})
+            ),
+            series_continuing=self.series_continuing,
+        )
 
     @property
     def search_year(self) -> int | None:
@@ -81,8 +97,36 @@ class IssueSearchOutcome:
     direct_outcome: DirectSearchOutcome | None = None
     dc_outcome: DcSearchOutcome | None = None
 
+    @property
+    def results_found_count(self) -> int:
+        """Count discovered candidates, independently of acquisition success."""
+        return len(self.raw_results) + sum(
+            len(outcome.matched) + len(outcome.rejected)
+            for outcome in (self.direct_outcome, self.dc_outcome)
+            if outcome is not None
+        )
+
+    @property
+    def results_rejected_count(self) -> int:
+        """Only validation rejections count, not unused or unavailable matches."""
+        return len(self.rejected) + sum(
+            len(outcome.rejected)
+            for outcome in (self.direct_outcome, self.dc_outcome)
+            if outcome is not None
+        )
+
 
 SearchOutcomeCallback = Callable[[IssueSearchOutcome], Awaitable[None]]
+
+
+def arc_issue_release_filter(*, today: date | None = None) -> Any:
+    """Track upcoming members now, but search on/after their publication date.
+
+    Store date takes precedence over Comic Vine's later cover date. Undated
+    issues remain eligible; a legacy upcoming flag never bypasses this rule.
+    """
+    publication_date = func.coalesce(Issue.store_date, Issue.release_date)
+    return or_(publication_date.is_(None), publication_date <= (today or date.today()))
 
 
 def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
@@ -93,11 +137,6 @@ def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
     normal wanted-search runner, so provider cooldowns, result selection,
     pending intervention suppression, and duplicate acquisition remain shared.
     """
-    today = today or date.today()
-    known_upcoming_issue = or_(
-        and_(Issue.release_date.is_not(None), Issue.release_date >= today),
-        and_(Issue.store_date.is_not(None), Issue.store_date >= today),
-    )
     monitored_story_arc = exists().where(
         and_(
             IssueStoryArc.issue_id == Issue.id,
@@ -105,10 +144,6 @@ def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
             IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
             StoryArc.lifecycle == StoryArcLifecycle.ACTIVE,
             StoryArc.monitored.is_(True),
-            or_(
-                StoryArc.search_missing.is_(True),
-                and_(StoryArc.include_upcoming.is_(True), known_upcoming_issue),
-            ),
         )
     )
     return and_(
@@ -119,9 +154,44 @@ def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
                 Series.monitored.is_(True),
             ),
             and_(
-                Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
+                arc_issue_acquisition_filter(today=today),
                 monitored_story_arc,
             ),
+        ),
+    )
+
+
+def arc_issue_acquisition_filter(*, today: date | None = None) -> Any:
+    """One missing-issue contract for manual and scheduled arc searches."""
+    active_download = exists().where(
+        DownloadHistory.issue_id == Issue.id,
+        or_(
+            DownloadHistory.state.in_(
+                (
+                    DownloadState.QUEUED,
+                    DownloadState.SENT,
+                    DownloadState.DOWNLOADING,
+                    DownloadState.FINALIZING,
+                    DownloadState.PAUSED,
+                    DownloadState.RETRY_PENDING,
+                    DownloadState.POST_PROCESSING,
+                )
+            ),
+            and_(
+                DownloadHistory.state == DownloadState.COMPLETED,
+                DownloadHistory.imported_at.is_(None),
+            ),
+        ),
+    )
+    return and_(
+        arc_issue_release_filter(today=today),
+        Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
+        Issue.manual_skip.is_(False),
+        ~exists().where(LibraryFile.issue_id == Issue.id),
+        ~active_download,
+        ~exists().where(
+            PendingMatch.issue_id == Issue.id,
+            PendingMatch.status == PendingMatchStatus.PENDING,
         ),
     )
 
@@ -149,6 +219,8 @@ def _target_from_row(row: Any) -> IssueSearchTarget:
     """Build a search target from a SQLAlchemy row with the expected labels."""
     release_date = getattr(row, "release_date", None) or getattr(row, "store_date", None)
     series_issue_count = getattr(row, "series_issue_count", None)
+    store_date = getattr(row, "store_date", None)
+    lifecycle = getattr(row, "status_override", None) or getattr(row, "series_status", None)
     return IssueSearchTarget(
         issue_id=int(row.issue_id),
         series_id=int(row.series_id),
@@ -161,6 +233,8 @@ def _target_from_row(row: Any) -> IssueSearchTarget:
         issue_title=str(row.issue_title) if row.issue_title else None,
         series_year=int(row.series_year) if row.series_year else None,
         release_year=release_date.year if release_date is not None else None,
+        store_year=store_date.year if store_date is not None else None,
+        series_continuing=str(lifecycle).casefold() == "continuing",
         alternate_names=list(row.alternate_names) if row.alternate_names else None,
         series_issue_count=(int(series_issue_count) if series_issue_count is not None else None),
     )
@@ -185,6 +259,8 @@ async def load_issue_search_target(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(Issue.id == issue_id)
@@ -215,6 +291,8 @@ async def load_series_wanted_search_targets(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(Issue.series_id == series_id)
@@ -313,6 +391,8 @@ async def load_wanted_issue_search_targets(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(*filters)
@@ -343,6 +423,8 @@ async def load_wanted_issue_search_targets_by_ids(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(

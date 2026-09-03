@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from pullbox.models.issue import IssueType
+from pullbox.models.library import MatchConfidence
 from pullbox.providers.airdcpp.contracts import AirDcppSearchInstance, AirDcppSearchResult
 from pullbox.services.airdcpp_search_cooldown import AirDcppCooldownReservation
 from pullbox.services.airdcpp_search_coordinator import (
@@ -220,6 +221,39 @@ def _client(
         search_dispatch_deadline_seconds=5,
         hub_allowlist=(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_year", [2026, None])
+async def test_dc_results_share_publication_and_series_window_confidence(
+    release_year: int | None,
+) -> None:
+    target = replace(
+        _target(),
+        series_title="2000 AD",
+        series_year=1977,
+        issue_number=2487,
+        release_year=release_year,
+        series_continuing=True,
+    )
+    api = _FakeApi(
+        [_result().model_copy(update={"name": "2000AD 2487 [2026] [Digital-Empire].cbz"})]
+    )
+    socket = _FakeSocket(emit_result=False)
+
+    async def sleep(seconds: float) -> None:
+        return None
+
+    outcome = await AirDcppSearchCoordinator(cooldown=_FakeCooldown(), sleep=sleep).search(
+        (_client(api, socket),), target, manual=True
+    )
+    assert not outcome.rejected
+    assert len(outcome.matched) == 1
+    validation = outcome.matched[0].validation
+    assert validation.confidence is (
+        MatchConfidence.HIGH if release_year else MatchConfidence.MEDIUM
+    )
+    assert validation.year_match_basis == ("publication_year" if release_year else "series_window")
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,6 @@
+{% from "components/provider_update_link.html" import provider_update_link %}
 {% set story_arc_title_parts = story_arc.name.split(" ", 1) %}
+{% set monitor_help = "Monitoring checks for new members and searches missing issues when released. Parent series monitoring stays unchanged." %}
 
 <section data-testid="story-arc-detail-hero" class="detail-hero-shell">
   <div class="series-domain-hero-inner story-arc-detail-hero-inner">
@@ -68,20 +70,18 @@
       <p id="story-arc-detail-actions-title" data-testid="story-arc-detail-actions-title" class="series-domain-actions-title">Manage <span>story arc</span></p>
       <div class="series-domain-actions-buttons">
         <form
-          action="/story-arcs/{{ story_arc.id }}/edit"
+          action="/story-arcs/{{ story_arc.id }}/monitor"
           method="post"
-          hx-post="/story-arcs/{{ story_arc.id }}/edit"
+          hx-post="/story-arcs/{{ story_arc.id }}/monitor"
+          hx-trigger="change"
+          hx-disabled-elt="find .toggle-input"
           hx-swap="none"
           data-testid="story-arc-action-monitor-control"
           class="series-domain-inline-toggle"
         >
           <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
-          <input type="hidden" name="name" value="{{ story_arc.name }}">
-          <input type="hidden" name="description" value="{{ story_arc.description or '' }}">
-          {% if story_arc.search_missing %}<input type="hidden" name="search_missing" value="true">{% endif %}
-          {% if story_arc.include_upcoming %}<input type="hidden" name="include_upcoming" value="true">{% endif %}
           <span class="series-domain-inline-toggle-label">Monitored</span>
-          <label class="relative inline-flex shrink-0 items-center">
+          <label class="relative inline-flex shrink-0 items-center" data-tip="{{ monitor_help }}">
             <input
               type="checkbox"
               role="switch"
@@ -89,13 +89,14 @@
               value="true"
               class="peer toggle-input"
               aria-label="Toggle monitoring for this Story Arc"
+              aria-describedby="story-arc-monitor-help"
               {% if story_arc.monitored %}checked{% endif %}
               {% if not story_arc.active %}disabled{% endif %}
-              @change="$el.form.requestSubmit()"
             >
             <span class="toggle-switch"></span>
           </label>
         </form>
+        <p id="story-arc-monitor-help" class="sr-only">{{ monitor_help }}</p>
 
         <form
           action="/story-arcs/{{ story_arc.id }}/search"
@@ -114,9 +115,7 @@
         </form>
 
         {% if story_arc.comicvine_id %}
-          <a data-testid="story-arc-action-provider-review" href="/story-arcs/{{ story_arc.id }}/catalog-refresh" class="btn-ghost">
-            Review provider changes
-          </a>
+          {{ provider_update_link("/story-arcs/" ~ story_arc.id ~ "/catalog-refresh", testid="story-arc-action-provider-review") }}
         {% endif %}
 
         {% if story_arc.active %}
@@ -165,6 +164,10 @@
       <div data-testid="story-arc-arc-files-summary">
         <p class="series-domain-info-value">{{ placement_ui.policy.summary_label }}</p>
         <p class="mt-1 text-xs text-pb-text-dim">{{ placement_ui.policy.synchronization_label }}</p>
+        {% if placement_ui.policy.destination_root %}
+          <p class="mt-1 break-all font-mono text-xs text-pb-text-dim">{{ placement_ui.policy.destination_root }}</p>
+        {% endif %}
+        <p class="mt-1 text-xs text-pb-text-dim">Saved for this arc. <a href="/settings?tab=media#story-arc-files" class="text-pb-interactive hover:underline">Defaults for new arcs</a></p>
       </div>
     </div>
   </div>

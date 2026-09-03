@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 INTERVENTION_TABS = {"queue", "recovery", "history"}
 INTERVENTION_LANES = {"review", "recovery"}
 INTERVENTION_CONFIDENCE_FILTERS = {"high", "medium", "low"}
-INTERVENTION_PROTOCOL_FILTERS = {"usenet", "torrent", "direct"}
+INTERVENTION_PROTOCOL_FILTERS = {"usenet", "torrent", "direct", "dc"}
 INTERVENTION_REASON_LABELS = {
     "fuzzy_series": "Fuzzy series match",
     "issue_mismatch": "Issue mismatch",
@@ -168,17 +168,19 @@ def intervention_protocol_clause(protocol: str) -> ColumnElement[bool]:
         PendingMatch.match_details["source_kind"].as_string(),
         "",
     )
-    if protocol == "direct":
-        return source_kind == "direct"
+    if protocol in {"direct", "dc"}:
+        return source_kind == protocol
     if protocol == "torrent":
-        return and_(PendingMatch.is_torrent.is_(True), source_kind != "direct")
-    return and_(PendingMatch.is_torrent.is_(False), source_kind != "direct")
+        return and_(PendingMatch.is_torrent.is_(True), source_kind.not_in(("direct", "dc")))
+    return and_(PendingMatch.is_torrent.is_(False), source_kind.not_in(("direct", "dc")))
 
 
 def intervention_protocol_label(is_torrent: bool, source_kind: str = "") -> str:
     """Return the human-readable protocol label for a pending match."""
     if source_kind == "direct":
         return "Direct"
+    if source_kind == "dc":
+        return "Direct Connect"
     return "Torrent" if is_torrent else "Usenet"
 
 
@@ -257,6 +259,7 @@ def get_intervention_history_order_by(sort: str) -> list[ColumnElement[object]]:
         "",
     )
     protocol_sort = case(
+        (source_kind == "dc", 3),
         (source_kind == "direct", 2),
         (PendingMatch.is_torrent.is_(True), 0),
         else_=1,

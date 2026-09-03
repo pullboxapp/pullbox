@@ -30,6 +30,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reconciled stale Mylar filenames with uniquely verified same-folder comic
+  files, including `#1` versus `001` naming changes, without weakening identity
+  or archive safety checks. Added a dry-run-first offline repair for saved
+  reviews that preserves matches and source files, and clarified missing-path
+  errors without claiming the source changed after scanning.
+- Automatic searches now distinguish valid matches that could not be queued
+  from empty results. Search history counts only validation rejections, not
+  unused alternatives or failed downloads.
+- Opted-in AirDC++ automatic searches now hand accepted matches to the durable
+  queue, with restart-safe intervention for lower-confidence matches and
+  duplicate-download and blocklist checks.
+- SABnzbd NZB retrieval now allows slow indexer proxies a separate bounded
+  timeout without delaying normal client-control requests.
+- Recognized unmarked four-digit issue numbers for known series such as 2000 AD
+  without treating numeric series names as issue numbers. Search confidence now
+  uses known issue publication/store dates instead of comparing every issue to
+  the series start year; undated continuing issues use a medium-confidence,
+  bounded year window while issue, series, and type checks remain required.
+- Corrected Mylar `series.json` metadata wrappers and `cvinfo` volume URL
+  parsing in both Mylar and folder imports, without interpreting another
+  application's unqualified `series_id` as a ComicVine identity.
+- Isolated metadata-only and possible cover-only comic archives in import
+  review while preserving valid series identities. Single-page approval is
+  explicit and does not bypass archive safety limits.
+- Added an offline, dry-run-first `recheck-import` maintenance command for
+  affected saved reviews, preserving manual decisions and source files without
+  repeating the directory scan.
+- Raised the database-size health warning to above 1 GiB and the critical
+  threshold to above 2 GiB to accommodate large collections and retained logs.
+  Disk-space, integrity, latency, and database-bloat checks remain unchanged.
+- Preserved supported Unicode spaces, joiners, and direction marks in Mylar
+  source paths across preview, mapping, and import without renaming files or
+  relaxing root-containment protections. Invalid path text no longer reports
+  a misleading outside-root error.
+- Kept Mylar scan counters, progress bars, and saved checkpoints in sync during
+  file checks and source-page preparation instead of waiting for the full scan.
+- Reconciled unambiguous Mylar filename format, case, and spacing changes within
+  the same folder while retaining original-path evidence and leaving ambiguous
+  or unavailable files for review. Source files and the Mylar database stay untouched.
+- Made Mylar path preflight show searchable, exportable exceptions with exact
+  paths and repair guidance, distinguishing missing folders from bad mappings.
+  Added explicit, revalidated continuation with available sources while retaining
+  unavailable records for review and keeping permission and safety failures blocked.
+- Included recent Mylar preflight evidence in diagnostic packages even when an
+  import cannot start.
 - Matched issue-only filenames using series-folder context and handled issue
   titles embedded in filenames without treating the title as a new series.
 - Preserved exact issue-number identity for large and special issue numbers
@@ -51,6 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- Streamed complete import-review safety summaries using one narrow-field query
+  instead of repeatedly scanning and sorting blocked files for every batch.
+  Category counts, examples, and bulk-approval eligibility remain unchanged.
+- Moved import archive safety checks off the application event loop and added
+  throttled progress and cancellation checkpoints between Mylar file checks.
+- Removed recursive comic-library sizing from diagnostic generation and moved
+  blocking filesystem, database snapshot, and ZIP work off the application event
+  loop. Mylar preflight filesystem analysis also runs on a worker thread.
 - Bounded Mylar staging, file matching, and conflict rebuilding so large jobs do
   not retain complete ORM result sets or unbounded task queues.
 - Moved filesystem inventory and source ordering to a private temporary SQLite

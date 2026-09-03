@@ -24,6 +24,42 @@ class ConfigUpdate(BaseModel):
     values: dict[str, str] = Field(..., min_length=1, description="Key-value pairs to update")
 
 
+class NamingSettingsState(BaseModel):
+    """Effective naming values for global defaults or one library."""
+
+    library_root_id: int | None
+    fingerprint: str
+    policy: FutureRootPolicyPayload
+    use_global: bool
+    revision: int = 0
+    source: str = "global_default"
+
+
+class NamingSettingsUpdate(BaseModel):
+    """Save one complete scope without changing other media settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    library_root_id: int | None = Field(None, gt=0)
+    expected_fingerprint: str = Field(..., min_length=64, max_length=64)
+    policy: FutureRootPolicyPayload
+    use_global: bool = False
+
+
+class NamingSettingsPreviewRequest(BaseModel):
+    """Preview the same complete policy that the scoped editor saves."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy: FutureRootPolicyPayload
+
+
+class NamingSettingsPreview(BaseModel):
+    """Rich examples grouped by naming field."""
+
+    examples: dict[str, list[dict[str, str]]]
+
+
 class LibraryRootCreate(BaseModel):
     """Create an explicit persistent container-visible library root."""
 

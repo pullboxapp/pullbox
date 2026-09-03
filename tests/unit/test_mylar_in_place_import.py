@@ -115,6 +115,7 @@ async def test_mylar_in_place_creation_accepts_database_outside_reference_root_w
 ) -> None:
     comics = tmp_path / "comics"
     comics.mkdir()
+    (comics / "Batman").mkdir()
     root = LibraryRoot(
         name="Existing library",
         path=str(comics),

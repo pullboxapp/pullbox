@@ -1,4 +1,4 @@
-"""Automatic AirDC++ evaluation stays opt-in, bounded, and mutation-free."""
+"""AirDC++ search stays opt-in and routes acquisition through its native adapter."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from unittest.mock import ANY, AsyncMock
 import pytest
 
 from pullbox.core.acquisition import AcquisitionProtocol
+from pullbox.core.exceptions import ProviderError
 from pullbox.models.issue import IssueType
 from pullbox.providers.base import ReleaseResult
 from pullbox.services.airdcpp_automatic_search import attach_automatic_airdcpp_search
@@ -108,7 +109,9 @@ async def test_automatic_search_is_noop_without_runtime_registry(
 
 
 @pytest.mark.asyncio
-async def test_automatic_dc_winner_is_evaluation_only_before_r6_queue_gate() -> None:
+async def test_unavailable_automatic_dc_client_falls_back_to_indexer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     release = ReleaseResult(
         title="Example Comic 001 (2026).cbz",
         indexer_name="Dedicated Air",
@@ -144,9 +147,22 @@ async def test_automatic_dc_winner_is_evaluation_only_before_r6_queue_gate() -> 
         ),
         metrics=DcMetrics(2, 1, 2, 1_000_000),
     )
+    fallback_release = replace(
+        release,
+        protocol=AcquisitionProtocol.USENET,
+        download_url="https://indexer.test/test.nzb",
+        indexer_name="Test NZB",
+    )
+    fallback_validation = replace(validation, release=fallback_release)
     outcome = replace(
         _outcome(),
+        raw_results=[fallback_release],
+        matched=[fallback_validation],
         dc_outcome=DcSearchOutcome((candidate,), (), (), 1, 1, 0, 1, False),
+    )
+    monkeypatch.setattr(
+        "pullbox.services.airdcpp_search_acquisition.ready_dc_client",
+        AsyncMock(side_effect=ProviderError("airdcpp", "Not ready")),
     )
     download = AsyncMock()
     intervention = AsyncMock()
@@ -163,8 +179,10 @@ async def test_automatic_dc_winner_is_evaluation_only_before_r6_queue_gate() -> 
         source_priority=["dc", "usenet", "torrent", "direct"],
     )
 
-    assert routed.source_kind == "dc"
-    assert routed.action_status == "dc_evaluation_only"
-    assert routed.grabbed == routed.queued == 0
-    download.send_to_client.assert_not_awaited()
+    assert routed.source_kind == "indexer"
+    assert routed.action_status == "downloading"
+    assert routed.grabbed == 1
+    assert routed.queued == 0
+    assert routed.notices
+    download.send_to_client.assert_awaited_once()
     intervention.create_pending_match.assert_not_awaited()

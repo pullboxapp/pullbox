@@ -165,6 +165,20 @@ def test_dangerous_findings_never_become_overrideable_from_untrusted_hint() -> N
     assert result.overrideable is False
 
 
+@pytest.mark.parametrize(
+    "code,overrideable", [("archive_no_pages", False), ("single_page_comic", True)]
+)
+def test_content_review_is_distinct_and_cannot_grant_resource_exceptions(code, overrideable):
+    from pullbox.core.file_safety import is_resource_safety_exception_allowed
+
+    block = build_import_safety_diagnostics(code, code=code, kind=code, source="import_content")
+    assert block["code"] == code
+    assert block["overrideable"] is overrideable
+    assert not is_resource_safety_exception_allowed(
+        {"safety_exception": {"allowed_once": True, "previous_block": block}}
+    )
+
+
 def test_build_import_safety_diagnostics_drops_raw_paths_and_preserves_review_contract() -> None:
     diagnostics = build_import_safety_diagnostics(
         "Archive could not be inspected: /mnt/user/private/secret.cbz",

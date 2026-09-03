@@ -28,6 +28,12 @@ from pullbox.services.reading_query_service import (
     load_story_arc_reading_aggregates,
     load_visible_issue_states,
 )
+from pullbox.services.story_arc_editing_policy import can_manually_edit_arc
+from pullbox.services.story_arc_membership_policy import (
+    order_review_filter,
+    provider_issue_identity,
+    requires_order_review,
+)
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicy,
     StoryArcPlacementPolicyInput,
@@ -122,10 +128,12 @@ class StoryArcMembershipView:
     issue_status: str | None
     reading: IssueReadingView | None
     can_resolve: bool
+    order_review_required: bool
     local_search_query: str
     metadata_add_url: str
     is_first: bool
     is_last: bool
+    can_rematch: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +186,9 @@ class StoryArcDetailView:
     cover_src: str | None = None
     catalog_removed_count: int = 0
     catalog_added_review_count: int = 0
+    catalog_refresh_error: str | None = None
     initial_placements: StoryArcInitialPlacementView | None = None
+    manual_editable: bool = True
 
     @property
     def active(self) -> bool:
@@ -339,7 +349,14 @@ def _membership_counts_subquery() -> Subquery:
             ).label("owned_count"),
             func.sum(
                 case(
-                    (IssueStoryArc.resolution_state == StoryArcResolutionState.PENDING, 1),
+                    (
+                        (IssueStoryArc.resolution_state == StoryArcResolutionState.PENDING)
+                        | (
+                            (IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED)
+                            & order_review_filter()
+                        ),
+                        1,
+                    ),
                     else_=0,
                 )
             ).label("pending_count"),
@@ -733,6 +750,10 @@ def _present_membership(
         reading=reading,
         can_resolve=(
             membership.issue_id is None
+            or (
+                membership.resolution_state is StoryArcResolutionState.RESOLVED
+                and requires_order_review(membership)
+            )
             or membership.resolution_state
             in {
                 StoryArcResolutionState.PENDING,
@@ -741,12 +762,14 @@ def _present_membership(
                 StoryArcResolutionState.CONFLICT,
             }
         ),
+        order_review_required=requires_order_review(membership),
         local_search_query=source_series_query or exact_issue_number,
         metadata_add_url=(
             f"/series/add?{urlencode({'q': metadata_query})}" if metadata_query else "/series/add"
         ),
         is_first=position == 1,
         is_last=position == membership_total,
+        can_rematch=membership.issue_id is None or provider_issue_identity(membership) is None,
     )
 
 
@@ -814,7 +837,14 @@ async def load_story_arc_detail(
                     func.sum(
                         case(
                             (
-                                IssueStoryArc.resolution_state == StoryArcResolutionState.PENDING,
+                                (IssueStoryArc.resolution_state == StoryArcResolutionState.PENDING)
+                                | (
+                                    (
+                                        IssueStoryArc.resolution_state
+                                        == StoryArcResolutionState.RESOLVED
+                                    )
+                                    & order_review_filter()
+                                ),
                                 1,
                             ),
                             else_=0,
@@ -1016,8 +1046,25 @@ async def load_story_arc_detail(
         publisher_name=publisher_name,
         cover_src=cover_src,
         catalog_removed_count=_catalog_diagnostic_count(arc, "removed_issue_provider_ids"),
-        catalog_added_review_count=_catalog_diagnostic_count(arc, "pending_membership_ids"),
+        catalog_added_review_count=pending_count if arc.comicvine_id else 0,
+        catalog_refresh_error=_catalog_refresh_error(arc),
         initial_placements=_initial_placement_view(arc),
+        manual_editable=can_manually_edit_arc(arc),
+    )
+
+
+def _catalog_refresh_error(arc: StoryArc) -> str | None:
+    error = (arc.diagnostics or {}).get("provider_refresh_error")
+    if not isinstance(error, dict):
+        return None
+    if error.get("code") in {"canonical_root_required", "canonical_root_unavailable"}:
+        return (
+            "New member discovery needs an available managed library root. "
+            "Check for updates to choose a root, or restore the saved root in Settings."
+        )
+    return (
+        "Comic Vine member refresh didn't finish. Existing members are unchanged; "
+        "check for updates to retry."
     )
 
 

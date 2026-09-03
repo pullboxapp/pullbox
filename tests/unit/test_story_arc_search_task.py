@@ -17,7 +17,7 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot
 from pullbox.models.pending_match import PendingMatch
 from pullbox.models.search_log import SearchLog
-from pullbox.models.series import Series
+from pullbox.models.series import Series, SeriesStatus, SeriesStatusOverride
 from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcResolutionState
 
 if TYPE_CHECKING:
@@ -114,7 +114,8 @@ async def test_arc_targets_keep_manual_scope_without_mutating_monitoring(
     rest = await load_story_arc_missing_search_targets(
         db_session, arc.id, after_issue_id=first[0].issue_id, limit=1
     )
-    assert rest[0].issue_id == issues[6].id
+    # Legacy flags cannot bypass the release-date policy used by scheduled search.
+    assert rest[0].issue_id == issues[7].id
     scoped = await load_story_arc_missing_search_targets(
         db_session, arc.id, issue_ids=[issues[7].id, issues[9].id], series_id=issues[7].series_id
     )
@@ -142,6 +143,68 @@ async def test_arc_batch_search_reuses_series_runner_with_exact_members(
     ]
     assert sorted(searched) == [issues[0].id, issues[7].id]
     assert all(call.kwargs["story_arc_id"] == arc.id for call in runner.await_args_list)
+
+
+async def test_scheduled_arc_search_protects_the_same_files_skips_and_downloads_as_manual(
+    db_session,
+):
+    from pullbox.services.search_targets import load_wanted_issue_search_targets
+    from pullbox.services.story_arc_search_targets import load_story_arc_missing_search_targets
+
+    arc, _ = await _seed(db_session)
+    arc.monitored = True
+    await db_session.flush()
+    manual = await load_story_arc_missing_search_targets(db_session, arc.id)
+    automatic = await load_wanted_issue_search_targets(db_session, limit=100)
+    assert {target.issue_id for target in automatic} == {target.issue_id for target in manual}
+
+
+@pytest.mark.parametrize(
+    ("status", "override", "continuing"),
+    [
+        (SeriesStatus.CONTINUING, None, True),
+        (SeriesStatus.ENDED, None, False),
+        (SeriesStatus.UNKNOWN, None, False),
+        (SeriesStatus.ENDED, SeriesStatusOverride.CONTINUING, True),
+        (SeriesStatus.CONTINUING, SeriesStatusOverride.ENDED, False),
+    ],
+)
+async def test_arc_search_preserves_lifecycle_year_evidence(
+    db_session: AsyncSession,
+    status: SeriesStatus,
+    override: SeriesStatusOverride | None,
+    continuing: bool,
+) -> None:
+    from pullbox.core.release_year_matching import match_release_year
+    from pullbox.services.search_targets import load_wanted_issue_search_targets
+    from pullbox.services.story_arc_search_targets import load_story_arc_missing_search_targets
+
+    arc, issues = await _seed(db_session)
+    arc.monitored = True
+    series = await db_session.get(Series, issues[0].series_id)
+    assert series is not None
+    series.year_start = 1977
+    series.status = status
+    series.status_override = override
+    await db_session.flush()
+
+    manual = await load_story_arc_missing_search_targets(
+        db_session, arc.id, issue_ids=[issues[0].id]
+    )
+    automatic = {
+        target.issue_id: target
+        for target in await load_wanted_issue_search_targets(db_session, limit=100)
+    }
+    assert len(manual) == 1
+    target = manual[0]
+    assert target.series_continuing is continuing
+    assert target.year_context == automatic[target.issue_id].year_context
+    evidence = match_release_year(
+        datetime.now(UTC).year, wanted_year=1977, context=target.year_context
+    )
+    assert evidence.matches is continuing
+    assert evidence.weak is continuing
+    assert evidence.basis == ("series_window" if continuing else "target_year")
 
 
 async def test_issues_released_today_are_missing_not_upcoming(db_session: AsyncSession) -> None:

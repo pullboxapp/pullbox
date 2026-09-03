@@ -686,6 +686,45 @@ class TestImportLayoutPreview:
 class TestMylarPathPreview:
     """Test POST /api/v1/import/mylar-path-preview."""
 
+    async def test_exception_report_is_paged_searchable_and_downloadable(
+        self,
+        client: AsyncClient,
+        unauth_client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "comics"
+        (root / "Existing").mkdir(parents=True)
+        database = tmp_path / "mylar.db"
+        self._write_mylar_database(
+            database, [str(root / "Existing")] + [str(root / f"Missing {i:02}") for i in range(31)]
+        )
+        async with _db_factory() as session:
+            session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
+            await session.commit()
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview", json={"source_path": str(database)}
+        )
+        assert response.status_code == 200
+        preview = response.json()
+        assert preview.get("report_id")
+        assert preview["exception_count"] == 31
+        assert len(preview["exceptions"]) == 25
+        url = f"/api/v1/import/mylar-path-reports/{preview['report_id']}"
+        second = await client.get(url, params={"page": 2})
+        assert second.status_code == 200
+        assert len(second.json()["items"]) == 6
+        found = await client.get(url, params={"search": "Missing 30"})
+        assert found.json()["total"] == 1
+        exported = await client.get(url + "/export")
+        assert exported.status_code == 200
+        assert "attachment" in exported.headers["content-disposition"]
+        assert len(exported.json()["exceptions"]) == 31
+        assert (await unauth_client.get(url)).status_code == 401
+        assert (
+            await client.get("/api/v1/import/mylar-path-reports/not-a-report")
+        ).status_code == 404
+
     @staticmethod
     def _write_mylar_database(path: Path, locations: list[str]) -> None:
         connection = sqlite3.connect(path)
@@ -755,6 +794,7 @@ class TestMylarPathPreview:
             "identity_resolved": 1,
             "mapped_existing": 2,
             "mapped_missing": 0,
+            "missing": 0,
             "unmapped": 0,
             "outside_root": 0,
             "unreadable": 0,

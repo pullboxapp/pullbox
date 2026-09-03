@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime  # noqa: TC003 - durable route validation needs this at runtime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from pullbox.core.acquisition import AcquisitionProtocol
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from pullbox.providers.base import ReleaseResult
     from pullbox.services.release_validator import ValidationResult
 

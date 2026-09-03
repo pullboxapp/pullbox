@@ -2,7 +2,7 @@
 
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import structlog
@@ -12,7 +12,10 @@ from sqlalchemy import inspect, select
 from sqlalchemy.orm import joinedload, selectinload
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
-from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry
+from pullbox.composition.airdcpp import (
+    get_airdcpp_supervisor_registry,
+    load_airdcpp_search_clients,
+)
 from pullbox.config import get_settings
 from pullbox.core.exceptions import ConfigurationError, NotFoundError, ValidationError
 from pullbox.core.file_ops import register_library_file
@@ -47,6 +50,7 @@ from pullbox.schemas.search import (
     SearchResultItem,
 )
 from pullbox.services.airdcpp_acquisition import AirDcppQueueAcquisitionService
+from pullbox.services.airdcpp_automatic_search import attach_automatic_airdcpp_search
 from pullbox.services.airdcpp_route_tokens import get_airdcpp_route_token_store
 from pullbox.services.direct_acquisition_planner_service import (
     DirectAcquisitionPlanningError,
@@ -420,10 +424,17 @@ async def _run_issue_search(
         raise NotFoundError("Issue", issue_id)
 
     issue_ctx = _build_issue_context(target)
+    has_automatic_dc = False
+    dc_registry = get_airdcpp_supervisor_registry() if include_download_clients else None
+    if dc_registry is not None:
+        has_automatic_dc = bool(
+            await load_airdcpp_search_clients(session, dc_registry, automatic=True)
+        )
     runtime = await build_search_runtime(
         session,
         include_download_clients=include_download_clients,
         include_direct_providers=True,
+        allow_empty_registry=has_automatic_dc,
     )
     # Release the read transaction before slow indexer/network work. Search log
     # persistence happens later in a short write transaction owned by the caller.
@@ -555,7 +566,9 @@ def _build_issue_search_log(
         direct_outcome = outcome.direct_outcome
         direct_matched = len(direct_outcome.matched) if direct_outcome else 0
         direct_rejected = len(direct_outcome.rejected) if direct_outcome else 0
-        details["validated_count"] = len(bundle.matched_items) + direct_matched
+        dc_outcome = outcome.dc_outcome
+        dc_matched = len(dc_outcome.matched) if dc_outcome else 0
+        details["validated_count"] = len(outcome.matched) + direct_matched + dc_matched
         details["direct_results_count"] = direct_matched + direct_rejected
         details["direct_providers_searched"] = (
             direct_outcome.providers_searched if direct_outcome else 0
@@ -569,7 +582,7 @@ def _build_issue_search_log(
                 }
                 for failure in direct_outcome.failures
             ]
-        results_found = len(outcome.raw_results) + direct_matched + direct_rejected
+        results_found = outcome.results_found_count
         best_confidence = (
             outcome.best_validation.confidence.value
             if outcome.best_validation is not None
@@ -585,12 +598,7 @@ def _build_issue_search_log(
     if action_status:
         details["action_status"] = action_status
     if results_rejected is None:
-        direct_rejected = (
-            len(bundle.outcome.direct_outcome.rejected)
-            if bundle.outcome and bundle.outcome.direct_outcome
-            else 0
-        )
-        results_rejected = len(bundle.rejected_items) + direct_rejected
+        results_rejected = outcome.results_rejected_count if outcome else 0
 
     return SearchLog(
         issue_id=bundle.target.issue_id,
@@ -994,6 +1002,16 @@ async def download_issue(
         issue_id,
         include_download_clients=True,
     )
+    if bundle.runtime is not None and bundle.outcome is not None:
+        started_at = time.monotonic()
+        outcome = await attach_automatic_airdcpp_search(
+            session, bundle.outcome, validator_kwargs=bundle.runtime.validator_kwargs
+        )
+        bundle = replace(
+            bundle,
+            outcome=outcome,
+            search_time_ms=bundle.search_time_ms + int((time.monotonic() - started_at) * 1000),
+        )
     # Searching a skipped issue implicitly marks it as wanted. Do this after
     # the search setup transaction has been released so slow indexer calls do
     # not hold a write transaction open.
@@ -1059,13 +1077,10 @@ async def download_issue(
         source_priority=bundle.runtime.source_priority,
     )
 
-    direct_outcome = bundle.outcome.direct_outcome
-    total_results = len(bundle.outcome.raw_results) + (
-        len(direct_outcome.matched) + len(direct_outcome.rejected) if direct_outcome else 0
-    )
     search_log.results_grabbed = routed.grabbed
     search_log.results_queued = routed.queued
-    search_log.results_rejected = max(0, total_results - routed.grabbed - routed.queued)
+    search_log.results_rejected = bundle.outcome.results_rejected_count
+    search_log.best_confidence = routed.best_confidence
     details = dict(search_log.details or {})
     details["action_status"] = routed.action_status
     if routed.notices:
@@ -1076,7 +1091,7 @@ async def download_issue(
     if routed.grabbed:
         payload: dict[str, object] = {
             "issue_id": issue_id,
-            "status": "downloading",
+            "status": "retry_pending" if routed.action_status == "retry_pending" else "downloading",
             "release_title": routed.release_title or selection.release.title,
             "source_kind": routed.source_kind,
         }
@@ -1084,6 +1099,10 @@ async def download_issue(
             payload["download_id"] = routed.download_id
         if routed.acquisition_id is not None:
             payload["acquisition_id"] = routed.acquisition_id
+        if routed.action_status == "retry_pending":
+            payload["message"] = (
+                "AirDC++ queue confirmation is pending; Pullbox will reconcile it automatically."
+            )
         return payload
 
     if routed.queued or routed.action_status == "pending_exists":
@@ -1100,7 +1119,19 @@ async def download_issue(
             ),
         }
 
-    return {"issue_id": issue_id, "status": "no_results"}
+    messages = {
+        "source_unavailable": "Matches found, but downloads could not be queued.",
+        "already_downloading": "This issue already has an active download.",
+        "already_owned": (
+            "This issue already has a library file; use Find Alternative to replace it."
+        ),
+    }
+    return {
+        "issue_id": issue_id,
+        "status": routed.action_status,
+        "message": messages.get(routed.action_status, "No eligible match was queued."),
+        "notices": list(routed.notices),
+    }
 
 
 @router.post(

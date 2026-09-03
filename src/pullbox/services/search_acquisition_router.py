@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
     from pullbox.providers.artifact_hosts.contract import HostResolutionRequest
     from pullbox.providers.base import ReleaseResult
+    from pullbox.services.airdcpp_search_types import DcValidatedCandidate
     from pullbox.services.direct_search_coordinator import (
         DirectSearchDiscovery,
         DirectValidatedCandidate,
@@ -79,6 +80,14 @@ class InterventionServiceLike(Protocol):
         issue_id: int,
         attempt_id: int,
         result: DirectValidatedCandidate,
+    ) -> object: ...
+
+    async def create_dc_pending_match(
+        self,
+        session: AsyncSession,
+        issue_id: int,
+        result: DcValidatedCandidate,
+        search_log_id: int,
     ) -> object: ...
 
 
@@ -211,15 +220,65 @@ async def route_search_acquisition(
         if selected.source_kind == "dc":
             if selected.dc_result is None:
                 raise RuntimeError("Selected DC result is unavailable.")
-            # R5 evaluates automatic DC participation and records the winner,
-            # while R6 owns durable provenance and queue mutation.
+            from pullbox.services.airdcpp_search_acquisition import (
+                DcIssueAlreadyOwnedError,
+                acquire_dc_candidate,
+                ready_dc_client,
+            )
+
+            try:
+                await ready_dc_client(session, selected.dc_result, automatic=True)
+                if not auto_grab:
+                    pending = None
+                    if not await intervention_service.has_pending_for_issue(
+                        session, target.issue_id
+                    ):
+                        pending = await intervention_service.create_dc_pending_match(
+                            session,
+                            target.issue_id,
+                            selected.dc_result,
+                            search_log_id,
+                        )
+                    return SearchAcquisitionRoutingResult(
+                        0,
+                        int(pending is not None),
+                        "queued" if pending is not None else "pending_exists",
+                        confidence,
+                        "dc",
+                        tuple(notices),
+                        release_title=selected.release.title,
+                    )
+                route = selected.dc_result.route
+                download, created = await acquire_dc_candidate(
+                    session,
+                    candidate=selected.dc_result,
+                    issue_id=target.issue_id,
+                    search_log_id=search_log_id,
+                    request_key=f"dc-auto:{search_log_id}:{target.issue_id}:{route.client_config_id}:{route.tth}",
+                    automatic=True,
+                )
+            except DcIssueAlreadyOwnedError:
+                return SearchAcquisitionRoutingResult(0, 0, "already_owned", confidence, "dc")
+            except ProviderError:
+                await session.commit()
+                notices.append(_indexer_failure_notice(selected.release.indexer_name))
+                continue
+            # An ambiguous mutation is already owned by reconciliation: do not
+            # fall through and start a duplicate on another source.
             return SearchAcquisitionRoutingResult(
+                int(created),
                 0,
-                0,
-                "dc_evaluation_only",
+                (
+                    "already_downloading"
+                    if not created
+                    else "retry_pending"
+                    if download.state == DownloadState.RETRY_PENDING
+                    else "downloading"
+                ),
                 confidence,
                 "dc",
                 tuple(notices),
+                download_id=download.id,
                 release_title=selected.release.title,
             )
 
