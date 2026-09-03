@@ -1036,6 +1036,8 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
         async def scan(self, _root):
             if self._progress_callback is not None:
                 await self._progress_callback(26, 1)
+            # Synthetic folder identity, not a credential.
+            cohort_key = "Publisher/Synthetic Crossover"  # gitleaks:allow
             for ordinal in range(1, 27):
                 if self._file_progress_callback is not None:
                     await self._file_progress_callback(1)
@@ -1073,7 +1075,7 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
                                     },
                                 }
                             },
-                            source_folder_cohort_key="Publisher/Synthetic Crossover",
+                            source_folder_cohort_key=cohort_key,
                             source_ordinal=ordinal,
                         )
                     ],
