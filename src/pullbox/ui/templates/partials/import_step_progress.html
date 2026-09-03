@@ -321,13 +321,13 @@
                 <div class="app-progress-track">
                   <div
                     class="app-progress-fill app-progress-fill--interactive"
-                    :class="currentItemProgressBarTransitionClass()"
-                    :style="'width: ' + currentItemProgress() + '%'"
+                    :class="currentItemIsIndeterminate() ? 'is-indeterminate' : currentItemProgressBarTransitionClass()"
+                    :style="'width: ' + (currentItemIsIndeterminate() ? 45 : currentItemProgress()) + '%'"
                   ></div>
                 </div>
                 <span
                   class="app-progress-value app-progress-value--interactive"
-                  x-text="currentItemProgress() + '%'"
+                  x-text="currentItemIsIndeterminate() ? 'Discovering...' : currentItemProgress() + '%'"
                 ></span>
               </div>
             </div>

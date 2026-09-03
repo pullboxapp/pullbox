@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from sqlalchemy import insert
+
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -97,6 +99,7 @@ async def materialize_discovered_scan_results(
     await session.flush()
 
     total_files = 0
+    file_rows: list[dict[str, object]] = []
     for discovered, series_item in series_pairs:
         series_file_count = 0
         for df in discovered.files:
@@ -127,7 +130,7 @@ async def materialize_discovered_scan_results(
                     }
                 )
             error_message = safety_block.get("reason") if isinstance(safety_block, dict) else None
-            file_item = ImportedFile(
+            file_item = dict(
                 import_job_id=job.id,
                 import_series_id=series_item.id,
                 file_path=df.file_path,
@@ -148,10 +151,15 @@ async def materialize_discovered_scan_results(
                 error_message=error_message,
                 diagnostics=diagnostics,
             )
-            session.add(file_item)
+            file_rows.append(file_item)
+            if len(file_rows) >= 500:
+                await session.execute(insert(ImportedFile), file_rows)
+                file_rows.clear()
             series_file_count += 1
         series_item.files_total = series_file_count
         total_files += series_file_count
+    if file_rows:
+        await session.execute(insert(ImportedFile), file_rows)
     if total_files:
         await session.flush()
 

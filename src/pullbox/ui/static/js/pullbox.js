@@ -4991,6 +4991,11 @@ function importProgressData(jobId, nextStep, sourceType) {
       return "";
     },
 
+    currentItemIsIndeterminate: function () {
+      return this.currentItemKind === "scan" &&
+        this.currentItemStage === "inventory" && this.currentItemProgressValue == null;
+    },
+
     currentItemProgress: function () {
       if (this.currentFileName) {
         return this.currentFileProgress;
@@ -5419,8 +5424,8 @@ function importProgressData(jobId, nextStep, sourceType) {
         return;
       }
 
-      var computed = this._computeEtaSeconds(this.startedAt, this.progress);
-      this.etaSeconds = computed;
+      // Weighted workflow milestones are not a measure of remaining runtime.
+      this.etaSeconds = null;
       this.etaCapturedAt = Date.now();
     },
 
@@ -5479,7 +5484,7 @@ function importProgressData(jobId, nextStep, sourceType) {
               this.etaSeconds -
                 Math.max(0, Math.floor((this.nowMs - this.etaCapturedAt) / 1000)),
             )
-          : this._computeEtaSeconds(this.startedAt, this.progress);
+          : null;
 
       if (etaSeconds == null) {
         return "Estimating...";

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import platform
 import tempfile
 import time
 import zipfile
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullbox.core import file_safety
 from pullbox.core.archive import ArchiveReader
+from pullbox.core.import_resources import detect_import_resources
 from pullbox.models import import_job as _import_job_models  # noqa: F401
 from pullbox.models import issue as _issue_models  # noqa: F401
 from pullbox.models import library as _library_models  # noqa: F401
@@ -120,6 +122,7 @@ def _build_tree(
     series_count: int,
     files_per_series: int,
     trusted_comicinfo: bool,
+    archive_pages: int = 2,
 ) -> None:
     for series_idx in range(series_count):
         title = f"Series {series_idx:04d}"
@@ -130,11 +133,8 @@ def _build_tree(
         for file_idx in range(1, files_per_series + 1):
             archive_path = folder / f"{title} #{file_idx:03d}.cbz"
             with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.writestr(
-                    f"{title} #{file_idx:03d}.jpg",
-                    b"benchmark-page",
-                )
-                archive.writestr(f"{title} #{file_idx:03d} p002.jpg", b"benchmark-page")
+                for page in range(1, archive_pages + 1):
+                    archive.writestr(f"{title} #{file_idx:03d} p{page:04d}.jpg", b"benchmark-page")
                 if trusted_comicinfo:
                     issue_provider_id = (series_provider_id * 1000) + file_idx
                     archive.writestr(
@@ -159,6 +159,9 @@ async def main() -> None:
     parser.add_argument("--series-count", type=int, default=200)
     parser.add_argument("--files-per-series", type=int, default=12)
     parser.add_argument("--trusted-comicinfo", action="store_true")
+    parser.add_argument("--archive-pages", type=int, default=32)
+    parser.add_argument("--inspection-workers", type=int, default=0, choices=range(17))
+    parser.add_argument("--inspection-delay-ms", type=float, default=0)
     args = parser.parse_args()
 
     provider = FakeMetadataProvider()
@@ -169,6 +172,9 @@ async def main() -> None:
         event_bus=cast("Any", SimpleNamespace()),
     )
     benchmark_service = cast("Any", service)
+    benchmark_service._settings = service._settings.model_copy(
+        update={"import_scan_worker_count": args.inspection_workers}
+    )
     benchmark_service._build_scan_metadata_provider = lambda _session: CachedImportMetadataProvider(
         provider
     )
@@ -203,6 +209,8 @@ async def main() -> None:
 
     def counting_inspect_zip_archive_safety(*call_args: Any, **call_kwargs: Any) -> Any:
         nonlocal archive_metadata_evidence_count, archive_safety_inspection_count
+        if args.inspection_delay_ms > 0:
+            time.sleep(args.inspection_delay_ms / 1000)
         archive_safety_inspection_count += 1
         report = original_inspect_zip_archive_safety(*call_args, **call_kwargs)
         if report is not None and report.comicinfo is not None:
@@ -238,6 +246,7 @@ async def main() -> None:
                 series_count=args.series_count,
                 files_per_series=args.files_per_series,
                 trusted_comicinfo=args.trusted_comicinfo,
+                archive_pages=args.archive_pages,
             )
 
             db_path = Path(tmp) / "benchmark.db"
@@ -273,6 +282,14 @@ async def main() -> None:
                     "series_count": args.series_count,
                     "files_per_series": args.files_per_series,
                     "trusted_comicinfo": args.trusted_comicinfo,
+                    "archive_pages": args.archive_pages,
+                    "inspection_workers_requested": args.inspection_workers,
+                    "simulated_inspection_delay_ms": args.inspection_delay_ms,
+                    "inspection_workers_effective": detect_import_resources().inspection_workers(
+                        requested=args.inspection_workers
+                    ),
+                    "platform": platform.platform(),
+                    "python": platform.python_version(),
                     "elapsed_ms": elapsed_ms,
                     "archive_read_count": archive_read_count,
                     "archive_member_payload_read_count": archive_member_payload_read_count,

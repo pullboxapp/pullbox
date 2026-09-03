@@ -6,6 +6,7 @@ import enum
 import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -204,6 +205,19 @@ def archive_entry_issue_hint_from_names(
     if len(image_entries) < _ARCHIVE_HINT_MIN_PARSEABLE_IMAGES:
         return None
 
+    @lru_cache(maxsize=256)
+    def parse_candidate(title: str) -> tuple[str, float, int | None] | None:
+        # Page suffixes often reduce hundreds of filenames to one release title.
+        parsed = parse_release_title(title)
+        if parsed is None or parsed.issue_number is None or not parsed.series_name:
+            return None
+        if expected_series_name and not _archive_entry_series_matches(
+            parsed.series_name,
+            expected_series_name,
+        ):
+            return None
+        return parsed.series_name, float(parsed.issue_number), parsed.year
+
     parsed_entries: list[tuple[str, float, int | None, str]] = []
     for entry in image_entries:
         file_name = entry.replace("\\", "/").rsplit("/", 1)[-1]
@@ -211,15 +225,9 @@ def archive_entry_issue_hint_from_names(
         candidate_title = _ARCHIVE_PAGE_SUFFIX_RE.sub("", stem).strip()
         if not candidate_title or candidate_title == stem:
             continue
-        parsed = parse_release_title(candidate_title)
-        if parsed is None or parsed.issue_number is None or not parsed.series_name:
-            continue
-        if expected_series_name and not _archive_entry_series_matches(
-            parsed.series_name,
-            expected_series_name,
-        ):
-            continue
-        parsed_entries.append((parsed.series_name, float(parsed.issue_number), parsed.year, entry))
+        identity = parse_candidate(candidate_title)
+        if identity is not None:
+            parsed_entries.append((*identity, entry))
 
     total_image_entries = len(image_entries)
     parseable_image_entries = len(parsed_entries)

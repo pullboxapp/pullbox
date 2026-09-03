@@ -987,6 +987,15 @@ async def run_import_series_matching(
                 progress_callback,
             )
             await maybe_slow_item_delay()
+        elif progress_callback:
+            # Completing the displayed series must not wait for a DB batch.
+            await emit_matching_progress(
+                item,
+                idx,
+                message=f"Completed series review {idx + 1}/{total_items}.",
+                current_item_progress_pct=100,
+                live_only=True,
+            )
         processed_items = idx + 1
 
     if deferred_count:

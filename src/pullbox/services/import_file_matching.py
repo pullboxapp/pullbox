@@ -700,6 +700,8 @@ async def _finalize_import_series_file_groups(
         ):
             for cohort in cohorts:
                 await raise_if_cancelled(session, job.id)
+                if cohort.file_count < 2:
+                    continue
                 files = await _load_file_target_cohort(
                     session,
                     job_id=job.id,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from pullbox.core.collection_scanner import DiscoveredFile, DiscoveredSeries
 from pullbox.models.import_job import (
@@ -32,6 +32,40 @@ async def _create_job(session: AsyncSession) -> ImportJob:
     session.add(job)
     await session.flush()
     return job
+
+
+async def test_materialization_batches_file_inserts_without_losing_review_rows(db_session):
+    job = await _create_job(db_session)
+    files = [_discovered_file(name=f"Issue {number}.cbz") for number in range(120)]
+    discovered = DiscoveredSeries(
+        raw_series_name="Test",
+        raw_year=2024,
+        raw_publisher=None,
+        file_count=len(files),
+        sample_paths=[],
+        source_folder="/tmp/comics",
+        source_folder_relative=".",
+        files=files,
+    )
+    statements = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO import_files"):
+            statements.append(statement)
+
+    engine = db_session.bind.sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        await materialize_discovered_scan_results(db_session, job, [discovered])
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert 0 < len(statements) <= 2
+    rows = (await db_session.scalars(select(ImportedFile).order_by(ImportedFile.id))).all()
+    assert [row.file_name for row in rows] == [file.file_name for file in files]
+    assert all(row.status == ImportedFileStatus.PENDING for row in rows)
+    assert all(
+        row.diagnostics["source_metadata"] == {"title": "Absolute Wonder Woman"} for row in rows
+    )
 
 
 def _discovered_file(

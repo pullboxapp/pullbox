@@ -345,7 +345,10 @@ class ImportService(
     ) -> None:
         """Run safety checks on discovered source files before review/import."""
         await validate_import_discovered_files_safety(
-            session, discovered_list, progress_callback=progress_callback
+            session,
+            discovered_list,
+            progress_callback=progress_callback,
+            worker_count=self._settings.import_scan_worker_count,
         )
 
     def _build_scan_metadata_provider(self, session: AsyncSession) -> CachedImportMetadataProvider:

@@ -89,6 +89,16 @@ if TYPE_CHECKING:
     PhaseProgressFunc = Callable[[int, int, int, int], int]
 
 
+def _scan_item_percentage(phase: str, progress: int, current_series: str | None) -> int:
+    # Named discovery events describe a completed cohort, not overall work.
+    if current_series:
+        return 100
+    if phase == "scanning":
+        span = SCAN_PROGRESS_MATERIALIZE_END - SCAN_PROGRESS_MATERIALIZE_START
+        return max(0, min(100, round((progress - SCAN_PROGRESS_MATERIALIZE_START) * 100 / span)))
+    return 0
+
+
 def _scan_failure_message(exc: Exception) -> str:
     """Return a user-facing import scan failure message."""
     if is_sqlite_locked_error(exc):
@@ -250,19 +260,12 @@ async def run_import_scan_pipeline(
                     message=message,
                     current_series=current_series,
                     current_series_status=current_series_status,
-                    estimated_seconds_remaining=estimate_remaining_seconds(
-                        (
-                            job.import_started_at
-                            if status == ImportJobStatus.IMPORTING
-                            else job.scan_started_at
-                        ),
-                        progress,
-                    ),
+                    estimated_seconds_remaining=None,
                     **current_item_payload(
                         kind="series" if current_series else "scan",
                         stage=phase,
                         name=current_series,
-                        progress_pct=progress,
+                        progress_pct=_scan_item_percentage(phase, progress, current_series),
                     ),
                     **job_stats(job),
                 ),
@@ -294,19 +297,12 @@ async def run_import_scan_pipeline(
                     message=message,
                     current_series=current_series,
                     current_series_status=current_series_status,
-                    estimated_seconds_remaining=estimate_remaining_seconds(
-                        (
-                            job.import_started_at
-                            if status == ImportJobStatus.IMPORTING
-                            else job.scan_started_at
-                        ),
-                        progress,
-                    ),
+                    estimated_seconds_remaining=None,
                     **current_item_payload(
                         kind="series" if current_series else "scan",
                         stage=phase,
                         name=current_series,
-                        progress_pct=progress,
+                        progress_pct=_scan_item_percentage(phase, progress, current_series),
                     ),
                     **job_stats(job),
                 ),
@@ -782,6 +778,7 @@ async def _load_mylar3_discovered_series(
             else scan_progress.source_completed + len(page)
         )
         await scan_progress.report_safety(0, sum(len(item.files) for item in page), "")
+        inspection_started_at = time.monotonic()
         if in_place:
             await asyncio.to_thread(
                 validate_mylar_in_place_files,
@@ -793,7 +790,12 @@ async def _load_mylar3_discovered_series(
                 session, page, progress_callback=scan_progress.report_safety
             )
         if materialize_discovered_scan_results is not None:
+            persistence_started_at = time.monotonic()
             await materialize_discovered_scan_results(session, job, page)
+        else:
+            persistence_started_at = time.monotonic()
+        persistence_duration_ms = round((time.monotonic() - persistence_started_at) * 1000)
+        inspection_duration_ms = round((persistence_started_at - inspection_started_at) * 1000)
         job.scan_completed_at = None
 
         for series in page:
@@ -822,6 +824,8 @@ async def _load_mylar3_discovered_series(
             message=f"Prepared {series_count} series and {file_count} file records from Mylar.",
             series_found=series_count,
             files_found=file_count,
+            inspection_duration_ms=inspection_duration_ms,
+            persistence_duration_ms=persistence_duration_ms,
             duration_ms=round((time.monotonic() - page_started_at) * 1000),
         )
         await scan_progress.checkpoint_page()
@@ -982,6 +986,7 @@ async def _scan_collection_discovered_series(
         batch_to_flush = list(batch)
         batch.clear()
         last_batch_flush_at = now
+        inspection_started_at = time.monotonic()
 
         if validate_discovered_files_safety is not None:
             batch_for_validation: list[DiscoveredSeries] = []
@@ -1018,6 +1023,7 @@ async def _scan_collection_discovered_series(
             if batch_for_validation:
                 await validate_discovered_files_safety(session, batch_for_validation)
 
+        persistence_started_at = time.monotonic()
         if materialize_discovered_scan_results is not None:
             await materialize_discovered_scan_results(session, job, batch_to_flush)
             # The shared materializer also supports one-shot callers and sets
@@ -1035,6 +1041,10 @@ async def _scan_collection_discovered_series(
                 message=f"Discovered {len(batch_to_flush)} series ({series_found} total so far)",
                 series_found_in_batch=len(batch_to_flush),
                 total_series_found=series_found,
+                inspection_duration_ms=round(
+                    (persistence_started_at - inspection_started_at) * 1000
+                ),
+                persistence_duration_ms=round((time.monotonic() - persistence_started_at) * 1000),
                 sample_series=[item.raw_series_name for item in batch_to_flush[:5]],
             )
 
