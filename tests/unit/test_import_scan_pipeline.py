@@ -1116,6 +1116,14 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
     async def run_file_matching(*_args, **_kwargs) -> None:
         milestones.append("file_matching")
 
+    async def finish_series_matching(*_args, **_kwargs) -> None:
+        job.progress_snapshot = {"progress": 49, "phase": "matching"}
+
+    async def capture_persisted_progress(_session, _job, event, _callback):
+        if event.phase == "file_matching":
+            assert event.progress == 49
+            assert event.estimated_seconds_remaining is None
+
     await run_import_scan_pipeline(
         db_session,
         job.id,
@@ -1127,12 +1135,12 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
         validate_discovered_files_safety=no_op,
         materialize_discovered_scan_results=materialize_batch,
         deduplicate_series=no_op,
-        run_matching=no_op,
+        run_matching=finish_series_matching,
         consolidate_logical_series_groups=no_op,
         run_file_matching=run_file_matching,
         raise_if_cancelled=raise_if_cancelled,
         log_event=log_event,
-        emit_progress=no_op,
+        emit_progress=capture_persisted_progress,
         phase_progress=phase_progress,
         estimate_remaining_seconds=lambda _started_at, _progress: None,
         job_stats=lambda _job: {},

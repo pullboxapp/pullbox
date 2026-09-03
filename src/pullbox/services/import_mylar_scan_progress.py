@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pullbox.models.import_job import ImportJobStatus
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services import import_progress_runtime
 from pullbox.services.import_counters import job_stats
 from pullbox.services.import_workflow_state import (
     SCAN_PROGRESS_MATERIALIZE_END,
@@ -36,6 +38,8 @@ class MylarScanProgress:
     last_report_at: float = 0.0
     checked_files: int = 0
     batch_files: int = 0
+    work_started_at: datetime = field(default_factory=lambda: datetime.now(UTC), repr=False)
+    estimated_seconds_remaining: int | None = field(default=None, init=False)
 
     async def report_safety(self, completed: int, total: int, file_path: str) -> None:
         self.checked_files = completed
@@ -70,6 +74,7 @@ class MylarScanProgress:
                 phase="scanning",
                 progress=progress,
                 message=message,
+                estimated_seconds_remaining=self.estimated_seconds_remaining,
                 current_item_kind="scan",
                 current_item_stage="scanning",
                 current_item_stage_label="Checking Mylar file batch",
@@ -82,6 +87,16 @@ class MylarScanProgress:
 
     async def checkpoint_page(self) -> None:
         self.source_completed = self.source_page_end
+        if self.source_total > 0 and self.source_completed >= self.source_total:
+            self.estimated_seconds_remaining = 0
+        else:
+            self.estimated_seconds_remaining = (
+                import_progress_runtime.estimate_remaining_work_seconds(
+                    self.work_started_at,
+                    completed_units=self.source_completed,
+                    total_units=self.source_total,
+                )
+            )
         # A single source page can emit extra Annual cohorts. Measure overall
         # progress using source rows, not the number of resulting review groups.
         await self._publish(

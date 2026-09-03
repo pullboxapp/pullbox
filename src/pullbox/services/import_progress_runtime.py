@@ -117,6 +117,8 @@ class ScanReviewProgressPlan:
     analysis_weights: tuple[float, ...]
     series_match_weights: tuple[float, ...]
     file_match_weights: tuple[float, ...]
+    progress_start: int = _SCAN_REVIEW_PROGRESS_START
+    progress_end: int = _SCAN_REVIEW_PROGRESS_END
 
     @property
     def analysis_weight(self) -> float:
@@ -336,10 +338,8 @@ def scan_review_completed_weight(
 def scan_review_progress_pct(plan: ScanReviewProgressPlan, *, completed_weight: float) -> int:
     """Scale weighted Step 2 review-prep work into the canonical 35-99 range."""
     fraction = min(max(completed_weight / plan.total_weight, 0.0), 1.0)
-    progress = _SCAN_REVIEW_PROGRESS_START + (
-        (_SCAN_REVIEW_PROGRESS_END - _SCAN_REVIEW_PROGRESS_START) * fraction
-    )
-    return max(_SCAN_REVIEW_PROGRESS_START, min(round(progress), _SCAN_REVIEW_PROGRESS_END))
+    progress = plan.progress_start + ((plan.progress_end - plan.progress_start) * fraction)
+    return max(plan.progress_start, min(round(progress), plan.progress_end))
 
 
 def _weighted_completed(

@@ -485,16 +485,17 @@ async def run_import_scan_pipeline(
                     job_id=job_id,
                     status=ImportJobStatus.FILE_MATCHING,
                     phase="file_matching",
-                    progress=SCAN_PROGRESS_FILE_MATCH_START,
-                    message="Matching files to issues...",
-                    estimated_seconds_remaining=estimate_remaining_seconds(
-                        job.scan_started_at,
-                        SCAN_PROGRESS_FILE_MATCH_START,
+                    progress=int(
+                        (job.progress_snapshot or {}).get(
+                            "progress", SCAN_PROGRESS_FILE_MATCH_START
+                        )
                     ),
+                    message="Matching files to issues...",
+                    estimated_seconds_remaining=None,
                     **current_item_payload(
                         kind="scan",
                         stage="file_matching",
-                        progress_pct=SCAN_PROGRESS_FILE_MATCH_START,
+                        progress_pct=0,
                     ),
                     **job_stats(job),
                 ),

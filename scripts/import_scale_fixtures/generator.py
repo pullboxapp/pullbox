@@ -43,6 +43,8 @@ class FixtureRequest:
     profile: FixtureProfile = "balanced"
     max_issues_per_series: int = 250
     layout_profile: LayoutProfile = "series"
+    archive_pages: int = 32
+    single_page_every: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +90,8 @@ class _CatalogSeries:
 
 
 def _validate_request(request: FixtureRequest) -> None:
+    if not 2 <= request.archive_pages <= 1000 or request.single_page_every < 0:
+        raise ValueError("archive_pages must be 2-1000 and single_page_every nonnegative")
     if request.series_count < 1:
         raise ValueError("series_count must be positive")
     if request.file_count < request.series_count:
@@ -412,6 +416,7 @@ def generate_import_scale_fixture(request: FixtureRequest) -> dict[str, object]:
     issue_distribution: dict[str, int] = defaultdict(int)
     content_digest = hashlib.sha256()
     logical_bytes = 0
+    ordinal = 0
     try:
         with manifest_path.open("w", encoding="utf-8", newline="\n") as manifest:
             for series_index, series in enumerate(plan.series):
@@ -422,6 +427,12 @@ def generate_import_scale_fixture(request: FixtureRequest) -> dict[str, object]:
                 )
                 issue_distribution[str(len(series.issues))] += 1
                 for issue in series.issues:
+                    ordinal += 1
+                    pages = (
+                        1
+                        if request.single_page_every and ordinal % request.single_page_every == 0
+                        else request.archive_pages
+                    )
                     relative_path = directory / _issue_filename(issue)
                     relative_text = relative_path.as_posix()
                     archive_path = staging / "source" / relative_path
@@ -436,7 +447,7 @@ def generate_import_scale_fixture(request: FixtureRequest) -> dict[str, object]:
                         publisher=_xml_safe(series.publisher),
                         comicvine_series_id=series.volume_id,
                         comicvine_issue_id=issue.issue_id,
-                        page_count=1,
+                        page_count=pages,
                     )
                     archive_digest = sha256_file(archive_path)
                     archive_size = archive_path.stat().st_size
@@ -444,6 +455,8 @@ def generate_import_scale_fixture(request: FixtureRequest) -> dict[str, object]:
                     row = {
                         "archive_sha256": archive_digest,
                         "archive_size": archive_size,
+                        "page_count": pages,
+                        "expected_safety_review": pages == 1,
                         "issue_id": issue.issue_id,
                         "issue_number": _xml_safe(issue.issue_number),
                         "issue_title": _xml_safe(issue.name),
@@ -466,6 +479,11 @@ def generate_import_scale_fixture(request: FixtureRequest) -> dict[str, object]:
             "file_count": sum(len(series.issues) for series in plan.series),
             "max_issues_per_series": request.max_issues_per_series,
             "layout_profile": request.layout_profile,
+            "archive_pages": request.archive_pages,
+            "single_page_every": request.single_page_every,
+            "single_page_files": ordinal // request.single_page_every
+            if request.single_page_every
+            else 0,
             "issue_count_distribution": dict(
                 sorted(issue_distribution.items(), key=lambda row: int(row[0]))
             ),
