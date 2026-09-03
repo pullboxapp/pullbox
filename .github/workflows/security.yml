@@ -8,7 +8,7 @@
 # See: docs/development/INFRASTRUCTURE.md
 #
 # Tools:
-#   pip-audit → OSV database (Google-backed)
+#   pip-audit → PyPI advisory service (shared blocking exception policy)
 #   safety    → Safety DB (secondary, different vulnerability coverage)
 #   gitleaks  → blocking secret scan
 #   bandit    → advisory static analysis during initial rollout
@@ -178,7 +178,7 @@ jobs:
           retention-days: 14
 
   # ──────────────────────────────────────────────
-  # Job 2: pip-audit (OSV database)
+  # Job 2: pip-audit (PyPI advisory service)
   # ──────────────────────────────────────────────
   dependency-audit:
     name: pip-audit
@@ -204,11 +204,18 @@ jobs:
       - name: Run pip-audit
         run: |
           # Generate requirements from installed packages, excluding editable pullbox
-          pip freeze --exclude-editable | grep -v "^pullbox==" > /tmp/requirements-audit.txt
-          # Transitive dep CVE suppressions (not used by pullbox directly):
-          # - CVE-2026-4539: pygments regex DoS (from bandit/rich, no fix available yet)
-          pip-audit --strict --desc on -r /tmp/requirements-audit.txt \
-            --ignore-vuln CVE-2026-4539
+          requirements_file="$(mktemp /tmp/pullbox-requirements-audit.XXXXXX.txt)"
+          trap 'rm -f "$requirements_file"' EXIT
+          python -m pip freeze --exclude-editable | grep -v "^pullbox==" > "$requirements_file"
+          python scripts/run_dependency_audit.py -r "$requirements_file"
+
+      - name: Upload dependency audit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-audit-report
+          path: dependency-audit-report.json
+          retention-days: 14
 
   # ──────────────────────────────────────────────
   # Job 3: safety (Safety DB — secondary scanner)

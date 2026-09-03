@@ -117,3 +117,4 @@ test-results/
 # Local security artifacts
 bandit-report.json
 safety-report.json
+dependency-audit-report.json

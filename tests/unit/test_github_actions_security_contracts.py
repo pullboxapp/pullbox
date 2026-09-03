@@ -180,7 +180,7 @@ def test_security_workflow_runs_required_scanners_on_pr_full_gate() -> None:
         "GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks@sha256:",
         "docker run --rm",
         '"$GITLEAKS_IMAGE"',
-        "pip-audit --strict",
+        "python scripts/run_dependency_audit.py",
         "safety check",
         "--save-json safety-report.json",
         "bandit -r src/pullbox/",
@@ -624,6 +624,23 @@ def test_local_security_script_writes_valid_safety_json_artifact() -> None:
     assert '"${safety_bin}" check' in script
     assert "--save-json safety-report.json" in script
     assert "--output json > safety-report.json" not in script
+
+
+def test_dependency_audit_policy_is_shared_and_retains_raw_ci_evidence() -> None:
+    script = (REPO_ROOT / "scripts" / "security_check.sh").read_text(encoding="utf-8")
+    workflow = _load_yaml(WORKFLOW_DIR / "security.yml")
+    job = workflow["jobs"]["dependency-audit"]
+    scan = next(step for step in job["steps"] if step.get("name") == "Run pip-audit")
+    assert '"${venv_bin}/python" scripts/run_dependency_audit.py' in script
+    assert "python scripts/run_dependency_audit.py" in scan["run"]
+    assert "mktemp" in scan["run"]
+    assert "continue-on-error" not in scan
+    assert "|| true" not in scan["run"]
+    upload = next(
+        step for step in job["steps"] if step.get("name") == "Upload dependency audit report"
+    )
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"] == "dependency-audit-report.json"
 
 
 def test_environment_bootstrap_uses_current_packaging_tool_floor() -> None:
