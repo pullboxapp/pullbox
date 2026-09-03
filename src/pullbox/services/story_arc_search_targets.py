@@ -101,6 +101,8 @@ async def load_story_arc_missing_search_targets(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(
