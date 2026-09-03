@@ -8,7 +8,15 @@ from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from pullbox.models.import_job import (
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSeriesStatus,
+    ImportSourceType,
+)
 from pullbox.models.library import LibraryRoot
+from pullbox.models.operation_progress import OperationProgress, OperationProgressState
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.providers.base import IssueSummary, SeriesMetadata
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
@@ -391,3 +399,38 @@ async def test_mark_catalog_hydration_failed_sets_retryable_state(db_session) ->
     assert series.issue_catalog_error == "ComicVine timed out"
     assert series.issue_catalog_last_synced_at is None
     assert series.issue_catalog_last_checked_at is None
+
+
+async def test_restart_catalog_hydration_publishes_one_import_summary(db_session) -> None:
+    job = ImportJob(
+        source_path="/imports",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    series = Series(
+        title="Imported",
+        sort_title="imported",
+        comicvine_id=4001,
+        issue_catalog_state=IssueCatalogState.HYDRATING,
+    )
+    db_session.add_all([job, series])
+    await db_session.flush()
+    db_session.add(
+        ImportedSeries(
+            import_job_id=job.id,
+            series_id=series.id,
+            raw_series_name="Imported",
+            status=ImportSeriesStatus.IMPORTED,
+        )
+    )
+    await db_session.commit()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    await run_pending_catalog_hydration(factory, series_service=CatalogHydrationSeriesServiceStub())
+
+    progress = (await db_session.scalars(sa_select(OperationProgress))).one_or_none()
+    assert progress is not None
+    assert progress.operation_key == f"metadata:{job.id}"
+    assert progress.state == OperationProgressState.COMPLETED
+    assert progress.overall_percent == 100
+    assert progress.item_key is None

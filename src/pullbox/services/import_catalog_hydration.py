@@ -11,6 +11,11 @@ from sqlalchemy import select as sa_select
 
 from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.series import IssueCatalogState, Series
+from pullbox.services.import_metadata_priority import catalog_metadata_work
+from pullbox.services.import_metadata_progress import (
+    catalog_hydration_import_job_ids,
+    track_import_metadata_progress,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -60,15 +65,20 @@ def schedule_catalog_hydration(
     prefetch_comicvine_bundle, add_from_comicvine_prefetched = hydration_methods
 
     async def run_hydration() -> None:
-        async with catalog_hydration_gate():
+        job_ids = await catalog_hydration_import_job_ids(session_factory, series_id=series_id)
+        async with catalog_metadata_work(1) as priority:
             try:
-                await run_catalog_hydration(
-                    session_factory,
-                    series_id=series_id,
-                    search_on_add=search_on_add,
-                    prefetch_comicvine_bundle=prefetch_comicvine_bundle,
-                    add_from_comicvine_prefetched=add_from_comicvine_prefetched,
-                )
+                async with (
+                    track_import_metadata_progress(session_factory, job_ids=job_ids),
+                    catalog_hydration_gate(),
+                ):
+                    await run_catalog_hydration(
+                        session_factory,
+                        series_id=series_id,
+                        search_on_add=search_on_add,
+                        prefetch_comicvine_bundle=prefetch_comicvine_bundle,
+                        add_from_comicvine_prefetched=add_from_comicvine_prefetched,
+                    )
             except Exception as exc:
                 await mark_catalog_hydration_failed(
                     session_factory,
@@ -80,6 +90,8 @@ def schedule_catalog_hydration(
                     series_id=series_id,
                     error=str(exc),
                 )
+            finally:
+                await priority.complete_one()
 
     task = asyncio.create_task(run_hydration())
     catalog_hydration_tasks.add(task)
@@ -100,7 +112,12 @@ async def run_pending_catalog_hydration(
     pending = await load_pending_catalog_hydration(session_factory, limit=limit)
     recovered = 0
 
-    async with catalog_hydration_gate():
+    job_ids = await catalog_hydration_import_job_ids(session_factory)
+    async with (
+        catalog_metadata_work(len(pending)) as priority,
+        track_import_metadata_progress(session_factory, job_ids=job_ids),
+        catalog_hydration_gate(),
+    ):
         for request in pending:
             try:
                 hydrated = await run_catalog_hydration(
@@ -122,6 +139,8 @@ async def run_pending_catalog_hydration(
                     error=str(exc),
                 )
                 continue
+            finally:
+                await priority.complete_one()
 
             if not hydrated:
                 continue

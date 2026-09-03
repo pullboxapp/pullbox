@@ -25,6 +25,8 @@ from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 from pullbox.services.import_comicinfo_metadata import is_retryable_provider_error
+from pullbox.services.import_metadata_priority import wait_for_comicinfo_turn
+from pullbox.services.import_metadata_progress import track_import_metadata_progress
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -134,7 +136,10 @@ async def run_import_comicinfo_enrichment(
     log_event: ImportComicInfoLogEvent,
 ) -> None:
     """Refresh deferred ComicInfo metadata for imported files in one import job."""
-    async with comicinfo_enrichment_gate():
+    async with (
+        track_import_metadata_progress(session_factory, job_ids=[job_id]),
+        comicinfo_enrichment_gate(),
+    ):
         await _run_import_comicinfo_enrichment_while_fenced(
             session_factory,
             job_id=job_id,
@@ -157,6 +162,7 @@ async def _run_import_comicinfo_enrichment_while_fenced(
         return
     pending_ids = await _load_pending_imported_file_ids(session_factory, job_id=job_id)
     for imported_file_id in pending_ids:
+        await wait_for_comicinfo_turn()
         try:
             prepared = await _prepare_pending_imported_file_with_retry(
                 session_factory,

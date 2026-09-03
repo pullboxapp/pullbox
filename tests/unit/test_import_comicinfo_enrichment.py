@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -21,6 +22,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.operation_progress import OperationProgress, OperationProgressState
 from pullbox.models.series import Series
 from pullbox.services import import_comicinfo_enrichment as enrichment_module
 from pullbox.services.import_comicinfo_enrichment import (
@@ -221,6 +223,12 @@ async def test_run_import_comicinfo_enrichment_rewrites_pending_library_file(
         assert imported_file.diagnostics["comicinfo_enrichment"]["status"] == "complete"
         assert imported_file.diagnostics["comicinfo_enrichment"]["library_file_id"] is not None
         assert issue.description == "Refreshed ComicVine summary."
+        progress = (await session.scalars(select(OperationProgress))).one_or_none()
+        assert progress is not None
+        assert progress.operation_key == f"metadata:{job_id}"
+        assert progress.state == OperationProgressState.COMPLETED
+        assert progress.overall_percent == 100
+        assert progress.item_key is None
 
 
 @pytest.mark.asyncio
