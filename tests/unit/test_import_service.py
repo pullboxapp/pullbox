@@ -1882,6 +1882,7 @@ class TestRunMatching:
         )
         assert len(file_rows) == 2
         assert all(f.status == ImportedFileStatus.NO_MATCH for f in file_rows)
+        assert all(dict(f.diagnostics or {}).get("reason") == "below_threshold" for f in file_rows)
         assert all(
             dict(f.diagnostics or {}).get("rejection_reason")
             == "Series could not be matched to ComicVine during import review."

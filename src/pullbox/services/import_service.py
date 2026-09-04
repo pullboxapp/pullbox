@@ -345,7 +345,10 @@ class ImportService(
     ) -> None:
         """Run safety checks on discovered source files before review/import."""
         await validate_import_discovered_files_safety(
-            session, discovered_list, progress_callback=progress_callback
+            session,
+            discovered_list,
+            progress_callback=progress_callback,
+            worker_count=self._settings.import_scan_worker_count,
         )
 
     def _build_scan_metadata_provider(self, session: AsyncSession) -> CachedImportMetadataProvider:
@@ -758,6 +761,7 @@ class ImportService(
             build_comicinfo_payload=self._build_comicinfo_payload_for_issue,
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
+            prefetch_issue_metadata=self._metadata_service.prefetch_issue_metadata_batch,
         )
 
     def schedule_story_arc_sync(self) -> None:
@@ -776,6 +780,7 @@ class ImportService(
             build_comicinfo_payload=self._build_comicinfo_payload_for_issue,
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
+            prefetch_issue_metadata=self._metadata_service.prefetch_issue_metadata_batch,
         )
 
     async def recover_pending_catalog_hydration(

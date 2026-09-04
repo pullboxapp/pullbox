@@ -1,19 +1,26 @@
 # Recheck A Saved Import Review
 
 Use this maintenance procedure when a review was generated before the Mylar
-sidecar parser and comic-content checks were corrected. It works for Mylar and
-folder imports. This is not a full rescan, a database restore, or an import.
+sidecar parser and comic-content checks were corrected. Normal completed-job
+recovery does not require this command: the **Retry failed** action revalidates
+retryable source changes inside Pullbox before execution. It works for Mylar
+and folder imports. This is not a full rescan, a database restore, or an import.
 
 ## Safety And Scope
 
 - Stop Pullbox and back up its database before running the command. `--offline`
   is the operator's acknowledgement, not an automatic container stop.
-- The job must be idle at Step 3 (`REVIEW`). Do not run this against a scan,
-  import, rollback, or job with a pending control request.
-- By default only automatically rejected series with
-  `trusted_source_identity_conflict` are examined. Repeat `--series-id` to
-  narrow the operation to specific **import-review series IDs**, not ComicVine
-  or library series IDs.
+- The job must be idle at Step 3 (`REVIEW`) or finished (`COMPLETED`). Do not
+  run this against a scan, import, rollback, or job with a pending control
+  request.
+- For a `REVIEW` job, only automatically rejected series with
+  `trusted_source_identity_conflict` are examined by default. Repeat
+  `--series-id` to narrow the operation to specific **import-review series
+  IDs**, not ComicVine or library series IDs.
+- For a `COMPLETED` job, prefer the in-app **Retry failed** action. It performs
+  the same bounded source revalidation automatically and retries only files
+  that remain inside their approved root, pass current safety checks, and do
+  not conflict with the saved source identity.
 - An entire series is left untouched if it has manual overrides, selected
   files, explicit skips, approved exceptions, or other completed file decisions.
   The report counts these as `skipped_series`; discuss them individually.
@@ -48,9 +55,11 @@ docker compose -f pullbox.yml run --rm --no-deps --entrypoint python pullbox \
   -m pullbox.cli recheck-import --job 1 --source-root /mnt/comics --offline
 ```
 
-The JSON result reports `series_prepared`, `files_checked`, `blocked_files`,
-and `skipped_series`. `applied: false` confirms it was only a preview. Review
-the counts before running the same command with `--apply`:
+For a Step 3 review, the JSON result reports `series_prepared`,
+`files_checked`, `blocked_files`, and `skipped_series`. For a completed import,
+it reports `files_prepared`, `files_checked`, `blocked_files`, and
+`skipped_files`. `applied: false` confirms it was only a preview. Review the
+counts before running the same command with `--apply`:
 
 ```bash
 docker compose -f pullbox.yml run --rm --no-deps --entrypoint python pullbox \
@@ -63,13 +72,19 @@ startup recovery resumes from `MATCHING`, preserving the directory inventory
 and unaffected review decisions, and returns to Step 3. It does not select
 files or start Step 4. Genuine source-identity conflicts remain in review.
 
+For a completed import, restart Pullbox, open that import's results, and choose
+**Retry failed**. Only the rechecked failures are prepared; successful files
+and series remain untouched. A file that is still missing, outside an approved
+root, unreadable, or unsafe stays failed with refreshed diagnostics.
+
 ## Replaced Files
 
 Changed or missing scan signatures normally remain blocked. After deliberately
-replacing a defective file, preview a targeted recheck with both `--series-id`
-and `--accept-replaced-files`. This explicitly accepts new scan evidence only
-after containment and archive checks; it is not an archive-safety override.
-Then repeat the reviewed command with `--apply` if appropriate.
+replacing a defective file, preview a targeted recheck with
+`--accept-replaced-files` and, when useful, one or more `--series-id` filters.
+This explicitly accepts new scan evidence only after containment and archive
+checks; it is not an archive-safety override. Then repeat the reviewed command
+with `--apply` if appropriate.
 
 A renamed file at a different path is not automatically discovered by this
 command. Do not use broad filename guessing to repair ownership.

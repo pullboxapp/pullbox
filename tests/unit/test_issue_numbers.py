@@ -36,6 +36,7 @@ def test_format_issue_number_is_exact_and_never_scientific(
         ("001", "1"),
         ("0.50", "0.5"),
         ("1au", "1AU"),
+        ("1948 Fall", "1948FALL"),
         ("½", "0.5"),
         ("1e6", "1000000"),
     ],
@@ -51,6 +52,11 @@ def test_normalize_issue_number_text_preserves_exact_semantics(
 def test_normalize_issue_number_text_rejects_invalid_values(value: str) -> None:
     with pytest.raises(ValueError, match="issue number"):
         normalize_issue_number_text(value)
+
+
+def test_normalize_issue_number_text_rejects_oversized_raw_input() -> None:
+    with pytest.raises(ValueError, match="exceeds the supported exact-text length"):
+        normalize_issue_number_text("1" + (" " * 321) + "AU")
 
 
 def test_issue_number_text_numeric_compatibility_preserves_suffixes() -> None:

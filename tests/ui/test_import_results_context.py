@@ -102,6 +102,70 @@ async def test_load_import_results_context_splits_unmatched_queue_counts(db_sess
 
 
 @pytest.mark.asyncio
+async def test_load_import_results_context_reports_changed_sources_separately(
+    db_session,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/tmp/comics",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.COMPLETED,
+        total_files_found=2,
+        total_files_failed=2,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Changed Sources",
+        file_count=2,
+        has_files=True,
+        sample_paths=[],
+        status=ImportSeriesStatus.FAILED,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=imported_series.id,
+                file_path="/tmp/comics/changed.cbz",
+                file_name="changed.cbz",
+                file_size=1024,
+                file_format="cbz",
+                status=ImportedFileStatus.FAILED,
+                diagnostics={
+                    "source_revalidation": {
+                        "code": "source_changed",
+                        "retryable": True,
+                    }
+                },
+            ),
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=imported_series.id,
+                file_path="/tmp/comics/failed.cbz",
+                file_name="failed.cbz",
+                file_size=1024,
+                file_format="cbz",
+                status=ImportedFileStatus.FAILED,
+                error_message="Destination is unavailable.",
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    assert context["files_total"] == 2
+    assert context["files_failed"] == 2
+    assert context["source_changed_files"] == 1
+
+
+@pytest.mark.asyncio
 async def test_load_import_results_context_counts_pending_catalog_sync(db_session) -> None:  # type: ignore[no-untyped-def]
     from pullbox.ui.import_results_context import load_import_results_context
 

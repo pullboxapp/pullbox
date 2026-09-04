@@ -73,6 +73,41 @@ def _filesystem_source_identity_evaluation(
     """Classify a filesystem series from trusted local identity only."""
     normalized_query = NameMatcher.normalize(source_metadata.series_name or item.raw_series_name)
     identity_conflicts = source_metadata.diagnostics.get("identity_conflicts")
+    source_signal = source_metadata.signals.get("comicvine_series_id")
+    cv_id = source_metadata.comicvine_series_id or item.cv_id
+    match_method = item.cv_match_method
+    if match_method not in _DIRECT_CV_ID_MATCH_METHODS:
+        match_method = (
+            {
+                MetadataSignal.MYLAR3: "mylar3_cv_id",
+                MetadataSignal.COMICINFO: "comicinfo_cv_id",
+                MetadataSignal.SIDECAR: "comicinfo_cv_id",
+                MetadataSignal.PULLBOX_FOLDER: "folder_cv_id",
+            }.get(source_signal)
+            if source_signal is not None
+            else None
+        )
+
+    # A Mylar database row is authoritative for series ownership during a Mylar
+    # migration. Conflicting file/sidecar evidence is retained for file-level
+    # review rather than invalidating the already-known series identity.
+    if cv_id is not None and match_method == "mylar3_cv_id":
+        evaluation = known_cv_id_evaluation_from_source(
+            int(cv_id),
+            match_method=match_method,
+            raw_name=item.raw_series_name,
+            raw_year=item.raw_year,
+            normalized_query=normalized_query,
+            source_metadata=source_metadata,
+            match_threshold=match_threshold,
+        )
+        if isinstance(identity_conflicts, list) and identity_conflicts:
+            evaluation.diagnostics["identity_conflicts"] = [
+                dict(conflict) for conflict in identity_conflicts if isinstance(conflict, dict)
+            ]
+            evaluation.diagnostics["file_identity_review_required"] = True
+        return evaluation
+
     if isinstance(identity_conflicts, list) and identity_conflicts:
         return ComicVineMatchEvaluation(
             match=None,
@@ -91,20 +126,6 @@ def _filesystem_source_identity_evaluation(
             },
         )
 
-    cv_id = source_metadata.comicvine_series_id or item.cv_id
-    match_method = item.cv_match_method
-    if match_method not in _DIRECT_CV_ID_MATCH_METHODS:
-        signal = source_metadata.signals.get("comicvine_series_id")
-        match_method = (
-            {
-                MetadataSignal.MYLAR3: "mylar3_cv_id",
-                MetadataSignal.COMICINFO: "comicinfo_cv_id",
-                MetadataSignal.SIDECAR: "comicinfo_cv_id",
-                MetadataSignal.PULLBOX_FOLDER: "folder_cv_id",
-            }.get(signal)
-            if signal is not None
-            else None
-        )
     if cv_id is not None and match_method in _DIRECT_CV_ID_MATCH_METHODS:
         return known_cv_id_evaluation_from_source(
             int(cv_id),
@@ -466,6 +487,10 @@ async def _mark_pending_files_no_match(
         for imp_file in pending_files:
             diagnostics = dict(imp_file.diagnostics or {})
             diagnostics.setdefault("kind", "series_no_match_file")
+            diagnostics.setdefault(
+                "reason",
+                str(dict(item.diagnostics or {}).get("reason") or "series_no_match"),
+            )
             local_identity_missing = (
                 dict(item.diagnostics or {}).get("reason") == "trusted_source_identity_missing"
             )
@@ -987,6 +1012,15 @@ async def run_import_series_matching(
                 progress_callback,
             )
             await maybe_slow_item_delay()
+        elif progress_callback:
+            # Completing the displayed series must not wait for a DB batch.
+            await emit_matching_progress(
+                item,
+                idx,
+                message=f"Completed series review {idx + 1}/{total_items}.",
+                current_item_progress_pct=100,
+                live_only=True,
+            )
         processed_items = idx + 1
 
     if deferred_count:

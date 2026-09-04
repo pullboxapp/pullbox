@@ -20,6 +20,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--series-count", type=int, default=50_000)
     parser.add_argument("--file-count", type=int, default=200_000)
     parser.add_argument("--seed", type=int, default=1300)
+    parser.add_argument("--archive-pages", type=int, default=32)
+    parser.add_argument(
+        "--single-page-every",
+        type=int,
+        default=0,
+        help="Include an explicit one-page safety exception every N files (0 disables)",
+    )
     parser.add_argument(
         "--profile",
         choices=("balanced", "realistic-skew"),
@@ -55,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         series_count=args.series_count,
         file_count=args.file_count,
         seed=args.seed,
+        archive_pages=args.archive_pages,
+        single_page_every=args.single_page_every,
         profile=args.profile,
         max_issues_per_series=args.max_issues_per_series,
         layout_profile=args.layout_profile,

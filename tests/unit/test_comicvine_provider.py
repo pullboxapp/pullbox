@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from pullbox.providers.metadata import comicvine as comicvine_module
 from pullbox.providers.metadata.comicvine import ComicVineError, ComicVineProvider
 
 
@@ -47,6 +48,70 @@ def _make_response(
     response.json.return_value = json_data or {"status_code": 1, "results": {}}
     response.raise_for_status = MagicMock()
     return response
+
+
+def test_rate_limit_resource_key_keeps_api_resources_independent() -> None:
+    assert comicvine_module._resource_rate_key("/issues/") == "issues"
+    assert comicvine_module._resource_rate_key("/issue/4000-123/") == "issue"
+    assert comicvine_module._resource_rate_key("/volumes/") == "volumes"
+    assert comicvine_module._resource_rate_key("/volume/4050-123/") == "volume"
+    assert comicvine_module._resource_rate_key("/search/") == "search"
+
+
+@pytest.mark.asyncio
+async def test_rate_coordinator_is_shared_by_api_key_and_policy() -> None:
+    first = comicvine_module._rate_coordinator_for(
+        api_key="shared-rate-key",
+        rate_limit=200,
+        requests_per_second=1,
+    )
+    second = comicvine_module._rate_coordinator_for(
+        api_key="shared-rate-key",
+        rate_limit=200,
+        requests_per_second=3,
+    )
+    other_key = comicvine_module._rate_coordinator_for(
+        api_key="other-rate-key",
+        rate_limit=200,
+        requests_per_second=1,
+    )
+    lower_hourly_policy = comicvine_module._rate_coordinator_for(
+        api_key="shared-rate-key",
+        rate_limit=10,
+        requests_per_second=1,
+    )
+
+    assert first is second
+    assert first is not other_key
+    assert first is not lower_hourly_policy
+
+
+@pytest.mark.asyncio
+async def test_request_uses_shared_resource_aware_rate_coordinator() -> None:
+    provider = ComicVineProvider(
+        api_key="coordinator-test-key",
+        rate_limit=200,
+        burst_limit=3,
+    )
+    coordinator = MagicMock()
+    coordinator.acquire = AsyncMock()
+    provider._rate_coordinator = coordinator
+    provider._client.get = AsyncMock(return_value=_make_response())  # type: ignore[method-assign]
+
+    try:
+        await provider._request("/issues/", {"filter": "volume:123"})
+        await provider._request("/volumes/", {"filter": "id:123"})
+    finally:
+        await provider._client.aclose()
+
+    assert [call.args[0] for call in coordinator.acquire.await_args_list] == [
+        "issues",
+        "volumes",
+    ]
+    assert [call.kwargs for call in coordinator.acquire.await_args_list] == [
+        {"requests_per_second": 3},
+        {"requests_per_second": 3},
+    ]
 
 
 @pytest.mark.asyncio
@@ -412,6 +477,36 @@ async def test_get_series_maps_volume_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_series_batch_chunks_ids_and_preserves_requested_identity() -> None:
+    provider = ComicVineProvider(api_key="series-batch-test-key", rate_limit=999_999)
+    requested_ids = [str(value) for value in range(1, 102)]
+    provider._request = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            {
+                "number_of_total_results": 100,
+                "results": [
+                    _volume_item(value, f"Series {value}", 2026) for value in range(1, 101)
+                ],
+            },
+            {
+                "number_of_total_results": 1,
+                "results": [_volume_item(101, "Series 101", 2026)],
+            },
+        ]
+    )
+
+    try:
+        result = await provider.get_series_batch(requested_ids)
+    finally:
+        await provider._client.aclose()
+
+    assert list(result) == requested_ids
+    filters = [call.args[1]["filter"] for call in provider._request.await_args_list]
+    assert filters[0] == "id:" + "|".join(requested_ids[:100])
+    assert filters[1] == "id:101"
+
+
+@pytest.mark.asyncio
 async def test_get_issue_maps_issue_metadata_creators_and_story_arcs() -> None:
     provider = ComicVineProvider(api_key="issue-test-key", rate_limit=999_999)
     provider._request = AsyncMock(  # type: ignore[method-assign]
@@ -467,6 +562,41 @@ async def test_get_issue_maps_issue_metadata_creators_and_story_arcs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_issue_batch_keeps_full_comicinfo_metadata() -> None:
+    provider = ComicVineProvider(api_key="issue-batch-test-key", rate_limit=999_999)
+    first = _issue_item(111, "1")
+    first.update(
+        {
+            "volume": {"id": 9001},
+            "description": "<p>First issue</p>",
+            "person_credits": [{"id": 10, "name": "Writer One", "role": "writer"}],
+            "story_arc_credits": [{"id": 20, "name": "First Arc"}],
+        }
+    )
+    second = _issue_item(222, "2")
+    second["volume"] = {"id": 9001}
+    provider._request = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "number_of_total_results": 2,
+            "results": [second, first],
+        }
+    )
+
+    try:
+        result = await provider.get_issue_batch(["111", "222"])
+    finally:
+        await provider._client.aclose()
+
+    assert list(result) == ["111", "222"]
+    assert result["111"].description == "First issue"
+    assert result["111"].creators[0]["name"] == "Writer One"
+    assert result["111"].story_arcs == [{"name": "First Arc", "provider_id": "20"}]
+    params = provider._request.await_args.args[1]
+    assert params["filter"] == "id:111|222"
+    assert "person_credits" in params["field_list"]
+
+
+@pytest.mark.asyncio
 async def test_comicvine_preserves_suffix_issue_number_text() -> None:
     provider = ComicVineProvider(api_key="suffix-test-key", rate_limit=999_999)
     provider._request = AsyncMock(  # type: ignore[method-assign]
@@ -509,6 +639,35 @@ async def test_get_issues_for_series_paginates_until_total_reached() -> None:
 
     assert len(summaries) == 101
     assert [summary.provider_id for summary in summaries[-2:]] == ["1099", "2000"]
+    assert [call.args[1]["offset"] for call in request_mock.await_args_list] == [0, 100]
+
+
+@pytest.mark.asyncio
+async def test_get_issue_catalog_batch_groups_multiple_volumes_across_pages() -> None:
+    provider = ComicVineProvider(api_key="catalog-batch-test-key", rate_limit=999_999)
+    first_page = []
+    for index in range(100):
+        item = _issue_item(1000 + index, str(index + 1))
+        item["volume"] = {"id": 10 if index < 60 else 20}
+        first_page.append(item)
+    final_item = _issue_item(2000, "41")
+    final_item["volume"] = {"id": 20}
+    request_mock = AsyncMock(
+        side_effect=[
+            {"number_of_total_results": 101, "results": first_page},
+            {"number_of_total_results": 101, "results": [final_item]},
+        ]
+    )
+    provider._request = request_mock  # type: ignore[method-assign]
+
+    try:
+        result = await provider.get_issue_catalog_batch(["10", "20"])
+    finally:
+        await provider._client.aclose()
+
+    assert len(result["10"]) == 60
+    assert len(result["20"]) == 41
+    assert request_mock.await_args_list[0].args[1]["filter"] == "volume:10|20"
     assert [call.args[1]["offset"] for call in request_mock.await_args_list] == [0, 100]
 
 

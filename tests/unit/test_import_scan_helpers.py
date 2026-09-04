@@ -154,6 +154,24 @@ async def test_content_inspection_reuses_zip_inventory(db_session, tmp_path, mon
     assert discovered.files[0].metadata_diagnostics["content_inspection"]["page_count"] == 2
 
 
+async def test_page_name_matching_stays_off_event_loop(db_session, tmp_path, monkeypatch):
+    path = tmp_path / "Batman 001.cbz"
+    with zipfile.ZipFile(path, "w") as archive:
+        for page in range(1, 5):
+            archive.writestr(f"Batman 001-{page:03d}.jpg", b"page")
+    main_thread = threading.get_ident()
+    original = import_scan_helpers.archive_entry_issue_hint_from_names
+
+    def checked_hint(*args, **kwargs):
+        assert threading.get_ident() != main_thread
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(import_scan_helpers, "archive_entry_issue_hint_from_names", checked_hint)
+    discovered = _discovered_series(str(path))
+    await validate_discovered_files_safety(db_session, [discovered])
+    assert discovered.files[0].metadata_diagnostics["archive_entry_issue_hint"]["issue_number"] == 1
+
+
 @pytest.mark.parametrize("extension", ["cbr", "cb7", "cbt"])
 @pytest.mark.parametrize("pages", [0, 1, 2])
 async def test_other_image_archives_have_the_same_content_policy(
@@ -302,7 +320,7 @@ async def test_validate_discovered_files_safety_reuses_default_policy_for_batch(
         ],
     )
 
-    assert safety_runs == [
+    assert sorted(safety_runs) == [
         (Path("/tmp/comics/Batman 001.cbz"), False, 123 * 1024 * 1024),
         (Path("/tmp/comics/Batman 002.cbz"), False, 123 * 1024 * 1024),
     ]
@@ -325,6 +343,39 @@ async def test_default_scan_safety_checks_do_not_run_on_event_loop(
 
     assert len(checked_threads) == 2
     assert all(thread != event_loop_thread for thread in checked_threads)
+
+
+async def test_default_inspection_is_parallel_with_serial_progress_and_no_shared_session(
+    db_session, monkeypatch
+):
+    barrier = threading.Barrier(2)
+    threads = set()
+    progress = []
+    main_thread = threading.get_ident()
+
+    def check_archive(path, **kwargs):
+        threads.add(threading.get_ident())
+        barrier.wait(timeout=2)
+
+    async def report(completed, total, path):
+        assert threading.get_ident() == main_thread
+        progress.append(completed)
+
+    monkeypatch.setattr(import_scan_helpers, "run_safety_checks", check_archive)
+    from pullbox.core.import_resources import ImportResources
+
+    monkeypatch.setattr(
+        import_scan_helpers, "detect_import_resources", lambda: ImportResources(8, 8 * 1024**3)
+    )
+    await validate_discovered_files_safety(
+        db_session,
+        [_discovered_series("/comics/One.cbz", "/comics/Two.cbz")],
+        worker_count=2,
+        progress_callback=report,
+    )
+    assert len(threads) == 2
+    assert main_thread not in threads
+    assert progress == [0, 1, 2]
 
 
 async def test_scan_safety_reports_checked_files_and_can_stop_between_them(db_session):

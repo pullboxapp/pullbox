@@ -673,7 +673,9 @@ def apply_progress_event_contract(
     if event.current_item_stage_label is None:
         event.current_item_stage_label = stage_label(event.current_item_stage)
 
-    if event.current_item_progress_pct is None:
+    if event.current_item_kind == "scan" and event.current_item_stage == "inventory":
+        event.current_item_progress_pct = None
+    elif event.current_item_progress_pct is None:
         if event.current_file_progress_pct is not None:
             event.current_item_progress_pct = event.current_file_progress_pct
         elif event.current_item_kind is not None:

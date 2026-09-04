@@ -83,6 +83,29 @@ def apply_file_match_series_summary(
         not duplicate_series
         and imp_series.status == ImportSeriesStatus.MATCHED
         and trusted_identity_conflict_files
+        and imp_series.cv_match_method == "mylar3_cv_id"
+    ):
+        diagnostics = dict(imp_series.diagnostics or {})
+        diagnostics.update(
+            {
+                "file_identity_conflict_count": len(trusted_identity_conflict_files),
+                "file_identity_review_required": True,
+                "conflicting_files": [
+                    {
+                        "file_name": imp_file.file_name,
+                        "rejection_reason": dict(imp_file.diagnostics or {}).get(
+                            "rejection_reason"
+                        ),
+                    }
+                    for imp_file in trusted_identity_conflict_files
+                ],
+            }
+        )
+        imp_series.diagnostics = diagnostics
+    elif (
+        not duplicate_series
+        and imp_series.status == ImportSeriesStatus.MATCHED
+        and trusted_identity_conflict_files
     ):
         identity_conflicts: list[dict[str, object]] = []
         for imp_file in trusted_identity_conflict_files:

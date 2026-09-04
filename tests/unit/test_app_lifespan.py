@@ -350,6 +350,44 @@ async def test_lifespan_starts_background_services_and_shuts_down_cleanly(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("files_fail", [False, True])
+async def test_catalog_recovery_does_not_wait_for_all_comicinfo_files(
+    patched_lifespan,
+    monkeypatch: pytest.MonkeyPatch,
+    files_fail: bool,
+) -> None:
+    file_work_started = asyncio.Event()
+    release_file_work = asyncio.Event()
+    catalog_work_started = asyncio.Event()
+
+    async def recover_files(_factory):
+        file_work_started.set()
+        if files_fail:
+            raise RuntimeError("File enrichment unavailable")
+        await release_file_work.wait()
+        return 1
+
+    async def recover_catalogs(_factory):
+        catalog_work_started.set()
+        return 2
+
+    async def build_service(_session):
+        return SimpleNamespace(
+            recover_pending_comicinfo_enrichment=recover_files,
+            recover_pending_catalog_hydration=recover_catalogs,
+        )
+
+    monkeypatch.setattr("pullbox.composition.services.build_import_service", build_service)
+    try:
+        async with patched_lifespan.app.lifespan(FastAPI()):
+            await asyncio.wait_for(file_work_started.wait(), timeout=1)
+            await asyncio.wait_for(catalog_work_started.wait(), timeout=1)
+            assert not release_file_work.is_set()
+    finally:
+        release_file_work.set()
+
+
+@pytest.mark.asyncio
 async def test_import_recovery_completes_before_scheduler_can_start(
     patched_lifespan,
 ) -> None:

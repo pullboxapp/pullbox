@@ -6,6 +6,7 @@ external providers. Cover images are downloaded and stored locally.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path  # noqa: TC003 — used at runtime via parameter values
@@ -40,7 +41,7 @@ from pullbox.services.cover_cache_service import purge_series_cover_cache
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from pullbox.providers.base import IssueSummary
+    from pullbox.providers.base import IssueMetadata, IssueSummary
     from pullbox.providers.metadata.comicvine import ComicVineProvider
 
 logger = structlog.get_logger(__name__)
@@ -248,6 +249,26 @@ class MetadataService:
         except ComicVineError as exc:
             raise _provider_error_from_comicvine(exc) from exc
 
+    async def get_series_metadata_batch(
+        self,
+        comicvine_ids: list[int],
+    ) -> dict[int, SeriesMetadata]:
+        """Fetch multiple provider series profiles through the optional bulk contract."""
+        batch_fetch = getattr(type(self._provider), "get_series_batch", None)
+        try:
+            if callable(batch_fetch):
+                result = await batch_fetch(
+                    self._provider,
+                    [str(comicvine_id) for comicvine_id in comicvine_ids],
+                )
+                return {int(provider_id): metadata for provider_id, metadata in result.items()}
+            metadata = await asyncio.gather(
+                *(self.get_series_metadata(comicvine_id) for comicvine_id in comicvine_ids)
+            )
+            return dict(zip(comicvine_ids, metadata, strict=True))
+        except ComicVineError as exc:
+            raise _provider_error_from_comicvine(exc) from exc
+
     async def get_cached_series_metadata(
         self,
         comicvine_id: int,
@@ -269,6 +290,29 @@ class MetadataService:
 
         try:
             return await self._provider.get_issues_for_series(str(comicvine_id))
+        except ComicVineError as exc:
+            raise _provider_error_from_comicvine(exc) from exc
+
+    async def get_issue_catalog_batch(
+        self,
+        comicvine_ids: list[int],
+    ) -> dict[int, list[IssueSummary]]:
+        """Fetch multiple full issue catalogs through the optional bulk contract."""
+        batch_fetch = getattr(type(self._provider), "get_issue_catalog_batch", None)
+        try:
+            if callable(batch_fetch):
+                result = await batch_fetch(
+                    self._provider,
+                    [str(comicvine_id) for comicvine_id in comicvine_ids],
+                )
+                return {int(provider_id): summaries for provider_id, summaries in result.items()}
+            catalogs = await asyncio.gather(
+                *(
+                    self.get_issue_summaries_for_series(comicvine_id)
+                    for comicvine_id in comicvine_ids
+                )
+            )
+            return dict(zip(comicvine_ids, catalogs, strict=True))
         except ComicVineError as exc:
             raise _provider_error_from_comicvine(exc) from exc
 
@@ -502,6 +546,23 @@ class MetadataService:
             raise NotFoundError("Issue", comicvine_id)
 
         return issue
+
+    async def prefetch_issue_metadata_batch(
+        self,
+        comicvine_ids: list[int],
+    ) -> dict[int, IssueMetadata]:
+        """Warm full issue metadata cache in bulk without holding a DB session."""
+        batch_fetch = getattr(type(self._provider), "get_issue_batch", None)
+        if not callable(batch_fetch) or not comicvine_ids:
+            return {}
+        try:
+            result = await batch_fetch(
+                self._provider,
+                [str(comicvine_id) for comicvine_id in comicvine_ids],
+            )
+        except ComicVineError as exc:
+            raise _provider_error_from_comicvine(exc) from exc
+        return {int(provider_id): metadata for provider_id, metadata in result.items()}
 
     async def _sync_issue_creators(
         self,
@@ -877,6 +938,17 @@ class MetadataService:
 
         if not series.comicvine_id:
             raise ProviderError("comicvine", "Series has no ComicVine ID")
+
+        if force:
+            refresh_series = getattr(type(self._provider), "refresh_series", None)
+            refresh_catalog = getattr(type(self._provider), "refresh_issue_catalog", None)
+            try:
+                if callable(refresh_series):
+                    await refresh_series(self._provider, str(series.comicvine_id))
+                if callable(refresh_catalog):
+                    await refresh_catalog(self._provider, str(series.comicvine_id))
+            except ComicVineError as exc:
+                raise _provider_error_from_comicvine(exc) from exc
 
         # noinspection PyTypeChecker
         series = await self.fetch_series(session, series.comicvine_id)

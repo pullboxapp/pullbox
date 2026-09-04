@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, func, or_, select
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.file_safety import (
@@ -29,11 +29,14 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobLog,
     ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
+from pullbox.models.library import LibraryRoot
 from pullbox.services.import_content_inspection import inspect_import_content
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.services.import_series_match_state import clear_auto_cv_match_fields
@@ -188,6 +191,370 @@ def _apply_file(
         file.status = ImportedFileStatus.SAFETY_BLOCKED
         file.error_message = str(block["reason"])
     file.diagnostics = diagnostics
+
+
+def _apply_completed_file_recheck(
+    file: ImportedFile,
+    metadata: SourceMetadata,
+    content: dict[str, Any],
+    signature: dict[str, int | str],
+    *,
+    reviewed_series_cv_id: int | None,
+) -> bool:
+    """Refresh source evidence without changing the saved import decision."""
+    diagnostics = dict(file.diagnostics or {})
+    previous_signature = dict(file.source_signature or {})
+    source = {**metadata.diagnostics, **content}
+    block = source.pop("file_safety", None)
+    identity_conflicts = source.get("identity_conflicts")
+    saved_target_conflicts = _saved_target_identity_conflicts(
+        file,
+        metadata,
+        reviewed_series_cv_id=reviewed_series_cv_id,
+    )
+    if block is None and isinstance(identity_conflicts, list) and identity_conflicts:
+        block = build_import_safety_diagnostics(
+            "The current source identity conflicts with the file reviewed during import.",
+            kind="source_revalidation",
+            code="source_identity_changed",
+            source="completed_import_recheck",
+            overrideable_hint=False,
+        )
+    if block is None and saved_target_conflicts:
+        block = build_import_safety_diagnostics(
+            "The replacement source does not match the issue reviewed during import.",
+            kind="source_revalidation",
+            code="source_identity_changed",
+            source="completed_import_recheck",
+            overrideable_hint=False,
+        )
+        block["identity_conflicts"] = saved_target_conflicts
+    checked_at = datetime.now(UTC).isoformat()
+    if isinstance(block, dict):
+        diagnostics["source_revalidation"] = {
+            **block,
+            "kind": "source_revalidation",
+            "source": "completed_import_recheck",
+        }
+        diagnostics["source_recheck"] = {
+            "checked_at": checked_at,
+            "ready_for_retry": False,
+        }
+        file.error_message = str(block.get("sanitized_reason") or block.get("reason"))
+        file.diagnostics = diagnostics
+        return False
+
+    diagnostics.pop("source_revalidation", None)
+    diagnostics.update(
+        {
+            "source_metadata": source,
+            "source_issue_type": metadata.issue_type.value,
+            "comicvine_series_id": metadata.comicvine_series_id,
+            "metadata_signals": {key: value.value for key, value in metadata.signals.items()},
+            "source_recheck": {
+                "checked_at": checked_at,
+                "ready_for_retry": True,
+            },
+        }
+    )
+    file.parsed_series = metadata.series_name
+    file.parsed_issue_number = metadata.issue_number
+    file.parsed_year = metadata.year
+    file.comicvine_issue_id = metadata.comicvine_issue_id
+    file.has_comicinfo = bool(source.get("has_comicinfo"))
+    refreshed_signature = dict(signature)
+    reference_root_id = previous_signature.get("mylar_reference_root_id")
+    if (
+        isinstance(reference_root_id, int)
+        and not isinstance(reference_root_id, bool)
+        and reference_root_id > 0
+    ):
+        refreshed_signature["mylar_reference_root_id"] = reference_root_id
+    file.source_signature = refreshed_signature
+    file.file_size = int(signature["size"])
+    file.error_message = "Source rechecked and ready to retry."
+    file.diagnostics = diagnostics
+    return True
+
+
+def _saved_target_identity_conflicts(
+    file: ImportedFile,
+    metadata: SourceMetadata,
+    *,
+    reviewed_series_cv_id: int | None,
+) -> list[dict[str, int | float | str]]:
+    """Compare fresh replacement evidence with the immutable reviewed target."""
+    diagnostics = dict(file.diagnostics or {})
+    raw_summary = diagnostics.get("target_issue_summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    conflicts: list[dict[str, int | float | str]] = []
+
+    target_issue_cv_id = file.matched_issue_cv_id
+    if target_issue_cv_id is None:
+        try:
+            target_issue_cv_id = int(str(summary.get("provider_id") or ""))
+        except ValueError:
+            target_issue_cv_id = None
+    if (
+        target_issue_cv_id is not None
+        and metadata.comicvine_issue_id is not None
+        and metadata.comicvine_issue_id != target_issue_cv_id
+    ):
+        conflicts.append(
+            {
+                "field": "comicvine_issue_id",
+                "reviewed": target_issue_cv_id,
+                "source": metadata.comicvine_issue_id,
+            }
+        )
+
+    raw_target_number = summary.get("issue_number", file.parsed_issue_number)
+    try:
+        target_issue_number = float(str(raw_target_number))
+    except (TypeError, ValueError):
+        target_issue_number = None
+    if (
+        target_issue_number is not None
+        and metadata.issue_number is not None
+        and abs(metadata.issue_number - target_issue_number) >= 0.0001
+    ):
+        conflicts.append(
+            {
+                "field": "issue_number",
+                "reviewed": target_issue_number,
+                "source": metadata.issue_number,
+            }
+        )
+
+    if (
+        reviewed_series_cv_id is not None
+        and metadata.comicvine_series_id is not None
+        and metadata.comicvine_series_id != reviewed_series_cv_id
+    ):
+        conflicts.append(
+            {
+                "field": "comicvine_series_id",
+                "reviewed": reviewed_series_cv_id,
+                "source": metadata.comicvine_series_id,
+            }
+        )
+    return conflicts
+
+
+async def _retry_source_roots(
+    session: AsyncSession,
+    job: ImportJob,
+) -> list[Path]:
+    """Recover only source boundaries already approved by the saved import."""
+    candidates: list[Path] = []
+    if job.source_type is ImportSourceType.FILESYSTEM:
+        candidates.append(Path(job.source_path))
+    else:
+        candidates.extend(Path(value) for value in dict(job.mylar3_path_map or {}).values())
+        signature_rows = await session.scalars(
+            select(ImportedFile.source_signature).where(
+                ImportedFile.import_job_id == job.id,
+                ImportedFile.status == ImportedFileStatus.FAILED,
+                ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
+            )
+        )
+        root_ids = {
+            root_id
+            for signature in signature_rows.all()
+            if isinstance(signature, dict)
+            and isinstance(
+                root_id := signature.get("mylar_reference_root_id"),
+                int,
+            )
+            and not isinstance(root_id, bool)
+            and root_id > 0
+        }
+        if root_ids:
+            root_query = select(LibraryRoot).where(
+                LibraryRoot.id.in_(root_ids),
+                LibraryRoot.enabled.is_(True),
+            )
+            if job.file_handling_mode is ImportFileHandlingMode.IN_PLACE:
+                root_query = root_query.where(LibraryRoot.allow_referenced_registrations.is_(True))
+            candidates.extend(Path(root.path) for root in (await session.scalars(root_query)).all())
+
+    roots: list[Path] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        try:
+            lexical = candidate.expanduser().absolute()
+            resolved = resolve_preview_source(candidate)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        key = (str(lexical), str(resolved))
+        if resolved.parent == resolved or key in seen:
+            continue
+        seen.add(key)
+        roots.append(lexical)
+    return roots
+
+
+async def prepare_retryable_failed_sources_for_retry(
+    session: AsyncSession,
+    job: ImportJob,
+) -> dict[str, int]:
+    """Revalidate changed failed sources as part of the in-app retry action."""
+    retryable_count = int(
+        await session.scalar(
+            select(func.count(ImportedFile.id)).where(
+                ImportedFile.import_job_id == job.id,
+                ImportedFile.status == ImportedFileStatus.FAILED,
+                ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
+            )
+        )
+        or 0
+    )
+    if retryable_count == 0:
+        return {
+            "files_checked": 0,
+            "files_prepared": 0,
+            "blocked_files": 0,
+            "skipped_files": 0,
+        }
+
+    roots = await _retry_source_roots(session, job)
+    if not roots:
+        raise ValidationError(
+            "No failed files are safe to retry because their approved source root is unavailable."
+        )
+    return await prepare_completed_import_file_recheck(
+        session,
+        job.id,
+        source_roots=roots,
+        apply=True,
+        accept_replaced_files=True,
+    )
+
+
+async def prepare_completed_import_file_recheck(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    source_roots: list[Path],
+    apply: bool = False,
+    series_ids: list[int] | None = None,
+    accept_replaced_files: bool = False,
+) -> dict[str, int]:
+    """Recheck only retryable failed sources from an otherwise completed import."""
+    job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+    if job.status != ImportJobStatus.COMPLETED or job.control_request != ImportControlRequest.NONE:
+        raise ValidationError("Job must be idle in COMPLETED before a failed-file recheck")
+    if not source_roots:
+        raise ValidationError("At least one explicit source root is required")
+    roots = [(path.expanduser().absolute(), resolve_preview_source(path)) for path in source_roots]
+    if any(not real.is_dir() or real.parent == real for _, real in roots):
+        raise ValidationError("Source roots must be specific existing directories")
+
+    block_dangerous = await is_dangerous_file_blocking_enabled(session)
+    max_archive_size = await get_archive_size_limit_bytes(session)
+    report = {
+        "files_checked": 0,
+        "files_prepared": 0,
+        "blocked_files": 0,
+        "skipped_files": 0,
+    }
+    sidecars: dict[str, dict[str, Any]] = {}
+    cursor = 0
+    while True:
+        query = (
+            select(ImportedFile, ImportedSeries)
+            .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
+            .where(
+                ImportedFile.import_job_id == job_id,
+                ImportedFile.status == ImportedFileStatus.FAILED,
+                ImportedFile.id > cursor,
+                ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
+            )
+            .order_by(ImportedFile.id)
+            .limit(250)
+        )
+        if series_ids:
+            query = query.where(ImportedFile.import_series_id.in_(series_ids))
+        rows = list((await session.execute(query)).all())
+        if not rows:
+            break
+        for imported_file, imported_series in rows:
+            cursor = int(imported_file.id)
+            metadata, content, signature = await asyncio.to_thread(
+                inspect_review_source,
+                Path(imported_file.file_path),
+                source_metadata_for_import_file(imported_series, imported_file),
+                dict(imported_file.source_signature or {}),
+                roots=roots,
+                block_dangerous=block_dangerous,
+                max_archive_size=max_archive_size,
+                accept_replaced_files=accept_replaced_files,
+                sidecars=sidecars,
+            )
+            report["files_checked"] += 1
+            blocked = "file_safety" in content
+            report["blocked_files"] += int(blocked)
+            report["files_prepared"] += int(not blocked)
+            if apply:
+                _apply_completed_file_recheck(
+                    imported_file,
+                    metadata,
+                    content,
+                    signature,
+                    reviewed_series_cv_id=imported_series.cv_id,
+                )
+        if apply:
+            await session.flush()
+
+    if apply and report["files_checked"]:
+        session.add(
+            ImportJobLog(
+                import_job_id=job.id,
+                level="INFO",
+                event="import_failed_sources_rechecked",
+                message=(
+                    f"Rechecked {report['files_checked']} failed source file(s); "
+                    f"{report['files_prepared']} are ready for retry."
+                ),
+                data={**report, "prepared_at": datetime.now(UTC).isoformat()},
+            )
+        )
+        await session.flush()
+    return report
+
+
+async def prepare_import_recheck(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    source_roots: list[Path],
+    apply: bool = False,
+    series_ids: list[int] | None = None,
+    accept_replaced_files: bool = False,
+) -> dict[str, int]:
+    """Dispatch a source recheck without widening the saved job's safe scope."""
+    job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+    if job.status == ImportJobStatus.COMPLETED:
+        return await prepare_completed_import_file_recheck(
+            session,
+            job_id,
+            source_roots=source_roots,
+            apply=apply,
+            series_ids=series_ids,
+            accept_replaced_files=accept_replaced_files,
+        )
+    return await prepare_review_recheck(
+        session,
+        job_id,
+        source_roots=source_roots,
+        apply=apply,
+        series_ids=series_ids,
+        accept_replaced_files=accept_replaced_files,
+    )
 
 
 async def prepare_review_recheck(

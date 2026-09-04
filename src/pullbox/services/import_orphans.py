@@ -21,6 +21,10 @@ from pullbox.models.series import Series
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
 from pullbox.services.import_file_resolution import load_issue_lookup_for_series
 from pullbox.services.import_job_actions import build_series_created_action_payload
+from pullbox.services.import_job_execution_items import (
+    ensure_target_issue_summary_for_import_file,
+)
+from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -530,6 +534,8 @@ async def retry_failed_series(
     if job.status != ImportJobStatus.COMPLETED:
         raise ValidationError(f"Job must be in COMPLETED state to retry (current: {job.status})")
 
+    source_recheck = await prepare_retryable_failed_sources_for_retry(session, job)
+
     result = await session.execute(
         sa_select(ImportedSeries).where(
             ImportedSeries.import_job_id == job_id,
@@ -539,7 +545,7 @@ async def retry_failed_series(
     failed_items = list(result.scalars().all())
 
     failed_file_result = await session.execute(
-        sa_select(ImportedSeries)
+        sa_select(ImportedSeries, ImportedFile)
         .join(ImportedFile, ImportedFile.import_series_id == ImportedSeries.id)
         .where(
             ImportedSeries.import_job_id == job_id,
@@ -551,13 +557,28 @@ async def retry_failed_series(
             ),
             ImportedFile.status == ImportedFileStatus.FAILED,
         )
-        .distinct()
     )
-    failed_file_items = list(failed_file_result.scalars().all())
+    failed_file_items = [
+        item
+        for item, imp_file in failed_file_result.all()
+        if not isinstance(dict(imp_file.diagnostics or {}).get("source_revalidation"), dict)
+    ]
     retry_items_by_id = {item.id: item for item in [*failed_items, *failed_file_items]}
     retry_items = list(retry_items_by_id.values())
 
     if not retry_items:
+        if source_recheck["files_checked"] > 0:
+            await session.flush()
+            await log_event(
+                session,
+                job_id,
+                "WARNING",
+                "import_retry_failed_source_revalidation_blocked",
+                message="No failed files passed source revalidation",
+                source_files_checked=source_recheck["files_checked"],
+                source_files_blocked=source_recheck["blocked_files"],
+            )
+            return job, 0
         raise ValidationError("No failed series or files to retry")
 
     retry_series_ids = [item.id for item in retry_items]
@@ -572,11 +593,33 @@ async def retry_failed_series(
             ImportedFile.status == ImportedFileStatus.FAILED,
         )
     )
-    failed_files = list(failed_files_result.scalars().all())
+    failed_files = [
+        imp_file
+        for imp_file in failed_files_result.scalars().all()
+        if not isinstance(dict(imp_file.diagnostics or {}).get("source_revalidation"), dict)
+    ]
     for imp_file in failed_files:
         imp_file.status = ImportedFileStatus.CONFIRMED
         imp_file.include_in_import = True
         imp_file.error_message = None
+
+    retry_file_result = await session.execute(
+        sa_select(ImportedFile).where(
+            ImportedFile.import_series_id.in_(retry_series_ids),
+            ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
+        )
+    )
+    repaired_target_count = 0
+    for imp_file in retry_file_result.scalars().all():
+        had_summary = isinstance(dict(imp_file.diagnostics or {}).get("target_issue_summary"), dict)
+        if ensure_target_issue_summary_for_import_file(imp_file):
+            if not had_summary and isinstance(
+                dict(imp_file.diagnostics or {}).get("target_issue_summary"), dict
+            ):
+                repaired_target_count += 1
+            continue
+        imp_file.status = ImportedFileStatus.NO_MATCH
+        imp_file.include_in_import = False
 
     count = len(retry_items)
     job.status = ImportJobStatus.IMPORTING
@@ -592,6 +635,7 @@ async def retry_failed_series(
         message=f"Retrying {count} failed import item{'s' if count != 1 else ''}",
         retry_count=count,
         retry_file_count=len(failed_files),
+        repaired_target_count=repaired_target_count,
     )
 
     return job, count

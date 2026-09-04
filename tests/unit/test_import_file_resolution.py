@@ -119,7 +119,7 @@ def _make_file(
     )
 
 
-async def test_load_importable_files_includes_preferred_conflicts_for_new_series(
+async def test_load_importable_files_excludes_unresolved_preferred_conflicts_for_new_series(
     db_session: AsyncSession,
 ) -> None:
     job = await _create_job(db_session)
@@ -146,7 +146,7 @@ async def test_load_importable_files_includes_preferred_conflicts_for_new_series
 
     files = await load_importable_files(db_session, item)
 
-    assert files == [matched, confirmed, preferred_conflict]
+    assert files == [matched, confirmed]
 
 
 async def test_load_importable_files_duplicate_mode_requires_selected_files(

@@ -4991,6 +4991,11 @@ function importProgressData(jobId, nextStep, sourceType) {
       return "";
     },
 
+    currentItemIsIndeterminate: function () {
+      return this.currentItemKind === "scan" &&
+        this.currentItemStage === "inventory" && this.currentItemProgressValue == null;
+    },
+
     currentItemProgress: function () {
       if (this.currentFileName) {
         return this.currentFileProgress;
@@ -5419,8 +5424,8 @@ function importProgressData(jobId, nextStep, sourceType) {
         return;
       }
 
-      var computed = this._computeEtaSeconds(this.startedAt, this.progress);
-      this.etaSeconds = computed;
+      // Weighted workflow milestones are not a measure of remaining runtime.
+      this.etaSeconds = null;
       this.etaCapturedAt = Date.now();
     },
 
@@ -5479,7 +5484,7 @@ function importProgressData(jobId, nextStep, sourceType) {
               this.etaSeconds -
                 Math.max(0, Math.floor((this.nowMs - this.etaCapturedAt) / 1000)),
             )
-          : this._computeEtaSeconds(this.startedAt, this.progress);
+          : null;
 
       if (etaSeconds == null) {
         return "Estimating...";
@@ -7665,6 +7670,17 @@ function importResultsData(config) {
               return {};
             });
           throw new Error(error.detail || "Failed to retry");
+        }
+
+        var payload = await response.json();
+        if (Math.max(0, Number(payload.retrying_count) || 0) === 0) {
+          var blockedMessage =
+            "No failed files passed source revalidation. Review the updated failure details before retrying.";
+          this.retryError = blockedMessage;
+          if (typeof showToast === "function") {
+            showToast({ message: blockedMessage, level: "warning" });
+          }
+          return;
         }
 
         dispatchImportWizardAdvance({
@@ -12021,6 +12037,8 @@ function appShell() {
     activityAttentionCount: 0,
     activitySource: null,
     activityPollTimer: null,
+    activityRefreshTimer: null,
+    activityStreamOpen: false,
     activityRefreshing: false,
 
     get collapsed() {
@@ -12068,6 +12086,7 @@ function appShell() {
       }
       this.disconnectActivityStream();
       this.clearActivityTimer();
+      this.clearActivityRefreshTimer();
     },
 
     clearActivityTimer: function () {
@@ -12084,6 +12103,22 @@ function appShell() {
         self.activityPollTimer = null;
         self.refreshActivity();
       }, delayMs || 3000);
+    },
+
+    clearActivityRefreshTimer: function () {
+      if (this.activityRefreshTimer) {
+        window.clearTimeout(this.activityRefreshTimer);
+        this.activityRefreshTimer = null;
+      }
+    },
+
+    scheduleActivityRefresh: function (delayMs) {
+      var self = this;
+      self.clearActivityRefreshTimer();
+      self.activityRefreshTimer = window.setTimeout(function () {
+        self.activityRefreshTimer = null;
+        self.refreshActivity();
+      }, delayMs || 500);
     },
 
     bootstrapActivity: function () {
@@ -12127,7 +12162,9 @@ function appShell() {
         })
         .finally(function () {
           self.activityRefreshing = false;
-          self.scheduleActivityPoll(3000);
+          if (!self.activityStreamOpen) {
+            self.scheduleActivityPoll(3000);
+          }
           if (!self.activitySource) {
             self.connectActivityStream();
           }
@@ -12143,8 +12180,15 @@ function appShell() {
       self.activitySource = source;
       var refreshFromEvent = function () {
         if (self.activitySource === source) {
-          self.refreshActivity();
+          self.scheduleActivityRefresh(500);
         }
+      };
+      source.onopen = function () {
+        if (self.activitySource !== source) {
+          return;
+        }
+        self.activityStreamOpen = true;
+        self.clearActivityTimer();
       };
       source.addEventListener("ready", refreshFromEvent);
       source.addEventListener("progress", refreshFromEvent);
@@ -12154,6 +12198,7 @@ function appShell() {
           return;
         }
         self.disconnectActivityStream();
+        self.scheduleActivityPoll(3000);
       };
     },
 
@@ -12167,6 +12212,7 @@ function appShell() {
         // Closing a stale activity stream is best-effort.
       }
       this.activitySource = null;
+      this.activityStreamOpen = false;
     },
 
     acknowledgeActivity: function (operationId) {
@@ -18076,10 +18122,14 @@ function seriesDetailPage(config) {
     statusSaving: false,
     refreshing: false,
     searching: false,
+    metadataSyncing: false,
+    metadataSyncTimer: null,
     issueSearchState: {},
 
     init: function () {
       this.monitored = !!cfg.monitored;
+      this.metadataSyncing = !!cfg.metadataSyncing;
+      this.startMetadataSyncPolling();
 
       var self = this;
       var runNormalize = function () {
@@ -18093,6 +18143,51 @@ function seriesDetailPage(config) {
       } else {
         window.setTimeout(runNormalize, 0);
       }
+    },
+
+    destroy: function () {
+      if (this.metadataSyncTimer !== null) {
+        clearTimeout(this.metadataSyncTimer);
+        this.metadataSyncTimer = null;
+      }
+    },
+
+    startMetadataSyncPolling: function () {
+      var self = this;
+      if (!self.metadataSyncing || self.metadataSyncTimer !== null) {
+        return;
+      }
+      self.metadataSyncTimer = window.setTimeout(function () {
+        self.metadataSyncTimer = null;
+        self.pollMetadataSyncState();
+      }, 3000);
+    },
+
+    pollMetadataSyncState: function () {
+      var self = this;
+      if (!self.metadataSyncing || !cfg.updateUrl) {
+        return;
+      }
+      fetch(cfg.updateUrl, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      })
+        .then(function (response) {
+          if (!response.ok) throw new Error("Failed to load metadata sync state");
+          return response.json();
+        })
+        .then(function (data) {
+          if (data.issue_catalog_state !== "hydrating") {
+            self.metadataSyncing = false;
+            self.refreshIssuesPanel();
+            return;
+          }
+          self.startMetadataSyncPolling();
+        })
+        .catch(function () {
+          self.startMetadataSyncPolling();
+        });
     },
 
     csrfToken: function () {

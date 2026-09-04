@@ -24,6 +24,7 @@ from pullbox.core.exceptions import (
 )
 from pullbox.core.file_ops import LibraryFileRegistrationOutcome
 from pullbox.core.file_safety import classify_resource_safety_exception
+from pullbox.core.import_resources import bounded_async_map
 from pullbox.core.issue_numbers import (
     issue_number_text_matches_numeric,
     normalize_issue_number_text,
@@ -743,7 +744,6 @@ async def process_import_series_files(
             )
             or 0
         )
-        semaphore = asyncio.Semaphore(min(effective_worker_count, len(importable_file_ids)))
 
         async def locked_record_action(
             session: AsyncSession,
@@ -773,7 +773,7 @@ async def process_import_series_files(
                 return action
 
         async def process_one_file(imp_file_id: int) -> tuple[int, int]:
-            async with semaphore, session_factory() as worker_session:
+            async with session_factory() as worker_session:
                 worker_job = await worker_session.get(type(job), job_id)
                 worker_item = await worker_session.get(type(item), item_id)
                 if worker_job is None or worker_item is None:
@@ -809,11 +809,16 @@ async def process_import_series_files(
                     _setup_placeholder_targets=False,
                 )
 
-        results = await asyncio.gather(
-            *(process_one_file(int(imp_file_id)) for imp_file_id in importable_file_ids)
-        )
-        files_imported = sum(imported for imported, _failed in results)
-        files_failed = sum(failed for _imported, failed in results)
+        files_imported = 0
+        files_failed = 0
+        async with bounded_async_map(
+            process_one_file,
+            importable_file_ids,
+            workers=effective_worker_count,
+        ) as results:
+            async for imported, failed in results:
+                files_imported += imported
+                files_failed += failed
         reloaded_item = await session.get(type(item), item_id)
         if reloaded_item is not None:
             item = reloaded_item
@@ -1227,6 +1232,7 @@ async def process_import_series_files(
                     "issue_id": resolved_issue.id,
                     "issue_cv_id": resolved_issue.comicvine_id,
                     "library_file_id": library_file.id,
+                    "artifact_path": library_file.file_path,
                     "queued_at": datetime.now(UTC).isoformat(),
                 }
                 imp_file.diagnostics = diagnostics

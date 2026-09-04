@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -28,6 +28,7 @@ from pullbox.services.import_job_execution_progress import (
 )
 from pullbox.services.import_job_execution_types import ExecutionItemPlan
 from pullbox.services.import_progress_runtime import (
+    ImportGroupProgressPlan,
     ImportProgressFileProfile,
     ImportProgressSettings,
     import_group_progress_plan,
@@ -74,9 +75,9 @@ def _callback_kwargs(**overrides: Any) -> dict[str, Any]:
         "job_id": 42,
         "job": _job(),
         "job_started_at": datetime(2026, 6, 9, 12, 0, tzinfo=UTC),
+        "work_started_at": datetime.now(UTC) - timedelta(seconds=20),
         "progress_callback": object(),
         "progress_session_factory": None,
-        "estimate_remaining_seconds": lambda _started_at, _progress: 123,
         "group_progress_plans": {7: plan},
         "shared_progress_settings": settings,
         "group_progress_weights": [plan.total_weight],
@@ -109,6 +110,93 @@ def _callback_kwargs(**overrides: Any) -> dict[str, Any]:
     }
     kwargs.update(overrides)
     return kwargs
+
+
+@pytest.mark.parametrize("large_group", [False, True])
+@pytest.mark.parametrize("live_only", [False, True])
+async def test_file_eta_is_available_before_display_reaches_one_percent(
+    large_group: bool, live_only: bool
+) -> None:
+    events = []
+
+    async def capture_active(*_args, **kwargs):
+        events.append(kwargs["event"])
+
+    async def capture_live(_job, event, **_kwargs):
+        events.append(event)
+
+    kwargs = _callback_kwargs(
+        work_started_at=datetime.now(UTC) - timedelta(seconds=20),
+        emit_active_file_progress=capture_active,
+        emit_live_progress=capture_live,
+    )
+    if large_group:
+        plan = ImportGroupProgressPlan(2.0, tuple((99 + idx, 3.5) for idx in range(2000)))
+        kwargs["group_progress_plans"] = {7: plan}
+        kwargs["group_progress_weights"] = [plan.total_weight]
+    else:
+        kwargs["group_progress_weights"] *= 50_000
+        kwargs["total_groups"] = 50_000
+    callback = build_report_file_progress_callback(**kwargs)
+    await callback(
+        imp_file=_file(),
+        file_index=1,
+        total_files=2000 if large_group else 1,
+        stage="finalizing",
+        current=1,
+        total=1,
+        unit="file",
+        live_only=live_only,
+    )
+
+    assert events[-1].progress == 0
+    assert events[-1].estimated_seconds_remaining is not None
+    assert events[-1].estimated_seconds_remaining > 0
+
+
+@pytest.mark.parametrize("live_only", [False, True])
+async def test_metadata_eta_is_available_before_display_reaches_one_percent(
+    live_only: bool,
+) -> None:
+    events = []
+    kwargs = _callback_kwargs()
+
+    async def capture(_session, _job, event, _callback):
+        events.append(event)
+
+    async def capture_live(_job, event, **_kwargs):
+        events.append(event)
+
+    emitter = build_series_metadata_progress_emitter(
+        session=kwargs["session"],
+        job_id=42,
+        job=kwargs["job"],
+        job_started_at=datetime.now(UTC) - timedelta(seconds=20),
+        work_started_at=datetime.now(UTC) - timedelta(seconds=20),
+        progress_callback=kwargs["progress_callback"],
+        emit_progress=capture,
+        emit_live_progress=capture_live,
+        group_progress_plans=kwargs["group_progress_plans"],
+        shared_progress_settings=kwargs["shared_progress_settings"],
+        group_progress_weights=kwargs["group_progress_weights"] * 50_000,
+        stats=lambda: kwargs["stats"],
+        series_found=50_000,
+        revision_state=kwargs["revision_state"],
+    )
+    await emitter(
+        group_index=1,
+        total_groups=50_000,
+        series_id=7,
+        series_name="Alpha",
+        message="Preparing series records",
+        current_item_stage="series_records",
+        current_item_progress_pct=10,
+        live_only=live_only,
+    )
+
+    assert events[-1].progress == 0
+    assert events[-1].estimated_seconds_remaining is not None
+    assert events[-1].estimated_seconds_remaining > 0
 
 
 @pytest.mark.asyncio
@@ -331,7 +419,7 @@ async def test_report_file_progress_persists_durable_stage_boundary() -> None:
     assert event.series_found == 3
     assert event.total_files_imported == 4
     assert event.total_files_failed == 5
-    assert event.estimated_seconds_remaining == 123
+    assert event.estimated_seconds_remaining is None  # All planned file work is complete.
     assert event.current_item_kind == "file"
     assert event.current_item_stage == "finalizing"
     assert event.current_item_progress_pct == event.current_file_progress_pct
@@ -442,10 +530,10 @@ async def test_series_metadata_progress_emitter_persists_durable_event() -> None
         job_id=42,
         job=kwargs["job"],
         job_started_at=kwargs["job_started_at"],
+        work_started_at=kwargs["work_started_at"],
         progress_callback=kwargs["progress_callback"],
         emit_progress=emit_progress,
         emit_live_progress=emit_live_progress,
-        estimate_remaining_seconds=kwargs["estimate_remaining_seconds"],
         group_progress_plans=kwargs["group_progress_plans"],
         shared_progress_settings=kwargs["shared_progress_settings"],
         group_progress_weights=kwargs["group_progress_weights"],
@@ -504,10 +592,10 @@ async def test_series_metadata_progress_emitter_emits_live_heartbeat() -> None:
         job_id=42,
         job=kwargs["job"],
         job_started_at=kwargs["job_started_at"],
+        work_started_at=kwargs["work_started_at"],
         progress_callback=kwargs["progress_callback"],
         emit_progress=emit_progress,
         emit_live_progress=emit_live_progress,
-        estimate_remaining_seconds=kwargs["estimate_remaining_seconds"],
         group_progress_plans=kwargs["group_progress_plans"],
         shared_progress_settings=kwargs["shared_progress_settings"],
         group_progress_weights=kwargs["group_progress_weights"],
@@ -549,10 +637,10 @@ async def test_series_metadata_progress_emitter_noops_without_progress_callback(
         job_id=42,
         job=kwargs["job"],
         job_started_at=kwargs["job_started_at"],
+        work_started_at=kwargs["work_started_at"],
         progress_callback=None,
         emit_progress=lambda *args, **kwargs: persisted_events.append((args, kwargs)),
         emit_live_progress=lambda *args, **kwargs: live_events.append((args, kwargs)),
-        estimate_remaining_seconds=kwargs["estimate_remaining_seconds"],
         group_progress_plans=kwargs["group_progress_plans"],
         shared_progress_settings=kwargs["shared_progress_settings"],
         group_progress_weights=kwargs["group_progress_weights"],

@@ -6,6 +6,7 @@ import json
 import tempfile
 import time
 from contextlib import suppress
+from datetime import UTC, datetime
 from inspect import isawaitable, iscoroutine
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -68,14 +69,11 @@ from pullbox.services.import_file_split_series import (
 from pullbox.services.import_progress_runtime import (
     ScanReviewFileMatchProfile,
     ScanReviewProgressPlan,
-    ScanReviewSeriesMatchProfile,
     current_item_payload,
     estimate_remaining_work_seconds,
-    scan_review_analysis_weight,
     scan_review_file_match_weight,
     scan_review_file_target_weight,
     scan_review_progress_pct,
-    scan_review_series_match_weight,
 )
 from pullbox.services.import_source_metadata import (
     import_file_has_deferred_archive_metadata,
@@ -89,7 +87,6 @@ from pullbox.services.import_workflow_state import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
-    from datetime import datetime
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -219,6 +216,7 @@ async def _iter_eligible_import_series(
     series_ids: list[int] | None,
     raise_if_cancelled: RaiseIfCancelledFunc,
     page_size: int,
+    blocked_only_counts: dict[int, int] | None = None,
 ) -> AsyncIterator[tuple[int, ImportedSeries, bool]]:
     after_id = 0
     series_index = 0
@@ -233,10 +231,43 @@ async def _iter_eligible_import_series(
         )
         if not page:
             break
+        if blocked_only_counts is not None:
+            blocked_only_counts.clear()
+            blocked_only_counts.update(await _blocked_only_summary_counts(session, page))
         for page_index, item in enumerate(page):
             yield series_index, item, page_index == len(page) - 1
             series_index += 1
         after_id = page[-1].id
+
+
+async def _blocked_only_summary_counts(
+    session: AsyncSession, series_page: list[ImportedSeries]
+) -> dict[int, int]:
+    """Summarize simple safety-only groups once per bounded series page."""
+    ids = [
+        item.id
+        for item in series_page
+        if item.status == ImportSeriesStatus.MATCHED and item.series_id is None
+    ]
+    if not ids:
+        return {}
+    needs_detailed_review = sa_or(
+        ImportedFile.status != ImportedFileStatus.SAFETY_BLOCKED,
+        ImportedFile.diagnostics["kind"]
+        .as_string()
+        .in_(["metadata_conflict", "source_layout_review"]),
+    )
+    rows = await session.execute(
+        sa_select(ImportedFile.import_series_id, sa_func.count(ImportedFile.id))
+        .where(ImportedFile.import_series_id.in_(ids))
+        .group_by(ImportedFile.import_series_id)
+        .having(sa_func.sum(sa_case((needs_detailed_review, 1), else_=0)) == 0)
+    )
+    return {int(series_id): int(count) for series_id, count in rows}
+
+
+def _review_summary_weight(file_count: int) -> float:
+    return 1.0 + max(file_count, 0) * 0.1
 
 
 async def _load_file_matching_profile_page(
@@ -334,6 +365,7 @@ async def _build_file_matching_plan(
     completed_file_phase_units = 0
     file_match_weight = 0.0
     completed_file_match_weight = 0.0
+    summary_weight = 0.0
     completed_target_series_ids: set[int] = set()
     after_id = 0
     while True:
@@ -349,6 +381,7 @@ async def _build_file_matching_plan(
             break
         for profile in profiles:
             series_count += 1
+            summary_weight += _review_summary_weight(profile.file_count)
             total_file_phase_units += 1 + profile.file_count
             file_profile = ScanReviewFileMatchProfile(
                 file_count=profile.file_count,
@@ -367,28 +400,26 @@ async def _build_file_matching_plan(
                 completed_target_series_ids.add(profile.id)
         after_id = profiles[-1].id
 
-    series_match_profile_count = max(
-        int(job.series_matched or 0) + int(job.series_no_match or 0),
-        series_count,
-    )
-    analysis_series_count = max(
-        int(job.series_found or 0),
-        series_match_profile_count,
-    )
-    analysis_weight = scan_review_analysis_weight(analysis_series_count)
-    series_match_weight = series_match_profile_count * scan_review_series_match_weight(
-        ScanReviewSeriesMatchProfile(direct_match=False)
+    # Replan only remaining work at the persisted phase boundary. Resolved files
+    # need no matching, but their summaries and cross-series review still do.
+    remaining_weight = max(file_match_weight - completed_file_match_weight, 0.0)
+    remaining_weight += summary_weight + max(1.0, series_count * 0.1)
+    progress_start = max(
+        35,
+        min(98, int((job.progress_snapshot or {}).get("progress", SCAN_PROGRESS_FILE_MATCH_START))),
     )
     return _FileMatchingPlan(
         series_count=series_count,
         total_file_phase_units=total_file_phase_units,
         completed_file_phase_units=completed_file_phase_units,
-        completed_file_match_weight=completed_file_match_weight,
+        completed_file_match_weight=0.0,
         completed_target_series_ids=frozenset(completed_target_series_ids),
         progress_plan=ScanReviewProgressPlan(
-            analysis_weights=(analysis_weight,) if analysis_weight else (),
-            series_match_weights=(series_match_weight,) if series_match_weight else (),
-            file_match_weights=(file_match_weight,) if file_match_weight else (),
+            analysis_weights=(),
+            series_match_weights=(),
+            file_match_weights=(remaining_weight,),
+            progress_start=progress_start,
+            progress_end=98,
         ),
     )
 
@@ -700,6 +731,8 @@ async def _finalize_import_series_file_groups(
         ):
             for cohort in cohorts:
                 await raise_if_cancelled(session, job.id)
+                if cohort.file_count < 2:
+                    continue
                 files = await _load_file_target_cohort(
                     session,
                     job_id=job.id,
@@ -1220,6 +1253,7 @@ async def run_import_file_matching(
 ) -> None:
     """Match individual imported files to issue targets for review."""
     started_at = time.monotonic()
+    work_started_at = datetime.now(UTC)
     last_checkpoint_at = time.monotonic()
     matching_plan = await _build_file_matching_plan(
         session,
@@ -1281,6 +1315,7 @@ async def run_import_file_matching(
         scan_review_plan=progress_plan,
         phase_start=SCAN_PROGRESS_FILE_MATCH_START,
         phase_end=SCAN_PROGRESS_FILE_MATCH_END,
+        work_started_at=work_started_at,
     )
 
     async def emit_file_matching_progress(
@@ -1292,9 +1327,9 @@ async def run_import_file_matching(
         effective_file_weight = completed_file_match_weight + (
             active_target_weight * max(min(current_progress, 100), 0) / 100
         )
-        overall_file_progress = round(
-            (effective_file_weight / max(progress_plan.file_match_weight, 1.0)) * 100
-        )
+        overall_file_progress = (
+            effective_file_weight / max(progress_plan.file_match_weight, 1.0)
+        ) * 100
         kwargs["current_work_unit_progress_pct"] = overall_file_progress
         await emit_weighted_file_matching_progress(item, 0, **kwargs)
 
@@ -1549,13 +1584,113 @@ async def run_import_file_matching(
             int(max_duplicate_group_id or 0),
         )
 
+    async def emit_review_progress(message: str, *, complete: bool = False) -> None:
+        if progress_callback is None:
+            return
+        await emit_progress(
+            session,
+            job,
+            ImportProgressEvent(
+                job_id=job.id,
+                status=ImportJobStatus.FILE_MATCHING,
+                phase="file_matching",
+                progress=(
+                    99
+                    if complete
+                    else scan_review_progress_pct(
+                        progress_plan, completed_weight=completed_file_match_weight
+                    )
+                ),
+                message=message,
+                estimated_seconds_remaining=(
+                    None
+                    if complete
+                    else estimate_remaining_work_seconds(
+                        work_started_at,
+                        completed_units=completed_file_match_weight,
+                        total_units=progress_plan.total_weight,
+                    )
+                ),
+                **current_item_payload(
+                    kind="scan", stage="file_matching", progress_pct=100 if complete else None
+                ),
+                **job_stats(job),
+            ),
+            progress_callback,
+        )
+
+    async def checkpoint_summary(
+        item: ImportedSeries,
+        summary: FileMatchSeriesSummary,
+        *,
+        series_idx: int,
+        page_end: bool,
+    ) -> None:
+        nonlocal total_found, total_matched, total_duplicate, total_already_owned
+        nonlocal total_no_match, total_conflict, last_checkpoint_at, completed_file_match_weight
+        completed_file_match_weight += _review_summary_weight(summary.found)
+        total_found += summary.found
+        total_matched += summary.matched
+        total_duplicate += summary.duplicate
+        total_already_owned += summary.already_owned
+        total_no_match += summary.no_match
+        total_conflict += summary.conflict
+        # Inventory is already known; partial summary counts must not shrink it.
+        job.total_files_found = max(int(job.total_files_found or 0), total_found)
+        job.total_files_matched = total_matched
+        job.total_files_duplicate = total_duplicate
+        job.total_files_already_owned = total_already_owned
+        job.total_files_no_match = total_no_match
+        job.total_files_conflict = total_conflict
+        should_checkpoint = (
+            series_idx == 0
+            or page_end
+            or series_idx == matching_plan.series_count - 1
+            or time.monotonic() - last_checkpoint_at >= 0.5
+        )
+        if not should_checkpoint:
+            return
+        await raise_if_cancelled(session, job.id)
+        await session.flush()
+        await session.commit()
+        last_checkpoint_at = time.monotonic()
+        await emit_file_matching_progress(
+            item,
+            completed_file_phase_units,
+            message=f"Prepared file review for {item.raw_series_name}",
+            current_item_progress_pct=100,
+            current_work_unit_progress_pct=0,
+        )
+        if progress_callback:
+            await maybe_slow_item_delay()
+
+    await emit_review_progress("Preparing file matching and review summaries...")
+    blocked_only_counts: dict[int, int] = {}
+    blocked_only_series = 0
     async for series_idx, imp_series, series_page_end in _iter_eligible_import_series(
         session,
         job_id=job.id,
         series_ids=series_ids,
         raise_if_cancelled=raise_if_cancelled,
         page_size=_SERIES_PAGE_SIZE,
+        blocked_only_counts=blocked_only_counts,
     ):
+        if imp_series.id in blocked_only_counts:
+            count = blocked_only_counts[imp_series.id]
+            blocked_only_series += 1
+            imp_series.files_total = count
+            imp_series.files_matched = 0
+            imp_series.files_duplicate = 0
+            imp_series.files_already_owned = 0
+            imp_series.files_no_match = 0
+            imp_series.files_conflict = 0
+            await checkpoint_summary(
+                imp_series,
+                FileMatchSeriesSummary(count, 0, 0, 0, 0, 0),
+                series_idx=series_idx,
+                page_end=series_page_end,
+            )
+            continue
         await raise_if_cancelled(session, job.id)
         duplicate_series = is_duplicate_series(imp_series)
 
@@ -1691,6 +1826,8 @@ async def run_import_file_matching(
             retained_file_count += len(matched_page)
             processed_file_count += len(file_page)
             series_had_processed_files = series_had_processed_files or bool(matched_page)
+            for split_id in created_split_series_ids:
+                blocked_only_counts.pop(split_id, None)
             split_series_ids.update(created_split_series_ids)
             while len(split_series_ids) >= _SERIES_PAGE_SIZE:
                 split_batch = sorted(split_series_ids)[:_SERIES_PAGE_SIZE]
@@ -1732,8 +1869,6 @@ async def run_import_file_matching(
             raise_if_cancelled=raise_if_cancelled,
             job_id=job.id,
         )
-        if not series_summary.found:
-            continue
         if series_summary.series_invalidated:
             invalidation_reason = (series_summary.invalidation_diagnostics or {}).get("reason")
             await log_event(
@@ -1750,70 +1885,14 @@ async def run_import_file_matching(
                 diagnostics=series_summary.invalidation_diagnostics,
             )
 
-        total_found += series_summary.found
-        total_matched += series_summary.matched
-        total_duplicate += series_summary.duplicate
-        total_already_owned += series_summary.already_owned
-        total_no_match += series_summary.no_match
-        total_conflict += series_summary.conflict
-        job.total_files_found = total_found
-        job.total_files_matched = total_matched
-        job.total_files_duplicate = total_duplicate
-        job.total_files_already_owned = total_already_owned
-        job.total_files_no_match = total_no_match
-        job.total_files_conflict = total_conflict
-
-        should_checkpoint = (
-            (series_idx == 0)
-            or series_page_end
-            or series_idx == matching_plan.series_count - 1
-            or (time.monotonic() - last_checkpoint_at) >= 0.5
+        await checkpoint_summary(
+            imp_series, series_summary, series_idx=series_idx, page_end=series_page_end
         )
-        if should_checkpoint:
-            await session.flush()
-            await session.commit()
-            last_checkpoint_at = time.monotonic()
-
-        if progress_callback and should_checkpoint:
-            completed_weight = (
-                progress_plan.analysis_weight
-                + progress_plan.series_match_weight
-                + completed_file_match_weight
-            )
-            progress = scan_review_progress_pct(
-                progress_plan,
-                completed_weight=completed_weight,
-            )
-            await emit_progress(
-                session,
-                job,
-                ImportProgressEvent(
-                    job_id=job.id,
-                    status=ImportJobStatus.FILE_MATCHING,
-                    phase="file_matching",
-                    progress=progress,
-                    message=f"Matched files in {imp_series.raw_series_name}",
-                    current_series=imp_series.raw_series_name,
-                    estimated_seconds_remaining=estimate_remaining_work_seconds(
-                        job.scan_completed_at or job.match_completed_at or job.scan_started_at,
-                        completed_units=completed_weight,
-                        total_units=progress_plan.total_weight,
-                    ),
-                    **current_item_payload(
-                        kind="series",
-                        stage="file_matching",
-                        name=imp_series.raw_series_name,
-                        progress_pct=100,
-                    ),
-                    **job_stats(job),
-                ),
-                progress_callback,
-            )
-            await maybe_slow_item_delay()
 
     if split_series_ids:
         await process_split_series_batch(sorted(split_series_ids))
 
+    await emit_review_progress("Finalizing review summaries and cross-series conflicts...")
     if rebuild_cross_conflicts:
         conflict_group_counter = await _rebuild_cross_series_conflicts(
             session,
@@ -1870,6 +1949,7 @@ async def run_import_file_matching(
         files_already_owned=job.total_files_already_owned,
         files_no_match=job.total_files_no_match,
         files_conflict=job.total_files_conflict,
+        blocked_only_series=blocked_only_series,
         duration_ms=round((time.monotonic() - started_at) * 1000),
         series_processed=series_processed,
         files_processed=files_processed,
@@ -1879,6 +1959,7 @@ async def run_import_file_matching(
         deferred_metadata_loads=deferred_metadata_loads,
         provider_cache_metrics=_provider_cache_metrics(metadata_provider),
     )
+    await emit_review_progress("File review summaries ready", complete=True)
 
 
 def _file_has_deferred_archive_metadata(imp_file: ImportedFile) -> bool:

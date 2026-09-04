@@ -11,6 +11,11 @@ from sqlalchemy import select as sa_select
 
 from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.series import IssueCatalogState, Series
+from pullbox.services.import_metadata_priority import catalog_metadata_work
+from pullbox.services.import_metadata_progress import (
+    catalog_hydration_import_job_ids,
+    track_import_metadata_progress,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -18,6 +23,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = structlog.get_logger(__name__)
+
+COMICVINE_BULK_BATCH_SIZE = 5_000
 
 catalog_hydration_tasks: set[asyncio.Task[None]] = set()
 _catalog_hydration_semaphore: asyncio.Semaphore | None = None
@@ -51,35 +58,31 @@ def schedule_catalog_hydration(
     series_id: int,
     search_on_add: bool,
 ) -> None:
-    """Queue full catalog hydration after the Step 4 file-placement hot path."""
+    """Nudge the singleton catalog drain after the Step 4 file-placement hot path."""
     if session_factory is None:
         return
-    hydration_methods = _catalog_hydration_methods(series_service)
-    if hydration_methods is None:
+    if _catalog_hydration_methods(series_service) is None:
         return
-    prefetch_comicvine_bundle, add_from_comicvine_prefetched = hydration_methods
+    if any(not task.done() for task in catalog_hydration_tasks):
+        return
 
     async def run_hydration() -> None:
-        async with catalog_hydration_gate():
+        _ = series_id, search_on_add
+        while True:
             try:
-                await run_catalog_hydration(
+                await run_pending_catalog_hydration(
                     session_factory,
-                    series_id=series_id,
-                    search_on_add=search_on_add,
-                    prefetch_comicvine_bundle=prefetch_comicvine_bundle,
-                    add_from_comicvine_prefetched=add_from_comicvine_prefetched,
+                    series_service=series_service,
                 )
             except Exception as exc:
-                await mark_catalog_hydration_failed(
-                    session_factory,
-                    series_id=series_id,
-                    error=str(exc),
-                )
                 logger.warning(
-                    "import_catalog_hydration_failed",
-                    series_id=series_id,
+                    "import_catalog_hydration_drain_failed",
                     error=str(exc),
                 )
+                return
+            await asyncio.sleep(0)
+            if not await load_pending_catalog_hydration(session_factory, limit=1):
+                return
 
     task = asyncio.create_task(run_hydration())
     catalog_hydration_tasks.add(task)
@@ -100,7 +103,21 @@ async def run_pending_catalog_hydration(
     pending = await load_pending_catalog_hydration(session_factory, limit=limit)
     recovered = 0
 
-    async with catalog_hydration_gate():
+    job_ids = await catalog_hydration_import_job_ids(session_factory)
+    async with (
+        catalog_metadata_work(len(pending)) as priority,
+        track_import_metadata_progress(session_factory, job_ids=job_ids),
+        catalog_hydration_gate(),
+    ):
+        batch_methods = _catalog_hydration_batch_methods(series_service)
+        if batch_methods is not None and pending:
+            return await _run_pending_catalog_hydration_batch(
+                session_factory,
+                pending=pending,
+                batch_methods=batch_methods,
+                add_from_comicvine_prefetched=add_from_comicvine_prefetched,
+                priority=priority,
+            )
         for request in pending:
             try:
                 hydrated = await run_catalog_hydration(
@@ -122,6 +139,8 @@ async def run_pending_catalog_hydration(
                     error=str(exc),
                 )
                 continue
+            finally:
+                await priority.complete_one()
 
             if not hydrated:
                 continue
@@ -132,6 +151,170 @@ async def run_pending_catalog_hydration(
                 series_id=request.series_id,
             )
 
+    return recovered
+
+
+def _catalog_hydration_batch_methods(
+    series_service: Any,
+) -> (
+    tuple[
+        Callable[..., Awaitable[Any]],
+        Callable[..., Awaitable[Any]],
+        Callable[..., Awaitable[Any]],
+    ]
+    | None
+):
+    methods = (
+        getattr(series_service, "prefetch_comicvine_profiles", None),
+        getattr(series_service, "prefetch_comicvine_issue_catalogs", None),
+        getattr(series_service, "upsert_comicvine_profile", None),
+    )
+    if not all(callable(method) for method in methods):
+        return None
+    return methods  # type: ignore[return-value]
+
+
+async def _run_pending_catalog_hydration_batch(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    pending: list[PendingCatalogHydration],
+    batch_methods: tuple[
+        Callable[..., Awaitable[Any]],
+        Callable[..., Awaitable[Any]],
+        Callable[..., Awaitable[Any]],
+    ],
+    add_from_comicvine_prefetched: Callable[..., Awaitable[Series]],
+    priority: Any,
+) -> int:
+    """Persist visible profiles first, then complete issue catalogs in bulk."""
+    planned: list[tuple[PendingCatalogHydration, CatalogHydrationPlan]] = []
+    for request in pending:
+        plan = await load_catalog_hydration_plan(
+            session_factory,
+            series_id=request.series_id,
+            search_on_add=request.search_on_add,
+            only_if_hydrating=True,
+        )
+        if plan is None:
+            await priority.complete_one()
+            continue
+        planned.append((request, plan))
+
+    comicvine_ids = [plan.comicvine_id for _request, plan in planned]
+    if not comicvine_ids:
+        return 0
+
+    recovered = 0
+    for start in range(0, len(planned), COMICVINE_BULK_BATCH_SIZE):
+        recovered += await _run_planned_catalog_hydration_batch(
+            session_factory,
+            planned=planned[start : start + COMICVINE_BULK_BATCH_SIZE],
+            batch_methods=batch_methods,
+            add_from_comicvine_prefetched=add_from_comicvine_prefetched,
+            priority=priority,
+        )
+    return recovered
+
+
+async def _run_planned_catalog_hydration_batch(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    planned: list[tuple[PendingCatalogHydration, CatalogHydrationPlan]],
+    batch_methods: tuple[
+        Callable[..., Awaitable[Any]],
+        Callable[..., Awaitable[Any]],
+        Callable[..., Awaitable[Any]],
+    ],
+    add_from_comicvine_prefetched: Callable[..., Awaitable[Series]],
+    priority: Any,
+) -> int:
+    """Hydrate one provider-safe batch without failing unrelated backlog rows."""
+    prefetch_profiles, prefetch_catalogs, upsert_profile = batch_methods
+    comicvine_ids = [plan.comicvine_id for _request, plan in planned]
+
+    try:
+        profiles = await prefetch_profiles(comicvine_ids)
+    except Exception as exc:
+        for request, _plan in planned:
+            await mark_catalog_hydration_failed(
+                session_factory,
+                series_id=request.series_id,
+                error=str(exc),
+            )
+            await priority.complete_one()
+        return 0
+
+    eligible: list[tuple[PendingCatalogHydration, CatalogHydrationPlan]] = []
+    for request, plan in planned:
+        profile = profiles.get(plan.comicvine_id)
+        if profile is None:
+            await mark_catalog_hydration_failed(
+                session_factory,
+                series_id=request.series_id,
+                error="ComicVine did not return the requested series profile",
+            )
+            await priority.complete_one()
+            continue
+        try:
+            async with session_factory() as session:
+                state = await session.scalar(
+                    sa_select(Series.issue_catalog_state).where(Series.id == request.series_id)
+                )
+                if state != IssueCatalogState.HYDRATING:
+                    await priority.complete_one()
+                    continue
+                await upsert_profile(session, plan.comicvine_id, profile)
+                await session.commit()
+            eligible.append((request, plan))
+        except Exception as exc:
+            await mark_catalog_hydration_failed(
+                session_factory,
+                series_id=request.series_id,
+                error=str(exc),
+            )
+            await priority.complete_one()
+
+    if not eligible:
+        return 0
+
+    try:
+        catalogs = await prefetch_catalogs([plan.comicvine_id for _request, plan in eligible])
+    except Exception as exc:
+        for request, _plan in eligible:
+            await mark_catalog_hydration_failed(
+                session_factory,
+                series_id=request.series_id,
+                error=str(exc),
+            )
+            await priority.complete_one()
+        return 0
+
+    recovered = 0
+    for request, plan in eligible:
+        try:
+            profile = profiles[plan.comicvine_id]
+            summaries = catalogs.get(plan.comicvine_id)
+            if summaries is None:
+                raise ValueError("ComicVine did not return the requested issue catalog")
+            persisted = await _persist_catalog_hydration(
+                session_factory,
+                series_id=request.series_id,
+                plan=plan,
+                series_meta=profile,
+                issue_summaries=summaries,
+                add_from_comicvine_prefetched=add_from_comicvine_prefetched,
+            )
+            if persisted:
+                recovered += 1
+                logger.info("import_catalog_hydration_recovered", series_id=request.series_id)
+        except Exception as exc:
+            await mark_catalog_hydration_failed(
+                session_factory,
+                series_id=request.series_id,
+                error=str(exc),
+            )
+        finally:
+            await priority.complete_one()
     return recovered
 
 
@@ -201,6 +384,7 @@ async def run_catalog_hydration(
         session_factory,
         series_id=series_id,
         search_on_add=search_on_add,
+        only_if_hydrating=True,
     )
     if plan is None:
         return False
@@ -208,6 +392,27 @@ async def run_catalog_hydration(
     # ComicVine can be slow for giant series. Fetch outside any DB session so
     # the UI and active import writer keep access to the pool while we wait.
     series_meta, issue_summaries = await prefetch_comicvine_bundle(plan.comicvine_id)
+
+    return await _persist_catalog_hydration(
+        session_factory,
+        series_id=series_id,
+        plan=plan,
+        series_meta=series_meta,
+        issue_summaries=issue_summaries,
+        add_from_comicvine_prefetched=add_from_comicvine_prefetched,
+    )
+
+
+async def _persist_catalog_hydration(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    series_id: int,
+    plan: CatalogHydrationPlan,
+    series_meta: Any,
+    issue_summaries: list[Any],
+    add_from_comicvine_prefetched: Callable[..., Awaitable[Series]],
+) -> bool:
+    """Persist one prefetched catalog only while its exact row still needs it."""
 
     async with session_factory() as hydrate_session:
         # A cancellation rollback can delete the series while the provider
@@ -219,6 +424,7 @@ async def run_catalog_hydration(
             .where(
                 Series.id == series_id,
                 Series.comicvine_id == plan.comicvine_id,
+                Series.issue_catalog_state == IssueCatalogState.HYDRATING,
             )
             .with_for_update()
         )
@@ -241,10 +447,13 @@ async def load_catalog_hydration_plan(
     *,
     series_id: int,
     search_on_add: bool,
+    only_if_hydrating: bool = False,
 ) -> CatalogHydrationPlan | None:
     async with session_factory() as session:
         series = await session.get(Series, series_id)
         if series is None:
+            return None
+        if only_if_hydrating and series.issue_catalog_state != IssueCatalogState.HYDRATING:
             return None
         if series.comicvine_id is None:
             msg = "Series has no ComicVine ID"

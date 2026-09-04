@@ -420,8 +420,8 @@ async def test_hydration_failure_never_publishes_earlier_successful_batches(
 async def test_real_request_plumbing_keeps_limiter_and_hides_key(
     provider: ComicVineProvider,
 ) -> None:
-    limiter = AsyncMock()
-    provider._rate_limiter.acquire = limiter  # type: ignore[method-assign]
+    coordinator = AsyncMock()
+    provider._rate_coordinator = coordinator
     response = httpx.Response(
         200,
         json={"status_code": 1, "results": _arc()},
@@ -430,7 +430,10 @@ async def test_real_request_plumbing_keeps_limiter_and_hides_key(
     provider._client.get = AsyncMock(return_value=response)  # type: ignore[method-assign]
     result = await provider.get_story_arc("55766")
     assert result.membership_complete
-    limiter.assert_awaited_once()
+    coordinator.acquire.assert_awaited_once_with(
+        "story_arc",
+        requests_per_second=1,
+    )
     assert provider._client.get.call_args.kwargs["params"]["api_key"] == "never-echo-this-key"
 
 

@@ -4,8 +4,10 @@ import sqlite3
 import threading
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, call
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -21,16 +23,56 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.operation_progress import OperationProgress, OperationProgressState
 from pullbox.models.series import Series
 from pullbox.services import import_comicinfo_enrichment as enrichment_module
 from pullbox.services.import_comicinfo_enrichment import (
     PreparedComicInfoEnrichment,
+    _run_import_comicinfo_enrichment_while_fenced,
     run_import_comicinfo_enrichment,
     run_pending_import_comicinfo_enrichment,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+async def test_comicinfo_prefetch_chunks_provider_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefetch_issue_metadata = AsyncMock()
+    monkeypatch.setattr(enrichment_module, "COMICVINE_BULK_BATCH_SIZE", 2, raising=False)
+    monkeypatch.setattr(
+        enrichment_module,
+        "_import_job_is_completed",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        enrichment_module,
+        "_load_pending_imported_file_ids",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        enrichment_module,
+        "_load_pending_issue_cv_ids",
+        AsyncMock(return_value=[101, 102, 103]),
+    )
+    monkeypatch.setattr(enrichment_module, "wait_for_comicinfo_turn", AsyncMock())
+
+    await _run_import_comicinfo_enrichment_while_fenced(
+        AsyncMock(),
+        job_id=7,
+        build_comicinfo_payload=AsyncMock(),
+        apply_comicinfo=AsyncMock(),
+        log_event=AsyncMock(),
+        prefetch_issue_metadata=prefetch_issue_metadata,
+    )
+
+    assert prefetch_issue_metadata.await_args_list == [
+        call([101, 102]),
+        call([103]),
+    ]
 
 
 @pytest.mark.asyncio
@@ -185,6 +227,7 @@ async def test_run_import_comicinfo_enrichment_rewrites_pending_library_file(
 
     monkeypatch.setattr(AsyncSession, "commit", commit_with_one_transient_lock)
     monkeypatch.setattr(enrichment_module, "sqlite_lock_retry_delay", lambda _attempt: 0.0)
+    prefetch_issue_metadata = AsyncMock()
 
     await run_import_comicinfo_enrichment(
         session_factory,
@@ -192,6 +235,7 @@ async def test_run_import_comicinfo_enrichment_rewrites_pending_library_file(
         build_comicinfo_payload=build_payload,
         apply_comicinfo=apply_comicinfo,
         log_event=log_event,
+        prefetch_issue_metadata=prefetch_issue_metadata,
     )
 
     assert applied == [
@@ -209,6 +253,7 @@ async def test_run_import_comicinfo_enrichment_rewrites_pending_library_file(
     assert apply_thread_ids != [event_loop_thread_id]
     assert lock_injected is True
     assert build_calls == 2
+    prefetch_issue_metadata.assert_awaited_once_with([1234567])
     async with session_factory() as session:
         imported_file = await session.get(ImportedFile, imported_file_id)
         issue = await session.get(Issue, issue_id)
@@ -221,6 +266,123 @@ async def test_run_import_comicinfo_enrichment_rewrites_pending_library_file(
         assert imported_file.diagnostics["comicinfo_enrichment"]["status"] == "complete"
         assert imported_file.diagnostics["comicinfo_enrichment"]["library_file_id"] is not None
         assert issue.description == "Refreshed ComicVine summary."
+        progress = (await session.scalars(select(OperationProgress))).one_or_none()
+        assert progress is not None
+        assert progress.operation_key == f"metadata:{job_id}"
+        assert progress.state == OperationProgressState.COMPLETED
+        assert progress.overall_percent == 100
+        assert progress.item_key is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_enrichment_rejects_reused_library_file_identity(
+    async_engine,
+    tmp_path: Path,
+) -> None:
+    session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    replacement_path = tmp_path / "Replacement Issue.cbz"
+    replacement_path.write_text("must not change")
+
+    async with session_factory() as session:
+        root = LibraryRoot(name="Comics", path=str(tmp_path), enabled=True)
+        original_series = Series(
+            title="Original Series",
+            sort_title="original series",
+            comicvine_id=1001,
+        )
+        replacement_series = Series(
+            title="Replacement Series",
+            sort_title="replacement series",
+            comicvine_id=2001,
+        )
+        session.add_all([root, original_series, replacement_series])
+        await session.flush()
+        original_issue = Issue(
+            series_id=original_series.id,
+            issue_number=1.0,
+            comicvine_id=1002,
+            issue_type=IssueType.ISSUE,
+            status=IssueStatus.WANTED,
+        )
+        replacement_issue = Issue(
+            series_id=replacement_series.id,
+            issue_number=1.0,
+            comicvine_id=2002,
+            issue_type=IssueType.ISSUE,
+            status=IssueStatus.WANTED,
+        )
+        session.add_all([original_issue, replacement_issue])
+        await session.flush()
+        library_file = LibraryFile(
+            file_path=str(replacement_path),
+            file_name=replacement_path.name,
+            file_size=replacement_path.stat().st_size,
+            file_format=FileFormat.CBZ,
+            file_modified_at=datetime.now(tz=UTC),
+            match_confidence=MatchConfidence.HIGH,
+            issue_id=replacement_issue.id,
+            library_root_id=root.id,
+        )
+        job = ImportJob(
+            source_path=str(tmp_path),
+            source_type=ImportSourceType.FILESYSTEM,
+            status=ImportJobStatus.COMPLETED,
+        )
+        session.add_all([library_file, job])
+        await session.flush()
+        imported_series = ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name="Original Series",
+            status=ImportSeriesStatus.IMPORTED,
+            series_id=original_series.id,
+        )
+        session.add(imported_series)
+        await session.flush()
+        imported_file = ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imported_series.id,
+            file_path=str(tmp_path / "original-source.cbz"),
+            file_name="original-source.cbz",
+            file_size=100,
+            file_format="cbz",
+            status=ImportedFileStatus.IMPORTED,
+            library_file_id=library_file.id,
+            diagnostics={
+                "comicinfo_enrichment": {
+                    "status": "pending",
+                    "issue_id": original_issue.id,
+                    "issue_cv_id": original_issue.comicvine_id,
+                    "library_file_id": library_file.id,
+                    "artifact_path": str(tmp_path / "original-destination.cbz"),
+                }
+            },
+        )
+        session.add(imported_file)
+        await session.commit()
+        job_id = job.id
+        imported_file_id = imported_file.id
+
+    build_payload = AsyncMock()
+    apply_comicinfo = AsyncMock()
+    log_event = AsyncMock()
+
+    await run_import_comicinfo_enrichment(
+        session_factory,
+        job_id=job_id,
+        build_comicinfo_payload=build_payload,
+        apply_comicinfo=apply_comicinfo,
+        log_event=log_event,
+    )
+
+    build_payload.assert_not_awaited()
+    apply_comicinfo.assert_not_awaited()
+    assert replacement_path.read_text() == "must not change"
+    async with session_factory() as session:
+        imported_file = await session.get(ImportedFile, imported_file_id)
+        assert imported_file is not None
+        details = imported_file.diagnostics["comicinfo_enrichment"]
+        assert details["status"] == "failed"
+        assert "no longer matches" in details["error"]
 
 
 @pytest.mark.asyncio

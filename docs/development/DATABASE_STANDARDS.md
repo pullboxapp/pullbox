@@ -533,9 +533,10 @@ Pullbox also includes sidecar recovery logic for stale or corrupt `-wal` and
 ### 5.2 Maintenance Coordination
 
 Database-size health thresholds allow for large collections and retained logs:
-the size sub-check is healthy through 1 GiB (1024 MiB), degraded above 1 GiB,
-and unhealthy above 2 GiB (2048 MiB). These are advisory health thresholds, not
-storage limits or an automatic cleanup policy. Disk-space, integrity, query
+the size sub-check reports the current file size as informational data. Database
+health is determined by integrity, representative latency, bloat, and available
+storage rather than a fixed size threshold. The file-size observation does not
+impose a storage limit or an automatic cleanup policy. Disk-space, integrity, query
 latency, and database-bloat checks remain independent; a smaller database does
 not suppress failures in those checks.
 

@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from pullbox.models import Base
 from pullbox.models.import_job import (
     ImportJob,
     ImportJobAction,
@@ -24,6 +25,16 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncEngine
+
+
+@pytest.fixture
+async def async_engine(tmp_path):
+    """Give concurrent progress readers and rollback writers separate connections."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'rollback.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
 
 
 async def _seed_rollback_job(

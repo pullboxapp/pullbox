@@ -492,9 +492,24 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         async def _resume_deferred_import_metadata() -> tuple[int, int]:
             async with factory() as session:
                 import_service = await build_import_service(session)
-            comicinfo_jobs = await import_service.recover_pending_comicinfo_enrichment(factory)
-            hydrated_series = await import_service.recover_pending_catalog_hydration(factory)
-            return comicinfo_jobs, hydrated_series
+            # Each lane owns its sessions and already shares provider rate limiting.
+            # A long archive rewrite queue must not block visible catalog hydration.
+            results = await asyncio.gather(
+                import_service.recover_pending_comicinfo_enrichment(factory),
+                import_service.recover_pending_catalog_hydration(factory),
+                return_exceptions=True,
+            )
+            for lane, result in zip(("comicinfo", "catalog"), results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "import_metadata_lane_recovery_failed",
+                        lane=lane,
+                        exc_info=result,
+                    )
+            return (
+                results[0] if isinstance(results[0], int) else 0,
+                results[1] if isinstance(results[1], int) else 0,
+            )
 
         import_metadata_recovery_task = asyncio.create_task(_resume_deferred_import_metadata())
         _startup_background_tasks.add(import_metadata_recovery_task)

@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Improved Mylar and folder scan throughput with resource-capped archive
+  inspection, batched review inserts, and fewer unnecessary duplicate checks.
+  Corrected current-item scan progress and unknown time estimates, and bounded
+  pending file-processing work without weakening cancellation or archive safety.
 - Reconciled stale Mylar filenames with uniquely verified same-folder comic
   files, including `#1` versus `001` naming changes, without weakening identity
   or archive safety checks. Added a dry-run-first offline repair for saved

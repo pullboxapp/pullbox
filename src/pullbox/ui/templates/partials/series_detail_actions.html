@@ -1,6 +1,7 @@
 {% set primary_action_classes = "btn-primary" %}
 {% set secondary_action_classes = "btn-ghost" %}
 {% set danger_action_classes = "btn-danger" %}
+{% set metadata_syncing = series.issue_catalog_state and series.issue_catalog_state.value == 'hydrating' %}
 
 <div data-testid="series-detail-actions" class="series-domain-actions-buttons">
   <div
@@ -49,14 +50,17 @@
   <button
     data-testid="series-action-refresh"
     @click="refreshMetadata()"
-    :disabled="refreshing"
+    :disabled="refreshing || metadataSyncing"
+    :aria-disabled="metadataSyncing ? 'true' : 'false'"
+    :title="metadataSyncing ? 'Initial metadata sync is in progress' : ''"
+    {% if metadata_syncing %}disabled aria-disabled="true" title="Initial metadata sync is in progress"{% endif %}
     class="{{ secondary_action_classes }}"
   >
     <span x-show="!refreshing" class="flex items-center gap-1.5">
       <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992V4.356m-1.636 12.728a9 9 0 11-2.287-9.051L21 8.25" />
       </svg>
-      Refresh metadata
+      <span x-text="metadataSyncing ? 'Metadata syncing...' : 'Refresh metadata'">{% if metadata_syncing %}Metadata syncing...{% else %}Refresh metadata{% endif %}</span>
     </span>
     <span x-show="refreshing" x-cloak class="flex items-center gap-1.5">
       <svg class="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24">

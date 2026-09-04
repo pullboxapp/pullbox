@@ -222,7 +222,8 @@ async def test_saved_reconciliation_is_dry_run_first_idempotent_and_keeps_matche
     assert await db_session.scalar(select(func.count()).select_from(ImportedFile)) == 1
     assert actual.status is ImportedFileStatus.MATCHED
     assert actual.matched_issue_cv_id == 703887
-    assert series.files_total == series.file_count == job.total_files_found == 1
+    assert series.files_total == series.file_count == 1
+    assert job.total_files_found == 2
     assert job.status is ImportJobStatus.REVIEW
     assert Path(actual.file_path).read_bytes() == original
     assert (

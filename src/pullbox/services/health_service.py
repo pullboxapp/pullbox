@@ -148,7 +148,12 @@ class HealthService:
         for factory, component, check_name in checks:
             if component == "comicvine" and skip_comicvine:
                 continue
-            results = await self._safe_run(factory(), component, check_name)
+            results = await self._safe_run(
+                factory(),
+                component,
+                check_name,
+                session=session,
+            )
             outcomes.extend(results)
 
         await self._persist_outcomes(session, outcomes)
@@ -183,7 +188,12 @@ class HealthService:
             ]
 
         factory, check_name = dispatch[component]
-        outcomes = await self._safe_run(factory(), component, check_name)
+        outcomes = await self._safe_run(
+            factory(),
+            component,
+            check_name,
+            session=session,
+        )
         await self._persist_outcomes(session, outcomes)
         return outcomes
 
@@ -455,6 +465,8 @@ class HealthService:
         coro: Awaitable[CheckOutcome | list[CheckOutcome]],
         component: str,
         check_name: str,
+        *,
+        session: AsyncSession | None = None,
     ) -> list[CheckOutcome]:
         """Run a check coroutine with timeout and exception isolation."""
         start = time.perf_counter()
@@ -476,6 +488,7 @@ class HealthService:
             return outcomes
 
         except TimeoutError:
+            await self._rollback_failed_check_session(session)
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.warning("health_check_timeout", component=component, check_name=check_name)
             return [
@@ -493,6 +506,7 @@ class HealthService:
                 )
             ]
         except Exception as exc:
+            await self._rollback_failed_check_session(session)
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.exception(
                 "health_check_error", component=component, check_name=check_name, error=str(exc)
@@ -510,6 +524,16 @@ class HealthService:
                     ),
                 )
             ]
+
+    @staticmethod
+    async def _rollback_failed_check_session(session: AsyncSession | None) -> None:
+        """Restore a failed check transaction before later checks or persistence."""
+        if session is None or session.is_active:
+            return
+        try:
+            await session.rollback()
+        except Exception:
+            logger.warning("health_check_session_rollback_failed", exc_info=True)
 
     @staticmethod
     async def _persist_outcomes(

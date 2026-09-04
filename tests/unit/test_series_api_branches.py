@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 from sqlalchemy import select
 
 from pullbox.api.v1 import series as series_api
@@ -17,7 +17,13 @@ from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.publisher import Publisher
 from pullbox.models.search_log import SearchLog
-from pullbox.models.series import Series, SeriesStatus, SeriesStatusOverride, SeriesType
+from pullbox.models.series import (
+    IssueCatalogState,
+    Series,
+    SeriesStatus,
+    SeriesStatusOverride,
+    SeriesType,
+)
 from pullbox.schemas.series import (
     SeriesBulkDelete,
     SeriesCreate,
@@ -330,9 +336,37 @@ async def test_add_update_refresh_and_folder_routes_delegate(
         "new_path": "/comics/Absolute Superman (2025)"
     }
 
-    refreshed = await series_api.refresh_series(10, _user(), db_session)
-    assert refreshed.id == 10
-    metadata_service.refresh_series.assert_awaited_once_with(db_session, 10, force=True)
+    refresh_target = await _seed_series(db_session, title="Refresh Target")
+    refreshed = await series_api.refresh_series(refresh_target.id, _user(), db_session)
+    assert refreshed.id == refresh_target.id
+    metadata_service.refresh_series.assert_awaited_once_with(
+        db_session,
+        refresh_target.id,
+        force=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_series_rejects_duplicate_initial_catalog_sync(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    series = await _seed_series(db_session, title="Hydrating Refresh Target")
+    series.issue_catalog_state = IssueCatalogState.HYDRATING
+    await db_session.commit()
+    metadata_service = SimpleNamespace(refresh_series=AsyncMock())
+    monkeypatch.setattr(
+        series_api,
+        "_build_metadata_service",
+        AsyncMock(return_value=metadata_service),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await series_api.refresh_series(series.id, _user(), db_session)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Initial metadata sync is already in progress."
+    metadata_service.refresh_series.assert_not_awaited()
 
 
 @pytest.mark.asyncio

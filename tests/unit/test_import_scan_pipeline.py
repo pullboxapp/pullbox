@@ -769,6 +769,10 @@ async def test_load_mylar3_streams_bounded_pages_to_persistence(
     assert [arc.source_ordinal for arc in staged_arcs] == [1, 2, 3, 4, 5]
     assert cancellation_checks >= len(yielded_series_page_sizes) + len(yielded_arc_page_sizes)
     assert all(reference() is None for reference in discovered_refs)
+    batch_metrics = [details for event, details in events if event == "import_mylar_batch_scanned"]
+    assert len(batch_metrics) == len(yielded_series_page_sizes)
+    assert all(details["inspection_duration_ms"] >= 0 for details in batch_metrics)
+    assert all(details["persistence_duration_ms"] >= 0 for details in batch_metrics)
     summaries = [
         details for event, details in events if event == "import_story_arc_staging_completed"
     ]
@@ -1005,6 +1009,7 @@ async def test_load_mylar3_cancellation_stops_before_next_page_persistence(
 async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batches(
     db_session,
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     job = ImportJob(
         source_path=str(tmp_path),
@@ -1084,6 +1089,14 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
     events: list[tuple[str, dict[str, object]]] = []
     milestones: list[str] = []
     cancellation_checks = 0
+    progress_events = []
+
+    async def capture_progress(_job, event, **_kwargs):
+        progress_events.append(event)
+
+    monkeypatch.setattr(
+        "pullbox.services.import_scan_pipeline.emit_live_progress", capture_progress
+    )
 
     async def log_event(_session, _job_id, _level, event, **kwargs) -> None:
         events.append((event, kwargs))
@@ -1103,6 +1116,14 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
     async def run_file_matching(*_args, **_kwargs) -> None:
         milestones.append("file_matching")
 
+    async def finish_series_matching(*_args, **_kwargs) -> None:
+        job.progress_snapshot = {"progress": 49, "phase": "matching"}
+
+    async def capture_persisted_progress(_session, _job, event, _callback):
+        if event.phase == "file_matching":
+            assert event.progress == 49
+            assert event.estimated_seconds_remaining is None
+
     await run_import_scan_pipeline(
         db_session,
         job.id,
@@ -1114,16 +1135,17 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
         validate_discovered_files_safety=no_op,
         materialize_discovered_scan_results=materialize_batch,
         deduplicate_series=no_op,
-        run_matching=no_op,
+        run_matching=finish_series_matching,
         consolidate_logical_series_groups=no_op,
         run_file_matching=run_file_matching,
         raise_if_cancelled=raise_if_cancelled,
         log_event=log_event,
-        emit_progress=no_op,
+        emit_progress=capture_persisted_progress,
         phase_progress=phase_progress,
         estimate_remaining_seconds=lambda _started_at, _progress: None,
         job_stats=lambda _job: {},
         maybe_slow_phase_delay=no_op,
+        progress_callback=no_op,
     )
 
     assert materialized_batch_sizes == [25, 1]
@@ -1154,6 +1176,10 @@ async def test_filesystem_stages_one_complete_cohort_after_all_incremental_batch
         "linked_files": 0,
     }
     assert milestones == ["file_matching", "story_arc_resolution"]
+    series_events = [event for event in progress_events if event.current_series]
+    assert len(series_events) == 26
+    assert all(event.current_item_progress_pct == 100 for event in series_events)
+    assert all(event.estimated_seconds_remaining is None for event in series_events)
     assert str(tmp_path) not in json.dumps(resolution_summary)
 
 

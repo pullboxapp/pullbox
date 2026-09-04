@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -25,6 +26,7 @@ from pullbox.models.import_job import (
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
 from pullbox.services import import_file_matching as file_matching
+from pullbox.services.import_progress_runtime import scan_review_progress_pct
 from pullbox.services.import_service import ImportService
 
 if TYPE_CHECKING:
@@ -102,6 +104,251 @@ async def _job(session: AsyncSession) -> ImportJob:
     session.add(job)
     await session.flush()
     return job
+
+
+@pytest.mark.parametrize("source_type", [ImportSourceType.MYLAR3, ImportSourceType.FILESYSTEM])
+async def test_blocked_only_review_is_batched_and_progress_counts_remaining_summary_work(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, source_type: ImportSourceType
+) -> None:
+    job = await _job(db_session)
+    job.source_type = source_type
+    job.progress_snapshot = {"progress": 49, "phase": "matching"}
+    job.total_files_found = 48
+    job.scan_started_at = datetime.now(UTC) - timedelta(minutes=10)
+    job.scan_completed_at = datetime.now(UTC) - timedelta(minutes=5)
+    groups = [
+        ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name=f"Blocked {i}",
+            status=ImportSeriesStatus.MATCHED,
+            cv_id=1000 + i,
+            file_count=4,
+        )
+        for i in range(12)
+    ]
+    db_session.add_all(groups)
+    await db_session.flush()
+    files = []
+    for group in groups:
+        for i in range(4):
+            item = _imported_file(
+                job_id=job.id,
+                import_series_id=group.id,
+                ordinal=i,
+                issue_number=float(i + 1),
+                series_name=group.raw_series_name,
+            )
+            item.status = ImportedFileStatus.SAFETY_BLOCKED
+            item.diagnostics = {"safety_block": {"kind": "single_page_comic"}}
+            files.append(item)
+    db_session.add_all(files)
+    await db_session.commit()
+    service, provider = _service_with_provider_spy()
+    plan = await file_matching._build_file_matching_plan(
+        db_session, job, series_ids=None, raise_if_cancelled=AsyncMock(), page_size=5
+    )
+    assert (
+        scan_review_progress_pct(
+            plan.progress_plan, completed_weight=plan.completed_file_match_weight
+        )
+        == 49
+    )
+    assert plan.progress_plan.total_weight > plan.completed_file_match_weight
+    original_summary = file_matching._summarize_import_series_files
+    summary_spy = AsyncMock(wraps=original_summary)
+    count_spy = AsyncMock(wraps=file_matching._count_import_series_files)
+    monkeypatch.setattr(file_matching, "_summarize_import_series_files", summary_spy)
+    monkeypatch.setattr(file_matching, "_count_import_series_files", count_spy)
+    monkeypatch.setattr(file_matching, "_SERIES_PAGE_SIZE", 5)
+    events = []
+    eta_starts = []
+    started = datetime.now(UTC)
+
+    def estimate(started_at, *, completed_units, total_units, **_kwargs):
+        eta_starts.append(started_at)
+        return 10 if 0 < completed_units < total_units else None
+
+    monkeypatch.setattr(file_matching, "estimate_remaining_work_seconds", estimate)
+    finalize = file_matching._rebuild_cross_series_conflicts
+
+    async def check_finalization(*args, **kwargs):
+        assert events[-1].progress < 99
+        assert "Finalizing" in events[-1].message
+        return await finalize(*args, **kwargs)
+
+    monkeypatch.setattr(file_matching, "_rebuild_cross_series_conflicts", check_finalization)
+
+    async def capture(event):
+        events.append(event)
+        assert job.total_files_found == 48
+
+    await service._run_file_matching(db_session, job, progress_callback=capture)
+    assert summary_spy.await_count == 0
+    assert count_spy.await_count == 0
+    assert not provider.metadata_calls
+    assert [e.progress for e in events] == sorted(e.progress for e in events)
+    assert events[0].progress == 49
+    assert events[-1].progress == 99
+    assert any(49 < e.progress < 99 for e in events)
+    assert any(e.estimated_seconds_remaining == 10 for e in events)
+    assert all(value >= started for value in eta_starts)
+    assert any("review" in e.message.lower() for e in events)
+    assert all(group.status == ImportSeriesStatus.MATCHED for group in groups)
+    assert all(group.files_total == 4 and group.files_matched == 0 for group in groups)
+    assert all(item.status == ImportedFileStatus.SAFETY_BLOCKED for item in files)
+    assert all(
+        item.diagnostics == {"safety_block": {"kind": "single_page_comic"}} for item in files
+    )
+
+
+async def test_blocked_summary_batch_excludes_mixed_linked_and_identity_conflict_groups(db_session):
+    job = await _job(db_session)
+    canonical, _issues = await _canonical_series(db_session, title="Existing", issue_count=1)
+    groups = [
+        ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name=f"Case {i}",
+            status=ImportSeriesStatus.MATCHED,
+            cv_id=500 + i,
+        )
+        for i in range(6)
+    ]
+    groups[4].series_id = canonical.id
+    groups[5].status = ImportSeriesStatus.DUPLICATE
+    db_session.add_all(groups)
+    await db_session.flush()
+    for i, group in enumerate(groups):
+        item = _imported_file(
+            job_id=job.id,
+            import_series_id=group.id,
+            ordinal=i,
+            issue_number=1,
+            series_name=group.raw_series_name,
+        )
+        item.status = ImportedFileStatus.SAFETY_BLOCKED
+        item.diagnostics = {"safety_block": {"kind": "single_page_comic"}}
+        if i in (2, 3):
+            item.diagnostics = {"kind": "metadata_conflict" if i == 2 else "source_layout_review"}
+        db_session.add(item)
+    db_session.add(
+        _imported_file(
+            job_id=job.id,
+            import_series_id=groups[1].id,
+            ordinal=10,
+            issue_number=2,
+            series_name="Mixed",
+        )
+    )
+    await db_session.flush()
+    assert await file_matching._blocked_only_summary_counts(db_session, groups) == {groups[0].id: 1}
+    summary = await file_matching._summarize_import_series_files(
+        db_session,
+        groups[0],
+        duplicate_series=False,
+        duplicate_merge_profile=None,
+        cv_match_threshold=job.cv_match_threshold,
+        raise_if_cancelled=AsyncMock(),
+        job_id=job.id,
+    )
+    assert summary == file_matching.FileMatchSeriesSummary(1, 0, 0, 0, 0, 0)
+    assert groups[0].status == ImportSeriesStatus.MATCHED
+
+
+async def test_blocked_summary_pages_check_cancellation_before_loading_next_page(db_session):
+    job = await _job(db_session)
+    db_session.add_all(
+        [
+            ImportedSeries(
+                import_job_id=job.id,
+                raw_series_name=f"Case {i}",
+                status=ImportSeriesStatus.MATCHED,
+                cv_id=1000 + i,
+            )
+            for i in range(11)
+        ]
+    )
+    await db_session.flush()
+    checks = AsyncMock(side_effect=[None, JobCancelledError("cancelled")])
+    seen = []
+    with pytest.raises(JobCancelledError):
+        async for _, item, _ in file_matching._iter_eligible_import_series(
+            db_session,
+            job_id=job.id,
+            series_ids=None,
+            raise_if_cancelled=checks,
+            page_size=5,
+            blocked_only_counts={},
+        ):
+            seen.append(item.id)
+    assert len(seen) == 5
+
+
+async def test_split_matching_invalidates_cached_blocked_summary_on_same_page(
+    db_session, monkeypatch
+):
+    job = await _job(db_session)
+    canonical, _ = await _canonical_series(db_session, title="Parent", issue_count=2)
+    parent = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Parent",
+        series_id=canonical.id,
+        status=ImportSeriesStatus.MATCHED,
+        file_count=2,
+    )
+    children = [
+        ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name=f"Child {i}",
+            status=ImportSeriesStatus.MATCHED,
+            cv_id=4000 + i,
+            file_count=1,
+            cv_match_method="mylar3_cv_id",
+        )
+        for i in range(2)
+    ]
+    db_session.add_all([parent, *children])
+    await db_session.flush()
+    for i, group in enumerate([parent, *children]):
+        for n in range(2 if i == 0 else 1):
+            item = _imported_file(
+                job_id=job.id,
+                import_series_id=group.id,
+                ordinal=n,
+                issue_number=float(n + 1),
+                series_name=group.raw_series_name,
+            )
+            if i:
+                item.status = ImportedFileStatus.SAFETY_BLOCKED
+            db_session.add(item)
+    await db_session.commit()
+
+    async def move_to_child_reviews(_session, _job, group, files, **_kwargs):
+        assert group.id == parent.id
+        for item, child in zip(files, children, strict=True):
+            item.import_series_id = child.id
+            item.status = ImportedFileStatus.NO_MATCH
+            child.file_count += 1
+        parent.file_count = 0
+        parent.status = ImportSeriesStatus.SKIPPED
+        return [], [child.id for child in children]
+
+    monkeypatch.setattr(
+        file_matching, "_split_explicit_issue_series_mismatches", move_to_child_reviews
+    )
+    monkeypatch.setattr(file_matching, "_SERIES_PAGE_SIZE", 2)
+    service, provider = _service_with_provider_spy()
+
+    async def check_checkpoint(event):
+        if event.message == "Prepared file review for Child 0":
+            assert children[0].files_total == 2
+            assert children[0].files_no_match == 1
+
+    await service._run_file_matching(db_session, job, progress_callback=check_checkpoint)
+    assert not provider.metadata_calls
+    for child in children:
+        await db_session.refresh(child)
+        assert child.files_total == 2
+        assert child.files_no_match == 1
 
 
 def _imported_file(

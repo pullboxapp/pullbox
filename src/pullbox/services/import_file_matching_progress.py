@@ -78,6 +78,7 @@ def build_file_matching_progress_emitter(
     scan_review_plan: ScanReviewProgressPlan | None = None,
     phase_start: int = 80,
     phase_end: int = 99,
+    work_started_at: datetime | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Build the Step 2 file-matching progress emitter."""
 
@@ -88,7 +89,7 @@ def build_file_matching_progress_emitter(
         message: str,
         current_item_stage: str = "file_matching",
         current_item_progress_pct: int | None = None,
-        current_work_unit_progress_pct: int | None = None,
+        current_work_unit_progress_pct: int | float | None = None,
         live_only: bool = False,
     ) -> None:
         if progress_callback is None:
@@ -121,7 +122,10 @@ def build_file_matching_progress_emitter(
         )
         estimated_seconds_remaining = (
             estimate_remaining_work_seconds(
-                job.scan_completed_at or job.match_completed_at or job.scan_started_at,
+                work_started_at
+                or job.scan_completed_at
+                or job.match_completed_at
+                or job.scan_started_at,
                 completed_units=(
                     completed_weight if completed_weight is not None else completed_units
                 ),

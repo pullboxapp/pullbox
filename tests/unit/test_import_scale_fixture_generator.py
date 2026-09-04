@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -187,6 +188,7 @@ def test_generator_writes_valid_unique_archives_and_path_safe_streaming_manifest
     half_row = next(row for row in rows if row["issue_number"] == "0.5")
     with zipfile.ZipFile(output / "source" / half_row["relative_path"]) as archive:
         comic_info = archive.read("ComicInfo.xml").decode("utf-8")
+        assert len([name for name in archive.namelist() if name.endswith(".png")]) == 32
     assert "<Number>0.5</Number>" in comic_info
     assert f"[cv_vol_id:{half_row['volume_id']}]" in comic_info
     assert f"[cv_issue_id:{half_row['issue_id']}]" in comic_info
@@ -204,6 +206,22 @@ def test_generator_refuses_existing_output_and_preserves_operator_files(tmp_path
         generate_import_scale_fixture(_request(catalog, output))
 
     assert marker.read_text(encoding="utf-8") == "operator data"
+
+
+def test_multipage_generator_has_explicit_sparse_safety_exceptions(tmp_path: Path) -> None:
+    catalog = tmp_path / "localcv.db"
+    output = tmp_path / "fixture"
+    _build_catalog(catalog)
+    summary = generate_import_scale_fixture(replace(_request(catalog, output), single_page_every=5))
+    assert summary["single_page_files"] == 3
+    rows = [
+        json.loads(line) for line in (output / "fixture-manifest.jsonl").read_text().splitlines()
+    ]
+    for ordinal, row in enumerate(rows, start=1):
+        expected = 1 if ordinal % 5 == 0 else 32
+        with zipfile.ZipFile(output / "source" / row["relative_path"]) as archive:
+            assert len([name for name in archive.namelist() if name.endswith(".png")]) == expected
+        assert row["expected_safety_review"] == (expected == 1)
 
 
 def test_long_series_directory_preserves_unknown_year_and_volume_id_suffix() -> None:

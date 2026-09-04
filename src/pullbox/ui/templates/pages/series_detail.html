@@ -5,6 +5,7 @@
 {% block content_container_classes %}px-4 sm:px-6 pt-5 sm:pt-7{% endblock %}
 
 {% block content %}
+{% set metadata_syncing = series.issue_catalog_state and series.issue_catalog_state.value == 'hydrating' %}
 <div
   class="series-domain-page space-y-4"
   data-testid="series-detail-page"
@@ -13,6 +14,7 @@
     seriesId: {{ series.id }},
     csrfToken: '{{ csrf_token }}',
     monitored: {{ 'true' if series.monitored else 'false' }},
+    metadataSyncing: {{ 'true' if metadata_syncing else 'false' }},
     updateUrl: '/api/v1/series/{{ series.id }}',
     refreshUrl: '/api/v1/series/{{ series.id }}/refresh',
     searchUrl: '/api/v1/series/{{ series.id }}/search',
