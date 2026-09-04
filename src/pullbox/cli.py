@@ -24,7 +24,7 @@ from pullbox.core.password_policy import validate_password
 from pullbox.models.user import User
 from pullbox.services.auth_service import AuthService
 from pullbox.services.import_path_reconciliation import reconcile_saved_mylar_paths
-from pullbox.services.import_review_recheck import prepare_review_recheck
+from pullbox.services.import_review_recheck import prepare_import_recheck
 
 
 async def _reset_password(username: str, candidate_secret: str) -> None:
@@ -95,7 +95,7 @@ async def _recheck_import(args: argparse.Namespace) -> None:
             if args.command == "reconcile-import-paths":
                 report = await reconcile_saved_mylar_paths(session, args.job, **options)
             else:
-                report = await prepare_review_recheck(
+                report = await prepare_import_recheck(
                     session,
                     args.job,
                     **options,
@@ -106,11 +106,17 @@ async def _recheck_import(args: argparse.Namespace) -> None:
             else:
                 await session.rollback()
             print(json.dumps({"applied": args.apply, **report}, sort_keys=True))
-            if args.apply and report.get("series_prepared"):
-                print(
-                    "Restart Pullbox to resume local matching of the saved review. "
-                    "Sources were not modified."
-                )
+            if args.apply:
+                if report.get("series_prepared"):
+                    print(
+                        "Restart Pullbox to resume local matching of the saved review. "
+                        "Sources were not modified."
+                    )
+                elif report.get("files_prepared"):
+                    print(
+                        "Restart Pullbox, open the completed import, and choose Retry failed. "
+                        "Only rechecked failures will run again."
+                    )
     finally:
         await engine.dispose()
 
@@ -137,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     recheck = subparsers.add_parser(
         "recheck-import", help="Recheck saved import evidence while Pullbox is stopped"
     )
-    recheck.add_argument("--job", required=True, type=int, help="Saved REVIEW job ID")
+    recheck.add_argument("--job", required=True, type=int, help="Saved REVIEW or COMPLETED job ID")
     recheck.add_argument(
         "--source-root",
         required=True,

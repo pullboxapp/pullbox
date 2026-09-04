@@ -239,6 +239,58 @@ def test_file_match_summary_preserves_trusted_folder_series_with_unmatched_file(
     assert series.cv_match_method == "comicinfo_cv_id"
 
 
+def test_file_match_summary_quarantines_conflict_without_invalidating_mylar_series() -> None:
+    series = ImportedSeries(
+        raw_series_name="Firefly",
+        raw_year=2018,
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=112340,
+        cv_title="Firefly",
+        cv_match_score=1.0,
+        cv_match_method="mylar3_cv_id",
+        diagnostics={"kind": "series_match"},
+    )
+    files = [
+        ImportedFile(file_name="Firefly 006.cbz", status=ImportedFileStatus.MATCHED),
+        ImportedFile(
+            file_name="Firefly 007 Variant.cbz",
+            status=ImportedFileStatus.NO_MATCH,
+            diagnostics={
+                "kind": "metadata_conflict",
+                "conflict_type": "trusted_source_identity_conflict",
+                "rejection_reason": "Sidecar identity conflicts with Mylar.",
+                "identity_conflicts": [
+                    {
+                        "field": "comicvine_series_id",
+                        "mylar3": 112340,
+                        "sidecar": 999999,
+                    }
+                ],
+            },
+        ),
+    ]
+
+    summary = apply_file_match_series_summary(
+        series,
+        files,
+        duplicate_series=False,
+        duplicate_merge_profile=None,
+        cv_match_threshold=0.88,
+    )
+
+    assert summary.series_invalidated is False
+    assert series.status == ImportSeriesStatus.MATCHED
+    assert series.cv_id == 112340
+    assert series.cv_match_method == "mylar3_cv_id"
+    assert series.diagnostics["file_identity_conflict_count"] == 1
+    assert series.diagnostics["conflicting_files"] == [
+        {
+            "file_name": "Firefly 007 Variant.cbz",
+            "rejection_reason": "Sidecar identity conflicts with Mylar.",
+        }
+    ]
+
+
 def test_file_match_summary_holds_mixed_selected_layout_group_for_review() -> None:
     series = ImportedSeries(
         raw_series_name="Batman",

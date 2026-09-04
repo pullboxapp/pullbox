@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select as sa_select
@@ -14,9 +15,14 @@ from pullbox.models.import_job import (
     ImportJob,
     ImportSeriesStatus,
 )
+from pullbox.models.issue import IssueType
 from pullbox.models.series import Series
 from pullbox.providers.base import IssueSummary
 from pullbox.services.import_catalog_hydration import schedule_catalog_hydration
+from pullbox.services.import_file_issue_signals import (
+    candidate_issue_number,
+    candidate_issue_number_text,
+)
 from pullbox.services.import_file_resolution import load_importable_files
 from pullbox.services.import_job_actions import (
     build_series_cover_cache_action_payload,
@@ -346,14 +352,14 @@ def targeted_issue_summaries_for_import_files(files: list[ImportedFile]) -> list
     """Build Step 4 issue summaries from review-time file matches."""
     summaries: list[IssueSummary] = []
     seen_provider_ids: set[str] = set()
-    seen_numbers: set[float] = set()
+    seen_issue_keys: set[str] = set()
     for imp_file in files:
+        if not ensure_target_issue_summary_for_import_file(imp_file):
+            continue
         diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
         summary_payload = diagnostics.get("target_issue_summary")
         issue_number: float | None
         if not isinstance(summary_payload, dict):
-            if imp_file.matched_issue_cv_id is not None and imp_file.matched_issue_id is None:
-                raise ValueError("Import file is missing required target_issue_summary diagnostics")
             continue
 
         provider_id = str(summary_payload.get("provider_id") or "").strip()
@@ -365,14 +371,16 @@ def targeted_issue_summaries_for_import_files(files: list[ImportedFile]) -> list
         release_date = summary_payload.get("release_date")
         cover_url = summary_payload.get("cover_url")
         issue_type = str(summary_payload["issue_type"])
+        issue_number_text = str(summary_payload.get("issue_number_text") or "").strip() or None
 
         if not provider_id or issue_number is None:
             continue
         number_key = float(issue_number)
-        if provider_id in seen_provider_ids or number_key in seen_numbers:
+        issue_key = issue_number_text or str(number_key)
+        if provider_id in seen_provider_ids or issue_key in seen_issue_keys:
             continue
         seen_provider_ids.add(provider_id)
-        seen_numbers.add(number_key)
+        seen_issue_keys.add(issue_key)
         summaries.append(
             IssueSummary(
                 provider_id=provider_id,
@@ -381,9 +389,63 @@ def targeted_issue_summaries_for_import_files(files: list[ImportedFile]) -> list
                 release_date=str(release_date) if release_date else None,
                 cover_url=str(cover_url) if cover_url else None,
                 issue_type=issue_type,
+                issue_number_text=issue_number_text,
             )
         )
     return summaries
+
+
+def ensure_target_issue_summary_for_import_file(imp_file: ImportedFile) -> bool:
+    """Repair the cached issue target needed to create a new series in Step 4."""
+    if imp_file.matched_issue_id is not None or imp_file.matched_issue_cv_id is None:
+        return True
+
+    diagnostics = dict(imp_file.diagnostics or {})
+    existing = diagnostics.get("target_issue_summary")
+    payload = dict(existing) if isinstance(existing, dict) else {}
+    provider_id = str(payload.get("provider_id") or imp_file.matched_issue_cv_id).strip()
+    raw_issue_number = payload.get("issue_number")
+    issue_number: float | None = None
+    if raw_issue_number is not None:
+        with suppress(ValueError):
+            issue_number = float(str(raw_issue_number))
+    if issue_number is None:
+        issue_number = candidate_issue_number(imp_file)
+    if not provider_id or issue_number is None:
+        diagnostics.update(
+            {
+                "reason": "target_issue_summary_unavailable",
+                "rejection_reason": (
+                    "The matched issue target is incomplete and must be reviewed before import."
+                ),
+            }
+        )
+        imp_file.diagnostics = diagnostics
+        return False
+
+    raw_issue_type = payload.get("issue_type") or diagnostics.get("source_issue_type")
+    try:
+        issue_type = IssueType(str(raw_issue_type or IssueType.ISSUE.value))
+    except ValueError:
+        issue_type = IssueType.ISSUE
+    issue_number_text = str(payload.get("issue_number_text") or "").strip()
+    if not issue_number_text:
+        issue_number_text = candidate_issue_number_text(imp_file) or ""
+    repaired = {
+        "provider_id": provider_id,
+        "issue_number": issue_number,
+        "title": payload.get("title"),
+        "release_date": payload.get("release_date"),
+        "cover_url": payload.get("cover_url"),
+        "issue_type": issue_type.value,
+    }
+    if issue_number_text:
+        repaired["issue_number_text"] = issue_number_text
+    diagnostics["target_issue_summary"] = repaired
+    diagnostics.pop("reason", None)
+    diagnostics.pop("rejection_reason", None)
+    imp_file.diagnostics = diagnostics
+    return True
 
 
 def schedule_catalog_hydration_for_series(

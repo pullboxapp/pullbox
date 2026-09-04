@@ -36,6 +36,7 @@ def test_format_issue_number_is_exact_and_never_scientific(
         ("001", "1"),
         ("0.50", "0.5"),
         ("1au", "1AU"),
+        ("1948 Fall", "1948FALL"),
         ("½", "0.5"),
         ("1e6", "1000000"),
     ],

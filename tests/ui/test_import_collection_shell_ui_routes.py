@@ -667,7 +667,11 @@ class TestImportShellRouteContracts:
         assert "activityRateEtaLabel: function" in shell_controller
         assert "activityOverallIndeterminate: function" in shell_controller
         assert "activityItemIndeterminate: function" in shell_controller
-        assert "scheduleActivityPoll(3000)" in shell_controller
+        assert "activityRefreshTimer: null" in shell_controller
+        assert "activityStreamOpen: false" in shell_controller
+        assert "scheduleActivityRefresh(500)" in shell_controller
+        assert "source.onopen = function" in shell_controller
+        assert "if (!self.activityStreamOpen)" in shell_controller
         assert 'fetch("/api/v1/import/active"' not in shell_controller
 
     async def test_step_two_ephemeral_progress_uses_its_real_workflow_status(self) -> None:

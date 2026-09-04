@@ -1010,6 +1010,41 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     }
 
 
+def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() -> None:
+    config_text = GRYPE_CONFIG.read_text(encoding="utf-8")
+    config = _load_yaml(GRYPE_CONFIG)
+    reviewed_cves = {
+        "CVE-2026-85091",
+        "CVE-2026-76642",
+        "CVE-2026-78408",
+        "CVE-2026-78409",
+        "CVE-2026-78410",
+    }
+    entries = [entry for entry in config["ignore"] if entry.get("vulnerability") in reviewed_cves]
+
+    assert "Re-review by 2026-10-04" in config_text
+    assert {
+        (
+            entry["vulnerability"],
+            entry["package"]["name"],
+            entry["package"]["version"],
+            entry["package"]["type"],
+        )
+        for entry in entries
+    } == {
+        (
+            "CVE-2026-85091",
+            package,
+            "1:1.3.dfsg+really1.3.1-1+dhi2",
+            "deb",
+        )
+        for package in ("zlib1g", "zlib1g-dev")
+    } | {
+        (cve, "libuuid1", "2.41.5-0+deb13u1+dhi2", "deb")
+        for cve in reviewed_cves - {"CVE-2026-85091"}
+    }
+
+
 def test_docker_workflow_signs_and_verifies_published_images() -> None:
     docker_workflow_path = WORKFLOW_DIR / "docker-release.yml"
     docker_workflow = docker_workflow_path.read_text(encoding="utf-8")

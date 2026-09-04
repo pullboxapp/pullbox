@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import pullbox.services.import_series_matching as import_series_matching
 from pullbox.core.exceptions import ImportProviderDegradedError, JobPausedError
-from pullbox.core.source_metadata import SourceMetadata
+from pullbox.core.source_metadata import MetadataSignal, SourceMetadata
 from pullbox.models import Base
 from pullbox.models.import_job import (
     ImportedFile,
@@ -35,6 +35,50 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.schemas.import_job import ImportProgressEvent
+
+
+def test_mylar_identity_remains_authoritative_when_file_evidence_conflicts() -> None:
+    item = ImportedSeries(
+        raw_series_name="Firefly",
+        raw_year=2018,
+        status=ImportSeriesStatus.PENDING,
+        cv_id=112340,
+        cv_match_method="mylar3_cv_id",
+    )
+    source_metadata = SourceMetadata(
+        original_title="Firefly 007 Variant.cbz",
+        series_name="Firefly",
+        year=2018,
+        comicvine_series_id=112340,
+        signals={"comicvine_series_id": MetadataSignal.MYLAR3},
+        diagnostics={
+            "identity_conflicts": [
+                {
+                    "field": "comicvine_series_id",
+                    "mylar3": 112340,
+                    "sidecar": 999999,
+                }
+            ]
+        },
+    )
+
+    evaluation = import_series_matching._filesystem_source_identity_evaluation(
+        item,
+        source_metadata,
+        match_threshold=0.88,
+    )
+
+    assert evaluation.match is not None
+    assert evaluation.match["cv_id"] == 112340
+    assert evaluation.match["cv_match_method"] == "mylar3_cv_id"
+    assert evaluation.diagnostics["reason"] == "trusted_known_cv_id_unverified"
+    assert evaluation.diagnostics["identity_conflicts"] == [
+        {
+            "field": "comicvine_series_id",
+            "mylar3": 112340,
+            "sidecar": 999999,
+        }
+    ]
 
 
 async def test_series_matching_commits_logs_mid_phase_for_other_sessions(async_engine) -> None:

@@ -52,6 +52,30 @@ def filename_issue_number(imp_file: ImportedFile) -> float | None:
     return parsed.issue_number if parsed is not None else None
 
 
+def comicinfo_issue_number_raw(imp_file: ImportedFile) -> str | float | int | None:
+    """Return the issue designation cached from ComicInfo.xml during discovery."""
+    diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
+    source_metadata = diagnostics.get("source_metadata")
+    comicinfo = source_metadata.get("comicinfo") if isinstance(source_metadata, dict) else None
+    value = comicinfo.get("number") if isinstance(comicinfo, dict) else None
+    return value if isinstance(value, str | float | int) else None
+
+
+def comicinfo_issue_number(imp_file: ImportedFile) -> float | None:
+    """Return a numeric compatibility value from saved ComicInfo.xml evidence."""
+    raw_value = comicinfo_issue_number_raw(imp_file)
+    normalized = normalize_issue_number(raw_value)
+    if normalized is not None:
+        return normalized
+    if not isinstance(raw_value, str):
+        return None
+    bracketed_total = re.fullmatch(
+        r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*\[\s*\d+\s*\]\s*",
+        raw_value,
+    )
+    return normalize_issue_number(bracketed_total.group(1)) if bracketed_total else None
+
+
 def candidate_issue_number(imp_file: ImportedFile) -> float | None:
     """Return the best issue-number signal available for target lookup."""
     if imp_file.parsed_issue_number is not None:
@@ -59,16 +83,35 @@ def candidate_issue_number(imp_file: ImportedFile) -> float | None:
     parsed_issue_number = filename_issue_number(imp_file)
     if parsed_issue_number is not None:
         return parsed_issue_number
-    return volume_issue_number(imp_file)
+    volume_number = volume_issue_number(imp_file)
+    if volume_number is not None:
+        return volume_number
+    comicinfo_number = comicinfo_issue_number(imp_file)
+    if comicinfo_number is not None:
+        return comicinfo_number
+    diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
+    comicinfo_raw = comicinfo_issue_number_raw(imp_file)
+    comicinfo_number_missing = comicinfo_raw is None or (
+        isinstance(comicinfo_raw, str) and not comicinfo_raw.strip()
+    )
+    if (
+        comicinfo_number_missing
+        and diagnostics.get("source_issue_type") == "one_shot"
+        and diagnostics.get("issue_count_hint") == 1
+        and imp_file.matched_issue_cv_id is not None
+    ):
+        return 1.0
+    return None
 
 
 def candidate_issue_number_text(imp_file: ImportedFile) -> str | None:
     """Return a validated exact issue designation when the source preserved one."""
     issue_number = candidate_issue_number(imp_file)
-    if not imp_file.issue_number_raw or issue_number is None:
+    raw_value = imp_file.issue_number_raw or comicinfo_issue_number_raw(imp_file)
+    if not raw_value or issue_number is None:
         return None
     try:
-        normalized = normalize_issue_number_text(imp_file.issue_number_raw)
+        normalized = normalize_issue_number_text(raw_value)
     except ValueError:
         return None
     if not issue_number_text_matches_numeric(issue_number, normalized):

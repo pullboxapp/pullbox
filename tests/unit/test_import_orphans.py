@@ -806,6 +806,51 @@ async def test_retry_failed_series_resets_rows_and_job_counter(
     assert failed_file.error_message is None
 
 
+async def test_retry_failed_series_repairs_confirmed_file_target_summary(
+    db_session: AsyncSession,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session, series_failed=1)
+    failed = await _create_imported_series(
+        db_session,
+        job,
+        name="The Amazing Spider-Man",
+        status=ImportSeriesStatus.FAILED,
+    )
+    imp_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=failed.id,
+        file_path="/tmp/The Amazing Spider-Man 54.LR.cbz",
+        file_name="The Amazing Spider-Man 54.LR.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.CONFIRMED,
+        parsed_issue_number=54.0,
+        issue_number_raw="54.LR",
+        matched_issue_cv_id=123456,
+        match_confidence="high",
+        match_method="comicvine_id",
+        diagnostics={"source_issue_type": "issue"},
+    )
+    db_session.add(imp_file)
+    await db_session.flush()
+
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+
+    assert count == 1
+    assert updated_job.status == ImportJobStatus.IMPORTING
+    assert imp_file.status == ImportedFileStatus.CONFIRMED
+    assert imp_file.diagnostics["target_issue_summary"] == {
+        "provider_id": "123456",
+        "issue_number": 54.0,
+        "title": None,
+        "release_date": None,
+        "cover_url": None,
+        "issue_type": "issue",
+        "issue_number_text": "54LR",
+    }
+
+
 async def test_retry_failed_series_resets_duplicate_file_failures(
     db_session: AsyncSession,
 ) -> None:

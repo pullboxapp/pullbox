@@ -1341,7 +1341,7 @@ class TestMylar3Import:
             is None
         )
 
-    async def test_mylar_sidecar_and_comicinfo_conflict_requires_review_without_provider_calls(
+    async def test_mylar_sidecar_and_comicinfo_conflict_preserves_mylar_identity(
         self,
         db_session,
         tmp_path,
@@ -1401,11 +1401,19 @@ class TestMylar3Import:
             sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
         )
         assert series_item is not None
-        assert series_item.status == ImportSeriesStatus.NO_MATCH
-        assert series_item.cv_id is None
-        assert series_item.cv_match_method is None
-        assert series_item.diagnostics["reason"] == "trusted_source_identity_conflict"
-        assert series_item.diagnostics["identity_conflicts"] == [
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.cv_id == 42721
+        assert series_item.cv_match_method == "mylar3_cv_id"
+        assert series_item.diagnostics["file_identity_review_required"] is True
+        assert series_item.diagnostics["file_identity_conflict_count"] == 1
+        imported_file = await db_session.scalar(
+            sa_select(ImportedFile).where(ImportedFile.import_series_id == series_item.id)
+        )
+        assert imported_file is not None
+        assert imported_file.status == ImportedFileStatus.NO_MATCH
+        assert imported_file.include_in_import is False
+        assert imported_file.diagnostics["conflict_type"] == "trusted_source_identity_conflict"
+        assert imported_file.diagnostics["identity_conflicts"] == [
             {
                 "field": "comicvine_series_id",
                 "comicinfo": 99999,
@@ -1413,7 +1421,7 @@ class TestMylar3Import:
             }
         ]
 
-    async def test_mylar_and_comicinfo_conflict_requires_review_without_provider_calls(
+    async def test_mylar_and_comicinfo_conflict_preserves_mylar_identity(
         self,
         db_session,
         tmp_path,
@@ -1471,11 +1479,19 @@ class TestMylar3Import:
             sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
         )
         assert series_item is not None
-        assert series_item.status == ImportSeriesStatus.NO_MATCH
-        assert series_item.cv_id is None
-        assert series_item.cv_match_method is None
-        assert series_item.diagnostics["reason"] == "trusted_source_identity_conflict"
-        assert series_item.diagnostics["identity_conflicts"] == [
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.cv_id == 42721
+        assert series_item.cv_match_method == "mylar3_cv_id"
+        assert series_item.diagnostics["file_identity_review_required"] is True
+        assert series_item.diagnostics["file_identity_conflict_count"] == 1
+        imported_file = await db_session.scalar(
+            sa_select(ImportedFile).where(ImportedFile.import_series_id == series_item.id)
+        )
+        assert imported_file is not None
+        assert imported_file.status == ImportedFileStatus.NO_MATCH
+        assert imported_file.include_in_import is False
+        assert imported_file.diagnostics["conflict_type"] == "trusted_source_identity_conflict"
+        assert imported_file.diagnostics["identity_conflicts"] == [
             {
                 "field": "comicvine_series_id",
                 "first": 42721,

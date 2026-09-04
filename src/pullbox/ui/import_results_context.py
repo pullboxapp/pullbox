@@ -570,6 +570,17 @@ async def load_import_results_context(
         file_status_counts.get(ImportedFileStatus.FAILED.value, 0),
         job.total_files_failed or 0,
     )
+    failed_files = (
+        await _load_files_for_status(session, job_id, ImportedFileStatus.FAILED)
+        if files_failed > 0
+        else []
+    )
+    source_changed_files = sum(
+        1
+        for imported_file in failed_files
+        if dict(dict(imported_file.diagnostics or {}).get("source_revalidation") or {}).get("code")
+        == "source_changed"
+    )
     files_safety_blocked = file_status_counts.get(
         ImportedFileStatus.SAFETY_BLOCKED.value,
         0,
@@ -620,11 +631,8 @@ async def load_import_results_context(
         "catalog_sync_attention_count": len(catalog_sync_series),
         "catalog_sync_series": catalog_sync_series,
         "files_failed": files_failed,
-        "failed_files": (
-            await _load_files_for_status(session, job_id, ImportedFileStatus.FAILED)
-            if files_failed > 0
-            else []
-        ),
+        "source_changed_files": source_changed_files,
+        "failed_files": failed_files,
         "files_safety_blocked": files_safety_blocked,
         "safety_blocked_files": (
             await _load_files_for_status(

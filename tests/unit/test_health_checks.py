@@ -70,6 +70,23 @@ def settings(tmp_path) -> MagicMock:
     return s
 
 
+async def test_run_check_rolls_back_failed_session_before_persisting(
+    settings: MagicMock,
+) -> None:
+    session = MagicMock(spec=AsyncSession)
+    session.is_active = False
+    session.rollback = AsyncMock()
+    service = _make_service(settings)
+    service._check_database = AsyncMock(side_effect=RuntimeError("database is locked"))
+    service._persist_outcomes = AsyncMock()
+
+    outcomes = await service.run_check(session, "database")
+
+    assert outcomes[0].status == HealthStatus.UNHEALTHY
+    session.rollback.assert_awaited_once_with()
+    service._persist_outcomes.assert_awaited_once_with(session, outcomes)
+
+
 @pytest.fixture
 def mock_scheduler() -> MagicMock:
     sched = MagicMock()
@@ -244,9 +261,9 @@ class TestDatabaseSizeCheck:
         [
             (1024**3 - 1, HealthStatus.HEALTHY),
             (1024**3, HealthStatus.HEALTHY),
-            (1024**3 + 1, HealthStatus.DEGRADED),
-            (2 * 1024**3, HealthStatus.DEGRADED),
-            (2 * 1024**3 + 1, HealthStatus.UNHEALTHY),
+            (1024**3 + 1, HealthStatus.HEALTHY),
+            (2 * 1024**3, HealthStatus.HEALTHY),
+            (2 * 1024**3 + 1, HealthStatus.HEALTHY),
         ],
     )
     async def test_size_threshold_boundaries(
@@ -263,8 +280,8 @@ class TestDatabaseSizeCheck:
         assert result.status == expected_status
 
     @pytest.mark.asyncio
-    async def test_degraded_large_db(self, settings: MagicMock) -> None:
-        """Database size between 1 GB and 2 GB -> degraded sub-check."""
+    async def test_large_db_size_is_informational(self, settings: MagicMock) -> None:
+        """A large valid database does not degrade system health by size alone."""
         session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
         service = _make_service(settings)
 
@@ -275,13 +292,13 @@ class TestDatabaseSizeCheck:
             result = await service._check_db_size(session)
 
         assert result is not None
-        assert result.status == HealthStatus.DEGRADED
-        assert "1200 MB" in result.message
-        assert "threshold: 1024 MB" in result.message
+        assert result.status == HealthStatus.HEALTHY
+        assert "1200.0 MB" in result.message
+        assert "informational" in result.message
 
     @pytest.mark.asyncio
-    async def test_unhealthy_very_large_db(self, settings: MagicMock) -> None:
-        """Database size above 2 GB -> unhealthy sub-check."""
+    async def test_very_large_db_size_is_informational(self, settings: MagicMock) -> None:
+        """Integrity, latency, bloat, and free space determine database health."""
         session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
         service = _make_service(settings)
 
@@ -292,9 +309,10 @@ class TestDatabaseSizeCheck:
             result = await service._check_db_size(session)
 
         assert result is not None
-        assert result.status == HealthStatus.UNHEALTHY
-        assert "2500 MB" in result.message
-        assert "threshold: 2048 MB" in result.message
+        assert result.status == HealthStatus.HEALTHY
+        assert "2500.0 MB" in result.message
+        assert result.details["size_bytes"] == 2500 * 1024 * 1024
+        assert result.details["classification"] == "informational"
 
     @pytest.mark.asyncio
     async def test_skipped_for_non_sqlite(self, settings: MagicMock) -> None:

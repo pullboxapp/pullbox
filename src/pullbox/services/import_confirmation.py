@@ -18,6 +18,9 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.issue import Issue
+from pullbox.services.import_job_execution_items import (
+    ensure_target_issue_summary_for_import_file,
+)
 from pullbox.services.import_managed_copy_preflight import (
     ManagedCopyPreflightError,
     reopen_review_after_managed_copy_preflight_failure,
@@ -208,11 +211,65 @@ async def _load_confirmed_series(
             item.selected_for_import = True
         await session.flush()
 
+    persisted_item_ids = [item.id for item in persisted_items]
+    series_ids_with_files = (
+        set(
+            (
+                await session.scalars(
+                    sa_select(ImportedFile.import_series_id)
+                    .where(ImportedFile.import_series_id.in_(persisted_item_ids))
+                    .distinct()
+                )
+            ).all()
+        )
+        if persisted_item_ids
+        else set()
+    )
+    importable_series_ids = (
+        set(
+            (
+                await session.scalars(
+                    sa_select(ImportedFile.import_series_id)
+                    .where(
+                        ImportedFile.import_series_id.in_(persisted_item_ids),
+                        ImportedFile.status.in_(
+                            [ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]
+                        ),
+                    )
+                    .distinct()
+                )
+            ).all()
+        )
+        if persisted_item_ids
+        else set()
+    )
+    conflict_series_ids = (
+        set(
+            (
+                await session.scalars(
+                    sa_select(ImportedFile.import_series_id)
+                    .where(
+                        ImportedFile.import_series_id.in_(persisted_item_ids),
+                        ImportedFile.status == ImportedFileStatus.CONFLICT,
+                    )
+                    .distinct()
+                )
+            ).all()
+        )
+        if persisted_item_ids
+        else set()
+    )
+
     valid_items: list[ImportedSeries] = []
     invalid_items: list[ImportedSeries] = []
     has_unresolved_conflicts = False
     for item in persisted_items:
-        if item.status == ImportSeriesStatus.MATCHED and (item.files_conflict or 0) == 0:
+        no_persisted_files = item.id not in series_ids_with_files
+        if item.status == ImportSeriesStatus.MATCHED and (
+            item.id in importable_series_ids
+            or no_persisted_files
+            or item.id not in conflict_series_ids
+        ):
             valid_items.append(item)
             continue
         if (item.files_conflict or 0) > 0:
@@ -309,6 +366,11 @@ async def _confirm_matched_files(
         )
     )
     for matched_file in matched_result.scalars().all():
+        if not ensure_target_issue_summary_for_import_file(matched_file):
+            matched_file.status = ImportedFileStatus.NO_MATCH
+            matched_file.include_in_import = False
+            affected_series_ids.add(matched_file.import_series_id)
+            continue
         matched_file.status = ImportedFileStatus.CONFIRMED
         affected_series_ids.add(matched_file.import_series_id)
     await session.flush()

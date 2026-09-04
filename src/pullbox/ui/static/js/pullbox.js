@@ -12026,6 +12026,8 @@ function appShell() {
     activityAttentionCount: 0,
     activitySource: null,
     activityPollTimer: null,
+    activityRefreshTimer: null,
+    activityStreamOpen: false,
     activityRefreshing: false,
 
     get collapsed() {
@@ -12073,6 +12075,7 @@ function appShell() {
       }
       this.disconnectActivityStream();
       this.clearActivityTimer();
+      this.clearActivityRefreshTimer();
     },
 
     clearActivityTimer: function () {
@@ -12089,6 +12092,22 @@ function appShell() {
         self.activityPollTimer = null;
         self.refreshActivity();
       }, delayMs || 3000);
+    },
+
+    clearActivityRefreshTimer: function () {
+      if (this.activityRefreshTimer) {
+        window.clearTimeout(this.activityRefreshTimer);
+        this.activityRefreshTimer = null;
+      }
+    },
+
+    scheduleActivityRefresh: function (delayMs) {
+      var self = this;
+      self.clearActivityRefreshTimer();
+      self.activityRefreshTimer = window.setTimeout(function () {
+        self.activityRefreshTimer = null;
+        self.refreshActivity();
+      }, delayMs || 500);
     },
 
     bootstrapActivity: function () {
@@ -12132,7 +12151,9 @@ function appShell() {
         })
         .finally(function () {
           self.activityRefreshing = false;
-          self.scheduleActivityPoll(3000);
+          if (!self.activityStreamOpen) {
+            self.scheduleActivityPoll(3000);
+          }
           if (!self.activitySource) {
             self.connectActivityStream();
           }
@@ -12148,8 +12169,15 @@ function appShell() {
       self.activitySource = source;
       var refreshFromEvent = function () {
         if (self.activitySource === source) {
-          self.refreshActivity();
+          self.scheduleActivityRefresh(500);
         }
+      };
+      source.onopen = function () {
+        if (self.activitySource !== source) {
+          return;
+        }
+        self.activityStreamOpen = true;
+        self.clearActivityTimer();
       };
       source.addEventListener("ready", refreshFromEvent);
       source.addEventListener("progress", refreshFromEvent);
@@ -12159,6 +12187,7 @@ function appShell() {
           return;
         }
         self.disconnectActivityStream();
+        self.scheduleActivityPoll(3000);
       };
     },
 
@@ -12172,6 +12201,7 @@ function appShell() {
         // Closing a stale activity stream is best-effort.
       }
       this.activitySource = null;
+      this.activityStreamOpen = false;
     },
 
     acknowledgeActivity: function (operationId) {

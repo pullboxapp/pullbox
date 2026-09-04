@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -17,7 +18,11 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
     ImportSourceType,
 )
-from pullbox.services.import_review_recheck import prepare_review_recheck
+from pullbox.services.import_review_recheck import (
+    prepare_completed_import_file_recheck,
+    prepare_import_recheck,
+    prepare_review_recheck,
+)
 
 
 async def _fixture(session, tmp_path, source_type):
@@ -205,3 +210,108 @@ async def test_recheck_refuses_symlink_escape(db_session, tmp_path):
         db_session, job.id, source_roots=[path.parent], apply=True, accept_replaced_files=True
     )
     assert files[0].diagnostics["safety_block"]["code"] == "source_outside_root"
+
+
+async def test_completed_recheck_repairs_only_changed_failed_sources(
+    db_session,
+    tmp_path,
+):
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    item.status = ImportSeriesStatus.IMPORTED
+    changed = files[1]
+    changed.status = ImportedFileStatus.FAILED
+    changed.include_in_import = False
+    changed.matched_issue_cv_id = 100008
+    changed.match_method = "comicvine_issue_id"
+    changed.match_confidence = "high"
+    changed.diagnostics = {
+        **changed.diagnostics,
+        "target_issue_summary": {
+            "provider_id": "100008",
+            "issue_number": 8.0,
+        },
+        "source_revalidation": {
+            "code": "source_changed",
+            "retryable": True,
+        },
+    }
+    untouched = files[2]
+    untouched.status = ImportedFileStatus.IMPORTED
+    untouched.include_in_import = True
+    before_untouched = {
+        "status": untouched.status,
+        "signature": dict(untouched.source_signature or {}),
+        "diagnostics": dict(untouched.diagnostics or {}),
+    }
+    path = Path(changed.file_path)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Firefly</Series><Number>8</Number></ComicInfo>",
+        )
+        archive.writestr("1.jpg", b"replacement image")
+        archive.writestr("2.jpg", b"replacement image")
+    await db_session.flush()
+
+    report = await prepare_import_recheck(
+        db_session,
+        job.id,
+        source_roots=[tmp_path],
+        apply=True,
+        accept_replaced_files=True,
+    )
+
+    assert report == {
+        "files_checked": 1,
+        "files_prepared": 1,
+        "blocked_files": 0,
+        "skipped_files": 0,
+    }
+    assert job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.IMPORTED
+    assert changed.status is ImportedFileStatus.FAILED
+    assert changed.include_in_import is False
+    assert changed.matched_issue_id is None
+    assert changed.matched_issue_cv_id == 100008
+    assert changed.match_method == "comicvine_issue_id"
+    assert changed.match_confidence == "high"
+    assert changed.diagnostics["target_issue_summary"]["provider_id"] == "100008"
+    assert "source_revalidation" not in changed.diagnostics
+    assert changed.diagnostics["source_recheck"]["ready_for_retry"] is True
+    assert changed.source_signature == build_file_identity_signature(path)
+    assert untouched.status is before_untouched["status"]
+    assert untouched.source_signature == before_untouched["signature"]
+    assert untouched.diagnostics == before_untouched["diagnostics"]
+
+
+async def test_completed_recheck_keeps_missing_source_blocked(db_session, tmp_path):
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    item.status = ImportSeriesStatus.FAILED
+    missing = files[0]
+    missing.status = ImportedFileStatus.FAILED
+    missing.diagnostics = {
+        **missing.diagnostics,
+        "source_revalidation": {
+            "code": "source_missing",
+            "retryable": True,
+        },
+    }
+    missing_path = Path(missing.file_path)
+    missing_path.unlink()
+    await db_session.flush()
+
+    report = await prepare_completed_import_file_recheck(
+        db_session,
+        job.id,
+        source_roots=[tmp_path],
+        apply=True,
+        accept_replaced_files=True,
+    )
+
+    assert report["files_checked"] == 1
+    assert report["files_prepared"] == 0
+    assert report["blocked_files"] == 1
+    assert missing.status is ImportedFileStatus.FAILED
+    assert missing.diagnostics["source_revalidation"]["code"] == "source_missing"

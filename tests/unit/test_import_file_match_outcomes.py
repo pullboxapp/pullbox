@@ -69,6 +69,57 @@ def test_apply_matched_file_outcome_marks_new_series_file_matched() -> None:
     assert event.data["confidence"] == "medium"
 
 
+def test_apply_matched_file_outcome_preserves_exact_suffix_issue_number() -> None:
+    imp_file = ImportedFile(
+        file_name="The Amazing Spider-Man 54.LR.cbz",
+        parsed_issue_number=54.0,
+        issue_number_raw="54.LR",
+    )
+    imp_series = ImportedSeries(raw_series_name="The Amazing Spider-Man")
+    candidate = FileMatchCandidate(
+        matched_issue_id=None,
+        matched_issue_cv_id=123456,
+        target_issue_number=54.0,
+        has_library_file=False,
+        matched_issue=None,
+        target_issue_title="Last Remains",
+        confidence="high",
+        method="comicvine_id",
+    )
+
+    apply_matched_file_outcome(
+        imp_file,
+        imp_series,
+        candidate,
+        duplicate_series=False,
+        duplicate_target_state=duplicate_target_state,
+    )
+
+    assert imp_file.diagnostics["target_issue_summary"]["issue_number_text"] == "54LR"
+
+
+def test_apply_unmatched_file_outcome_always_records_specific_reason() -> None:
+    imp_file = ImportedFile(
+        file_name="Unknown Special.cbz",
+        parsed_issue_number=None,
+        diagnostics={"source_metadata": {"filename_parse": {"series": "Unknown Special"}}},
+    )
+    imp_series = ImportedSeries(raw_series_name="Unknown Special")
+
+    apply_unmatched_file_outcome(
+        imp_file,
+        imp_series,
+        duplicate_series=False,
+        duplicate_merge_profile=None,
+        metadata_conflict=None,
+    )
+
+    assert imp_file.diagnostics["reason"] == "issue_target_not_found"
+    assert imp_file.diagnostics["rejection_reason"] == (
+        "No issue target matched the available file name and metadata evidence."
+    )
+
+
 def test_apply_matched_file_outcome_marks_multi_entry_graphic_novel_as_volume() -> None:
     imp_file = ImportedFile(
         file_name="AL15 002 (2022) (Graphic Novel) (AAM-Markosia) (Digital-HD).cbz",
@@ -172,7 +223,12 @@ def test_apply_unmatched_file_outcome_marks_new_series_no_match() -> None:
 
     assert imp_file.status == ImportedFileStatus.NO_MATCH
     assert imp_file.include_in_import is False
-    assert imp_file.diagnostics == {}
+    assert imp_file.diagnostics == {
+        "reason": "issue_target_not_found",
+        "rejection_reason": (
+            "No issue target matched the available file name and metadata evidence."
+        ),
+    }
     assert event.name == "import_file_no_match_detail"
     assert event.data["diagnostics"] is None
 
@@ -199,6 +255,10 @@ def test_apply_unmatched_file_outcome_preserves_source_metadata_diagnostics() ->
     assert imp_file.diagnostics == {
         "source_issue_type": "volume",
         "source_metadata": {"filename_parse": {"volume": "Vol 02"}},
+        "reason": "issue_target_not_found",
+        "rejection_reason": (
+            "No issue target matched the available file name and metadata evidence."
+        ),
     }
 
 
@@ -216,7 +276,7 @@ def test_apply_unmatched_file_outcome_uses_metadata_conflict() -> None:
     )
 
     assert imp_file.status == ImportedFileStatus.NO_MATCH
-    assert imp_file.diagnostics == conflict
+    assert imp_file.diagnostics == {**conflict, "reason": "metadata_conflict"}
     assert event.name == "import_file_metadata_conflict"
     assert event.data["diagnostics"] == conflict
 
@@ -242,6 +302,7 @@ def test_apply_unmatched_file_outcome_marks_duplicate_informational_only() -> No
     assert imp_file.status == ImportedFileStatus.NO_MATCH
     assert imp_file.diagnostics == {
         "kind": "duplicate_series_file",
+        "reason": "duplicate_series_no_importable_target",
         "target_state": "no_importable_targets",
         "actionable_duplicate_merge": False,
         "existing_issue_count": 3,

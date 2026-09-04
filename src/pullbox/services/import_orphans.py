@@ -21,6 +21,9 @@ from pullbox.models.series import Series
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
 from pullbox.services.import_file_resolution import load_issue_lookup_for_series
 from pullbox.services.import_job_actions import build_series_created_action_payload
+from pullbox.services.import_job_execution_items import (
+    ensure_target_issue_summary_for_import_file,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -578,6 +581,24 @@ async def retry_failed_series(
         imp_file.include_in_import = True
         imp_file.error_message = None
 
+    retry_file_result = await session.execute(
+        sa_select(ImportedFile).where(
+            ImportedFile.import_series_id.in_(retry_series_ids),
+            ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
+        )
+    )
+    repaired_target_count = 0
+    for imp_file in retry_file_result.scalars().all():
+        had_summary = isinstance(dict(imp_file.diagnostics or {}).get("target_issue_summary"), dict)
+        if ensure_target_issue_summary_for_import_file(imp_file):
+            if not had_summary and isinstance(
+                dict(imp_file.diagnostics or {}).get("target_issue_summary"), dict
+            ):
+                repaired_target_count += 1
+            continue
+        imp_file.status = ImportedFileStatus.NO_MATCH
+        imp_file.include_in_import = False
+
     count = len(retry_items)
     job.status = ImportJobStatus.IMPORTING
     await recompute_file_counters(session, job, series_ids=retry_series_ids)
@@ -592,6 +613,7 @@ async def retry_failed_series(
         message=f"Retrying {count} failed import item{'s' if count != 1 else ''}",
         retry_count=count,
         retry_file_count=len(failed_files),
+        repaired_target_count=repaired_target_count,
     )
 
     return job, count

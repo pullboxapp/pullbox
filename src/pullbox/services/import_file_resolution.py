@@ -33,16 +33,6 @@ async def load_importable_files(
     files_result = await session.execute(sa_select(ImportedFile).where(*file_filters))
     importable_files = list(files_result.scalars().all())
 
-    if not duplicate_mode:
-        conflict_result = await session.execute(
-            sa_select(ImportedFile).where(
-                ImportedFile.import_series_id == item.id,
-                ImportedFile.status == ImportedFileStatus.CONFLICT,
-                ImportedFile.is_preferred.is_(True),
-            )
-        )
-        importable_files.extend(conflict_result.scalars().all())
-
     return importable_files
 
 

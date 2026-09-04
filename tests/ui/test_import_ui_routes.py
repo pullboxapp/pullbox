@@ -740,6 +740,50 @@ class TestImportResultsPartial:
         assert "Retry failed" in html
         assert "2000AD prog 2481.cbz" in html
 
+    def test_results_template_explains_changed_source_failures(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        html = templates.env.get_template("partials/import_results.html").render(
+            job=SimpleNamespace(id=27, status=SimpleNamespace(value="completed")),
+            can_rollback=False,
+            imported_count=18,
+            failed_count=1,
+            duplicate_count=0,
+            no_match_count=0,
+            unmatched_queue_count=0,
+            failed_series=[],
+            files_total=184190,
+            files_imported=79487,
+            files_matched=0,
+            files_duplicate=0,
+            files_already_owned=0,
+            files_conflict=0,
+            files_no_match=0,
+            orphaned_file_no_match_count=0,
+            identified_series_file_no_match_count=0,
+            catalog_sync_pending_count=0,
+            catalog_sync_failed_count=0,
+            catalog_sync_attention_count=0,
+            catalog_sync_series=[],
+            files_failed=4,
+            source_changed_files=4,
+            failed_files=[
+                SimpleNamespace(
+                    file_name="changed.cbz",
+                    error_message="The source changed after discovery.",
+                )
+            ],
+            resume_step=5,
+            resume_job_id=27,
+            resume_progress_snapshot={},
+        )
+
+        assert 'data-testid="import-results-source-changed-note"' in html
+        assert "4 source files changed after discovery" in html
+        assert "Recheck only those files" in html
+
     def test_results_template_surfaces_background_catalog_sync(self) -> None:
         from types import SimpleNamespace
 

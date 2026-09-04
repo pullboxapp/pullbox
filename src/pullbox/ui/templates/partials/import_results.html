@@ -20,6 +20,7 @@
       - files_safety_blocked: int
       - safety_blocked_files: list of ImportedFile with SAFETY_BLOCKED status
       - files_failed: int
+      - source_changed_files: int (source changed after discovery)
       - failed_files: list of ImportedFile with FAILED status
       - managed_artifacts_created: int
       - referenced_files_registered: int
@@ -375,6 +376,17 @@
       </div>
     </div>
     <div x-show="showFailedFiles" x-cloak x-transition class="section-body space-y-3">
+      {% set source_changed_files = source_changed_files|default(0) %}
+      {% if source_changed_files > 0 %}
+      <div data-testid="import-results-source-changed-note">
+        {% call inline_alert(tone="warning", icon="warning") %}
+          <span>
+            <strong>{{ source_changed_files }} source file{{ '' if source_changed_files == 1 else 's' }} changed after discovery.</strong>
+            Recheck only those files before retrying; successfully imported files remain untouched.
+          </span>
+        {% endcall %}
+      </div>
+      {% endif %}
       {% for f in failed_files %}
       <div class="rounded-xl border border-pb-border bg-pb-card-hover/40 px-4 py-3">
         <div class="text-sm font-medium font-mono text-pb-text">{{ f.file_name }}</div>

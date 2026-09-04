@@ -30,6 +30,7 @@ from pullbox.models.import_job import (
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryRoot
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, SeriesType
+from pullbox.providers.base import IssueSummary
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services import library_root_management
 from pullbox.services.import_file_execution import process_import_series_files
@@ -1057,6 +1058,102 @@ def test_targeted_issue_summaries_preserve_review_issue_type() -> None:
     assert summaries[0].issue_number == 2.0
     assert summaries[0].title == "Broken Dreams"
     assert summaries[0].issue_type == IssueType.VOLUME.value
+
+
+def test_targeted_issue_summaries_repair_missing_payload_and_preserve_exact_number() -> None:
+    imp_file = ImportedFile(
+        file_name="The Amazing Spider-Man 54.LR.cbz",
+        parsed_issue_number=54.0,
+        issue_number_raw="54.LR",
+        matched_issue_cv_id=1149277,
+        match_method="comicvine_id",
+        diagnostics={"source_issue_type": IssueType.ISSUE.value},
+    )
+
+    summaries = _targeted_issue_summaries_for_import_files([imp_file])
+
+    assert summaries == [
+        IssueSummary(
+            provider_id="1149277",
+            issue_number=54.0,
+            title=None,
+            release_date=None,
+            cover_url=None,
+            issue_type=IssueType.ISSUE.value,
+            issue_number_text="54LR",
+        )
+    ]
+    assert imp_file.diagnostics["target_issue_summary"]["issue_number_text"] == "54LR"
+
+
+def test_targeted_issue_summaries_repair_from_saved_comicinfo_number() -> None:
+    imp_file = ImportedFile(
+        file_name="2000ad Prog (2021).cbz",
+        matched_issue_cv_id=861153,
+        match_method="comicvine_id",
+        diagnostics={
+            "source_issue_type": IssueType.ISSUE.value,
+            "source_metadata": {"comicinfo": {"number": "2236"}},
+        },
+    )
+
+    summaries = _targeted_issue_summaries_for_import_files([imp_file])
+
+    assert summaries[0].issue_number == 2236.0
+    assert summaries[0].issue_number_text == "2236"
+
+
+def test_targeted_issue_summaries_repair_saved_mylar_bracket_number() -> None:
+    imp_file = ImportedFile(
+        file_name="pedro.1.(1950).cbz",
+        matched_issue_cv_id=49104,
+        match_method="comicvine_id",
+        diagnostics={
+            "source_issue_type": IssueType.ISSUE.value,
+            "source_metadata": {"comicinfo": {"number": "1 [18]"}},
+        },
+    )
+
+    summaries = _targeted_issue_summaries_for_import_files([imp_file])
+
+    assert summaries[0].issue_number == 1.0
+    assert summaries[0].issue_number_text is None
+
+
+def test_targeted_issue_summaries_repair_verified_unnumbered_one_shot() -> None:
+    imp_file = ImportedFile(
+        file_name="Wizard How to Draw 2007 (2007).cbz",
+        matched_issue_cv_id=415950,
+        match_method="comicvine_id",
+        diagnostics={
+            "source_issue_type": IssueType.ONE_SHOT.value,
+            "issue_count_hint": 1,
+            "source_metadata": {"comicinfo": {"number": None}},
+        },
+    )
+
+    summaries = _targeted_issue_summaries_for_import_files([imp_file])
+
+    assert summaries[0].issue_number == 1.0
+    assert summaries[0].issue_type == IssueType.ONE_SHOT.value
+
+
+def test_targeted_issue_summaries_do_not_coerce_nonnumeric_one_shot_label() -> None:
+    imp_file = ImportedFile(
+        file_name="Prime Infinity #infinity (1995).cbz",
+        matched_issue_cv_id=652469,
+        match_method="comicvine_id",
+        diagnostics={
+            "source_issue_type": IssueType.ONE_SHOT.value,
+            "issue_count_hint": 1,
+            "source_metadata": {"comicinfo": {"number": "∞"}},
+        },
+    )
+
+    summaries = _targeted_issue_summaries_for_import_files([imp_file])
+
+    assert summaries == []
+    assert imp_file.diagnostics["reason"] == "target_issue_summary_unavailable"
 
 
 @pytest.mark.asyncio

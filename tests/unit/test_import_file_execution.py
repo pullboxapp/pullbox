@@ -3480,6 +3480,40 @@ class TestConfirmImportAppliesConflictResolutions:
         assert imp_files[1].status == ImportedFileStatus.CONFLICT
 
     @pytest.mark.asyncio
+    async def test_clean_files_in_mixed_group_can_be_confirmed_without_importing_conflict(
+        self, db_session: AsyncSession
+    ) -> None:
+        job, imp_series, imp_files, _series, _issues = await _setup_full_scenario(
+            db_session,
+            num_issues=2,
+            job_status=ImportJobStatus.REVIEW,
+            series_status=ImportSeriesStatus.MATCHED,
+            file_statuses=[
+                ImportedFileStatus.MATCHED,
+                ImportedFileStatus.CONFLICT,
+            ],
+        )
+        imp_series.files_total = 2
+        imp_series.files_matched = 1
+        imp_series.files_conflict = 1
+        imp_files[1].conflict_group_id = 1
+        imp_files[1].is_preferred = True
+        await db_session.flush()
+
+        svc = _make_service()
+        await svc.confirm_import(
+            db_session,
+            job.id,
+            ConfirmImportRequest(series_ids=[imp_series.id]),
+        )
+
+        await db_session.refresh(imp_files[0])
+        await db_session.refresh(imp_files[1])
+        assert imp_files[0].status == ImportedFileStatus.CONFIRMED
+        assert imp_files[1].status == ImportedFileStatus.CONFLICT
+        assert imp_files[1].include_in_import is False
+
+    @pytest.mark.asyncio
     async def test_conflict_resolution_marks_preferred_confirmed(
         self, db_session: AsyncSession
     ) -> None:

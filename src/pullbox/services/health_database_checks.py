@@ -24,8 +24,6 @@ _DB_CONNECTION_DEGRADED_MS = 250.0
 _DB_CONNECTION_UNHEALTHY_MS = 1000.0
 _DB_QUERY_DEGRADED_MS = 500.0
 _DB_QUERY_UNHEALTHY_MS = 1500.0
-_DB_SIZE_DEGRADED_MB = 1024.0
-_DB_SIZE_UNHEALTHY_MB = 2048.0
 _DB_BLOAT_DEGRADED_RATIO = 0.15
 _DB_BLOAT_UNHEALTHY_RATIO = 0.3
 _DB_BLOAT_DEGRADED_MB = 50.0
@@ -233,25 +231,15 @@ async def check_db_size(session: AsyncSession) -> SubCheckOutcome | None:
 
     size_mb = size_bytes / (1024 * 1024)
 
-    if size_mb > _DB_SIZE_UNHEALTHY_MB:
-        return SubCheckOutcome(
-            check_name="database_size",
-            name="Database size",
-            status=HealthStatus.UNHEALTHY,
-            message=f"{size_mb:.0f} MB (threshold: {_DB_SIZE_UNHEALTHY_MB:.0f} MB)",
-        )
-    if size_mb > _DB_SIZE_DEGRADED_MB:
-        return SubCheckOutcome(
-            check_name="database_size",
-            name="Database size",
-            status=HealthStatus.DEGRADED,
-            message=f"{size_mb:.0f} MB (threshold: {_DB_SIZE_DEGRADED_MB:.0f} MB)",
-        )
     return SubCheckOutcome(
         check_name="database_size",
         name="Database size",
         status=HealthStatus.HEALTHY,
-        message=f"{size_mb:.1f} MB",
+        message=f"{size_mb:.1f} MB (informational)",
+        details={
+            "size_bytes": size_bytes,
+            "classification": "informational",
+        },
     )
 
 

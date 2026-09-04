@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import ImportedFileStatus
 from pullbox.models.issue import IssueType
+from pullbox.services.import_file_issue_signals import candidate_issue_number_text
 from pullbox.services.import_file_match_targets import (
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND,
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
@@ -200,6 +201,16 @@ def _target_issue_summary_diagnostics(
         "cover_url": None,
         "issue_type": issue_type.value,
     }
+    issue_number_text = (
+        match_candidate.matched_issue.effective_issue_number_text
+        if match_candidate.matched_issue is not None
+        else candidate_issue_number_text(imp_file)
+    )
+    numeric_issue_text = (
+        str(int(issue_number)) if float(issue_number).is_integer() else str(float(issue_number))
+    )
+    if issue_number_text is not None and issue_number_text != numeric_issue_text:
+        target_summary["issue_number_text"] = issue_number_text
     return {
         "target_issue_summary": target_summary,
     }
@@ -318,6 +329,7 @@ def apply_unmatched_file_outcome(
         )
         next_diagnostics = metadata_conflict or {
             "kind": "duplicate_series_file",
+            "reason": "duplicate_series_no_importable_target",
             "target_state": (
                 "no_importable_targets"
                 if duplicate_merge_profile is not None and not duplicate_merge_profile.actionable
@@ -335,6 +347,10 @@ def apply_unmatched_file_outcome(
                 else 0
             ),
         }
+        next_diagnostics.setdefault(
+            "reason",
+            str(next_diagnostics.get("kind") or "duplicate_series_issue_target_not_found"),
+        )
         imp_file.diagnostics = {**existing_diagnostics, **next_diagnostics}
         informational_only = (
             duplicate_merge_profile is not None and not duplicate_merge_profile.actionable
@@ -367,9 +383,23 @@ def apply_unmatched_file_outcome(
         )
 
     imp_file.diagnostics = (
-        {**existing_diagnostics, **metadata_conflict}
+        {
+            **existing_diagnostics,
+            **metadata_conflict,
+            "reason": str(
+                metadata_conflict.get("reason")
+                or metadata_conflict.get("kind")
+                or "issue_target_not_found"
+            ),
+        }
         if metadata_conflict is not None
-        else existing_diagnostics
+        else {
+            **existing_diagnostics,
+            "reason": "issue_target_not_found",
+            "rejection_reason": (
+                "No issue target matched the available file name and metadata evidence."
+            ),
+        }
     )
     return FileMatchLogEvent(
         name=(

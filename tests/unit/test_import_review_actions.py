@@ -354,6 +354,7 @@ async def test_unmatch_series_match_returns_matched_row_to_series_review(
     assert imp_file.duplicate_group_id is None
     assert imp_file.is_preferred is False
     assert imp_file.diagnostics["kind"] == "file_no_match"
+    assert imp_file.diagnostics["reason"] == "series_unmatched_by_user"
     assert imp_file.diagnostics["target_state"] == "needs_series_match"
     recompute_files.assert_awaited_once_with(db_session, job, [imported.id])
     recompute_series.assert_awaited_once_with(db_session, job)

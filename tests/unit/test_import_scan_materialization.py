@@ -270,6 +270,7 @@ async def test_materialize_non_fitting_layout_files_as_explicit_review_rows(
     assert file_row.status == ImportedFileStatus.NO_MATCH
     assert file_row.include_in_import is False
     assert file_row.diagnostics["kind"] == "source_layout_review"
+    assert file_row.diagnostics["reason"] == "selected_layout_no_match"
     assert file_row.diagnostics["rejection_reason"] == (
         "This file does not fit the selected source layout. Review its series before importing."
     )

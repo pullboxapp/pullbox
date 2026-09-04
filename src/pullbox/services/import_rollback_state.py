@@ -188,6 +188,13 @@ def _restore_imported_file_state(
         imp_file.status = ImportedFileStatus.MATCHED
     else:
         imp_file.status = ImportedFileStatus.NO_MATCH
+    if imp_file.status == ImportedFileStatus.NO_MATCH:
+        diagnostics.setdefault("reason", "rollback_restored_unmatched")
+        diagnostics.setdefault(
+            "rejection_reason",
+            "This file returned to unresolved review after the import was rolled back.",
+        )
+        imp_file.diagnostics = diagnostics
     imp_file.include_in_import = False
     imp_file.library_file_id = None
     imp_file.error_message = None

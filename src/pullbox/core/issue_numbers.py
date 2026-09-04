@@ -37,6 +37,11 @@ def _issue_number_parts(value: str | float | int) -> tuple[Decimal, str]:
         raise ValueError("issue number must not be blank")
 
     normalized_fraction = raw_value.replace("½", ".5").replace("¼", ".25").replace("¾", ".75")
+    normalized_fraction = re.sub(
+        r"(?<=[0-9.])\s+(?=[A-Za-z]+$)",
+        "",
+        normalized_fraction,
+    )
     suffix = ""
     try:
         numeric_value = Decimal(normalized_fraction)

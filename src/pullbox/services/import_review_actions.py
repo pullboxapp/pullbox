@@ -507,6 +507,7 @@ async def _unmatch_series_target(
         imp_file.diagnostics = {
             **existing_diagnostics,
             "kind": "file_no_match",
+            "reason": reason,
             "target_state": "needs_series_match",
             "rejection_reason": rejection_reason,
             "previous_match": previous_file_match,

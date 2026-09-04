@@ -126,6 +126,7 @@ async def materialize_discovered_scan_results(
                 diagnostics.update(
                     {
                         "kind": "source_layout_review",
+                        "reason": "selected_layout_no_match",
                         "rejection_reason": _SOURCE_LAYOUT_REVIEW_MESSAGE,
                     }
                 )
