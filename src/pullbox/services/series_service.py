@@ -376,6 +376,31 @@ class SeriesService:
         )
         return series_meta, issue_summaries
 
+    async def prefetch_comicvine_profiles(
+        self,
+        comicvine_ids: list[int],
+    ) -> dict[int, SeriesMetadata]:
+        """Fetch provider profiles in bulk before the slower issue-catalog pass."""
+        return await self._metadata.get_series_metadata_batch(comicvine_ids)
+
+    async def prefetch_comicvine_issue_catalogs(
+        self,
+        comicvine_ids: list[int],
+    ) -> dict[int, list[IssueSummary]]:
+        """Fetch and group issue catalogs for multiple imported series."""
+        return await self._metadata.get_issue_catalog_batch(comicvine_ids)
+
+    async def upsert_comicvine_profile(
+        self,
+        session: AsyncSession,
+        comicvine_id: int,
+        series_meta: SeriesMetadata,
+    ) -> Series:
+        """Persist visible profile fields without claiming catalog completion."""
+        series = await self._metadata.upsert_series_metadata(session, comicvine_id, series_meta)
+        await session.flush()
+        return series
+
     async def add_from_comicvine_prefetched(
         self,
         session: AsyncSession,

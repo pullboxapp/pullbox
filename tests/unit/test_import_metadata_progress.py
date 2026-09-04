@@ -93,7 +93,8 @@ async def test_metadata_progress_is_one_overall_summary_with_bounded_queries(
     assert update.overall.total == 4  # Repeated series references are counted once.
     assert update.item is None
     assert update.state == OperationProgressState.RUNNING
-    assert "Series catalogs: 1 of 2" in update.message
+    assert "Series details: 1 of 2" in update.message
+    assert "Issue catalogs: 1 of 2" in update.message
     assert "ComicInfo files: 1 of 2" in update.message
     result = await publish_operation_progress(db_session, update)
     await db_session.commit()

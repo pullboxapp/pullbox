@@ -209,6 +209,7 @@ async def build_metadata_service(session: AsyncSession) -> MetadataService:
     settings = get_settings()
     api_key = await get_comicvine_api_key(session)
     provider = ComicVineProvider(api_key=api_key)
+    provider = build_persistent_import_metadata_provider(session, provider)
     covers_dir = await resolve_covers_dir(session)
     return MetadataService(
         provider=provider,

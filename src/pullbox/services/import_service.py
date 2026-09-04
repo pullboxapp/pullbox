@@ -761,6 +761,7 @@ class ImportService(
             build_comicinfo_payload=self._build_comicinfo_payload_for_issue,
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
+            prefetch_issue_metadata=self._metadata_service.prefetch_issue_metadata_batch,
         )
 
     def schedule_story_arc_sync(self) -> None:
@@ -779,6 +780,7 @@ class ImportService(
             build_comicinfo_payload=self._build_comicinfo_payload_for_issue,
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
+            prefetch_issue_metadata=self._metadata_service.prefetch_issue_metadata_batch,
         )
 
     async def recover_pending_catalog_hydration(

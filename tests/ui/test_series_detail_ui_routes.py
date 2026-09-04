@@ -561,6 +561,36 @@ class TestSeriesDetailRouteContracts:
         else:
             assert 'data-testid="series-detail-catalog-refresh"' not in response.text
 
+        refresh_start = response.text.index('data-testid="series-action-refresh"')
+        refresh_end = response.text.index(
+            'data-testid="series-action-status-toggle"',
+            refresh_start,
+        )
+        refresh_html = response.text[refresh_start:refresh_end]
+        if catalog_state == "hydrating":
+            assert "disabled" in refresh_html
+            assert 'aria-disabled="true"' in refresh_html
+            assert "Metadata syncing" in refresh_html
+            assert "metadataSyncing: true" in response.text
+            assert ':disabled="refreshing || metadataSyncing"' in refresh_html
+            assert "metadataSyncing ? 'Metadata syncing...' : 'Refresh metadata'" in refresh_html
+        else:
+            assert 'aria-disabled="true"' not in refresh_html
+            assert "Refresh metadata" in refresh_html
+
+    async def test_series_detail_stops_sync_polling_and_reenables_refresh(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text(encoding="utf-8")
+        detail_start = script.index("function seriesDetailPage(config)")
+        detail_end = script.index("function issueSearchModal", detail_start)
+        detail_script = script[detail_start:detail_end]
+
+        assert "metadataSyncing: false" in detail_script
+        assert "this.metadataSyncing = !!cfg.metadataSyncing" in detail_script
+        assert "startMetadataSyncPolling" in detail_script
+        assert 'data.issue_catalog_state !== "hydrating"' in detail_script
+        assert "self.metadataSyncing = false" in detail_script
+        assert "clearTimeout(this.metadataSyncTimer)" in detail_script
+
     async def test_series_detail_omits_catalog_state_banner_when_complete(
         self,
         authenticated_client,

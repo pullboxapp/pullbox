@@ -1232,6 +1232,7 @@ async def process_import_series_files(
                     "issue_id": resolved_issue.id,
                     "issue_cv_id": resolved_issue.comicvine_id,
                     "library_file_id": library_file.id,
+                    "artifact_path": library_file.file_path,
                     "queued_at": datetime.now(UTC).isoformat(),
                 }
                 imp_file.diagnostics = diagnostics

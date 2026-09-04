@@ -185,11 +185,17 @@ async def build_import_metadata_progress(
 
     series_ids = select(ImportedSeries.series_id).where(ImportedSeries.import_job_id == job_id)
     catalog_rows = await session.execute(
-        select(Series.issue_catalog_state, func.count())
+        select(Series.issue_catalog_state, Series.metadata_source, func.count())
         .where(Series.id.in_(series_ids), Series.comicvine_id.isnot(None))
-        .group_by(Series.issue_catalog_state)
+        .group_by(Series.issue_catalog_state, Series.metadata_source)
     )
-    catalogs = {state: count for state, count in catalog_rows.all()}
+    catalog_groups = list(catalog_rows.all())
+    catalogs: dict[IssueCatalogState, int] = {}
+    profile_done = 0
+    for catalog_state, metadata_source, count in catalog_groups:
+        catalogs[catalog_state] = catalogs.get(catalog_state, 0) + count
+        if metadata_source == "comicvine" or catalog_state == IssueCatalogState.COMPLETE:
+            profile_done += count
     status = ImportedFile.diagnostics["comicinfo_enrichment"]["status"].as_string()
     file_rows = await session.execute(
         select(status, func.count())
@@ -215,7 +221,8 @@ async def build_import_metadata_progress(
     tone = OperationProgressTone.INFO
     attention = False
     summary = (
-        f"Series catalogs: {catalog_done:,} of {catalog_total:,}. "
+        f"Series details: {profile_done:,} of {catalog_total:,}. "
+        f"Issue catalogs: {catalog_done:,} of {catalog_total:,}. "
         f"ComicInfo files: {file_done:,} of {file_total:,}."
     )
     if not pending:
@@ -250,6 +257,8 @@ async def build_import_metadata_progress(
         overall=OperationProgressMeasure(current=finished, total=total, unit="updates"),
         detail_snapshot={
             "job_id": job_id,
+            "profiles_complete": profile_done,
+            "profiles_total": catalog_total,
             "catalogs_complete": catalog_done,
             "catalogs_total": catalog_total,
             "files_complete": file_done,

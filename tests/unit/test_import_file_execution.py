@@ -1628,6 +1628,7 @@ class TestImportExecutionAutoflushDiscipline:
         assert pending["issue_id"] == issues[0].id
         assert pending["issue_cv_id"] == issues[0].comicvine_id
         assert pending["library_file_id"] is not None
+        assert pending["artifact_path"] == str(final_path)
         payload = record_action.await_args.kwargs["payload"]
         assert payload["embedded_comicinfo_enrichment_deferred"] is True
         events = [call.args[3] for call in log_event.await_args_list]

@@ -38,6 +38,7 @@ COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY = "comicinfo_enrichment"
 ImportComicInfoBuildPayload = Callable[..., Awaitable[dict[str, Any]]]
 ImportComicInfoApply = Callable[[Path, dict[str, Any]], Any]
 ImportComicInfoLogEvent = Callable[..., Awaitable[None]]
+ImportComicInfoPrefetch = Callable[[list[int]], Awaitable[Any]]
 
 comicinfo_enrichment_tasks: set[asyncio.Task[None]] = set()
 _comicinfo_enrichment_semaphore: asyncio.Semaphore | None = None
@@ -81,6 +82,7 @@ def schedule_import_comicinfo_enrichment(
     build_comicinfo_payload: ImportComicInfoBuildPayload,
     apply_comicinfo: ImportComicInfoApply,
     log_event: ImportComicInfoLogEvent,
+    prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
 ) -> None:
     """Queue deferred issue metadata and ComicInfo rewrites after Step 4 completes."""
     if session_factory is None:
@@ -94,6 +96,7 @@ def schedule_import_comicinfo_enrichment(
                 build_comicinfo_payload=build_comicinfo_payload,
                 apply_comicinfo=apply_comicinfo,
                 log_event=log_event,
+                prefetch_issue_metadata=prefetch_issue_metadata,
             )
         except Exception as exc:
             logger.warning(
@@ -113,6 +116,7 @@ async def run_pending_import_comicinfo_enrichment(
     build_comicinfo_payload: ImportComicInfoBuildPayload,
     apply_comicinfo: ImportComicInfoApply,
     log_event: ImportComicInfoLogEvent,
+    prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
 ) -> int:
     """Refresh deferred ComicInfo metadata for all completed jobs with pending rows."""
     pending_job_ids = await _load_pending_import_job_ids(session_factory)
@@ -123,6 +127,7 @@ async def run_pending_import_comicinfo_enrichment(
             build_comicinfo_payload=build_comicinfo_payload,
             apply_comicinfo=apply_comicinfo,
             log_event=log_event,
+            prefetch_issue_metadata=prefetch_issue_metadata,
         )
     return len(pending_job_ids)
 
@@ -134,6 +139,7 @@ async def run_import_comicinfo_enrichment(
     build_comicinfo_payload: ImportComicInfoBuildPayload,
     apply_comicinfo: ImportComicInfoApply,
     log_event: ImportComicInfoLogEvent,
+    prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
 ) -> None:
     """Refresh deferred ComicInfo metadata for imported files in one import job."""
     async with (
@@ -146,6 +152,7 @@ async def run_import_comicinfo_enrichment(
             build_comicinfo_payload=build_comicinfo_payload,
             apply_comicinfo=apply_comicinfo,
             log_event=log_event,
+            prefetch_issue_metadata=prefetch_issue_metadata,
         )
 
 
@@ -156,11 +163,25 @@ async def _run_import_comicinfo_enrichment_while_fenced(
     build_comicinfo_payload: ImportComicInfoBuildPayload,
     apply_comicinfo: ImportComicInfoApply,
     log_event: ImportComicInfoLogEvent,
+    prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
 ) -> None:
     """Run one job while holding the process-local filesystem mutation fence."""
     if not await _import_job_is_completed(session_factory, job_id=job_id):
         return
     pending_ids = await _load_pending_imported_file_ids(session_factory, job_id=job_id)
+    if prefetch_issue_metadata is not None:
+        issue_cv_ids = await _load_pending_issue_cv_ids(session_factory, job_id=job_id)
+        if issue_cv_ids:
+            await wait_for_comicinfo_turn()
+            try:
+                await prefetch_issue_metadata(issue_cv_ids)
+            except Exception as exc:
+                logger.warning(
+                    "import_comicinfo_metadata_batch_prefetch_failed",
+                    job_id=job_id,
+                    issue_count=len(issue_cv_ids),
+                    error=str(exc),
+                )
     for imported_file_id in pending_ids:
         await wait_for_comicinfo_turn()
         try:
@@ -241,6 +262,41 @@ async def _load_pending_imported_file_ids(
             if _is_pending_comicinfo_enrichment(imported_file):
                 ids.append(int(imported_file_id))
         return ids
+
+
+async def _load_pending_issue_cv_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    job_id: int,
+) -> list[int]:
+    """Load unique provider issue IDs already recorded in pending diagnostics."""
+    async with session_factory() as session:
+        result = await session.execute(
+            sa_select(ImportedFile.diagnostics)
+            .join(ImportJob, ImportedFile.import_job_id == ImportJob.id)
+            .where(ImportedFile.import_job_id == job_id)
+            .where(ImportJob.status == ImportJobStatus.COMPLETED)
+            .where(ImportedFile.status == ImportedFileStatus.IMPORTED)
+            .order_by(ImportedFile.id)
+        )
+        provider_ids: list[int] = []
+        seen: set[int] = set()
+        for diagnostics in result.scalars().all():
+            if not _is_pending_comicinfo_enrichment_diagnostics(diagnostics):
+                continue
+            details = diagnostics.get(COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY, {})
+            raw_provider_id = details.get("issue_cv_id") if isinstance(details, dict) else None
+            if isinstance(raw_provider_id, bool) or not isinstance(raw_provider_id, (int, str)):
+                continue
+            try:
+                provider_id = int(raw_provider_id)
+            except (TypeError, ValueError):
+                continue
+            if provider_id <= 0 or provider_id in seen:
+                continue
+            seen.add(provider_id)
+            provider_ids.append(provider_id)
+        return provider_ids
 
 
 async def _load_pending_import_job_ids(
@@ -335,19 +391,37 @@ async def _prepare_pending_imported_file(
     if job_status is not ImportJobStatus.COMPLETED:
         return None
 
-    library_file_id = imported_file.library_file_id
-    if library_file_id is None:
-        details = imported_file.diagnostics.get(COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY, {})
-        if isinstance(details, dict):
-            library_file_id = details.get("library_file_id")
+    details_value = imported_file.diagnostics.get(COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY, {})
+    details = details_value if isinstance(details_value, dict) else {}
+    recorded_library_file_id = _recorded_positive_int(details, "library_file_id")
+    library_file_id = imported_file.library_file_id or recorded_library_file_id
     if library_file_id is None:
         raise ValueError("Deferred ComicInfo enrichment is missing library_file_id")
+    if (
+        imported_file.library_file_id is not None
+        and recorded_library_file_id is not None
+        and imported_file.library_file_id != recorded_library_file_id
+    ):
+        raise ValueError("Deferred ComicInfo target no longer matches its queued library file")
 
     library_file = await session.get(LibraryFile, int(library_file_id))
     if library_file is None:
         raise ValueError(f"Library file {library_file_id} no longer exists")
 
-    issue_id = imported_file.matched_issue_id or library_file.issue_id
+    recorded_issue_id = _recorded_positive_int(details, "issue_id")
+    expected_issue_id = imported_file.matched_issue_id or recorded_issue_id
+    if expected_issue_id is not None and library_file.issue_id != expected_issue_id:
+        raise ValueError("Deferred ComicInfo target no longer matches its queued issue")
+
+    recorded_artifact_path = details.get("artifact_path")
+    if (
+        isinstance(recorded_artifact_path, str)
+        and recorded_artifact_path
+        and Path(library_file.file_path) != Path(recorded_artifact_path)
+    ):
+        raise ValueError("Deferred ComicInfo target no longer matches its queued artifact path")
+
+    issue_id = expected_issue_id or library_file.issue_id
     if issue_id is None:
         raise ValueError("Deferred ComicInfo enrichment is missing issue_id")
 
@@ -359,6 +433,9 @@ async def _prepare_pending_imported_file(
     issue = issue_result.scalars().first()
     if issue is None:
         raise ValueError(f"Issue {issue_id} no longer exists")
+    recorded_issue_cv_id = _recorded_positive_int(details, "issue_cv_id")
+    if recorded_issue_cv_id is not None and issue.comicvine_id != recorded_issue_cv_id:
+        raise ValueError("Deferred ComicInfo target no longer matches its queued ComicVine issue")
 
     artifact_path = Path(library_file.file_path)
     payload = await build_comicinfo_payload(
@@ -376,6 +453,22 @@ async def _prepare_pending_imported_file(
         issue_id=issue.id,
         issue_cv_id=issue.comicvine_id,
     )
+
+
+def _recorded_positive_int(details: dict[str, Any], key: str) -> int | None:
+    value = details.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed > 0 else None
 
 
 async def _mark_pending_file_complete_with_retry(

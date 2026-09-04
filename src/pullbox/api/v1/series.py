@@ -6,7 +6,7 @@ import time
 from typing import Any, Literal
 
 import structlog
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from sqlalchemy import case, func, inspect, select, update
 from sqlalchemy.orm import contains_eager
 
@@ -16,7 +16,7 @@ from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.library_policy import load_search_on_add_default
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.search_log import SearchLog, SearchType
-from pullbox.models.series import Series, SeriesStatus
+from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
 from pullbox.schemas.issue import IssueListResponse
 from pullbox.schemas.pagination import PaginatedResponse
 from pullbox.schemas.series import (
@@ -567,6 +567,14 @@ async def refresh_series(
     session: DbSession,
 ) -> SeriesResponse:
     """Refresh series metadata from ComicVine."""
+    series = await session.get(Series, series_id)
+    if series is None:
+        raise NotFoundError("Series", series_id)
+    if series.issue_catalog_state == IssueCatalogState.HYDRATING:
+        raise HTTPException(
+            status_code=409,
+            detail="Initial metadata sync is already in progress.",
+        )
     metadata_svc = await _build_metadata_service(session)
     await metadata_svc.refresh_series(session, series_id, force=True)
     return await _load_series_response(session, series_id)

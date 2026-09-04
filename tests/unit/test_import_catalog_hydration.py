@@ -109,6 +109,37 @@ class CatalogHydrationProviderDouble:
         ]
 
 
+class BatchCatalogHydrationSeriesServiceStub(CatalogHydrationSeriesServiceStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[str] = []
+        self.profile_batch_calls: list[list[int]] = []
+        self.catalog_batch_calls: list[list[int]] = []
+
+    async def prefetch_comicvine_profiles(self, comicvine_ids: list[int]):
+        self.profile_batch_calls.append(list(comicvine_ids))
+        self.events.append("profiles_fetched")
+        return {
+            comicvine_id: {"title": f"Hydrated {comicvine_id}"} for comicvine_id in comicvine_ids
+        }
+
+    async def prefetch_comicvine_issue_catalogs(self, comicvine_ids: list[int]):
+        assert self.events.count("profile_persisted") == len(comicvine_ids)
+        self.catalog_batch_calls.append(list(comicvine_ids))
+        self.events.append("catalogs_fetched")
+        return {comicvine_id: [] for comicvine_id in comicvine_ids}
+
+    async def upsert_comicvine_profile(self, hydrate_session, comicvine_id: int, series_meta):
+        result = await hydrate_session.execute(
+            sa_select(Series).where(Series.comicvine_id == comicvine_id)
+        )
+        series = result.scalar_one()
+        series.title = series_meta["title"]
+        self.events.append("profile_persisted")
+        await hydrate_session.flush()
+        return series
+
+
 async def test_run_pending_catalog_hydration_recovers_hydrating_series_after_restart(
     db_session,
 ) -> None:
@@ -169,6 +200,44 @@ async def test_run_pending_catalog_hydration_recovers_hydrating_series_after_res
     assert no_provider_id.issue_catalog_state == IssueCatalogState.HYDRATING
 
 
+async def test_run_pending_catalog_hydration_batches_profiles_before_issue_catalogs(
+    db_session,
+) -> None:
+    series_rows = [
+        Series(
+            title=f"Pending {comicvine_id}",
+            sort_title=f"pending {comicvine_id}",
+            comicvine_id=comicvine_id,
+            issue_catalog_state=IssueCatalogState.HYDRATING,
+        )
+        for comicvine_id in (6101, 6102, 6103)
+    ]
+    db_session.add_all(series_rows)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    service = BatchCatalogHydrationSeriesServiceStub()
+
+    recovered = await run_pending_catalog_hydration(
+        session_factory,
+        series_service=service,
+    )
+
+    assert recovered == 3
+    assert service.profile_batch_calls == [[6101, 6102, 6103]]
+    assert service.catalog_batch_calls == [[6101, 6102, 6103]]
+    assert service.prefetch_calls == []
+    assert service.events.index("profiles_fetched") < service.events.index("profile_persisted")
+    assert service.events.index("profile_persisted") < service.events.index("catalogs_fetched")
+    for series in series_rows:
+        await db_session.refresh(series)
+        assert series.title == f"Hydrated {series.comicvine_id}"
+        assert series.issue_catalog_state == IssueCatalogState.COMPLETE
+
+
 async def test_catalog_hydration_does_not_recreate_series_deleted_during_fetch(
     db_session,
 ) -> None:
@@ -211,6 +280,37 @@ async def test_catalog_hydration_does_not_recreate_series_deleted_during_fetch(
 
     assert add_calls == 0
     assert hydrated is False
+
+
+async def test_catalog_hydration_skips_series_completed_after_queue_snapshot(db_session) -> None:
+    series = Series(
+        title="Completed While Queued",
+        sort_title="completed while queued",
+        comicvine_id=4041,
+        monitored=True,
+        issue_catalog_state=IssueCatalogState.COMPLETE,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    prefetch = AsyncMock()
+    persist = AsyncMock()
+
+    hydrated = await run_catalog_hydration(
+        session_factory,
+        series_id=series.id,
+        search_on_add=True,
+        prefetch_comicvine_bundle=prefetch,
+        add_from_comicvine_prefetched=persist,
+    )
+
+    assert hydrated is False
+    prefetch.assert_not_awaited()
+    persist.assert_not_awaited()
 
 
 async def test_load_catalog_hydration_plan_uses_explicit_preferred_root(db_session) -> None:

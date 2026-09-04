@@ -18081,10 +18081,14 @@ function seriesDetailPage(config) {
     statusSaving: false,
     refreshing: false,
     searching: false,
+    metadataSyncing: false,
+    metadataSyncTimer: null,
     issueSearchState: {},
 
     init: function () {
       this.monitored = !!cfg.monitored;
+      this.metadataSyncing = !!cfg.metadataSyncing;
+      this.startMetadataSyncPolling();
 
       var self = this;
       var runNormalize = function () {
@@ -18098,6 +18102,51 @@ function seriesDetailPage(config) {
       } else {
         window.setTimeout(runNormalize, 0);
       }
+    },
+
+    destroy: function () {
+      if (this.metadataSyncTimer !== null) {
+        clearTimeout(this.metadataSyncTimer);
+        this.metadataSyncTimer = null;
+      }
+    },
+
+    startMetadataSyncPolling: function () {
+      var self = this;
+      if (!self.metadataSyncing || self.metadataSyncTimer !== null) {
+        return;
+      }
+      self.metadataSyncTimer = window.setTimeout(function () {
+        self.metadataSyncTimer = null;
+        self.pollMetadataSyncState();
+      }, 3000);
+    },
+
+    pollMetadataSyncState: function () {
+      var self = this;
+      if (!self.metadataSyncing || !cfg.updateUrl) {
+        return;
+      }
+      fetch(cfg.updateUrl, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      })
+        .then(function (response) {
+          if (!response.ok) throw new Error("Failed to load metadata sync state");
+          return response.json();
+        })
+        .then(function (data) {
+          if (data.issue_catalog_state !== "hydrating") {
+            self.metadataSyncing = false;
+            self.refreshIssuesPanel();
+            return;
+          }
+          self.startMetadataSyncPolling();
+        })
+        .catch(function () {
+          self.startMetadataSyncPolling();
+        });
     },
 
     csrfToken: function () {

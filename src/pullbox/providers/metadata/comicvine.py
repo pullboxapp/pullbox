@@ -11,9 +11,11 @@ ComicVine terminology mapping: "volume" → "series" in Pullbox.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import re
 import time
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -51,6 +53,8 @@ _REQUEST_TIMEOUT = 15.0
 _GLOBAL_SERIES_SEARCH_BATCH_SIZE = 100
 _GLOBAL_SERIES_SEARCH_MAX_RESULTS = 1000
 _GLOBAL_SERIES_SEARCH_CACHE_TTL_SECONDS = 300.0
+_BULK_RESOURCE_PAGE_SIZE = 100
+_MAX_BULK_PROVIDER_IDS = 5000
 _GLOBAL_SERIES_SEARCH_CACHE: dict[
     tuple[str, int, int],
     tuple[float, tuple[SeriesSearchResult, ...], int],
@@ -92,6 +96,75 @@ class _TokenBucket:
         elapsed = now - self._last_refill
         self._tokens = min(self._max_tokens, self._tokens + elapsed * self._refill_rate)
         self._last_refill = now
+
+
+class _RequestVelocityGate:
+    """Serialize request starts without conflating velocity and hourly quotas."""
+
+    def __init__(self) -> None:
+        self._last_started_at: float | None = None
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, requests_per_second: int) -> None:
+        minimum_interval = 1.0 / max(int(requests_per_second), 1)
+        async with self._lock:
+            now = time.monotonic()
+            if self._last_started_at is not None:
+                wait_seconds = minimum_interval - (now - self._last_started_at)
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+            self._last_started_at = time.monotonic()
+
+
+class _ComicVineRateCoordinator:
+    """Share per-resource hourly budgets and velocity pacing across clients."""
+
+    def __init__(self, rate_limit: int) -> None:
+        self._rate_limit = max(int(rate_limit), 1)
+        self._resource_limiters: dict[str, _TokenBucket] = {}
+        self._velocity_gate = _RequestVelocityGate()
+
+    async def acquire(self, resource: str, *, requests_per_second: int) -> None:
+        limiter = self._resource_limiters.get(resource)
+        if limiter is None:
+            limiter = _TokenBucket(
+                max_tokens=self._rate_limit,
+                refill_rate=self._rate_limit / 3600.0,
+            )
+            self._resource_limiters[resource] = limiter
+        await limiter.acquire()
+        await self._velocity_gate.acquire(requests_per_second)
+
+
+_RATE_COORDINATORS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[tuple[str, int], _ComicVineRateCoordinator],
+] = weakref.WeakKeyDictionary()
+
+
+def _resource_rate_key(endpoint: str) -> str:
+    """Return ComicVine's first path segment, which defines its API resource."""
+    return endpoint.strip("/").partition("/")[0] or "unknown"
+
+
+def _rate_coordinator_for(
+    *,
+    api_key: str,
+    rate_limit: int,
+    requests_per_second: int,
+) -> _ComicVineRateCoordinator:
+    """Return one process-local rate coordinator without retaining an API key."""
+    _ = requests_per_second
+    loop = asyncio.get_running_loop()
+    coordinators = _RATE_COORDINATORS.setdefault(loop, {})
+    key_fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    normalized_rate_limit = max(int(rate_limit), 1)
+    coordinator_key = (key_fingerprint, normalized_rate_limit)
+    coordinator = coordinators.get(coordinator_key)
+    if coordinator is None:
+        coordinator = _ComicVineRateCoordinator(normalized_rate_limit)
+        coordinators[coordinator_key] = coordinator
+    return coordinator
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +243,31 @@ def _series_search_result_from_item(item: dict[str, Any]) -> SeriesSearchResult:
     )
 
 
+def _series_metadata_from_item(
+    item: dict[str, Any],
+    *,
+    fallback_provider_id: str,
+) -> SeriesMetadata:
+    publisher_data = item.get("publisher")
+    publisher_name = publisher_data.get("name") if isinstance(publisher_data, dict) else None
+    image_data = item.get("image")
+    cover_url = image_data.get("medium_url") if isinstance(image_data, dict) else None
+    title = item.get("name", "Unknown")
+    return SeriesMetadata(
+        provider_id=str(item.get("id", fallback_provider_id)),
+        title=title,
+        sort_title=_make_sort_title(title),
+        year_start=_safe_int(item.get("start_year")),
+        year_end=None,
+        status=None,
+        publisher=publisher_name,
+        description=_strip_html(item.get("description") or item.get("deck")),
+        cover_url=cover_url,
+        issue_count=_safe_int(item.get("count_of_issues")),
+        comicvine_url=item.get("site_detail_url"),
+    )
+
+
 def _issue_summary_from_item(item: dict[str, Any]) -> IssueSummary:
     image_data = item.get("image")
     cover_url = image_data.get("medium_url") if isinstance(image_data, dict) else None
@@ -184,6 +282,48 @@ def _issue_summary_from_item(item: dict[str, Any]) -> IssueSummary:
         issue_type=detect_issue_type(str(title or "")),
         issue_number_text=issue_number_text,
     )
+
+
+def _issue_metadata_from_item(
+    item: dict[str, Any],
+    *,
+    fallback_provider_id: str,
+) -> IssueMetadata:
+    volume_data = item.get("volume")
+    series_provider_id = str(volume_data["id"]) if isinstance(volume_data, dict) else ""
+    image_data = item.get("image")
+    cover_url = image_data.get("medium_url") if isinstance(image_data, dict) else None
+    issue_number, issue_number_text = _parse_issue_number_fields(item.get("issue_number"))
+    return IssueMetadata(
+        provider_id=str(item.get("id", fallback_provider_id)),
+        series_provider_id=series_provider_id,
+        issue_number=issue_number,
+        title=item.get("name"),
+        description=_strip_html(item.get("description") or item.get("deck")),
+        release_date=item.get("cover_date"),
+        store_date=item.get("store_date"),
+        cover_url=cover_url,
+        page_count=None,
+        comicvine_url=item.get("site_detail_url"),
+        creators=_extract_creators(item.get("person_credits")),
+        story_arcs=_extract_story_arcs(item.get("story_arc_credits")),
+        issue_number_text=issue_number_text,
+    )
+
+
+def _normalize_bulk_provider_ids(provider_ids: Sequence[str]) -> list[str]:
+    if isinstance(provider_ids, (str, bytes)) or len(provider_ids) > _MAX_BULK_PROVIDER_IDS:
+        raise ValueError("ComicVine batch requests require at most 5000 provider IDs")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in provider_ids:
+        provider_id = str(value).strip()
+        if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
+            raise ValueError("ComicVine provider IDs must be positive integers")
+        if provider_id not in seen:
+            seen.add(provider_id)
+            normalized.append(provider_id)
+    return normalized
 
 
 def _discard_global_series_search_inflight(
@@ -274,15 +414,10 @@ class ComicVineProvider:
             headers={"User-Agent": "Pullbox/1.0"},
         )
         normalized_rate_limit = max(int(rate_limit), 1)
-        normalized_burst_limit = (
-            normalized_rate_limit
-            if burst_limit is None
-            else max(1, min(int(burst_limit), normalized_rate_limit))
-        )
-        self._rate_limiter = _TokenBucket(
-            max_tokens=normalized_burst_limit,
-            refill_rate=normalized_rate_limit / 3600.0,
-        )
+        normalized_burst_limit = 1 if burst_limit is None else max(1, min(int(burst_limit), 10))
+        self._rate_limit = normalized_rate_limit
+        self._requests_per_second = normalized_burst_limit
+        self._rate_coordinator: _ComicVineRateCoordinator | None = None
 
     @property
     def name(self) -> str:
@@ -296,7 +431,16 @@ class ComicVineProvider:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Make a rate-limited GET request to the ComicVine API."""
-        await self._rate_limiter.acquire()
+        if self._rate_coordinator is None:
+            self._rate_coordinator = _rate_coordinator_for(
+                api_key=self._api_key,
+                rate_limit=self._rate_limit,
+                requests_per_second=self._requests_per_second,
+            )
+        await self._rate_coordinator.acquire(
+            _resource_rate_key(endpoint),
+            requests_per_second=self._requests_per_second,
+        )
 
         request_params: dict[str, Any] = {
             "api_key": self._api_key,
@@ -627,27 +771,34 @@ class ComicVineProvider:
         data = await self._request(f"/volume/{_VOLUME_PREFIX}-{provider_id}/", params)
         item: dict[str, Any] = data.get("results", {})
 
-        publisher_data = item.get("publisher")
-        publisher_name = publisher_data.get("name") if isinstance(publisher_data, dict) else None
+        return _series_metadata_from_item(item, fallback_provider_id=provider_id)
 
-        image_data = item.get("image")
-        cover_url = image_data.get("medium_url") if isinstance(image_data, dict) else None
-
-        title = item.get("name", "Unknown")
-
-        return SeriesMetadata(
-            provider_id=str(item.get("id", provider_id)),
-            title=title,
-            sort_title=_make_sort_title(title),
-            year_start=_safe_int(item.get("start_year")),
-            year_end=None,  # ComicVine doesn't provide end year directly
-            status=None,  # ComicVine volumes lack an explicit status field
-            publisher=publisher_name,
-            description=_strip_html(item.get("description") or item.get("deck")),
-            cover_url=cover_url,
-            issue_count=_safe_int(item.get("count_of_issues")),
-            comicvine_url=item.get("site_detail_url"),
+    async def get_series_batch(self, provider_ids: Sequence[str]) -> dict[str, SeriesMetadata]:
+        """Fetch volume profiles in bounded ID-filter batches."""
+        normalized = _normalize_bulk_provider_ids(provider_ids)
+        found: dict[str, SeriesMetadata] = {}
+        field_list = (
+            "id,name,start_year,count_of_issues,publisher,image,description,deck,site_detail_url"
         )
+        for start in range(0, len(normalized), _BULK_RESOURCE_PAGE_SIZE):
+            batch = normalized[start : start + _BULK_RESOURCE_PAGE_SIZE]
+            data = await self._request(
+                "/volumes/",
+                {
+                    "filter": f"id:{'|'.join(batch)}",
+                    "field_list": field_list,
+                    "limit": _BULK_RESOURCE_PAGE_SIZE,
+                    "offset": 0,
+                },
+            )
+            for raw_item in data.get("results", []):
+                item = raw_item if isinstance(raw_item, dict) else {}
+                metadata = _series_metadata_from_item(item, fallback_provider_id="")
+                if metadata.provider_id in batch:
+                    found[metadata.provider_id] = metadata
+        return {
+            provider_id: found[provider_id] for provider_id in normalized if provider_id in found
+        }
 
     async def get_issue(self, provider_id: str) -> IssueMetadata:
         """Get full issue metadata by ComicVine issue ID."""
@@ -665,28 +816,35 @@ class ComicVineProvider:
         data = await self._request(f"/issue/{_ISSUE_PREFIX}-{provider_id}/", params)
         item: dict[str, Any] = data.get("results", {})
 
-        volume_data = item.get("volume")
-        series_provider_id = str(volume_data["id"]) if isinstance(volume_data, dict) else ""
+        return _issue_metadata_from_item(item, fallback_provider_id=provider_id)
 
-        image_data = item.get("image")
-        cover_url = image_data.get("medium_url") if isinstance(image_data, dict) else None
-        issue_number, issue_number_text = _parse_issue_number_fields(item.get("issue_number"))
-
-        return IssueMetadata(
-            provider_id=str(item.get("id", provider_id)),
-            series_provider_id=series_provider_id,
-            issue_number=issue_number,
-            title=item.get("name"),
-            description=_strip_html(item.get("description") or item.get("deck")),
-            release_date=item.get("cover_date"),
-            store_date=item.get("store_date"),
-            cover_url=cover_url,
-            page_count=None,  # Not available from ComicVine
-            comicvine_url=item.get("site_detail_url"),
-            creators=_extract_creators(item.get("person_credits")),
-            story_arcs=_extract_story_arcs(item.get("story_arc_credits")),
-            issue_number_text=issue_number_text,
+    async def get_issue_batch(self, provider_ids: Sequence[str]) -> dict[str, IssueMetadata]:
+        """Fetch full issue metadata in bounded ID-filter batches."""
+        normalized = _normalize_bulk_provider_ids(provider_ids)
+        found: dict[str, IssueMetadata] = {}
+        field_list = (
+            "id,volume,issue_number,name,description,deck,cover_date,store_date,"
+            "image,site_detail_url,person_credits,story_arc_credits"
         )
+        for start in range(0, len(normalized), _BULK_RESOURCE_PAGE_SIZE):
+            batch = normalized[start : start + _BULK_RESOURCE_PAGE_SIZE]
+            data = await self._request(
+                "/issues/",
+                {
+                    "filter": f"id:{'|'.join(batch)}",
+                    "field_list": field_list,
+                    "limit": _BULK_RESOURCE_PAGE_SIZE,
+                    "offset": 0,
+                },
+            )
+            for raw_item in data.get("results", []):
+                item = raw_item if isinstance(raw_item, dict) else {}
+                metadata = _issue_metadata_from_item(item, fallback_provider_id="")
+                if metadata.provider_id in batch:
+                    found[metadata.provider_id] = metadata
+        return {
+            provider_id: found[provider_id] for provider_id in normalized if provider_id in found
+        }
 
     async def get_issues_for_series(self, series_provider_id: str) -> list[IssueSummary]:
         """Get all issues for a series (volume), paginating automatically."""
@@ -722,6 +880,40 @@ class ComicVineProvider:
 
         log.debug("comicvine_issues_fetched", count=len(all_issues))
         return all_issues
+
+    async def get_issue_catalog_batch(
+        self,
+        series_provider_ids: Sequence[str],
+    ) -> dict[str, list[IssueSummary]]:
+        """Fetch and group issue summaries for multiple volumes."""
+        normalized = _normalize_bulk_provider_ids(series_provider_ids)
+        grouped: dict[str, list[IssueSummary]] = {provider_id: [] for provider_id in normalized}
+        for start in range(0, len(normalized), _BULK_RESOURCE_PAGE_SIZE):
+            batch = normalized[start : start + _BULK_RESOURCE_PAGE_SIZE]
+            offset = 0
+            while True:
+                data = await self._request(
+                    "/issues/",
+                    {
+                        "filter": f"volume:{'|'.join(batch)}",
+                        "field_list": "id,volume,issue_number,name,cover_date,image",
+                        "sort": "issue_number:asc",
+                        "limit": _BULK_RESOURCE_PAGE_SIZE,
+                        "offset": offset,
+                    },
+                )
+                items = data.get("results", [])
+                for raw_item in items:
+                    item = raw_item if isinstance(raw_item, dict) else {}
+                    volume = item.get("volume")
+                    volume_id = str(volume.get("id")) if isinstance(volume, dict) else ""
+                    if volume_id in grouped:
+                        grouped[volume_id].append(_issue_summary_from_item(item))
+                total = _safe_int(data.get("number_of_total_results")) or 0
+                offset += len(items)
+                if not items or offset >= total:
+                    break
+        return grouped
 
     async def get_recent_issues_for_series(
         self,
