@@ -54,6 +54,11 @@ def test_normalize_issue_number_text_rejects_invalid_values(value: str) -> None:
         normalize_issue_number_text(value)
 
 
+def test_normalize_issue_number_text_rejects_oversized_raw_input() -> None:
+    with pytest.raises(ValueError, match="exceeds the supported exact-text length"):
+        normalize_issue_number_text("1" + (" " * 321) + "AU")
+
+
 def test_issue_number_text_numeric_compatibility_preserves_suffixes() -> None:
     assert issue_number_text_matches_numeric(1.0, "1AU") is True
     assert issue_number_text_matches_numeric(2.0, "1AU") is False

@@ -157,6 +157,9 @@ def _rate_coordinator_for(
     _ = requests_per_second
     loop = asyncio.get_running_loop()
     coordinators = _RATE_COORDINATORS.setdefault(loop, {})
+    # This non-secret fingerprint only groups an in-memory rate limiter; it is
+    # not stored or used to authenticate the API key as a password.
+    # codeql[py/weak-sensitive-data-hashing]
     key_fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
     normalized_rate_limit = max(int(rate_limit), 1)
     coordinator_key = (key_fingerprint, normalized_rate_limit)

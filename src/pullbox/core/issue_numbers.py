@@ -35,13 +35,20 @@ def _issue_number_parts(value: str | float | int) -> tuple[Decimal, str]:
     raw_value = str(value).strip()
     if not raw_value:
         raise ValueError("issue number must not be blank")
+    if len(raw_value) > _MAX_ISSUE_NUMBER_TEXT_LENGTH:
+        raise ValueError("issue number exceeds the supported exact-text length")
 
     normalized_fraction = raw_value.replace("½", ".5").replace("¼", ".25").replace("¾", ".75")
-    normalized_fraction = re.sub(
-        r"(?<=[0-9.])\s+(?=[A-Za-z]+$)",
-        "",
-        normalized_fraction,
-    )
+    suffix_start = len(normalized_fraction)
+    while suffix_start > 0:
+        character = normalized_fraction[suffix_start - 1]
+        if not character.isascii() or not character.isalpha():
+            break
+        suffix_start -= 1
+    if suffix_start < len(normalized_fraction):
+        numeric_prefix = normalized_fraction[:suffix_start].rstrip()
+        if numeric_prefix and numeric_prefix[-1] in "0123456789.":
+            normalized_fraction = numeric_prefix + normalized_fraction[suffix_start:]
     suffix = ""
     try:
         numeric_value = Decimal(normalized_fraction)
