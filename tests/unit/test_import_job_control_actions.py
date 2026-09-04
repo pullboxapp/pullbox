@@ -16,6 +16,7 @@ from pullbox.api.v1.import_job_control_actions import (
     confirm_import_response,
     get_import_preview_response,
     resume_import_job_response,
+    retry_failed_series_response,
 )
 from pullbox.models.import_job import (
     ImportControlRequest,
@@ -192,6 +193,29 @@ async def test_resume_import_job_response_triggers_only_active_import_states() -
 
     assert response.status == ImportJobStatus.FILE_MATCHING
     trigger_resume.assert_called_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_response_does_not_trigger_empty_retry() -> None:
+    """A durable blocked-source result must not launch an empty Step 4 task."""
+    service = AsyncMock()
+    service.retry_failed_series.return_value = (
+        _import_job(ImportJobStatus.COMPLETED),
+        0,
+    )
+    session = AsyncMock()
+    trigger_execute = MagicMock()
+
+    response = await retry_failed_series_response(
+        service,
+        session=session,
+        job_id=42,
+        trigger_import_execute=trigger_execute,
+    )
+
+    assert response.retrying_count == 0
+    session.commit.assert_awaited_once()
+    trigger_execute.assert_not_called()
 
 
 @pytest.mark.asyncio

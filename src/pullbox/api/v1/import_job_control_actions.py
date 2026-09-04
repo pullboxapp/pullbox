@@ -272,7 +272,8 @@ async def retry_failed_series_response(
     await session.commit()
 
     logger.info("import_retry_failed", job_id=job_id, retrying_count=count)
-    trigger_import_execute(job_id)
+    if count > 0:
+        trigger_import_execute(job_id)
 
     return RetryFailedResponse(job_id=job.id, retrying_count=count)
 

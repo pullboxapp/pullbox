@@ -138,6 +138,7 @@ _SOURCE_CHANGED_CODES = frozenset(
         "source_unavailable",
         "source_root_unconfirmed",
         "source_root_changed",
+        "source_identity_changed",
     }
 )
 

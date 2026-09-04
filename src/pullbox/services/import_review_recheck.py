@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, func, or_, select
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.file_safety import (
@@ -29,11 +29,14 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobLog,
     ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
+from pullbox.models.library import LibraryRoot
 from pullbox.services.import_content_inspection import inspect_import_content
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.services.import_series_match_state import clear_auto_cv_match_fields
@@ -198,8 +201,18 @@ def _apply_completed_file_recheck(
 ) -> bool:
     """Refresh source evidence without changing the saved import decision."""
     diagnostics = dict(file.diagnostics or {})
+    previous_signature = dict(file.source_signature or {})
     source = {**metadata.diagnostics, **content}
     block = source.pop("file_safety", None)
+    identity_conflicts = source.get("identity_conflicts")
+    if block is None and isinstance(identity_conflicts, list) and identity_conflicts:
+        block = build_import_safety_diagnostics(
+            "The current source identity conflicts with the file reviewed during import.",
+            kind="source_revalidation",
+            code="source_identity_changed",
+            source="completed_import_recheck",
+            overrideable_hint=False,
+        )
     checked_at = datetime.now(UTC).isoformat()
     if isinstance(block, dict):
         diagnostics["source_revalidation"] = {
@@ -233,11 +246,109 @@ def _apply_completed_file_recheck(
     file.parsed_year = metadata.year
     file.comicvine_issue_id = metadata.comicvine_issue_id
     file.has_comicinfo = bool(source.get("has_comicinfo"))
-    file.source_signature = signature
+    refreshed_signature = dict(signature)
+    reference_root_id = previous_signature.get("mylar_reference_root_id")
+    if (
+        isinstance(reference_root_id, int)
+        and not isinstance(reference_root_id, bool)
+        and reference_root_id > 0
+    ):
+        refreshed_signature["mylar_reference_root_id"] = reference_root_id
+    file.source_signature = refreshed_signature
     file.file_size = int(signature["size"])
     file.error_message = "Source rechecked and ready to retry."
     file.diagnostics = diagnostics
     return True
+
+
+async def _retry_source_roots(
+    session: AsyncSession,
+    job: ImportJob,
+) -> list[Path]:
+    """Recover only source boundaries already approved by the saved import."""
+    candidates: list[Path] = []
+    if job.source_type is ImportSourceType.FILESYSTEM:
+        candidates.append(Path(job.source_path))
+    else:
+        candidates.extend(Path(value) for value in dict(job.mylar3_path_map or {}).values())
+        signature_rows = await session.scalars(
+            select(ImportedFile.source_signature).where(
+                ImportedFile.import_job_id == job.id,
+                ImportedFile.status == ImportedFileStatus.FAILED,
+                ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
+            )
+        )
+        root_ids = {
+            root_id
+            for signature in signature_rows.all()
+            if isinstance(signature, dict)
+            and isinstance(
+                root_id := signature.get("mylar_reference_root_id"),
+                int,
+            )
+            and not isinstance(root_id, bool)
+            and root_id > 0
+        }
+        if root_ids:
+            root_query = select(LibraryRoot).where(
+                LibraryRoot.id.in_(root_ids),
+                LibraryRoot.enabled.is_(True),
+            )
+            if job.file_handling_mode is ImportFileHandlingMode.IN_PLACE:
+                root_query = root_query.where(LibraryRoot.allow_referenced_registrations.is_(True))
+            candidates.extend(Path(root.path) for root in (await session.scalars(root_query)).all())
+
+    roots: list[Path] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        try:
+            lexical = candidate.expanduser().absolute()
+            resolved = resolve_preview_source(candidate)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        key = (str(lexical), str(resolved))
+        if resolved.parent == resolved or key in seen:
+            continue
+        seen.add(key)
+        roots.append(lexical)
+    return roots
+
+
+async def prepare_retryable_failed_sources_for_retry(
+    session: AsyncSession,
+    job: ImportJob,
+) -> dict[str, int]:
+    """Revalidate changed failed sources as part of the in-app retry action."""
+    retryable_count = int(
+        await session.scalar(
+            select(func.count(ImportedFile.id)).where(
+                ImportedFile.import_job_id == job.id,
+                ImportedFile.status == ImportedFileStatus.FAILED,
+                ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
+            )
+        )
+        or 0
+    )
+    if retryable_count == 0:
+        return {
+            "files_checked": 0,
+            "files_prepared": 0,
+            "blocked_files": 0,
+            "skipped_files": 0,
+        }
+
+    roots = await _retry_source_roots(session, job)
+    if not roots:
+        raise ValidationError(
+            "No failed files are safe to retry because their approved source root is unavailable."
+        )
+    return await prepare_completed_import_file_recheck(
+        session,
+        job.id,
+        source_roots=roots,
+        apply=True,
+        accept_replaced_files=True,
+    )
 
 
 async def prepare_completed_import_file_recheck(

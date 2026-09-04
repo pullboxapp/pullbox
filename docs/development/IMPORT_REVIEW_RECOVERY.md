@@ -1,9 +1,10 @@
 # Recheck A Saved Import Review
 
 Use this maintenance procedure when a review was generated before the Mylar
-sidecar parser and comic-content checks were corrected, or when a completed
-import has retryable source-change failures. It works for Mylar and folder
-imports. This is not a full rescan, a database restore, or an import.
+sidecar parser and comic-content checks were corrected. Normal completed-job
+recovery does not require this command: the **Retry failed** action revalidates
+retryable source changes inside Pullbox before execution. It works for Mylar
+and folder imports. This is not a full rescan, a database restore, or an import.
 
 ## Safety And Scope
 
@@ -16,10 +17,10 @@ imports. This is not a full rescan, a database restore, or an import.
   `trusted_source_identity_conflict` are examined by default. Repeat
   `--series-id` to narrow the operation to specific **import-review series
   IDs**, not ComicVine or library series IDs.
-- For a `COMPLETED` job, only failed files carrying retryable source
-  revalidation evidence are examined. Imported siblings and series decisions
-  are never reset. The recheck updates safe source evidence; the existing
-  **Retry failed** action performs the actual retry after startup.
+- For a `COMPLETED` job, prefer the in-app **Retry failed** action. It performs
+  the same bounded source revalidation automatically and retries only files
+  that remain inside their approved root, pass current safety checks, and do
+  not conflict with the saved source identity.
 - An entire series is left untouched if it has manual overrides, selected
   files, explicit skips, approved exceptions, or other completed file decisions.
   The report counts these as `skipped_series`; discuss them individually.

@@ -7672,6 +7672,17 @@ function importResultsData(config) {
           throw new Error(error.detail || "Failed to retry");
         }
 
+        var payload = await response.json();
+        if (Math.max(0, Number(payload.retrying_count) || 0) === 0) {
+          var blockedMessage =
+            "No failed files passed source revalidation. Review the updated failure details before retrying.";
+          this.retryError = blockedMessage;
+          if (typeof showToast === "function") {
+            showToast({ message: blockedMessage, level: "warning" });
+          }
+          return;
+        }
+
         dispatchImportWizardAdvance({
           step: 4,
           jobId: this.jobId,

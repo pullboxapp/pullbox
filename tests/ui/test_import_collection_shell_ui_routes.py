@@ -955,6 +955,18 @@ class TestImportShellRouteContracts:
         assert "hasRequiredPreferredRoot" in review_controller
         assert "target_library_root_id: this.preferredRootId" in review_controller
 
+    async def test_completed_retry_stays_on_results_when_no_source_passes_revalidation(
+        self,
+    ) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = script.index("function importResultsData")
+        end = script.index("function conflictResolutionData", start)
+        results_controller = script[start:end]
+
+        assert "var payload = await response.json();" in results_controller
+        assert "payload.retrying_count" in results_controller
+        assert "No failed files passed source revalidation." in results_controller
+
     async def test_import_collection_exposes_stable_step_mounts(
         self,
         authenticated_client,
