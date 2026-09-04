@@ -198,6 +198,8 @@ def _apply_completed_file_recheck(
     metadata: SourceMetadata,
     content: dict[str, Any],
     signature: dict[str, int | str],
+    *,
+    reviewed_series_cv_id: int | None,
 ) -> bool:
     """Refresh source evidence without changing the saved import decision."""
     diagnostics = dict(file.diagnostics or {})
@@ -205,6 +207,11 @@ def _apply_completed_file_recheck(
     source = {**metadata.diagnostics, **content}
     block = source.pop("file_safety", None)
     identity_conflicts = source.get("identity_conflicts")
+    saved_target_conflicts = _saved_target_identity_conflicts(
+        file,
+        metadata,
+        reviewed_series_cv_id=reviewed_series_cv_id,
+    )
     if block is None and isinstance(identity_conflicts, list) and identity_conflicts:
         block = build_import_safety_diagnostics(
             "The current source identity conflicts with the file reviewed during import.",
@@ -213,6 +220,15 @@ def _apply_completed_file_recheck(
             source="completed_import_recheck",
             overrideable_hint=False,
         )
+    if block is None and saved_target_conflicts:
+        block = build_import_safety_diagnostics(
+            "The replacement source does not match the issue reviewed during import.",
+            kind="source_revalidation",
+            code="source_identity_changed",
+            source="completed_import_recheck",
+            overrideable_hint=False,
+        )
+        block["identity_conflicts"] = saved_target_conflicts
     checked_at = datetime.now(UTC).isoformat()
     if isinstance(block, dict):
         diagnostics["source_revalidation"] = {
@@ -259,6 +275,70 @@ def _apply_completed_file_recheck(
     file.error_message = "Source rechecked and ready to retry."
     file.diagnostics = diagnostics
     return True
+
+
+def _saved_target_identity_conflicts(
+    file: ImportedFile,
+    metadata: SourceMetadata,
+    *,
+    reviewed_series_cv_id: int | None,
+) -> list[dict[str, int | float | str]]:
+    """Compare fresh replacement evidence with the immutable reviewed target."""
+    diagnostics = dict(file.diagnostics or {})
+    raw_summary = diagnostics.get("target_issue_summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    conflicts: list[dict[str, int | float | str]] = []
+
+    target_issue_cv_id = file.matched_issue_cv_id
+    if target_issue_cv_id is None:
+        try:
+            target_issue_cv_id = int(str(summary.get("provider_id") or ""))
+        except ValueError:
+            target_issue_cv_id = None
+    if (
+        target_issue_cv_id is not None
+        and metadata.comicvine_issue_id is not None
+        and metadata.comicvine_issue_id != target_issue_cv_id
+    ):
+        conflicts.append(
+            {
+                "field": "comicvine_issue_id",
+                "reviewed": target_issue_cv_id,
+                "source": metadata.comicvine_issue_id,
+            }
+        )
+
+    raw_target_number = summary.get("issue_number", file.parsed_issue_number)
+    try:
+        target_issue_number = float(str(raw_target_number))
+    except (TypeError, ValueError):
+        target_issue_number = None
+    if (
+        target_issue_number is not None
+        and metadata.issue_number is not None
+        and abs(metadata.issue_number - target_issue_number) >= 0.0001
+    ):
+        conflicts.append(
+            {
+                "field": "issue_number",
+                "reviewed": target_issue_number,
+                "source": metadata.issue_number,
+            }
+        )
+
+    if (
+        reviewed_series_cv_id is not None
+        and metadata.comicvine_series_id is not None
+        and metadata.comicvine_series_id != reviewed_series_cv_id
+    ):
+        conflicts.append(
+            {
+                "field": "comicvine_series_id",
+                "reviewed": reviewed_series_cv_id,
+                "source": metadata.comicvine_series_id,
+            }
+        )
+    return conflicts
 
 
 async def _retry_source_roots(
@@ -423,6 +503,7 @@ async def prepare_completed_import_file_recheck(
                     metadata,
                     content,
                     signature,
+                    reviewed_series_cv_id=imported_series.cv_id,
                 )
         if apply:
             await session.flush()

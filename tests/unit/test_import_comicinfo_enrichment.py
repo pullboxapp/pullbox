@@ -4,7 +4,7 @@ import sqlite3
 import threading
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 from sqlalchemy import select
@@ -28,12 +28,51 @@ from pullbox.models.series import Series
 from pullbox.services import import_comicinfo_enrichment as enrichment_module
 from pullbox.services.import_comicinfo_enrichment import (
     PreparedComicInfoEnrichment,
+    _run_import_comicinfo_enrichment_while_fenced,
     run_import_comicinfo_enrichment,
     run_pending_import_comicinfo_enrichment,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+async def test_comicinfo_prefetch_chunks_provider_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefetch_issue_metadata = AsyncMock()
+    monkeypatch.setattr(enrichment_module, "COMICVINE_BULK_BATCH_SIZE", 2, raising=False)
+    monkeypatch.setattr(
+        enrichment_module,
+        "_import_job_is_completed",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        enrichment_module,
+        "_load_pending_imported_file_ids",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        enrichment_module,
+        "_load_pending_issue_cv_ids",
+        AsyncMock(return_value=[101, 102, 103]),
+    )
+    monkeypatch.setattr(enrichment_module, "wait_for_comicinfo_turn", AsyncMock())
+
+    await _run_import_comicinfo_enrichment_while_fenced(
+        AsyncMock(),
+        job_id=7,
+        build_comicinfo_payload=AsyncMock(),
+        apply_comicinfo=AsyncMock(),
+        log_event=AsyncMock(),
+        prefetch_issue_metadata=prefetch_issue_metadata,
+    )
+
+    assert prefetch_issue_metadata.await_args_list == [
+        call([101, 102]),
+        call([103]),
+    ]
 
 
 @pytest.mark.asyncio

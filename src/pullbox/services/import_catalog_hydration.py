@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+COMICVINE_BULK_BATCH_SIZE = 5_000
+
 catalog_hydration_tasks: set[asyncio.Task[None]] = set()
 _catalog_hydration_semaphore: asyncio.Semaphore | None = None
 _catalog_hydration_semaphore_loop: asyncio.AbstractEventLoop | None = None
@@ -185,7 +187,6 @@ async def _run_pending_catalog_hydration_batch(
     priority: Any,
 ) -> int:
     """Persist visible profiles first, then complete issue catalogs in bulk."""
-    prefetch_profiles, prefetch_catalogs, upsert_profile = batch_methods
     planned: list[tuple[PendingCatalogHydration, CatalogHydrationPlan]] = []
     for request in pending:
         plan = await load_catalog_hydration_plan(
@@ -202,6 +203,34 @@ async def _run_pending_catalog_hydration_batch(
     comicvine_ids = [plan.comicvine_id for _request, plan in planned]
     if not comicvine_ids:
         return 0
+
+    recovered = 0
+    for start in range(0, len(planned), COMICVINE_BULK_BATCH_SIZE):
+        recovered += await _run_planned_catalog_hydration_batch(
+            session_factory,
+            planned=planned[start : start + COMICVINE_BULK_BATCH_SIZE],
+            batch_methods=batch_methods,
+            add_from_comicvine_prefetched=add_from_comicvine_prefetched,
+            priority=priority,
+        )
+    return recovered
+
+
+async def _run_planned_catalog_hydration_batch(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    planned: list[tuple[PendingCatalogHydration, CatalogHydrationPlan]],
+    batch_methods: tuple[
+        Callable[..., Awaitable[Any]],
+        Callable[..., Awaitable[Any]],
+        Callable[..., Awaitable[Any]],
+    ],
+    add_from_comicvine_prefetched: Callable[..., Awaitable[Series]],
+    priority: Any,
+) -> int:
+    """Hydrate one provider-safe batch without failing unrelated backlog rows."""
+    prefetch_profiles, prefetch_catalogs, upsert_profile = batch_methods
+    comicvine_ids = [plan.comicvine_id for _request, plan in planned]
 
     try:
         profiles = await prefetch_profiles(comicvine_ids)

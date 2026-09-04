@@ -507,3 +507,45 @@ async def test_retry_failed_rejects_changed_source_with_conflicting_identity(
     assert changed.status is ImportedFileStatus.FAILED
     assert changed.include_in_import is False
     assert changed.diagnostics["source_revalidation"]["code"] == "source_identity_changed"
+
+
+async def test_retry_failed_rejects_replacement_for_different_saved_issue(
+    db_session,
+    tmp_path,
+):
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    job.mylar3_path_map = {"/mylar/comics": str(tmp_path)}
+    job.mylar3_path_map_confirmed = True
+    item.status = ImportSeriesStatus.IMPORTED
+    changed = files[1]
+    changed.status = ImportedFileStatus.FAILED
+    changed.include_in_import = False
+    changed.matched_issue_cv_id = 100008
+    changed.diagnostics = {
+        **changed.diagnostics,
+        "target_issue_summary": {"provider_id": "100008", "issue_number": 8.0},
+        "source_revalidation": {"code": "source_changed", "retryable": True},
+    }
+    path = Path(changed.file_path)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Firefly</Series><Number>9</Number></ComicInfo>",
+        )
+        archive.writestr("1.jpg", b"replacement image")
+        archive.writestr("2.jpg", b"replacement image")
+    await db_session.flush()
+
+    updated_job, count = await retry_failed_series(
+        db_session,
+        job.id,
+        log_event=AsyncMock(),
+    )
+
+    assert updated_job.status is ImportJobStatus.COMPLETED
+    assert count == 0
+    assert changed.status is ImportedFileStatus.FAILED
+    assert changed.include_in_import is False
+    assert changed.matched_issue_cv_id == 100008
+    assert changed.diagnostics["source_revalidation"]["code"] == "source_identity_changed"

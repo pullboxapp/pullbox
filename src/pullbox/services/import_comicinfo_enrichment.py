@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY = "comicinfo_enrichment"
+COMICVINE_BULK_BATCH_SIZE = 5_000
 
 ImportComicInfoBuildPayload = Callable[..., Awaitable[dict[str, Any]]]
 ImportComicInfoApply = Callable[[Path, dict[str, Any]], Any]
@@ -172,16 +173,18 @@ async def _run_import_comicinfo_enrichment_while_fenced(
     if prefetch_issue_metadata is not None:
         issue_cv_ids = await _load_pending_issue_cv_ids(session_factory, job_id=job_id)
         if issue_cv_ids:
-            await wait_for_comicinfo_turn()
-            try:
-                await prefetch_issue_metadata(issue_cv_ids)
-            except Exception as exc:
-                logger.warning(
-                    "import_comicinfo_metadata_batch_prefetch_failed",
-                    job_id=job_id,
-                    issue_count=len(issue_cv_ids),
-                    error=str(exc),
-                )
+            for start in range(0, len(issue_cv_ids), COMICVINE_BULK_BATCH_SIZE):
+                batch = issue_cv_ids[start : start + COMICVINE_BULK_BATCH_SIZE]
+                await wait_for_comicinfo_turn()
+                try:
+                    await prefetch_issue_metadata(batch)
+                except Exception as exc:
+                    logger.warning(
+                        "import_comicinfo_metadata_batch_prefetch_failed",
+                        job_id=job_id,
+                        issue_count=len(batch),
+                        error=str(exc),
+                    )
     for imported_file_id in pending_ids:
         await wait_for_comicinfo_turn()
         try:

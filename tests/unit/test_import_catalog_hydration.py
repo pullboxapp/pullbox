@@ -19,6 +19,7 @@ from pullbox.models.library import LibraryRoot
 from pullbox.models.operation_progress import OperationProgress, OperationProgressState
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.providers.base import IssueSummary, SeriesMetadata
+from pullbox.services import import_catalog_hydration as hydration_module
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.import_catalog_hydration import (
     load_catalog_hydration_plan,
@@ -124,7 +125,9 @@ class BatchCatalogHydrationSeriesServiceStub(CatalogHydrationSeriesServiceStub):
         }
 
     async def prefetch_comicvine_issue_catalogs(self, comicvine_ids: list[int]):
-        assert self.events.count("profile_persisted") == len(comicvine_ids)
+        assert self.events.count("profile_persisted") == sum(
+            len(batch) for batch in self.profile_batch_calls
+        )
         self.catalog_batch_calls.append(list(comicvine_ids))
         self.events.append("catalogs_fetched")
         return {comicvine_id: [] for comicvine_id in comicvine_ids}
@@ -236,6 +239,39 @@ async def test_run_pending_catalog_hydration_batches_profiles_before_issue_catal
         await db_session.refresh(series)
         assert series.title == f"Hydrated {series.comicvine_id}"
         assert series.issue_catalog_state == IssueCatalogState.COMPLETE
+
+
+async def test_run_pending_catalog_hydration_chunks_provider_batches(
+    db_session,
+    monkeypatch,
+) -> None:
+    series_rows = [
+        Series(
+            title=f"Chunked {comicvine_id}",
+            sort_title=f"chunked {comicvine_id}",
+            comicvine_id=comicvine_id,
+            issue_catalog_state=IssueCatalogState.HYDRATING,
+        )
+        for comicvine_id in (6201, 6202, 6203)
+    ]
+    db_session.add_all(series_rows)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    service = BatchCatalogHydrationSeriesServiceStub()
+    monkeypatch.setattr(hydration_module, "COMICVINE_BULK_BATCH_SIZE", 2, raising=False)
+
+    recovered = await run_pending_catalog_hydration(
+        session_factory,
+        series_service=service,
+    )
+
+    assert recovered == 3
+    assert service.profile_batch_calls == [[6201, 6202], [6203]]
+    assert service.catalog_batch_calls == [[6201, 6202], [6203]]
 
 
 async def test_catalog_hydration_does_not_recreate_series_deleted_during_fetch(
