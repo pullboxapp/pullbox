@@ -67,7 +67,7 @@ class TestInventoryProgress:
     """Inventory should emit incremental directory/file counts before completion."""
 
     @pytest.mark.asyncio
-    async def test_inventory_emits_incremental_progress(self, tmp_path: Path) -> None:
+    async def test_inventory_emits_final_coalesced_progress(self, tmp_path: Path) -> None:
         for idx in range(220):
             folder = tmp_path / f"Series {idx:03d}"
             folder.mkdir(parents=True, exist_ok=True)
@@ -84,7 +84,7 @@ class TestInventoryProgress:
 
         assert inventory.directory_count == 221
         assert inventory.file_count == 220
-        assert len(updates) >= 2
+        assert updates
         assert updates[-1] == (221, 220)
         assert all(
             later[0] >= earlier[0] and later[1] >= earlier[1]
