@@ -27,7 +27,7 @@ from pullbox.services.import_job_execution_items import (
 from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.sql import Select
@@ -525,6 +525,7 @@ async def retry_failed_series(
     job_id: int,
     *,
     log_event: ImportEventLogger,
+    file_ids: Sequence[int] | None = None,
 ) -> tuple[ImportJob, int]:
     """Reset failed import rows/files for re-execution."""
     job = await session.get(ImportJob, job_id)
@@ -534,36 +535,58 @@ async def retry_failed_series(
     if job.status != ImportJobStatus.COMPLETED:
         raise ValidationError(f"Job must be in COMPLETED state to retry (current: {job.status})")
 
-    source_recheck = await prepare_retryable_failed_sources_for_retry(session, job)
-
-    result = await session.execute(
-        sa_select(ImportedSeries).where(
-            ImportedSeries.import_job_id == job_id,
-            ImportedSeries.status == ImportSeriesStatus.FAILED,
-        )
+    normalized_file_ids = (
+        tuple(sorted({int(file_id) for file_id in file_ids})) if file_ids is not None else None
     )
-    failed_items = list(result.scalars().all())
-
-    failed_file_result = await session.execute(
-        sa_select(ImportedSeries, ImportedFile)
-        .join(ImportedFile, ImportedFile.import_series_id == ImportedSeries.id)
-        .where(
-            ImportedSeries.import_job_id == job_id,
-            ImportedSeries.status.in_(
-                [
-                    ImportSeriesStatus.DUPLICATE,
-                    ImportSeriesStatus.IMPORTED,
-                ]
-            ),
-            ImportedFile.status == ImportedFileStatus.FAILED,
-        )
+    source_recheck = await prepare_retryable_failed_sources_for_retry(
+        session,
+        job,
+        file_ids=normalized_file_ids,
     )
-    failed_file_items = [
-        item
-        for item, imp_file in failed_file_result.all()
-        if not isinstance(dict(imp_file.diagnostics or {}).get("source_revalidation"), dict)
-    ]
-    retry_items_by_id = {item.id: item for item in [*failed_items, *failed_file_items]}
+
+    if normalized_file_ids is None:
+        result = await session.execute(
+            sa_select(ImportedSeries).where(
+                ImportedSeries.import_job_id == job_id,
+                ImportedSeries.status == ImportSeriesStatus.FAILED,
+            )
+        )
+        failed_items = list(result.scalars().all())
+
+        failed_file_result = await session.execute(
+            sa_select(ImportedSeries, ImportedFile)
+            .join(ImportedFile, ImportedFile.import_series_id == ImportedSeries.id)
+            .where(
+                ImportedSeries.import_job_id == job_id,
+                ImportedSeries.status.in_(
+                    [
+                        ImportSeriesStatus.DUPLICATE,
+                        ImportSeriesStatus.IMPORTED,
+                    ]
+                ),
+                ImportedFile.status == ImportedFileStatus.FAILED,
+            )
+        )
+        failed_file_items = [
+            item
+            for item, imp_file in failed_file_result.all()
+            if not isinstance(dict(imp_file.diagnostics or {}).get("source_revalidation"), dict)
+        ]
+        retry_items_by_id = {item.id: item for item in [*failed_items, *failed_file_items]}
+    else:
+        scoped_items = await session.execute(
+            sa_select(ImportedSeries, ImportedFile)
+            .join(ImportedFile, ImportedFile.import_series_id == ImportedSeries.id)
+            .where(
+                ImportedSeries.import_job_id == job_id,
+                ImportedFile.id.in_(normalized_file_ids),
+                ImportedFile.status == ImportedFileStatus.FAILED,
+                ImportedFile.diagnostics["source_recheck"]["ready_for_retry"]
+                .as_boolean()
+                .is_(True),
+            )
+        )
+        retry_items_by_id = {item.id: item for item, _imp_file in scoped_items.all()}
     retry_items = list(retry_items_by_id.values())
 
     if not retry_items:
@@ -587,12 +610,13 @@ async def retry_failed_series(
             item.status = ImportSeriesStatus.CONFIRMED
         item.error_message = None
 
-    failed_files_result = await session.execute(
-        sa_select(ImportedFile).where(
-            ImportedFile.import_series_id.in_(retry_series_ids),
-            ImportedFile.status == ImportedFileStatus.FAILED,
-        )
+    failed_files_query = sa_select(ImportedFile).where(
+        ImportedFile.import_series_id.in_(retry_series_ids),
+        ImportedFile.status == ImportedFileStatus.FAILED,
     )
+    if normalized_file_ids is not None:
+        failed_files_query = failed_files_query.where(ImportedFile.id.in_(normalized_file_ids))
+    failed_files_result = await session.execute(failed_files_query)
     failed_files = [
         imp_file
         for imp_file in failed_files_result.scalars().all()
@@ -603,12 +627,13 @@ async def retry_failed_series(
         imp_file.include_in_import = True
         imp_file.error_message = None
 
-    retry_file_result = await session.execute(
-        sa_select(ImportedFile).where(
-            ImportedFile.import_series_id.in_(retry_series_ids),
-            ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
-        )
+    retry_file_query = sa_select(ImportedFile).where(
+        ImportedFile.import_series_id.in_(retry_series_ids),
+        ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
     )
+    if normalized_file_ids is not None:
+        retry_file_query = retry_file_query.where(ImportedFile.id.in_(normalized_file_ids))
+    retry_file_result = await session.execute(retry_file_query)
     repaired_target_count = 0
     for imp_file in retry_file_result.scalars().all():
         had_summary = isinstance(dict(imp_file.diagnostics or {}).get("target_issue_summary"), dict)

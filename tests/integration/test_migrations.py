@@ -42,6 +42,7 @@ _SERIES_PREFERRED_ROOT_REVISION = "i0d1e2f3a456"
 _IMPORT_FILE_MATCHED_ISSUE_INDEX_REVISION = "j1e2f3a4b567"
 _IMPORT_FILE_SERIES_INDEX_REVISION = "k2f3a4b5c678"
 _IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION = "l3f4a5b6c789"
+_IMPORT_JOB_ARCHIVE_REVISION = "m4g5h6i7j890"
 
 
 @pytest.fixture
@@ -1869,15 +1870,15 @@ class TestMigrationChain:
         finally:
             engine.dispose()
 
-    def test_story_arc_cover_fields_extend_the_single_migration_head(
+    def test_import_job_archival_extends_the_single_migration_head(
         self,
         alembic_cfg,
     ) -> None:
-        """Story Arc covers are nullable and extend the existing migration graph."""
+        """Import history archival extends the existing migration graph."""
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
 
-        assert script.get_heads() == [_IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION]
+        assert script.get_heads() == [_IMPORT_JOB_ARCHIVE_REVISION]
 
         command.upgrade(cfg, "head")
         engine = create_engine(sync_url)
@@ -1890,6 +1891,14 @@ class TestMigrationChain:
             columns = {
                 column["name"]: column for column in inspect(engine).get_columns("import_jobs")
             }
+            import_job_indexes = {
+                index["name"]: index for index in inspect(engine).get_indexes("import_jobs")
+            }
+            assert columns["archived_at"]["nullable"] is True
+            assert import_job_indexes["ix_import_jobs_archived_created"]["column_names"] == [
+                "archived_at",
+                "created_at",
+            ]
             assert columns["story_arc_import_requested"]["nullable"] is False
             assert columns["story_arc_materialization_requested"]["nullable"] is False
             assert columns["mylar3_path_map_confirmed"]["nullable"] is False
@@ -1908,7 +1917,9 @@ class TestMigrationChain:
             engine.dispose()
 
         command.downgrade(cfg, _STORY_ARC_COVER_REVISION)
-        assert "mylar3_path_map_confirmed" not in _get_columns(sync_url, "import_jobs")
+        downgraded_columns = _get_columns(sync_url, "import_jobs")
+        assert "archived_at" not in downgraded_columns
+        assert "mylar3_path_map_confirmed" not in downgraded_columns
         command.upgrade(cfg, "head")
 
         command.downgrade(cfg, _STORY_ARC_IMPORT_SYNC_REVISION)

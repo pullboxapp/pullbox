@@ -143,6 +143,7 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
             "story_arc_rollback_waiting_work_id",
             "id",
         ),
+        Index("ix_import_jobs_archived_created", "archived_at", "created_at"),
     )
 
     # Source
@@ -189,6 +190,7 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     match_completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     import_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     import_completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=False)
 
     # Error
     error_message: Mapped[str | None] = mapped_column(Text)

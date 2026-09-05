@@ -469,6 +469,50 @@ async def test_retry_failed_keeps_unavailable_changed_source_failed(
     assert missing.diagnostics["source_recheck"]["ready_for_retry"] is False
 
 
+async def test_retry_failed_sources_can_be_limited_to_exact_previewed_files(
+    db_session,
+    tmp_path,
+):
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    job.mylar3_path_map = {"/mylar/comics": str(tmp_path)}
+    job.mylar3_path_map_confirmed = True
+    item.status = ImportSeriesStatus.IMPORTED
+    selected, unrelated = files[1:]
+    for imp_file in (selected, unrelated):
+        imp_file.status = ImportedFileStatus.FAILED
+        imp_file.include_in_import = False
+        imp_file.matched_issue_cv_id = 100000 + int(imp_file.parsed_issue_number or 0)
+        imp_file.match_method = "comicvine_issue_id"
+        imp_file.match_confidence = "high"
+        imp_file.diagnostics = {
+            **imp_file.diagnostics,
+            "target_issue_summary": {
+                "provider_id": str(imp_file.matched_issue_cv_id),
+                "issue_number": imp_file.parsed_issue_number,
+            },
+            "source_revalidation": {"code": "source_changed", "retryable": True},
+        }
+        path = Path(imp_file.file_path)
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("1.jpg", b"replacement image")
+            archive.writestr("2.jpg", b"replacement image")
+    await db_session.flush()
+
+    updated_job, count = await retry_failed_series(
+        db_session,
+        job.id,
+        log_event=AsyncMock(),
+        file_ids=[selected.id],
+    )
+
+    assert updated_job.status is ImportJobStatus.IMPORTING
+    assert count == 1
+    assert selected.status is ImportedFileStatus.CONFIRMED
+    assert unrelated.status is ImportedFileStatus.FAILED
+    assert unrelated.diagnostics["source_revalidation"]["retryable"] is True
+
+
 async def test_retry_failed_rejects_changed_source_with_conflicting_identity(
     db_session,
     tmp_path,

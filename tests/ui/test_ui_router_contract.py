@@ -155,6 +155,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_results_partial",
         ),
         (
+            "/import/{job_id}/cleanup/{action}/files",
+            ("GET",),
+            "import_completed_cleanup_files_partial",
+            "import_completed_cleanup_files_partial",
+        ),
+        (
             "/import/{job_id}/series/{series_id}/details-partial",
             ("GET",),
             "import_series_details_partial",

@@ -25,6 +25,7 @@
     {% set _base_params = ["tab=history"] %}
     {% if search_query %}{% set _ = _base_params.append("search=" ~ (search_query|urlencode)) %}{% endif %}
     {% if sort and sort != "-created_at" %}{% set _ = _base_params.append("sort=" ~ sort) %}{% endif %}
+    {% if show_archived %}{% set _ = _base_params.append("show_archived=true") %}{% endif %}
     {% set _base_url = "/import" ~ ("?" ~ _base_params|join("&") if _base_params else "") %}
     {{ page_dock(
       page=page,

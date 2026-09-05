@@ -24,6 +24,7 @@
       <input type="hidden" name="tab" value="history">
       <input id="import-history-page-input" type="hidden" name="page" value="{{ page }}">
       <input id="import-history-sort-input" type="hidden" name="sort" value="{{ sort }}">
+      {% if show_archived %}<input type="hidden" name="show_archived" value="true">{% endif %}
       <div class="series-toolbar-body">
         <div class="series-toolbar-browse">
           <div class="series-toolbar-primary">
@@ -44,7 +45,7 @@
           </div>
 
           {% if clearable_jobs_total|default(0) > 0 %}
-            <div class="series-toolbar-actions" data-testid="import-history-clear-shell">
+          <div class="series-toolbar-actions" data-testid="import-history-clear-shell">
               <button
                 type="button"
                 @click="clearHistory($el)"
@@ -58,6 +59,17 @@
               </button>
             </div>
           {% endif %}
+          <a
+            href="/import?tab=history{% if not show_archived %}&show_archived=true{% endif %}"
+            hx-get="/import?tab=history{% if not show_archived %}&show_archived=true{% endif %}"
+            hx-target="#import-history-page"
+            hx-swap="outerHTML"
+            hx-push-url="true"
+            data-testid="import-history-archive-toggle"
+            class="btn-ghost control-size-sm"
+          >
+            {{ 'Show current' if show_archived else 'Show archived' }}
+          </a>
         </div>
       </div>
     </form>

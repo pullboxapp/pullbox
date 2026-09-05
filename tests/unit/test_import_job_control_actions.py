@@ -252,6 +252,32 @@ async def test_clear_import_history_response_deletes_only_terminal_jobs(
 
 
 @pytest.mark.asyncio
+async def test_clear_import_history_response_preserves_archived_jobs(
+    db_session: AsyncSession,
+) -> None:
+    """Archived evidence must survive clearing the visible history list."""
+    archived = ImportJob(
+        source_path="/tmp/archived",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.COMPLETED,
+        archived_at=datetime.now(UTC),
+    )
+    visible = ImportJob(
+        source_path="/tmp/visible",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add_all([archived, visible])
+    await db_session.commit()
+
+    response = await clear_import_history_response(db_session)
+
+    assert response == {"deleted": 1}
+    remaining = await db_session.scalars(select(ImportJob.source_path))
+    assert set(remaining.all()) == {"/tmp/archived"}
+
+
+@pytest.mark.asyncio
 async def test_cancel_response_keeps_runtime_state_while_rollback_is_pending() -> None:
     """Deferred Story Arc rollback must retain the job runner's live state."""
     service = AsyncMock()

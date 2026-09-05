@@ -556,6 +556,7 @@ class ImportJobRead(BaseModel):
     match_completed_at: datetime | None
     import_started_at: datetime | None
     import_completed_at: datetime | None
+    archived_at: datetime | None = None
 
     # Settings
     target_library_root_id: int | None
@@ -628,6 +629,7 @@ class ImportJobListItem(BaseModel):
     series_failed: int
     created_at: datetime
     import_completed_at: datetime | None
+    archived_at: datetime | None = None
 
 
 class ImportPreviewResponse(BaseModel):

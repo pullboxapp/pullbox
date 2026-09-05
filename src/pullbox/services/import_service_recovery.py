@@ -198,10 +198,13 @@ class ImportServiceRecoveryMixin:
         self: ImportServiceRecoveryContext,
         session: AsyncSession,
         job_id: int,
+        *,
+        file_ids: list[int] | None = None,
     ) -> tuple[ImportJob, int]:
         """Reset failed import rows/files for a job back to retryable states."""
         return await retry_import_failed_series(
             session,
             job_id,
             log_event=self._log_event,
+            file_ids=file_ids,
         )

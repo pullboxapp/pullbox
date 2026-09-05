@@ -43,6 +43,12 @@ _CATEGORY_LABELS: dict[ImportSafetyCategory, str] = {
     ImportSafetyCategory.UNKNOWN: "Other safety failure",
 }
 
+
+def import_safety_category_label(category: ImportSafetyCategory) -> str:
+    """Return the stable user-facing label for a safety category."""
+    return _CATEGORY_LABELS[category]
+
+
 _SANITIZED_REASONS: dict[ImportSafetyCategory, str] = {
     ImportSafetyCategory.PERMISSION_UNREADABLE: (
         "Pullbox could not read this file. Check its permissions and try again."
