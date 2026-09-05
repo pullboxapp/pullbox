@@ -10,7 +10,8 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Final
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from sqlalchemy import case, exists, func, select, update
+from sqlalchemy import case, exists, func, or_, select, update
+from sqlalchemy.orm import aliased
 
 from pullbox.core.config_resolver import get_application_secret
 from pullbox.core.exceptions import NotFoundError, ValidationError
@@ -88,6 +89,7 @@ class CompletedImportCleanupResult:
     affected_count: int
     affected_file_count: int
     requires_import_retry: bool
+    retry_file_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,24 +119,24 @@ def _safety_filter(*categories: ImportSafetyCategory) -> Any:
     return _category_expression().in_([category.value for category in categories])
 
 
-def _eligible_conflict_groups(job_id: int) -> Any:
+def _candidate_conflict_groups(job_id: int) -> Any:
     """Groups with exactly one high-confidence preferred candidate."""
+    candidate = aliased(ImportedFile)
     return (
-        select(ImportedFile.conflict_group_id)
+        select(candidate.conflict_group_id)
         .where(
-            ImportedFile.import_job_id == job_id,
-            ImportedFile.status == ImportedFileStatus.CONFLICT,
-            ImportedFile.conflict_group_id.is_not(None),
-            ~exists().where(LibraryFile.issue_id == ImportedFile.matched_issue_id),
+            candidate.import_job_id == job_id,
+            candidate.status == ImportedFileStatus.CONFLICT,
+            candidate.conflict_group_id.is_not(None),
+            ~exists().where(LibraryFile.issue_id == candidate.matched_issue_id),
         )
-        .group_by(ImportedFile.conflict_group_id)
-        .having(func.sum(case((ImportedFile.is_preferred.is_(True), 1), else_=0)) == 1)
+        .group_by(candidate.conflict_group_id)
+        .having(func.sum(case((candidate.is_preferred.is_(True), 1), else_=0)) == 1)
         .having(
             func.sum(
                 case(
                     (
-                        ImportedFile.is_preferred.is_(True)
-                        & (ImportedFile.match_confidence == "high"),
+                        candidate.is_preferred.is_(True) & (candidate.match_confidence == "high"),
                         1,
                     ),
                     else_=0,
@@ -142,6 +144,50 @@ def _eligible_conflict_groups(job_id: int) -> Any:
             )
             == 1
         )
+    )
+
+
+def _fully_recoverable_conflict_series(job_id: int) -> Any:
+    """Series whose remaining conflicts are all safe recommended groups."""
+    conflict = aliased(ImportedFile)
+    candidate_groups = _candidate_conflict_groups(job_id)
+    return (
+        select(conflict.import_series_id)
+        .where(
+            conflict.import_job_id == job_id,
+            conflict.status == ImportedFileStatus.CONFLICT,
+        )
+        .group_by(conflict.import_series_id)
+        .having(
+            func.sum(
+                case(
+                    (
+                        or_(
+                            conflict.conflict_group_id.is_(None),
+                            ~conflict.conflict_group_id.in_(candidate_groups),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            )
+            == 0
+        )
+    )
+
+
+def _eligible_conflict_groups(job_id: int) -> Any:
+    """Recommended groups that can be resumed without stranding sibling conflicts."""
+    candidate = aliased(ImportedFile)
+    return (
+        select(candidate.conflict_group_id)
+        .where(
+            candidate.import_job_id == job_id,
+            candidate.status == ImportedFileStatus.CONFLICT,
+            candidate.conflict_group_id.in_(_candidate_conflict_groups(job_id)),
+            candidate.import_series_id.in_(_fully_recoverable_conflict_series(job_id)),
+        )
+        .distinct()
     )
 
 
@@ -511,8 +557,9 @@ async def _apply_file_action(
     session: AsyncSession,
     job: ImportJob,
     action: CompletedImportCleanupAction,
-) -> tuple[set[int], bool]:
+) -> tuple[set[int], tuple[int, ...], bool]:
     affected_series_ids: set[int] = set()
+    affected_file_ids: list[int] = []
     requires_import_retry = False
     cursor = 0
     while True:
@@ -531,6 +578,7 @@ async def _apply_file_action(
         cursor = int(files[-1].id)
         for file in files:
             affected_series_ids.add(int(file.import_series_id))
+            affected_file_ids.append(int(file.id))
             if action in {
                 CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES,
                 CompletedImportCleanupAction.SKIP_PROBABLE_COVERS,
@@ -550,7 +598,7 @@ async def _apply_file_action(
             else:  # pragma: no cover - conflict groups use a separate path
                 raise ValidationError("Unsupported file cleanup action.")
         await session.flush()
-    return affected_series_ids, requires_import_retry
+    return affected_series_ids, tuple(affected_file_ids), requires_import_retry
 
 
 async def _apply_recommended_conflicts(
@@ -669,9 +717,12 @@ async def apply_completed_import_cleanup(
 
     if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
         affected_series_ids = await _apply_recommended_conflicts(session, job)
+        affected_file_ids: tuple[int, ...] = ()
         requires_import_retry = await _prepare_series_for_retry(session, job, affected_series_ids)
     else:
-        affected_series_ids, requires_import_retry = await _apply_file_action(session, job, action)
+        affected_series_ids, affected_file_ids, requires_import_retry = await _apply_file_action(
+            session, job, action
+        )
         if action is CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES:
             requires_import_retry = await _prepare_series_for_retry(
                 session, job, affected_series_ids
@@ -685,6 +736,11 @@ async def apply_completed_import_cleanup(
         affected_count=preview_snapshot.affected_count,
         affected_file_count=preview_snapshot.affected_file_count,
         requires_import_retry=requires_import_retry,
+        retry_file_ids=(
+            affected_file_ids
+            if action is CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION
+            else ()
+        ),
     )
     item_unit = (
         "group" if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS else "file"

@@ -513,6 +513,59 @@
   </div>
   {% endif %}
 
+  {% if job.status.value == 'failed' and safety_blocked_files %}
+  <div data-testid="import-results-safety-exceptions" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Safety exceptions</p>
+        <h3 class="section-title-plain">{{ files_safety_blocked }} file{{ "s need" if files_safety_blocked != 1 else " needs" }} safety approval</h3>
+        <p class="section-copy">
+          Pullbox stopped before processing these files during safety review. Resource-limit blocks can be allowed once; corrupt or unsafe files must be replaced before retry.
+        </p>
+      </div>
+    </div>
+    <div class="section-body space-y-3">
+      {% for f in safety_blocked_files %}
+      {% set blocked_diagnostics = f.diagnostics or {} %}
+      {% set safety_block = blocked_diagnostics.get('safety_block', {}) %}
+      {% set safety_block_overrideable = safety_block.get('overrideable', true) is not sameas false %}
+      <div class="rounded-xl border border-pb-warning/40 bg-pb-warning/5 px-4 py-3">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div class="min-w-0">
+            <div class="break-words text-sm font-medium font-mono text-pb-text">{{ f.file_name }}</div>
+            <div class="mt-1 break-words text-xs text-pb-text-dim">
+              {{ safety_block.get('reason') or f.error_message or 'File exceeded a resource safety limit.' }}
+            </div>
+          </div>
+          {% if safety_block_overrideable %}
+          <button
+            type="button"
+            class="btn-warning btn-sm inline-flex shrink-0 items-center gap-2"
+            data-testid="import-results-safety-retry-{{ f.id }}"
+            :disabled="safetyRetryingFileId === {{ f.id }}"
+            @click="allowSafetyOnceAndRetry({{ f.id }})"
+          >
+            <svg x-show="safetyRetryingFileId === {{ f.id }}" x-cloak class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            <span>Allow once and retry</span>
+          </button>
+          {% else %}
+          <span class="pill pill-error shrink-0 justify-center">Cannot retry</span>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+      {% if safety_blocked_files_truncated|default(0) > 0 %}
+      <p class="text-xs text-pb-text-dim">
+        {{ safety_blocked_files_truncated }} more safety exceptions are not shown. Resolve the visible files, then reload to continue.
+      </p>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
 </div>
 
 {% include "partials/import_collection_footer_oob.html" %}

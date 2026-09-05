@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 
 _STORY_ARC_ACTION_PAGE_SIZE = 1_000
+_FAILED_SAFETY_DETAIL_LIMIT = 100
 _STORY_ARC_MANAGED_ACTION = "story_arc_managed_placement_requested"
 _STORY_ARC_REFERENCE_ACTION = "story_arc_referenced_placement_attached"
 _MANAGED_PAYLOAD_KEYS = frozenset(
@@ -122,13 +123,20 @@ async def _load_files_for_status(
     session: AsyncSession,
     job_id: int,
     status: ImportedFileStatus,
+    *,
+    limit: int | None = None,
 ) -> list[ImportedFile]:
-    result = await session.execute(
-        select(ImportedFile).where(
+    query = (
+        select(ImportedFile)
+        .where(
             ImportedFile.import_job_id == job_id,
             ImportedFile.status == status,
         )
+        .order_by(ImportedFile.id)
     )
+    if limit is not None:
+        query = query.limit(limit)
+    result = await session.execute(query)
     return list(result.scalars().all())
 
 
@@ -781,6 +789,16 @@ async def load_import_results_context(
         ImportedFileStatus.SAFETY_BLOCKED.value,
         0,
     )
+    safety_blocked_files = (
+        await _load_files_for_status(
+            session,
+            job_id,
+            ImportedFileStatus.SAFETY_BLOCKED,
+            limit=_FAILED_SAFETY_DETAIL_LIMIT,
+        )
+        if files_safety_blocked > 0 and job.status is ImportJobStatus.FAILED
+        else []
+    )
     safety_category_summaries = (
         await _load_safety_category_summaries(session, job_id) if files_safety_blocked > 0 else []
     )
@@ -870,9 +888,13 @@ async def load_import_results_context(
         "source_changed_files": source_changed_files,
         "failed_files": failed_files,
         "files_safety_blocked": files_safety_blocked,
-        # Completed results use bounded category summaries; never hydrate an
-        # unbounded safety backlog into ORM objects or template rows.
-        "safety_blocked_files": [],
+        # Completed results use category summaries. Failed jobs retain a
+        # bounded detail list so interrupted safety decisions remain actionable.
+        "safety_blocked_files": safety_blocked_files,
+        "safety_blocked_files_truncated": max(
+            files_safety_blocked - len(safety_blocked_files),
+            0,
+        ),
         "safety_category_summaries": safety_category_summaries,
         "cleanup_action_summaries": cleanup_action_summaries,
         "recommended_conflict_groups": recommended_conflict_groups,

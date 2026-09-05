@@ -268,6 +268,92 @@ async def test_accept_recommended_conflicts_requires_one_high_confidence_choice(
 
 
 @pytest.mark.asyncio
+async def test_recommended_conflicts_leave_mixed_conflict_series_untouched(
+    db_session: AsyncSession,
+) -> None:
+    job, mixed_series = await _seed_job(db_session)
+    safe_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Safe series",
+        status=ImportSeriesStatus.IMPORTED,
+        selected_for_import=False,
+    )
+    db_session.add(safe_series)
+    await db_session.flush()
+
+    mixed_rows = [
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=mixed_series.id,
+            file_path=f"/comics/mixed-{index}.cbz",
+            file_name=f"mixed-{index}.cbz",
+            file_size=100,
+            file_format="cbz",
+            status=ImportedFileStatus.CONFLICT,
+            matched_issue_cv_id=1001,
+            match_confidence="high" if index == 0 else "medium",
+            conflict_group_id=7,
+            is_preferred=index == 0,
+        )
+        for index in range(2)
+    ]
+    mixed_rows.extend(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=mixed_series.id,
+            file_path=f"/comics/ambiguous-{index}.cbz",
+            file_name=f"ambiguous-{index}.cbz",
+            file_size=100,
+            file_format="cbz",
+            status=ImportedFileStatus.CONFLICT,
+            matched_issue_cv_id=1002,
+            match_confidence="medium",
+            conflict_group_id=8,
+            is_preferred=False,
+        )
+        for index in range(2)
+    )
+    safe_rows = [
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=safe_series.id,
+            file_path=f"/comics/safe-{index}.cbz",
+            file_name=f"safe-{index}.cbz",
+            file_size=100,
+            file_format="cbz",
+            status=ImportedFileStatus.CONFLICT,
+            matched_issue_cv_id=2001,
+            match_confidence="high" if index == 0 else "medium",
+            conflict_group_id=9,
+            is_preferred=index == 0,
+        )
+        for index in range(2)
+    ]
+    db_session.add_all([*mixed_rows, *safe_rows])
+    await db_session.commit()
+
+    preview = await preview_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS,
+        actor_id=42,
+    )
+    result = await apply_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+
+    assert result.affected_count == 1
+    assert result.affected_file_count == 2
+    assert all(row.status is ImportedFileStatus.CONFLICT for row in mixed_rows)
+    assert safe_rows[0].status is ImportedFileStatus.CONFIRMED
+    assert safe_rows[1].status is ImportedFileStatus.SKIPPED
+
+
+@pytest.mark.asyncio
 async def test_known_library_issue_conflicts_are_normalized_without_reimport(
     db_session: AsyncSession,
 ) -> None:
@@ -410,6 +496,7 @@ async def test_retry_source_inspection_prepares_existing_retry_pipeline(
     assert blocked.status is ImportedFileStatus.FAILED
     assert "safety_block" not in blocked.diagnostics
     assert blocked.diagnostics["source_revalidation"]["retryable"] is True
+    assert result.retry_file_ids == (blocked.id,)
 
 
 @pytest.mark.asyncio

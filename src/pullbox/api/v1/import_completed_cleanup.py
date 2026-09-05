@@ -68,7 +68,11 @@ async def apply_completed_import_cleanup_route(
 
     if action is CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION:
         service = await build_import_service(session)
-        _job, retrying_count = await service.retry_failed_series(session, job_id)
+        _job, retrying_count = await service.retry_failed_series(
+            session,
+            job_id,
+            file_ids=list(result.retry_file_ids),
+        )
         result_read = CompletedImportCleanupResultRead.model_validate(
             result,
             from_attributes=True,

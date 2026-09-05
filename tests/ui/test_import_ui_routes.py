@@ -810,6 +810,54 @@ class TestImportResultsPartial:
         assert 'data-testid="import-cleanup-review-dismiss_missing_references"' in html
         assert 'data-testid="import-results-archive-action"' in html
 
+    def test_failed_results_template_preserves_bounded_safety_actions(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        blocked_file = SimpleNamespace(
+            id=91,
+            file_name="large-tpb.cbz",
+            error_message="Archive exceeds the configured safety limit.",
+            diagnostics={"safety_block": {"overrideable": True, "reason": "Too large"}},
+        )
+        html = templates.env.get_template("partials/import_results.html").render(
+            job=SimpleNamespace(id=35, status=SimpleNamespace(value="failed")),
+            can_rollback=False,
+            imported_count=0,
+            failed_count=1,
+            duplicate_count=0,
+            no_match_count=0,
+            unmatched_queue_count=0,
+            failed_series=[],
+            files_total=105,
+            files_imported=0,
+            files_matched=0,
+            files_duplicate=0,
+            files_already_owned=0,
+            files_conflict=0,
+            files_no_match=0,
+            orphaned_file_no_match_count=0,
+            identified_series_file_no_match_count=0,
+            catalog_sync_pending_count=0,
+            catalog_sync_failed_count=0,
+            catalog_sync_attention_count=0,
+            catalog_sync_series=[],
+            files_failed=0,
+            failed_files=[],
+            files_safety_blocked=105,
+            safety_blocked_files=[blocked_file],
+            safety_blocked_files_truncated=5,
+            resume_step=5,
+            resume_job_id=35,
+            resume_progress_snapshot={},
+        )
+
+        assert 'data-testid="import-results-safety-exceptions"' in html
+        assert "large-tpb.cbz" in html
+        assert "5 more safety exceptions are not shown" in html
+        assert 'data-testid="import-results-safety-retry-91"' in html
+
     def test_results_template_explains_changed_source_failures(self) -> None:
         from types import SimpleNamespace
 

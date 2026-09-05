@@ -43,6 +43,8 @@ from pullbox.services.import_series_match_state import clear_auto_cv_match_field
 from pullbox.services.import_source_metadata import source_metadata_for_import_file
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -344,6 +346,8 @@ def _saved_target_identity_conflicts(
 async def _retry_source_roots(
     session: AsyncSession,
     job: ImportJob,
+    *,
+    file_ids: Sequence[int] | None = None,
 ) -> list[Path]:
     """Recover only source boundaries already approved by the saved import."""
     candidates: list[Path] = []
@@ -351,13 +355,14 @@ async def _retry_source_roots(
         candidates.append(Path(job.source_path))
     else:
         candidates.extend(Path(value) for value in dict(job.mylar3_path_map or {}).values())
-        signature_rows = await session.scalars(
-            select(ImportedFile.source_signature).where(
-                ImportedFile.import_job_id == job.id,
-                ImportedFile.status == ImportedFileStatus.FAILED,
-                ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
-            )
+        signature_query = select(ImportedFile.source_signature).where(
+            ImportedFile.import_job_id == job.id,
+            ImportedFile.status == ImportedFileStatus.FAILED,
+            ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
         )
+        if file_ids is not None:
+            signature_query = signature_query.where(ImportedFile.id.in_(file_ids))
+        signature_rows = await session.scalars(signature_query)
         root_ids = {
             root_id
             for signature in signature_rows.all()
@@ -397,17 +402,19 @@ async def _retry_source_roots(
 async def prepare_retryable_failed_sources_for_retry(
     session: AsyncSession,
     job: ImportJob,
+    *,
+    file_ids: Sequence[int] | None = None,
 ) -> dict[str, int]:
     """Revalidate changed failed sources as part of the in-app retry action."""
+    retryable_filters = [
+        ImportedFile.import_job_id == job.id,
+        ImportedFile.status == ImportedFileStatus.FAILED,
+        ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
+    ]
+    if file_ids is not None:
+        retryable_filters.append(ImportedFile.id.in_(file_ids))
     retryable_count = int(
-        await session.scalar(
-            select(func.count(ImportedFile.id)).where(
-                ImportedFile.import_job_id == job.id,
-                ImportedFile.status == ImportedFileStatus.FAILED,
-                ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
-            )
-        )
-        or 0
+        await session.scalar(select(func.count(ImportedFile.id)).where(*retryable_filters)) or 0
     )
     if retryable_count == 0:
         return {
@@ -417,7 +424,7 @@ async def prepare_retryable_failed_sources_for_retry(
             "skipped_files": 0,
         }
 
-    roots = await _retry_source_roots(session, job)
+    roots = await _retry_source_roots(session, job, file_ids=file_ids)
     if not roots:
         raise ValidationError(
             "No failed files are safe to retry because their approved source root is unavailable."
@@ -427,6 +434,7 @@ async def prepare_retryable_failed_sources_for_retry(
         job.id,
         source_roots=roots,
         apply=True,
+        file_ids=list(file_ids) if file_ids is not None else None,
         accept_replaced_files=True,
     )
 
@@ -438,6 +446,7 @@ async def prepare_completed_import_file_recheck(
     source_roots: list[Path],
     apply: bool = False,
     series_ids: list[int] | None = None,
+    file_ids: list[int] | None = None,
     accept_replaced_files: bool = False,
 ) -> dict[str, int]:
     """Recheck only retryable failed sources from an otherwise completed import."""
@@ -477,6 +486,8 @@ async def prepare_completed_import_file_recheck(
         )
         if series_ids:
             query = query.where(ImportedFile.import_series_id.in_(series_ids))
+        if file_ids is not None:
+            query = query.where(ImportedFile.id.in_(file_ids))
         rows = list((await session.execute(query)).all())
         if not rows:
             break

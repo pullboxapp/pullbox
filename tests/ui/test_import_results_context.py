@@ -684,3 +684,50 @@ async def test_completed_results_group_large_safety_backlog_without_loading_ever
     assert context["cleanup_needs_review_count"] == 2
     assert context["cleanup_action_summaries"][0]["action"] == "dismiss_missing_references"
     assert context["cleanup_action_summaries"][0]["affected_file_count"] == 10
+
+
+@pytest.mark.asyncio
+async def test_failed_results_keep_a_bounded_safety_exception_list(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/imports/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.FAILED,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Interrupted library",
+        status=ImportSeriesStatus.FAILED,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    block = build_import_safety_diagnostics(
+        ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT.value,
+        code=ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT.value,
+        overrideable_hint=True,
+    )
+    db_session.add_all(
+        [
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=imported_series.id,
+                file_path=f"/imports/large-{index:03}.cbz",
+                file_name=f"large-{index:03}.cbz",
+                file_size=1,
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_BLOCKED,
+                diagnostics={"safety_block": block},
+            )
+            for index in range(105)
+        ]
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    assert context["files_safety_blocked"] == 105
+    assert len(context["safety_blocked_files"]) == 100
+    assert context["safety_blocked_files_truncated"] == 5
