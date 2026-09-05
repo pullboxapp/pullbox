@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import UTC, datetime
 
 import pytest
 
@@ -22,6 +23,7 @@ async def _seed_import_history_job(
     source_path: str = "/tmp/import-history-contract",
     source_type: str = "filesystem",
     progress_snapshot: dict[str, object] | None = None,
+    archived: bool = False,
 ) -> int:  # type: ignore[no-untyped-def]
     from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 
@@ -35,6 +37,7 @@ async def _seed_import_history_job(
             series_failed=0,
             series_no_match=2,
             progress_snapshot=progress_snapshot or {},
+            archived_at=(datetime.now(UTC) if archived else None),
         )
         session.add(job)
         await session.commit()
@@ -73,6 +76,32 @@ class TestImportHistoryTabRouteContracts:
         assert 'data-testid="import-history-results"' in response.text
         assert 'data-testid="import-history-table-shell"' in response.text
         assert 'data-testid="import-history-delete-modal"' in response.text
+
+    async def test_archived_imports_are_hidden_by_default_and_can_be_shown(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        active_id = await _seed_import_history_job(
+            sec_db,
+            status="completed",
+            source_path="/imports/visible",
+        )
+        archived_id = await _seed_import_history_job(
+            sec_db,
+            status="completed",
+            source_path="/imports/archived",
+            archived=True,
+        )
+
+        response = await authenticated_client.get("/import?tab=history")
+        assert f"import-job-row-{active_id}" in response.text
+        assert f"import-job-row-{archived_id}" not in response.text
+
+        archived_response = await authenticated_client.get("/import?tab=history&show_archived=true")
+        assert f"import-job-row-{active_id}" not in archived_response.text
+        assert f"import-job-row-{archived_id}" in archived_response.text
+        assert f"import-history-restore-{archived_id}" in archived_response.text
 
     @pytest.mark.parametrize("source_type", ["filesystem", "mylar3"])
     async def test_step_four_explains_that_import_continues_in_background(

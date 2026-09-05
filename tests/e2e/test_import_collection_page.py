@@ -1094,7 +1094,7 @@ class TestImportCollectionTab:
             assert state["sectionCardIndices"][0] > state["actionIndex"]
         assert "Rollback import" in state["leftActions"][0]
         assert "View import history" in state["leftActions"]
-        assert state["rightActions"] == ["View series library"]
+        assert state["rightActions"] == ["Archive results", "View series library"]
         assert state["hasImportAnother"] is False
         assert state["hasResultsSubcopy"] is False
         assert state["hasSourcePill"] is False

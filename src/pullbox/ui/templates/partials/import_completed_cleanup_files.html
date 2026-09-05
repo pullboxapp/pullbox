@@ -1,0 +1,41 @@
+<div
+  data-testid="import-cleanup-file-page-{{ cleanup_action }}"
+  class="mt-3 overflow-hidden rounded-xl border border-pb-border bg-pb-bg/35"
+>
+  <div class="flex flex-wrap items-center justify-between gap-2 border-b border-pb-border px-3 py-2 text-xs text-pb-text-dim">
+    <span>{{ "{:,}".format(cleanup_page.total) }} eligible file{{ '' if cleanup_page.total == 1 else 's' }}</span>
+    <span>Page {{ cleanup_page.page }} of {{ cleanup_page.total_pages }}</span>
+  </div>
+  <div class="divide-y divide-pb-border">
+    {% for item in cleanup_page.items %}
+      {% set diagnostics = item.diagnostics or {} %}
+      {% set safety_block = diagnostics.get('safety_block', {}) %}
+      <div class="px-3 py-2.5">
+        <p class="break-words font-mono text-xs font-medium text-pb-text">{{ item.file_name }}</p>
+        <p class="mt-1 break-words text-xs text-pb-text-dim">
+          {{ safety_block.get('reason') or item.error_message or 'Pullbox found a safe completed-import follow-up for this file.' }}
+        </p>
+      </div>
+    {% endfor %}
+  </div>
+  {% if cleanup_page.total_pages > 1 %}
+  <div class="flex items-center justify-between gap-2 border-t border-pb-border px-3 py-2">
+    <button
+      type="button"
+      class="btn-ghost btn-sm"
+      {% if cleanup_page.page <= 1 %}disabled{% endif %}
+      hx-get="/import/{{ job_id }}/cleanup/{{ cleanup_action }}/files?page={{ cleanup_page.page - 1 }}"
+      hx-target="#import-cleanup-detail-{{ cleanup_action }}"
+      hx-swap="innerHTML"
+    >Previous</button>
+    <button
+      type="button"
+      class="btn-ghost btn-sm"
+      {% if cleanup_page.page >= cleanup_page.total_pages %}disabled{% endif %}
+      hx-get="/import/{{ job_id }}/cleanup/{{ cleanup_action }}/files?page={{ cleanup_page.page + 1 }}"
+      hx-target="#import-cleanup-detail-{{ cleanup_action }}"
+      hx-swap="innerHTML"
+    >Next</button>
+  </div>
+  {% endif %}
+</div>

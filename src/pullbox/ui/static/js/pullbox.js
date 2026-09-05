@@ -7638,7 +7638,10 @@ function importResultsData(config) {
     showFailedFiles: cfg.failedFilesCount > 0,
     retrying: false,
     rollingBack: false,
+    archiving: false,
     safetyRetryingFileId: null,
+    cleanupRunningAction: "",
+    cleanupError: "",
     retryError: "",
 
     toggleFailedSeries: function () {
@@ -7744,6 +7747,139 @@ function importResultsData(config) {
         }
       } finally {
         this.safetyRetryingFileId = null;
+      }
+    },
+
+    refreshResults: function () {
+      var url = "/import/" + this.jobId + "/results-partial";
+      var target = "[data-testid='import-collection-results']";
+      if (window.htmx && document.querySelector(target)) {
+        window.htmx.ajax("GET", url, { target: target, swap: "outerHTML" });
+        return;
+      }
+      window.location.reload();
+    },
+
+    applyCleanup: async function (action, label) {
+      if (!this.jobId || this.cleanupRunningAction) {
+        return;
+      }
+      this.cleanupRunningAction = action;
+      this.cleanupError = "";
+      try {
+        var previewResponse = await fetch(
+          "/api/v1/import/" + this.jobId + "/cleanup/" + action + "/preview"
+        );
+        var preview = await previewResponse.json().catch(function () {
+          return {};
+        });
+        if (!previewResponse.ok) {
+          throw new Error(preview.detail || "Could not preview this cleanup action.");
+        }
+        var unit = preview.item_unit === "group" ? "conflict group" : "file";
+        var count = Math.max(0, Number(preview.affected_count) || 0);
+        var examples = Array.isArray(preview.examples) ? preview.examples.slice(0, 3) : [];
+        var message =
+          label +
+          " will update " +
+          count.toLocaleString() +
+          " " +
+          unit +
+          (count === 1 ? "" : "s") +
+          ". Source files will remain unchanged.";
+        if (examples.length) {
+          message += " Examples: " + examples.join(", ") + ".";
+        }
+        var confirmed = await pbConfirm({
+          title: label + "?",
+          message: message,
+          confirmText: "Apply cleanup",
+          destructive: false,
+        });
+        if (!confirmed) {
+          return;
+        }
+
+        var response = await fetch(
+          "/api/v1/import/" + this.jobId + "/cleanup/" + action,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": readCsrfTokenFromBody(),
+            },
+            body: JSON.stringify({
+              preview_token: preview.preview_token,
+              confirmation: "APPLY CLEANUP",
+            }),
+          }
+        );
+        var result = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          throw new Error(result.detail || "The cleanup action could not be applied.");
+        }
+        if (result.requires_import_retry) {
+          dispatchImportWizardAdvance({
+            step: 4,
+            jobId: this.jobId,
+            jobStatus: "importing",
+          });
+          return;
+        }
+        if (typeof showToast === "function") {
+          showToast({ message: label + " completed.", level: "success" });
+        }
+        this.refreshResults();
+      } catch (err) {
+        var message =
+          err && err.message ? err.message : "The cleanup action could not be applied.";
+        this.cleanupError = message;
+        if (typeof showToast === "function") {
+          showToast({ message: message, level: "error" });
+        }
+      } finally {
+        this.cleanupRunningAction = "";
+      }
+    },
+
+    archiveImport: async function () {
+      if (!this.jobId || this.archiving) {
+        return;
+      }
+      var confirmed = await pbConfirm({
+        title: "Archive import results?",
+        message:
+          "This hides the finished import from current history without deleting its records, logs, or recovery evidence.",
+        confirmText: "Archive results",
+        destructive: false,
+      });
+      if (!confirmed) {
+        return;
+      }
+      this.archiving = true;
+      try {
+        var response = await fetch("/api/v1/import/" + this.jobId + "/archive", {
+          method: "POST",
+          headers: { "X-CSRF-Token": readCsrfTokenFromBody() },
+        });
+        if (!response.ok) {
+          var error = await response.json().catch(function () {
+            return {};
+          });
+          throw new Error(error.detail || "Failed to archive import results.");
+        }
+        window.location.assign("/import?tab=history");
+      } catch (err) {
+        var message =
+          err && err.message ? err.message : "Failed to archive import results.";
+        this.cleanupError = message;
+        if (typeof showToast === "function") {
+          showToast({ message: message, level: "error" });
+        }
+      } finally {
+        this.archiving = false;
       }
     },
 
@@ -15132,6 +15268,54 @@ function importHistoryPage(config) {
         throw new Error("Retry did not return a new import job.");
       } catch (error) {
         this.dispatchToast(error.message || "Failed to start a fresh retry.", "error");
+      }
+    },
+
+    restoreJob: async function (jobId) {
+      try {
+        var response = await fetch("/api/v1/import/" + jobId + "/restore", {
+          method: "POST",
+          headers: { "X-CSRF-Token": this.csrfToken() },
+        });
+        if (!response.ok) {
+          var error = await response.json().catch(function () {
+            return {};
+          });
+          throw new Error(error.detail || "Failed to restore import history.");
+        }
+        this.removeJobRow(jobId);
+        this.dispatchToast("Import restored to current history.", "success");
+      } catch (error) {
+        this.dispatchToast(error.message || "Failed to restore import history.", "error");
+      }
+    },
+
+    archiveJob: async function (jobId) {
+      var confirmed = await pbConfirm({
+        title: "Archive import results?",
+        message:
+          "This hides the finished import without deleting its records, logs, or recovery evidence.",
+        confirmText: "Archive results",
+        destructive: false,
+      });
+      if (!confirmed) {
+        return;
+      }
+      try {
+        var response = await fetch("/api/v1/import/" + jobId + "/archive", {
+          method: "POST",
+          headers: { "X-CSRF-Token": this.csrfToken() },
+        });
+        if (!response.ok) {
+          var error = await response.json().catch(function () {
+            return {};
+          });
+          throw new Error(error.detail || "Failed to archive import history.");
+        }
+        this.removeJobRow(jobId);
+        this.dispatchToast("Import moved to archived history.", "success");
+      } catch (error) {
+        this.dispatchToast(error.message || "Failed to archive import history.", "error");
       }
     },
 

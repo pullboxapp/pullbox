@@ -20,6 +20,10 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.library import LibraryRoot
 from pullbox.services.audit_service import source_ip_from_request
+from pullbox.services.import_completed_cleanup import (
+    CompletedImportCleanupAction,
+    list_completed_import_cleanup_files,
+)
 from pullbox.services.import_safety_bulk_review import (
     IMPORT_SAFETY_BULK_CONFIRMATION,
     ImportSafetyBulkInterruptedError,
@@ -338,6 +342,7 @@ async def import_page(
     search: str = Query(""),
     sort: str = Query(""),
     page: int = Query(1, ge=1),
+    show_archived: bool = Query(False),
     resume_job_id: int | None = Query(None),
     resume_step: int | None = Query(None),
 ) -> Response:
@@ -351,6 +356,7 @@ async def import_page(
             search_query=search,
             sort=sort,
             requested_page=page,
+            show_archived=show_archived,
         )
     elif normalized_tab == "unmatched":
         workspace_ctx = await _load_import_orphaned_context(
@@ -871,6 +877,39 @@ async def import_results_partial(
             resume_step=5,
             resume_job_id=job.id,
             resume_progress_snapshot=progress_snapshot,
+        ),
+    )
+
+
+@router.get(
+    "/import/{job_id}/cleanup/{action}/files",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_completed_cleanup_files_partial(
+    job_id: int,
+    action: CompletedImportCleanupAction,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    page: int = Query(1, ge=1),
+) -> Response:
+    """Render one bounded page of files in a completed cleanup scope."""
+    cleanup_page = await list_completed_import_cleanup_files(
+        session,
+        job_id,
+        action,
+        page=page,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_completed_cleanup_files.html",
+        _ctx(
+            request,
+            user,
+            job_id=job_id,
+            cleanup_action=action.value,
+            cleanup_page=cleanup_page,
         ),
     )
 

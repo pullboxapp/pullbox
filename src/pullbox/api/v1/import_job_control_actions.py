@@ -140,7 +140,10 @@ async def confirm_import_response(
 async def clear_import_history_response(session: Any) -> dict[str, int]:
     """Delete terminal import history records while leaving active jobs intact."""
     jobs_result = await session.execute(
-        sa_select(ImportJob).where(ImportJob.status.in_(_CLEARABLE_HISTORY_STATUSES))
+        sa_select(ImportJob).where(
+            ImportJob.status.in_(_CLEARABLE_HISTORY_STATUSES),
+            ImportJob.archived_at.is_(None),
+        )
     )
     jobs = list(jobs_result.scalars().all())
 

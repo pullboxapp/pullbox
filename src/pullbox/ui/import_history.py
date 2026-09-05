@@ -129,19 +129,29 @@ async def _load_import_history_context(
     search_query: str = "",
     sort: str = "",
     requested_page: int = 1,
+    show_archived: bool = False,
 ) -> dict[str, object]:
     """Load the import history page context."""
-    clearable_jobs_total: int = (
-        await session.execute(
-            select(func.count(ImportJob.id)).where(
-                ImportJob.status.in_(_IMPORT_HISTORY_CLEARABLE_STATUSES)
-            )
+    archive_filter = (
+        ImportJob.archived_at.is_not(None) if show_archived else ImportJob.archived_at.is_(None)
+    )
+    clearable_jobs_total = 0
+    if not show_archived:
+        clearable_jobs_total = int(
+            (
+                await session.execute(
+                    select(func.count(ImportJob.id)).where(
+                        ImportJob.status.in_(_IMPORT_HISTORY_CLEARABLE_STATUSES),
+                        archive_filter,
+                    )
+                )
+            ).scalar_one()
+            or 0
         )
-    ).scalar_one()
 
     normalized_search = (search_query or "").strip()
     normalized_sort = _normalize_import_history_sort(sort)
-    history_filters = []
+    history_filters: list[ColumnElement[bool]] = [archive_filter]
     if normalized_search:
         search_pattern = f"%{normalized_search}%"
         history_filters.append(
@@ -282,4 +292,5 @@ async def _load_import_history_context(
         "clearable_jobs_total": clearable_jobs_total,
         "search_query": normalized_search,
         "sort": normalized_sort,
+        "show_archived": show_archived,
     }

@@ -740,6 +740,76 @@ class TestImportResultsPartial:
         assert "Retry failed" in html
         assert "2000AD prog 2481.cbz" in html
 
+    def test_results_template_presents_bounded_completed_cleanup_actions(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        html = templates.env.get_template("partials/import_results.html").render(
+            job=SimpleNamespace(id=35, status=SimpleNamespace(value="completed")),
+            can_rollback=False,
+            imported_count=17505,
+            failed_count=0,
+            duplicate_count=0,
+            no_match_count=0,
+            unmatched_queue_count=0,
+            failed_series=[],
+            files_total=184186,
+            files_imported=79487,
+            files_matched=34767,
+            files_duplicate=857,
+            files_already_owned=0,
+            files_conflict=20989,
+            files_no_match=7258,
+            orphaned_file_no_match_count=0,
+            identified_series_file_no_match_count=7258,
+            catalog_sync_pending_count=0,
+            catalog_sync_failed_count=0,
+            catalog_sync_attention_count=0,
+            catalog_sync_series=[],
+            files_failed=0,
+            failed_files=[],
+            files_safety_blocked=39582,
+            safety_blocked_files=[],
+            cleanup_no_action_count=857,
+            cleanup_safe_action_count=38383,
+            cleanup_needs_review_count=100,
+            cleanup_action_summaries=[
+                {
+                    "action": "dismiss_missing_references",
+                    "label": "Dismiss stale Mylar references",
+                    "description": "Clear stale references without deleting files.",
+                    "button_label": "Dismiss references",
+                    "tone": "neutral",
+                    "affected_count": 38383,
+                    "affected_file_count": 38383,
+                    "item_unit": "file",
+                    "examples": ("missing-1.cbz", "missing-2.cbz", "missing-3.cbz"),
+                }
+            ],
+            safety_category_summaries=[
+                {
+                    "category": "source_missing",
+                    "label": "Source file is missing",
+                    "count": 38383,
+                    "examples": ("missing-1.cbz",),
+                    "action": "dismiss_missing_references",
+                    "bucket": "safe_action",
+                }
+            ],
+            remaining_conflict_files=100,
+            resume_step=5,
+            resume_job_id=35,
+            resume_progress_snapshot={},
+        )
+
+        assert 'data-testid="import-results-recovery-dashboard"' in html
+        assert "38,383" in html
+        assert "Dismiss stale Mylar references" in html
+        assert 'data-testid="import-cleanup-apply-dismiss_missing_references"' in html
+        assert 'data-testid="import-cleanup-review-dismiss_missing_references"' in html
+        assert 'data-testid="import-results-archive-action"' in html
+
     def test_results_template_explains_changed_source_failures(self) -> None:
         from types import SimpleNamespace
 

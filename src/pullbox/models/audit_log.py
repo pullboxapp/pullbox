@@ -26,6 +26,7 @@ class AuditEventType(StrEnum):
     SECURITY_CONFIG_CHANGED = "security_config_changed"
     LOCAL_BYPASS_TOGGLED = "local_bypass_toggled"
     IMPORT_SAFETY_BULK_OVERRIDE = "import_safety_bulk_override"
+    IMPORT_RECOVERY_BULK_ACTION = "import_recovery_bulk_action"
 
 
 class AuditLog(Base, IdentityMixin):

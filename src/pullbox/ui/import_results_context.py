@@ -30,6 +30,15 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
+from pullbox.services.import_completed_cleanup import (
+    CompletedImportCleanupAction,
+    count_completed_import_cleanup_scope,
+    list_completed_import_cleanup_examples,
+)
+from pullbox.services.import_safety_diagnostics import (
+    ImportSafetyCategory,
+    import_safety_category_label,
+)
 from pullbox.services.import_workflow_state import import_control_state_for_job
 
 if TYPE_CHECKING:
@@ -121,6 +130,192 @@ async def _load_files_for_status(
         )
     )
     return list(result.scalars().all())
+
+
+_SAFETY_ACTION_BY_CATEGORY = {
+    ImportSafetyCategory.SOURCE_MISSING: (
+        CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES,
+        "safe_action",
+    ),
+    ImportSafetyCategory.SINGLE_PAGE_COMIC: (
+        CompletedImportCleanupAction.SKIP_PROBABLE_COVERS,
+        "safe_action",
+    ),
+    ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT: (
+        CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES,
+        "safe_action",
+    ),
+    ImportSafetyCategory.PERMISSION_UNREADABLE: (
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+        "safe_action",
+    ),
+    ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED: (
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+        "safe_action",
+    ),
+    ImportSafetyCategory.SOURCE_CHANGED: (
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+        "safe_action",
+    ),
+    ImportSafetyCategory.ZERO_BYTE: (
+        CompletedImportCleanupAction.SKIP_UNUSABLE_FILES,
+        "safe_action",
+    ),
+    ImportSafetyCategory.ARCHIVE_NO_PAGES: (
+        CompletedImportCleanupAction.SKIP_UNUSABLE_FILES,
+        "safe_action",
+    ),
+    ImportSafetyCategory.UNSUPPORTED_FILE_TYPE: (
+        CompletedImportCleanupAction.SKIP_UNUSABLE_FILES,
+        "safe_action",
+    ),
+}
+
+_CLEANUP_ACTION_PRESENTATION = {
+    CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES: {
+        "label": "Dismiss stale Mylar references",
+        "description": (
+            "Clear database references whose source files no longer exist. No files are deleted."
+        ),
+        "button_label": "Dismiss references",
+        "tone": "neutral",
+    },
+    CompletedImportCleanupAction.SKIP_PROBABLE_COVERS: {
+        "label": "Skip probable cover files",
+        "description": (
+            "Exclude one-page image archives that look like series cover art, "
+            "while preserving the source files."
+        ),
+        "button_label": "Skip cover files",
+        "tone": "neutral",
+    },
+    CompletedImportCleanupAction.SKIP_UNUSABLE_FILES: {
+        "label": "Skip unusable files",
+        "description": (
+            "Clear empty, unsupported, or page-less files that cannot become library issues."
+        ),
+        "button_label": "Skip unusable files",
+        "tone": "neutral",
+    },
+    CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES: {
+        "label": "Allow oversized files once",
+        "description": (
+            "Retry legitimate large books once without weakening the global archive safety policy."
+        ),
+        "button_label": "Allow once and retry",
+        "tone": "warning",
+    },
+    CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION: {
+        "label": "Retry source inspection",
+        "description": (
+            "Recheck files that were unreadable, changed, or could not be "
+            "inspected during the original run."
+        ),
+        "button_label": "Recheck sources",
+        "tone": "warning",
+    },
+    CompletedImportCleanupAction.NORMALIZE_ALREADY_OWNED: {
+        "label": "Recognize already-owned issues",
+        "description": (
+            "Resolve conflicts that point to issues already registered in the Pullbox library."
+        ),
+        "button_label": "Mark already owned",
+        "tone": "neutral",
+    },
+    CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS: {
+        "label": "Accept recommended conflict choices",
+        "description": (
+            "Import the single high-confidence preferred file in each eligible "
+            "conflict group and skip its alternatives."
+        ),
+        "button_label": "Accept recommendations",
+        "tone": "warning",
+    },
+}
+
+
+async def _load_cleanup_action_summaries(
+    session: AsyncSession,
+    job_id: int,
+) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for action, presentation in _CLEANUP_ACTION_PRESENTATION.items():
+        affected_count, affected_file_count = await count_completed_import_cleanup_scope(
+            session,
+            job_id,
+            action,
+        )
+        if affected_count == 0:
+            continue
+        summaries.append(
+            {
+                "action": action.value,
+                "affected_count": affected_count,
+                "affected_file_count": affected_file_count,
+                "item_unit": (
+                    "group"
+                    if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
+                    else "file"
+                ),
+                "examples": await list_completed_import_cleanup_examples(
+                    session,
+                    job_id,
+                    action,
+                ),
+                **presentation,
+            }
+        )
+    return summaries
+
+
+async def _load_safety_category_summaries(
+    session: AsyncSession,
+    job_id: int,
+) -> list[dict[str, object]]:
+    category_expression = ImportedFile.diagnostics["safety_block"]["category"].as_string()
+    rows = (
+        await session.execute(
+            select(category_expression, func.count(ImportedFile.id))
+            .where(
+                ImportedFile.import_job_id == job_id,
+                ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+            )
+            .group_by(category_expression)
+            .order_by(func.count(ImportedFile.id).desc(), category_expression.asc())
+        )
+    ).all()
+    summaries: list[dict[str, object]] = []
+    for raw_category, count in rows:
+        try:
+            category = ImportSafetyCategory(str(raw_category))
+        except ValueError:
+            category = ImportSafetyCategory.UNKNOWN
+        action, bucket = _SAFETY_ACTION_BY_CATEGORY.get(category, (None, "needs_review"))
+        examples = tuple(
+            (
+                await session.scalars(
+                    select(ImportedFile.file_name)
+                    .where(
+                        ImportedFile.import_job_id == job_id,
+                        ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                        category_expression == raw_category,
+                    )
+                    .order_by(ImportedFile.id)
+                    .limit(3)
+                )
+            ).all()
+        )
+        summaries.append(
+            {
+                "category": category.value,
+                "label": import_safety_category_label(category),
+                "count": int(count),
+                "examples": examples,
+                "action": action.value if action is not None else None,
+                "bucket": bucket,
+            }
+        )
+    return summaries
 
 
 async def _orphaned_file_no_match_count(session: AsyncSession, job_id: int) -> int:
@@ -570,6 +765,7 @@ async def load_import_results_context(
         file_status_counts.get(ImportedFileStatus.FAILED.value, 0),
         job.total_files_failed or 0,
     )
+    files_skipped = file_status_counts.get(ImportedFileStatus.SKIPPED.value, 0)
     failed_files = (
         await _load_files_for_status(session, job_id, ImportedFileStatus.FAILED)
         if files_failed > 0
@@ -585,6 +781,45 @@ async def load_import_results_context(
         ImportedFileStatus.SAFETY_BLOCKED.value,
         0,
     )
+    safety_category_summaries = (
+        await _load_safety_category_summaries(session, job_id) if files_safety_blocked > 0 else []
+    )
+    cleanup_action_summaries = (
+        await _load_cleanup_action_summaries(session, job_id)
+        if job.status is ImportJobStatus.COMPLETED and job.archived_at is None
+        else []
+    )
+    cleanup_by_action = {str(item["action"]): item for item in cleanup_action_summaries}
+    recommended_summary = cleanup_by_action.get(
+        CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS.value,
+        {},
+    )
+    already_owned_summary = cleanup_by_action.get(
+        CompletedImportCleanupAction.NORMALIZE_ALREADY_OWNED.value,
+        {},
+    )
+    recommended_conflict_groups = _positive_int(recommended_summary.get("affected_count")) or 0
+    recommended_conflict_files = _positive_int(recommended_summary.get("affected_file_count")) or 0
+    already_owned_conflict_files = (
+        _positive_int(already_owned_summary.get("affected_file_count")) or 0
+    )
+    remaining_conflict_files = max(
+        files_conflict - recommended_conflict_files - already_owned_conflict_files,
+        0,
+    )
+    actionable_safety_files = sum(
+        _positive_int(item["affected_file_count"]) or 0
+        for item in cleanup_action_summaries
+        if item["action"]
+        in {
+            CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES.value,
+            CompletedImportCleanupAction.SKIP_PROBABLE_COVERS.value,
+            CompletedImportCleanupAction.SKIP_UNUSABLE_FILES.value,
+            CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES.value,
+            CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION.value,
+        }
+    )
+    needs_review_safety_count = max(files_safety_blocked - actionable_safety_files, 0)
     files_total = sum(file_status_counts.values())
     orphaned_file_no_match_count = await _orphaned_file_no_match_count(session, job_id)
     identified_series_file_no_match_count = max(
@@ -631,17 +866,23 @@ async def load_import_results_context(
         "catalog_sync_attention_count": len(catalog_sync_series),
         "catalog_sync_series": catalog_sync_series,
         "files_failed": files_failed,
+        "files_skipped": files_skipped,
         "source_changed_files": source_changed_files,
         "failed_files": failed_files,
         "files_safety_blocked": files_safety_blocked,
-        "safety_blocked_files": (
-            await _load_files_for_status(
-                session,
-                job_id,
-                ImportedFileStatus.SAFETY_BLOCKED,
-            )
-            if files_safety_blocked > 0
-            else []
+        # Completed results use bounded category summaries; never hydrate an
+        # unbounded safety backlog into ORM objects or template rows.
+        "safety_blocked_files": [],
+        "safety_category_summaries": safety_category_summaries,
+        "cleanup_action_summaries": cleanup_action_summaries,
+        "recommended_conflict_groups": recommended_conflict_groups,
+        "recommended_conflict_files": recommended_conflict_files,
+        "already_owned_conflict_files": already_owned_conflict_files,
+        "remaining_conflict_files": remaining_conflict_files,
+        "cleanup_no_action_count": files_duplicate + files_already_owned + files_skipped,
+        "cleanup_safe_action_count": sum(
+            _positive_int(item["affected_file_count"]) or 0 for item in cleanup_action_summaries
         ),
+        "cleanup_needs_review_count": needs_review_safety_count + remaining_conflict_files,
         **rollback_journal_summary,
     }

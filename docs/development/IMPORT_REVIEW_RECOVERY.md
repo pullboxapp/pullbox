@@ -2,9 +2,46 @@
 
 Use this maintenance procedure when a review was generated before the Mylar
 sidecar parser and comic-content checks were corrected. Normal completed-job
-recovery does not require this command: the **Retry failed** action revalidates
-retryable source changes inside Pullbox before execution. It works for Mylar
-and folder imports. This is not a full rescan, a database restore, or an import.
+recovery is available in the import results screen and does not require an
+offline command. It works for Mylar and folder imports. This is not a full
+rescan, a database restore, or an import.
+
+## Completed Import Recovery
+
+The completed results screen groups large backlogs into bounded recovery
+categories instead of rendering every row. Each action has an exact count,
+three representative filenames, and an on-demand detail view limited to 25
+files per page. This keeps even six-figure imports responsive.
+
+Available recovery actions are intentionally narrow:
+
+- **Dismiss stale Mylar references** marks missing database references skipped.
+  It does not delete a review record or touch Mylar's database.
+- **Skip probable cover files** excludes one-page image archives while leaving
+  the source files intact.
+- **Skip unusable files** excludes empty, unsupported, and page-less files.
+- **Allow oversized files once** retries only decompression-size blocks marked
+  overrideable. It does not change the global archive safety policy or approve
+  dangerous archive content.
+- **Retry source inspection** rechecks files that were unreadable, changed, or
+  temporarily could not be inspected, then resumes only work that now passes.
+- **Recognize already-owned issues** clears conflicts whose issue already has a
+  registered library file.
+- **Accept recommended conflict choices** applies only when a conflict group has
+  exactly one high-confidence preferred file and the issue is not already
+  owned. Alternatives in that group are skipped and the preferred file alone
+  is retried.
+
+Every mutation requires a fresh, actor-bound signed preview. Pullbox rejects an
+expired preview or any action whose row set changed after preview. Mutations run
+in bounded database pages, recompute import counters, and create import and
+security audit records. Dangerous, unknown, and genuinely ambiguous outcomes
+remain manual-review items.
+
+Once cleanup is complete, **Archive results** hides the finished job from the
+current history view without deleting its rows, logs, decisions, or rollback
+evidence. Archived jobs can be restored later. **Clear History** never deletes
+archived jobs.
 
 ## Safety And Scope
 
@@ -17,10 +54,10 @@ and folder imports. This is not a full rescan, a database restore, or an import.
   `trusted_source_identity_conflict` are examined by default. Repeat
   `--series-id` to narrow the operation to specific **import-review series
   IDs**, not ComicVine or library series IDs.
-- For a `COMPLETED` job, prefer the in-app **Retry failed** action. It performs
-  the same bounded source revalidation automatically and retries only files
-  that remain inside their approved root, pass current safety checks, and do
-  not conflict with the saved source identity.
+- For a `COMPLETED` job, prefer the matching in-app recovery action. **Retry
+  failed** remains available for ordinary import failures; **Retry source
+  inspection** handles completed safety rows whose source should be checked
+  again.
 - An entire series is left untouched if it has manual overrides, selected
   files, explicit skips, approved exceptions, or other completed file decisions.
   The report counts these as `skipped_series`; discuss them individually.
@@ -73,9 +110,10 @@ and unaffected review decisions, and returns to Step 3. It does not select
 files or start Step 4. Genuine source-identity conflicts remain in review.
 
 For a completed import, restart Pullbox, open that import's results, and choose
-**Retry failed**. Only the rechecked failures are prepared; successful files
-and series remain untouched. A file that is still missing, outside an approved
-root, unreadable, or unsafe stays failed with refreshed diagnostics.
+the relevant recovery action. Only the previewed scope is prepared; successful
+files and series remain untouched. A file that is still missing, outside an
+approved root, unreadable, or unsafe remains excluded with refreshed
+diagnostics.
 
 ## Replaced Files
 

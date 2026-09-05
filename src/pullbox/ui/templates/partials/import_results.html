@@ -105,8 +105,19 @@
 
       <div
         data-testid="import-results-action-bar-right"
-        class="flex justify-start sm:justify-end"
+        class="flex flex-wrap justify-start gap-2 sm:justify-end"
       >
+        {% if job.status.value == 'completed' and not job.archived_at %}
+        <button
+          type="button"
+          data-testid="import-results-archive-action"
+          :disabled="archiving"
+          @click="archiveImport()"
+          class="btn-ghost btn-sm"
+        >
+          <span x-text="archiving ? 'Archiving...' : 'Archive results'"></span>
+        </button>
+        {% endif %}
         <a
           href="/series"
           data-series-index-link="true"
@@ -319,6 +330,111 @@
     </div>
   </div>
 
+  {% set cleanup_action_summaries = cleanup_action_summaries|default([]) %}
+  {% set safety_category_summaries = safety_category_summaries|default([]) %}
+  {% set cleanup_no_action_count = cleanup_no_action_count|default(0) %}
+  {% set cleanup_safe_action_count = cleanup_safe_action_count|default(0) %}
+  {% set cleanup_needs_review_count = cleanup_needs_review_count|default(0) %}
+  {% if job.status.value == 'completed' and not job.archived_at and (cleanup_action_summaries or cleanup_needs_review_count > 0 or cleanup_no_action_count > 0) %}
+  <section data-testid="import-results-recovery-dashboard" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Completed import recovery</p>
+        <h3 class="section-title-plain">Finish cleanup without starting over</h3>
+        <p class="section-copy">
+          Pullbox grouped the remaining outcomes so large imports stay readable. Preview each safe action before applying it. Source files are never deleted or changed by these cleanup actions.
+        </p>
+      </div>
+    </div>
+    <div class="section-body space-y-5">
+      <div class="grid gap-3 sm:grid-cols-3">
+        <div class="stat-card">
+          <p class="stat-card-kicker">Already handled</p>
+          <p class="stat-card-value text-pb-success">{{ "{:,}".format(cleanup_no_action_count) }}</p>
+          <p class="stat-card-copy">Duplicates, already-owned files, and dismissed outcomes need no further action.</p>
+        </div>
+        <div class="stat-card">
+          <p class="stat-card-kicker">Safe next steps</p>
+          <p class="stat-card-value text-pb-interactive">{{ "{:,}".format(cleanup_safe_action_count) }}</p>
+          <p class="stat-card-copy">Files have a bounded recovery action ready for review.</p>
+        </div>
+        <div class="stat-card">
+          <p class="stat-card-kicker">Needs review</p>
+          <p class="stat-card-value{% if cleanup_needs_review_count > 0 %} text-pb-warning{% endif %}">{{ "{:,}".format(cleanup_needs_review_count) }}</p>
+          <p class="stat-card-copy">Ambiguous or unsafe outcomes remain untouched for manual review.</p>
+        </div>
+      </div>
+
+      {% if cleanup_action_summaries %}
+      <div class="grid gap-3 xl:grid-cols-2">
+        {% for action in cleanup_action_summaries %}
+        <article class="rounded-xl border border-pb-border bg-pb-card-hover/35 p-4">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <h4 class="text-sm font-semibold text-pb-text">{{ action.label }}</h4>
+                <span class="pill {{ 'pill-warning' if action.tone == 'warning' else 'pill-neutral' }}">
+                  {{ "{:,}".format(action.affected_count) }} {{ action.item_unit }}{{ '' if action.affected_count == 1 else 's' }}
+                </span>
+              </div>
+              <p class="mt-1 text-xs leading-5 text-pb-text-dim">{{ action.description }}</p>
+              {% if action.examples %}
+              <ul class="mt-3 space-y-1 text-xs text-pb-text-muted">
+                {% for example in action.examples %}
+                <li class="truncate font-mono" title="{{ example }}">{{ example }}</li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+            </div>
+          </div>
+          <div class="mt-4 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-testid="import-cleanup-apply-{{ action.action }}"
+              class="{{ 'btn-warning' if action.tone == 'warning' else 'btn-primary' }} btn-sm"
+              :disabled="Boolean(cleanupRunningAction)"
+              @click="applyCleanup({{ action.action|tojson|forceescape }}, {{ action.label|tojson|forceescape }})"
+            >
+              <span x-text="cleanupRunningAction === {{ action.action|tojson|forceescape }} ? 'Working...' : {{ action.button_label|tojson|forceescape }}"></span>
+            </button>
+            <button
+              type="button"
+              data-testid="import-cleanup-review-{{ action.action }}"
+              class="btn-ghost btn-sm"
+              hx-get="/import/{{ job.id }}/cleanup/{{ action.action }}/files?page=1"
+              hx-target="#import-cleanup-detail-{{ action.action }}"
+              hx-swap="innerHTML"
+            >Review files</button>
+          </div>
+          <div id="import-cleanup-detail-{{ action.action }}"></div>
+        </article>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% set manual_safety = safety_category_summaries|selectattr('bucket', 'equalto', 'needs_review')|list %}
+      {% if manual_safety or remaining_conflict_files|default(0) > 0 %}
+      <div class="rounded-xl border border-pb-warning/35 bg-pb-warning/5 p-4">
+        <p class="text-sm font-semibold text-pb-text">Still needs a decision</p>
+        <p class="mt-1 text-xs leading-5 text-pb-text-dim">
+          Pullbox will not bulk-approve dangerous, unknown, or ambiguous outcomes. Archive these results when you are done if you want a clean current-history view without deleting the evidence.
+        </p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          {% for category in manual_safety %}
+          <span class="pill pill-warning">{{ category.label }}: {{ "{:,}".format(category.count) }}</span>
+          {% endfor %}
+          {% if remaining_conflict_files|default(0) > 0 %}
+          <span class="pill pill-warning">Ambiguous conflicts: {{ "{:,}".format(remaining_conflict_files) }}</span>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      <p x-show="cleanupError" x-cloak x-text="cleanupError" class="text-xs text-pb-error"></p>
+    </div>
+  </section>
+  {% endif %}
+
   {% if failed_series %}
   <div class="section-card overflow-hidden">
     <div class="section-header">
@@ -397,53 +513,6 @@
   </div>
   {% endif %}
 
-  {% if safety_blocked_files %}
-  <div class="section-card overflow-hidden">
-    <div class="section-header">
-      <div class="section-header-copy">
-        <p class="section-eyebrow">Safety exceptions</p>
-        <h3 class="section-title-plain">{{ files_safety_blocked }} file{{ "s need" if files_safety_blocked != 1 else " needs" }} safety approval</h3>
-        <p class="section-copy">
-          Pullbox stopped before processing these files during safety review. Resource-limit blocks can be allowed once; corrupt or unsafe files must be replaced before retry.
-        </p>
-      </div>
-    </div>
-    <div class="section-body space-y-3">
-      {% for f in safety_blocked_files %}
-      {% set blocked_diagnostics = f.diagnostics or {} %}
-      {% set safety_block = blocked_diagnostics.get('safety_block', {}) %}
-      {% set safety_block_overrideable = safety_block.get('overrideable', true) is not sameas false %}
-      <div class="rounded-xl border border-pb-warning/40 bg-pb-warning/5 px-4 py-3">
-        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div class="min-w-0">
-            <div class="break-words text-sm font-medium font-mono text-pb-text">{{ f.file_name }}</div>
-            <div class="mt-1 break-words text-xs text-pb-text-dim">
-              {{ safety_block.get('reason') or f.error_message or 'File exceeded a resource safety limit.' }}
-            </div>
-          </div>
-          {% if safety_block_overrideable %}
-          <button
-            type="button"
-            class="btn-warning btn-sm inline-flex shrink-0 items-center gap-2"
-            data-testid="import-results-safety-retry-{{ f.id }}"
-            :disabled="safetyRetryingFileId === {{ f.id }}"
-            @click="allowSafetyOnceAndRetry({{ f.id }})"
-          >
-            <svg x-show="safetyRetryingFileId === {{ f.id }}" x-cloak class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-            </svg>
-            <span>Allow once and retry</span>
-          </button>
-          {% else %}
-          <span class="pill pill-error shrink-0 justify-center">Cannot retry</span>
-          {% endif %}
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-  {% endif %}
 </div>
 
 {% include "partials/import_collection_footer_oob.html" %}
