@@ -359,6 +359,30 @@ class TestDashboardRouteContracts:
         assert "Open reading queue" in response.text
         assert 'hx-trigger="every 3s"' not in response.text
 
+    async def test_dashboard_continue_shelf_shows_progress_for_large_compendium(
+        self,
+        authenticated_client,
+        sec_db,
+        sec_user,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from tests.ui.test_reading_ui_routes import _seed_reading_items
+
+        await _seed_reading_items(
+            sec_db,
+            sec_user,
+            count=1,
+            mode="continue",
+            last_page_index=0,
+            page_count=1_250,
+        )
+
+        response = await authenticated_client.get("/")
+
+        assert response.status_code == 200
+        assert "Page 1 of 1250 · 1%" in response.text
+        assert 'aria-valuenow="1"' in response.text
+        assert 'style="width: 1%"' in response.text
+
     async def test_reader_gate_hides_dashboard_continue_shelf(
         self,
         authenticated_client,

@@ -13,7 +13,11 @@ from pullbox.models.library import FileFormat, LibraryFile
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series
 from pullbox.models.story_arc import IssueStoryArc, StoryArcResolutionState
-from pullbox.services.reader_state_service import ReaderStateSnapshot, snapshot_reader_state
+from pullbox.services.reader_state_service import (
+    ReaderStateSnapshot,
+    calculate_reader_position_percent,
+    snapshot_reader_state,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -53,9 +57,7 @@ class ReadingStateProjection:
 
     @property
     def position_percent(self) -> int:
-        if self.last_page_index is None or self.page_count is None:
-            return 0
-        return max(0, min(100, ((self.last_page_index + 1) * 100) // self.page_count))
+        return calculate_reader_position_percent(self.last_page_index, self.page_count)
 
     @property
     def is_continue_candidate(self) -> bool:
