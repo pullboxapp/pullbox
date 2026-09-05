@@ -163,7 +163,27 @@
 
             <div class="mt-3 flex justify-end" x-show="libraryRootRebindRootId !== Number(root.id)">
               <button type="button" class="btn-ghost" :disabled="libraryRootSaving" @click="openLibraryRootRebind(root)">Rebind path</button>
+              <button type="button" class="btn-danger ml-2" x-show="!root.enabled && !root.is_default_managed_destination"
+                :disabled="libraryRootSaving" @click="previewLibraryRootRemoval(root)"
+                :aria-label="'Remove ' + root.name">Remove root</button>
             </div>
+            <template x-if="libraryRootRemovalPreview && libraryRootRemovalPreview.id === root.id">
+              <section class="mt-4 space-y-3 rounded-lg border border-pb-border p-4" aria-live="polite"
+                data-testid="settings-media-library-root-removal">
+                <h4 class="text-sm font-semibold" x-text="libraryRootRemovalPreview.can_remove ? 'Ready to remove root' : 'Root removal blocked'"></h4>
+                <p class="text-sm text-pb-text-sec">Only this root's configuration and root-specific naming settings will be removed. No folders or files will be deleted.</p>
+                <p class="text-sm text-pb-text-sec" x-show="libraryRootRemovalPreview.history_count"
+                  x-text="libraryRootRemovalPreview.history_count + ' import history record(s) will retain the original root name and path. To retry them, start a new import and explicitly choose a destination.'"></p>
+                <ul class="space-y-2 text-sm text-pb-warning">
+                  <template x-for="reason in libraryRootRemovalPreview.blocking_reasons" :key="reason"><li x-text="reason"></li></template>
+                </ul>
+                <div class="flex flex-wrap gap-2">
+                  <button type="button" class="btn-danger" :disabled="libraryRootSaving || !libraryRootRemovalPreview.can_remove"
+                    @click="confirmLibraryRootRemoval(root)">Confirm removal</button>
+                  <button type="button" class="btn-ghost" :disabled="libraryRootSaving" @click="libraryRootRemovalPreview = null">Cancel</button>
+                </div>
+              </section>
+            </template>
           </article>
         </template>
       </div>
@@ -543,6 +563,7 @@ function mediaSettings() {
     libraryRootRebindPath: '',
     libraryRootRebindPreview: null,
     libraryRootRebindPreviewRequest: 0,
+    libraryRootRemovalPreview: null,
     libraryRootForm: {
       name: '',
       path: '',
@@ -648,6 +669,7 @@ function mediaSettings() {
       if (this.libraryRootSaving) return;
       this.libraryRootSaving = true;
       this.libraryRootError = '';
+      this.libraryRootRemovalPreview = null;
       try {
         await this.libraryRootRequest(`/api/v1/config/library-roots/${root.id}`, {
           method: "PATCH",
@@ -663,7 +685,55 @@ function mediaSettings() {
       }
     },
 
+    async previewLibraryRootRemoval(root) {
+      if (this.libraryRootSaving) return;
+      this.libraryRootSaving = true;
+      this.libraryRootError = '';
+      this.libraryRootRemovalPreview = null;
+      try {
+        this.libraryRootRemovalPreview = await this.libraryRootRequest(
+          `/api/v1/config/library-roots/${root.id}/remove/preview`, { method: "POST" }
+        );
+        await this.$nextTick();
+        this.$root.querySelector('[data-testid="settings-media-library-root-removal"]')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      } catch (err) {
+        this.libraryRootError = err.message || 'Could not check this library root.';
+      } finally {
+        this.libraryRootSaving = false;
+      }
+    },
+
+    async confirmLibraryRootRemoval(root) {
+      const preview = this.libraryRootRemovalPreview;
+      if (this.libraryRootSaving || preview?.id !== root.id || !preview.can_remove || !preview.preview_token) return;
+      this.libraryRootSaving = true;
+      this.libraryRootError = '';
+      try {
+        const confirmed = await pbConfirm({
+          title: 'Remove library root?',
+          message: `Remove "${preview.name}" (${preview.path})? Its configuration and root-specific naming settings will be removed. No folders or files will be deleted. Import history will be preserved.`,
+          confirmText: 'Remove root',
+          destructive: true,
+        });
+        if (!confirmed) return;
+        await this.libraryRootRequest(`/api/v1/config/library-roots/${root.id}`, {
+          method: "DELETE",
+          body: JSON.stringify({ preview_token: preview.preview_token, confirmation: "REMOVE" }),
+        });
+        this.libraryRoots = this.libraryRoots.filter(item => item.id !== root.id);
+        this.libraryRootRemovalPreview = null;
+        if (this.namingScope === String(root.id)) await this.loadNamingScope('global');
+        if (typeof showToast === 'function') showToast({ message: 'Library root removed. Files are unchanged.', level: 'success' });
+      } catch (err) {
+        this.libraryRootError = err.message || 'Could not remove this library root.';
+        this.libraryRootRemovalPreview = null;
+      } finally {
+        this.libraryRootSaving = false;
+      }
+    },
+
     openLibraryRootRebind(root) {
+      this.libraryRootRemovalPreview = null;
       this.libraryRootRebindRootId = Number(root.id);
       this.libraryRootRebindPath = '';
       this.libraryRootRebindPreview = null;

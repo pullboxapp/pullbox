@@ -560,6 +560,7 @@ class ImportJobRead(BaseModel):
 
     # Settings
     target_library_root_id: int | None
+    removed_library_root_snapshot: dict[str, str | int] | None = None
     monitored: bool
     search_on_add: bool
     move_to_library: bool = True

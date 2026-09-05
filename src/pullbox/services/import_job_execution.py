@@ -93,6 +93,7 @@ from pullbox.services.import_progress_runtime import (
     import_group_progress_plan,
     import_work_progress,
 )
+from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_root_policy_activation import (
     RootPolicyActivationConflictError,
     activate_future_root_policy,
@@ -242,6 +243,7 @@ async def execute_import_job(
     if loaded_job is None:
         raise NotFoundError("ImportJob", job_id)
     job = loaded_job
+    require_retained_import_destination(job)
 
     try:
         await validate_managed_copy_preflight(session, job, stage="execution")

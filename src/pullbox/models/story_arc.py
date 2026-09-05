@@ -171,7 +171,7 @@ class StoryArc(Base, IdentityMixin, TimestampMixin):
     )
     sync_enabled: Mapped[bool] = mapped_column(default=False, server_default="0", nullable=False)
     target_library_root_id: Mapped[int | None] = mapped_column(
-        ForeignKey("library_roots.id", ondelete="SET NULL")
+        ForeignKey("library_roots.id", ondelete="RESTRICT")
     )
     policy_schema_version: Mapped[int | None] = mapped_column(Integer)
     policy_snapshot: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
@@ -365,7 +365,7 @@ class StoryArcPlacement(Base, IdentityMixin, TimestampMixin):
         ForeignKey("library_files.id", ondelete="SET NULL")
     )
     library_root_id: Mapped[int | None] = mapped_column(
-        ForeignKey("library_roots.id", ondelete="SET NULL")
+        ForeignKey("library_roots.id", ondelete="RESTRICT")
     )
     placement_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     mode: Mapped[StoryArcPlacementMode] = mapped_column(

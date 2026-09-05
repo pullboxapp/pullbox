@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pullbox.core.exceptions import ValidationError
 from pullbox.models.import_job import ImportFileHandlingMode
 from pullbox.schemas.import_job import ImportJobCreate
 from pullbox.schemas.import_layout import SourceLayoutSpecPayload
@@ -23,6 +24,7 @@ _RETRY_RUNTIME_FIELDS = (
 
 def build_retry_import_request(original: Any) -> ImportJobCreate:
     """Build the creation request for a fresh retry job."""
+    require_retained_import_destination(original)
     source_layout_snapshot = getattr(original, "source_layout_snapshot", None) or {}
     future_root_policy_snapshot = getattr(original, "future_root_policy_snapshot", None)
     frozen_path_map = dict(original.mylar3_path_map or {})
@@ -52,6 +54,16 @@ def build_retry_import_request(original: Any) -> ImportJobCreate:
             getattr(original, "story_arc_materialization_requested", False)
         ),
     )
+
+
+def require_retained_import_destination(job: Any) -> None:
+    """Never replace an explicitly removed historical destination with a default."""
+    if getattr(job, "removed_library_root_snapshot", None) and job.target_library_root_id is None:
+        raise ValidationError(
+            "This import's library root was removed. Start a new import and explicitly "
+            "select an enabled library root. Existing library files and import history "
+            "are unchanged."
+        )
 
 
 def copy_retry_import_settings(original: Any, retry: Any) -> None:

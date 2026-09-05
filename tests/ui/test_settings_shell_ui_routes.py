@@ -530,6 +530,10 @@ class TestSettingsRouteContracts:
         assert "Confirm rebind" in response.text
         assert "/rebind/preview" in response.text
         assert 'confirmation: "REBIND"' in response.text
+        assert 'data-testid="settings-media-library-root-removal"' in response.text
+        assert 'confirmation: "REMOVE"' in response.text
+        assert "No folders or files will be deleted." in response.text
+        assert 'method: "DELETE"' in response.text
         assert "Delete library root" not in response.text
         assert "ordinary edits cannot change them" in response.text
         assert "bootstraps the default managed destination" in response.text

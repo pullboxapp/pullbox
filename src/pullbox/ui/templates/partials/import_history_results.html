@@ -102,6 +102,12 @@
             <td>
               <span class="downloads-release-name tooltip-wrap" data-tooltip-auto data-tip-size="wide">
                 <span class="block truncate" data-tooltip-measure>{{ job.source_path }}</span>
+                {% if job.removed_library_root_snapshot %}
+                <span class="block text-xs text-pb-warning" title="{{ job.removed_library_root_snapshot.path }}">
+                  Original root removed: {{ job.removed_library_root_snapshot.name }}.
+                  Start a new import to choose a destination.
+                </span>
+                {% endif %}
               </span>
             </td>
             <td>

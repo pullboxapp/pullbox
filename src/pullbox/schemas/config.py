@@ -121,6 +121,24 @@ class LibraryRootPreviewResponse(BaseModel):
     can_create: bool
 
 
+class LibraryRootRemovalPreview(BaseModel):
+    id: int
+    name: str
+    path: str
+    can_remove: bool
+    blocking_reasons: list[str]
+    dependencies: dict[str, int]
+    history_count: int
+    has_naming_policy: bool
+    preview_token: str | None
+
+
+class LibraryRootRemovalConfirm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    preview_token: str = Field(min_length=1, max_length=8192)
+    confirmation: Literal["REMOVE"]
+
+
 class LibraryRootRebindPreviewRequest(BaseModel):
     """Request a write-free preview for an established root path replacement."""
 

@@ -35,6 +35,8 @@ from pullbox.schemas.config import (
     LibraryRootRebindConfirmRequest,
     LibraryRootRebindPreviewRequest,
     LibraryRootRebindPreviewResponse,
+    LibraryRootRemovalConfirm,
+    LibraryRootRemovalPreview,
     LibraryRootState,
     LibraryRootUpdate,
     NamingPreview,
@@ -50,7 +52,9 @@ from pullbox.services.library_root_management import (
     list_library_roots,
     preview_library_root,
     preview_library_root_rebind,
+    preview_library_root_removal,
     rebind_library_root,
+    remove_library_root,
     update_library_root,
 )
 from pullbox.services.library_root_policy_service import (
@@ -882,6 +886,31 @@ async def confirm_existing_library_root_rebind(
     )
     logger.info("library_root_rebound", library_root_id=library_root_id)
     return LibraryRootState.model_validate(state)
+
+
+@router.post(
+    "/library-roots/{library_root_id}/remove/preview", response_model=LibraryRootRemovalPreview
+)
+async def preview_root_removal(
+    library_root_id: int,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootRemovalPreview:
+    preview = await preview_library_root_removal(session, library_root_id, actor_id=user.id)
+    return LibraryRootRemovalPreview.model_validate(preview)
+
+
+@router.delete("/library-roots/{library_root_id}", status_code=204)
+async def delete_library_root(
+    library_root_id: int,
+    body: LibraryRootRemovalConfirm,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> None:
+    await remove_library_root(
+        session, library_root_id, actor_id=user.id, preview_token=body.preview_token
+    )
+    logger.info("library_root_removed", library_root_id=library_root_id, actor_id=user.id)
 
 
 # ── Per-root Naming Policy ──────────────────────────────────────────

@@ -24,6 +24,7 @@ from pullbox.services.import_job_actions import build_series_created_action_payl
 from pullbox.services.import_job_execution_items import (
     ensure_target_issue_summary_for_import_file,
 )
+from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
 
 if TYPE_CHECKING:
@@ -213,6 +214,7 @@ async def recover_orphan(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Create/reuse the local series and import selected files for delayed recovery."""
+    require_retained_import_destination(job)
     job_id = job.id
     item_id = item.id
     has_identified_series = (
@@ -534,6 +536,8 @@ async def retry_failed_series(
 
     if job.status != ImportJobStatus.COMPLETED:
         raise ValidationError(f"Job must be in COMPLETED state to retry (current: {job.status})")
+
+    require_retained_import_destination(job)
 
     normalized_file_ids = (
         tuple(sorted({int(file_id) for file_id in file_ids})) if file_ids is not None else None

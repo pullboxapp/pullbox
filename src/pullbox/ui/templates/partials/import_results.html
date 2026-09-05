@@ -42,6 +42,13 @@
   data-testid="import-collection-results"
   class="space-y-6"
 >
+  {% if job.removed_library_root_snapshot %}
+  <div class="info-panel" role="status">
+    <p class="font-semibold">Original library root removed</p>
+    <p>{{ job.removed_library_root_snapshot.name }}: <span class="break-all font-mono">{{ job.removed_library_root_snapshot.path }}</span></p>
+    <p>Files and import history were preserved. To retry, start a new import and explicitly choose an enabled destination.</p>
+  </div>
+  {% endif %}
   <div
     data-testid="import-results-action-bar"
     class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3"
@@ -67,7 +74,7 @@
           <span x-show="rollingBack" x-cloak>Starting rollback...</span>
         </button>
         {% endif %}
-        {% if failed_count > 0 or files_failed > 0 %}
+        {% if (failed_count > 0 or files_failed > 0) and not job.removed_library_root_snapshot %}
         <button
           type="button"
           data-testid="import-results-retry-action"

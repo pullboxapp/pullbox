@@ -7,7 +7,8 @@ behavior without touching the real database or Alembic migrations.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryRoot
@@ -116,8 +117,9 @@ class TestSeriesPath:
         titles = {s.title for s in root.series}
         assert titles == {"Batman", "Saga", "Invincible"}
 
-    async def test_series_library_root_set_null_on_delete(self, db_session) -> None:
-        """Deleting a library root sets series.library_root_id to NULL."""
+    async def test_series_library_root_prevents_deletion(self, db_session) -> None:
+        """A root cannot silently detach the series still using it."""
+        await db_session.execute(text("PRAGMA foreign_keys=ON"))
         root = LibraryRoot(name="Comics", path="/comics", enabled=True)
         db_session.add(root)
         await db_session.flush()
@@ -133,13 +135,17 @@ class TestSeriesPath:
         await db_session.flush()
 
         series_id = series.id
-        await db_session.delete(root)
-        await db_session.flush()
+        root_id = root.id
+        await db_session.commit()
+        with pytest.raises(IntegrityError):
+            await db_session.delete(root)
+            await db_session.flush()
+        await db_session.rollback()
 
         # Re-fetch the series
         reloaded = await db_session.get(Series, series_id)
         assert reloaded is not None
-        assert reloaded.library_root_id is None
+        assert reloaded.library_root_id == root_id
 
     async def test_multiple_series_in_same_root(self, db_session) -> None:
         """Multiple series can reference the same library root."""

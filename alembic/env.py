@@ -45,10 +45,26 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection: Connection) -> None:
     """Configure context and run migrations within a connection."""
+    # SQLite table rebuilds must not cascade into existing child tables. Keep
+    # embedded Alembic callers consistent with the standalone migration process.
+    sqlite_fk_enabled = False
+    if connection.dialect.name == "sqlite":
+        sqlite_fk_enabled = bool(connection.exec_driver_sql("PRAGMA foreign_keys").scalar())
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.commit()
     context.configure(connection=connection, target_metadata=target_metadata)
 
-    with context.begin_transaction():
-        context.run_migrations()
+    try:
+        with context.begin_transaction():
+            context.run_migrations()
+    except BaseException:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+    finally:
+        if sqlite_fk_enabled:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
 async def run_async_migrations() -> None:

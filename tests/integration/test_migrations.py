@@ -1870,6 +1870,47 @@ class TestMigrationChain:
         finally:
             engine.dispose()
 
+    def test_root_removal_protects_dependencies_without_losing_other_fk_actions(self, alembic_cfg):
+        cfg, sync_url = alembic_cfg
+        script = ScriptDirectory.from_config(cfg)
+        assert script.get_heads() == ["n5h6i7j8k901"]
+        assert script.get_revision("n5h6i7j8k901").down_revision == _IMPORT_JOB_ARCHIVE_REVISION
+        command.upgrade(cfg, _IMPORT_JOB_ARCHIVE_REVISION)
+        engine = create_engine(sync_url)
+
+        def actions():
+            with engine.connect() as conn:
+                return {
+                    (table, row[3]): row[6]
+                    for table in (
+                        "library_files",
+                        "series",
+                        "story_arcs",
+                        "story_arc_placements",
+                        "import_jobs",
+                    )
+                    for row in conn.exec_driver_sql(f'PRAGMA foreign_key_list("{table}")')
+                }
+
+        before = actions()
+        command.upgrade(cfg, "head")
+        after = actions()
+        for (table, column), action in before.items():
+            assert after[table, column] == (
+                "RESTRICT"
+                if column
+                in {
+                    "library_root_id",
+                    "target_library_root_id",
+                    "preferred_library_root_id",
+                }
+                else action
+            )
+        assert "removed_library_root_snapshot" in _get_columns(sync_url, "import_jobs")
+        command.downgrade(cfg, _IMPORT_JOB_ARCHIVE_REVISION)
+        assert actions() == before
+        engine.dispose()
+
     def test_import_job_archival_extends_the_single_migration_head(
         self,
         alembic_cfg,
@@ -1878,7 +1919,10 @@ class TestMigrationChain:
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
 
-        assert script.get_heads() == [_IMPORT_JOB_ARCHIVE_REVISION]
+        assert (
+            script.get_revision(_IMPORT_JOB_ARCHIVE_REVISION).down_revision
+            == _IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION
+        )
 
         command.upgrade(cfg, "head")
         engine = create_engine(sync_url)
@@ -2050,7 +2094,7 @@ class TestMigrationChain:
             assert columns["preferred_library_root_id"]["nullable"] is True
             assert len(preferred_fks) == 1
             assert preferred_fks[0]["referred_table"] == "library_roots"
-            assert preferred_fks[0]["options"].get("ondelete") == "SET NULL"
+            assert preferred_fks[0]["options"].get("ondelete") == "RESTRICT"
             assert [tuple(row) for row in rows] == [
                 ("Managed Series", roots["Managed"]),
                 ("Referenced Series", None),
