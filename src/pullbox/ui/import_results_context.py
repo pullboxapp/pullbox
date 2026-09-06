@@ -825,19 +825,14 @@ async def load_import_results_context(
         files_conflict - recommended_conflict_files - already_owned_conflict_files,
         0,
     )
-    actionable_safety_files = sum(
-        _positive_int(item["affected_file_count"]) or 0
-        for item in cleanup_action_summaries
-        if item["action"]
-        in {
-            CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES.value,
-            CompletedImportCleanupAction.SKIP_PROBABLE_COVERS.value,
-            CompletedImportCleanupAction.SKIP_UNUSABLE_FILES.value,
-            CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES.value,
-            CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION.value,
-        }
+    cleanup_safe_action_count = sum(
+        _positive_int(item["affected_file_count"]) or 0 for item in cleanup_action_summaries
     )
-    needs_review_safety_count = max(files_safety_blocked - actionable_safety_files, 0)
+    unresolved_file_count = files_failed + files_no_match + files_safety_blocked + files_conflict
+    cleanup_needs_review_count = max(
+        unresolved_file_count - cleanup_safe_action_count,
+        0,
+    )
     files_total = sum(file_status_counts.values())
     orphaned_file_no_match_count = await _orphaned_file_no_match_count(session, job_id)
     identified_series_file_no_match_count = max(
@@ -902,9 +897,7 @@ async def load_import_results_context(
         "already_owned_conflict_files": already_owned_conflict_files,
         "remaining_conflict_files": remaining_conflict_files,
         "cleanup_no_action_count": files_duplicate + files_already_owned + files_skipped,
-        "cleanup_safe_action_count": sum(
-            _positive_int(item["affected_file_count"]) or 0 for item in cleanup_action_summaries
-        ),
-        "cleanup_needs_review_count": needs_review_safety_count + remaining_conflict_files,
+        "cleanup_safe_action_count": cleanup_safe_action_count,
+        "cleanup_needs_review_count": cleanup_needs_review_count,
         **rollback_journal_summary,
     }

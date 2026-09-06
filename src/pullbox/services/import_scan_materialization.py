@@ -25,6 +25,9 @@ _SOURCE_LAYOUT_REVIEW_REASON = "selected_layout_no_match"
 _SOURCE_LAYOUT_REVIEW_MESSAGE = (
     "This file does not fit the selected source layout. Review its series before importing."
 )
+_MYLAR_FOLDER_SCOPE_REVIEW_MESSAGE = (
+    "This unrecorded file appears to belong to another series in the selected Mylar folder."
+)
 
 
 def _requires_source_layout_review(metadata_diagnostics: dict[str, object]) -> bool:
@@ -35,6 +38,11 @@ def _requires_source_layout_review(metadata_diagnostics: dict[str, object]) -> b
         and layout.get("review_required") is True
         and layout.get("review_reason") == _SOURCE_LAYOUT_REVIEW_REASON
     )
+
+
+def _requires_mylar_folder_scope_review(metadata_diagnostics: dict[str, object]) -> bool:
+    """Return whether an unrecorded file contradicts its owning Mylar series folder."""
+    return isinstance(metadata_diagnostics.get("mylar3_folder_scope_conflict"), dict)
 
 
 async def materialize_discovered_scan_results(
@@ -106,9 +114,10 @@ async def materialize_discovered_scan_results(
             metadata_diagnostics = dict(df.metadata_diagnostics)
             safety_block = metadata_diagnostics.pop("file_safety", None)
             source_layout_review = _requires_source_layout_review(metadata_diagnostics)
+            mylar_folder_scope_review = _requires_mylar_folder_scope_review(metadata_diagnostics)
             if isinstance(safety_block, dict):
                 file_status = ImportedFileStatus.SAFETY_BLOCKED
-            elif source_layout_review:
+            elif source_layout_review or mylar_folder_scope_review:
                 file_status = ImportedFileStatus.NO_MATCH
             else:
                 file_status = ImportedFileStatus.PENDING
@@ -128,6 +137,15 @@ async def materialize_discovered_scan_results(
                         "kind": "source_layout_review",
                         "reason": "selected_layout_no_match",
                         "rejection_reason": _SOURCE_LAYOUT_REVIEW_MESSAGE,
+                    }
+                )
+            elif mylar_folder_scope_review:
+                diagnostics.update(
+                    {
+                        "kind": "source_scope_review",
+                        "reason": "mylar3_folder_scope_conflict",
+                        "rejection_reason": _MYLAR_FOLDER_SCOPE_REVIEW_MESSAGE,
+                        "preserve_series_match": True,
                     }
                 )
             error_message = safety_block.get("reason") if isinstance(safety_block, dict) else None

@@ -400,6 +400,13 @@ async def load_deferred_source_metadata_for_import_file(
     identity_conflicts = _reconcile_loaded_exact_identities(base_metadata, loaded_metadata)
     reconciliation = base_metadata.diagnostics.get("mylar3_path_reconciliation")
     diagnostics = dict(loaded_metadata.diagnostics)
+    folder_scope_conflict = _deferred_mylar_folder_scope_conflict(
+        base_metadata,
+        loaded_metadata,
+    )
+    if folder_scope_conflict is not None:
+        diagnostics["mylar3_folder_scope_conflict"] = folder_scope_conflict
+        update["diagnostics"] = diagnostics
     if isinstance(reconciliation, dict):
         diagnostics["mylar3_path_reconciliation"] = dict(reconciliation)
         update["diagnostics"] = diagnostics
@@ -525,6 +532,31 @@ def _reconcile_loaded_exact_identities(
         if conflict not in conflicts:
             conflicts.append(conflict)
     return conflicts
+
+
+def _deferred_mylar_folder_scope_conflict(
+    base_metadata: SourceMetadata,
+    loaded_metadata: SourceMetadata,
+) -> dict[str, object] | None:
+    """Detect a foreign embedded series on an unrecorded file in a Mylar folder."""
+    raw_scope = base_metadata.diagnostics.get("mylar3_unrecorded_file")
+    if not isinstance(raw_scope, dict):
+        return None
+    signal = loaded_metadata.signals.get("series_name")
+    if signal not in {MetadataSignal.COMICINFO, MetadataSignal.SIDECAR}:
+        return None
+    expected_series = str(raw_scope.get("expected_series") or "").strip()
+    parsed_series = (loaded_metadata.series_name or "").strip()
+    if not expected_series or not parsed_series:
+        return None
+    if NameMatcher.normalize(expected_series) == NameMatcher.normalize(parsed_series):
+        return None
+    return {
+        "expected_series": expected_series,
+        "parsed_series": parsed_series,
+        "recorded_issue": False,
+        "signal": signal.value,
+    }
 
 
 def source_metadata_for_import_series(imp_series: ImportedSeries) -> SourceMetadata:
@@ -908,6 +940,22 @@ def build_import_metadata_conflict(
     target_issue_title: str | None,
 ) -> dict[str, Any] | None:
     """Explain why import refused an auto-match due to conflicting strong signals."""
+    folder_scope_conflict = metadata.diagnostics.get("mylar3_folder_scope_conflict")
+    if isinstance(folder_scope_conflict, dict):
+        return {
+            "kind": "source_scope_review",
+            "reason": "mylar3_folder_scope_conflict",
+            "preserve_series_match": True,
+            "rejection_reason": (
+                "This unrecorded file appears to belong to another series in the selected "
+                "Mylar folder."
+            ),
+            **folder_scope_conflict,
+            "target_series": target_series_title,
+            "target_series_year": target_series_year,
+            "target_issue_number": target_issue_number,
+            "target_issue_cv_id": target_issue_cv_id,
+        }
     raw_identity_conflicts = metadata.diagnostics.get("identity_conflicts")
     identity_conflicts = (
         [dict(conflict) for conflict in raw_identity_conflicts if isinstance(conflict, dict)]

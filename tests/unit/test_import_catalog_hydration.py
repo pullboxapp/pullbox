@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from pullbox.core.exceptions import ProviderError
 from pullbox.models.import_job import (
     ImportedSeries,
     ImportJob,
@@ -143,6 +145,16 @@ class BatchCatalogHydrationSeriesServiceStub(CatalogHydrationSeriesServiceStub):
         return series
 
 
+class RateLimitedBatchCatalogHydrationSeriesServiceStub(BatchCatalogHydrationSeriesServiceStub):
+    async def prefetch_comicvine_profiles(self, comicvine_ids: list[int]):
+        self.profile_batch_calls.append(list(comicvine_ids))
+        raise ProviderError(
+            "comicvine",
+            "HTTP 420: /volumes/",
+            details={"status_code": 420, "retryable": True},
+        )
+
+
 async def test_run_pending_catalog_hydration_recovers_hydrating_series_after_restart(
     db_session,
 ) -> None:
@@ -272,6 +284,79 @@ async def test_run_pending_catalog_hydration_chunks_provider_batches(
     assert recovered == 3
     assert service.profile_batch_calls == [[6201, 6202], [6203]]
     assert service.catalog_batch_calls == [[6201, 6202], [6203]]
+
+
+async def test_retryable_provider_failure_pauses_hydration_without_failing_backlog(
+    db_session,
+    monkeypatch,
+) -> None:
+    series_rows = [
+        Series(
+            title=f"Rate limited {comicvine_id}",
+            sort_title=f"rate limited {comicvine_id}",
+            comicvine_id=comicvine_id,
+            issue_catalog_state=IssueCatalogState.HYDRATING,
+        )
+        for comicvine_id in (6301, 6302, 6303)
+    ]
+    db_session.add_all(series_rows)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    service = RateLimitedBatchCatalogHydrationSeriesServiceStub()
+    monkeypatch.setattr(hydration_module, "COMICVINE_BULK_BATCH_SIZE", 2, raising=False)
+
+    recovered = await run_pending_catalog_hydration(
+        session_factory,
+        series_service=service,
+    )
+
+    assert recovered == 0
+    assert service.profile_batch_calls == [[6301, 6302]]
+    for series in series_rows:
+        await db_session.refresh(series)
+        assert series.issue_catalog_state == IssueCatalogState.HYDRATING
+    assert series_rows[0].issue_catalog_error is not None
+    assert "HTTP 420" in series_rows[0].issue_catalog_error
+    assert series_rows[0].issue_catalog_last_checked_at is not None
+    assert series_rows[1].issue_catalog_last_checked_at is not None
+    assert series_rows[2].issue_catalog_error is None
+    assert series_rows[2].issue_catalog_last_checked_at is None
+
+    assert await hydration_module.load_pending_catalog_hydration(session_factory) == []
+
+
+async def test_old_rate_limited_failed_catalog_is_resumed_after_backoff(db_session) -> None:
+    series = Series(
+        title="Legacy Rate Limit Failure",
+        sort_title="legacy rate limit failure",
+        comicvine_id=6401,
+        issue_catalog_state=IssueCatalogState.FAILED,
+        issue_catalog_error="Provider 'comicvine' error: HTTP 420: /volumes/",
+        issue_catalog_last_checked_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    service = CatalogHydrationSeriesServiceStub()
+
+    recovered = await run_pending_catalog_hydration(
+        session_factory,
+        series_service=service,
+    )
+
+    assert recovered == 1
+    assert service.prefetch_calls == [6401]
+    await db_session.refresh(series)
+    assert series.issue_catalog_state == IssueCatalogState.COMPLETE
+    assert series.issue_catalog_error is None
 
 
 async def test_catalog_hydration_does_not_recreate_series_deleted_during_fetch(

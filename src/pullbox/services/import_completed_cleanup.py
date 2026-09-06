@@ -10,7 +10,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Final
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from sqlalchemy import case, exists, func, or_, select, update
+from sqlalchemy import and_, case, exists, func, or_, select, update
 from sqlalchemy.orm import aliased
 
 from pullbox.core.config_resolver import get_application_secret
@@ -113,6 +113,14 @@ def _category_expression() -> Any:
 
 def _overrideable_expression() -> Any:
     return ImportedFile.diagnostics["safety_block"]["overrideable"].as_boolean()
+
+
+def _source_revalidation_category_expression() -> Any:
+    return ImportedFile.diagnostics["source_revalidation"]["category"].as_string()
+
+
+def _source_revalidation_retryable_expression() -> Any:
+    return ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean()
 
 
 def _safety_filter(*categories: ImportSafetyCategory) -> Any:
@@ -227,15 +235,26 @@ def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[An
             ]
         )
     elif action is CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION:
-        filters.extend(
-            [
-                ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
-                _safety_filter(
-                    ImportSafetyCategory.PERMISSION_UNREADABLE,
-                    ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED,
-                    ImportSafetyCategory.SOURCE_CHANGED,
+        retryable_categories = [
+            category.value
+            for category in (
+                ImportSafetyCategory.PERMISSION_UNREADABLE,
+                ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED,
+                ImportSafetyCategory.SOURCE_CHANGED,
+            )
+        ]
+        filters.append(
+            or_(
+                and_(
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                    _category_expression().in_(retryable_categories),
                 ),
-            ]
+                and_(
+                    ImportedFile.status == ImportedFileStatus.FAILED,
+                    _source_revalidation_category_expression().in_(retryable_categories),
+                    _source_revalidation_retryable_expression().is_(True),
+                ),
+            )
         )
     elif action is CompletedImportCleanupAction.NORMALIZE_ALREADY_OWNED:
         filters.extend(
@@ -539,11 +558,16 @@ def _mark_skipped(file: ImportedFile, *, action: CompletedImportCleanupAction) -
 def _prepare_source_retry(file: ImportedFile) -> None:
     diagnostics = dict(file.diagnostics or {})
     raw_block = diagnostics.get("safety_block")
-    if not isinstance(raw_block, Mapping):
+    raw_revalidation = diagnostics.get("source_revalidation")
+    if isinstance(raw_block, Mapping):
+        retry_evidence = dict(raw_block)
+        diagnostics.pop("safety_block", None)
+    elif isinstance(raw_revalidation, Mapping) and raw_revalidation.get("retryable") is True:
+        retry_evidence = dict(raw_revalidation)
+    else:
         raise ValidationError("A selected source failure no longer has safety evidence.")
-    diagnostics.pop("safety_block", None)
     diagnostics["source_revalidation"] = {
-        **dict(raw_block),
+        **retry_evidence,
         "kind": "source_revalidation",
         "retryable": True,
         "source": "completed_import_cleanup",

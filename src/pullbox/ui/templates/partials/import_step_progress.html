@@ -392,7 +392,10 @@
           <p class="mt-1 text-lg font-semibold text-pb-success" x-text="stats.series_imported || 0"></p>
         </div>
         <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
-          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Remaining</p>
+          <p
+            class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim"
+            x-text="completed ? 'Follow-up' : 'Remaining'"
+          >Remaining</p>
           <p class="mt-1 text-lg font-semibold text-pb-text" x-text="remaining"></p>
         </div>
         <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
@@ -400,7 +403,7 @@
           <p class="mt-1 text-lg font-semibold" :class="(stats.series_failed || 0) > 0 ? 'text-pb-error' : 'text-pb-text'" x-text="stats.series_failed || 0"></p>
         </div>
         <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
-          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Selected</p>
+          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Discovered</p>
           <p class="mt-1 text-lg font-semibold text-pb-text" x-text="totalSelected"></p>
         </div>
       </div>

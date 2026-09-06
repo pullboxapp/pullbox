@@ -72,6 +72,20 @@ def test_run_safety_checks_rejects_unreadable_zip_archive(tmp_path: Path) -> Non
         )
 
 
+def test_run_safety_checks_classifies_zero_byte_archive_before_reader_failure(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "empty.cbz"
+    archive.touch()
+
+    with pytest.raises(FileSafetyError, match="zero_byte_file"):
+        run_safety_checks(
+            archive,
+            block_dangerous=True,
+            max_archive_size=2000 * 1024 * 1024,
+        )
+
+
 def test_ensure_zip_archive_inspectable_ignores_non_zip_and_accepts_valid_zip(
     tmp_path: Path,
 ) -> None:

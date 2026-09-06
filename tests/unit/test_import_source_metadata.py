@@ -690,6 +690,63 @@ async def test_load_deferred_source_metadata_for_import_file_reads_archive_metad
 
 
 @pytest.mark.asyncio
+async def test_deferred_comicinfo_quarantines_unrecorded_foreign_mylar_file(
+    tmp_path: Path,
+) -> None:
+    file_path = tmp_path / "unknown-001.cbz"
+    with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            (
+                "<?xml version='1.0'?>"
+                "<ComicInfo>"
+                "<Series>Action Comics</Series>"
+                "<Number>969</Number>"
+                "<Volume>2016</Volume>"
+                "</ComicInfo>"
+            ),
+        )
+
+    imp_series = ImportedSeries(raw_series_name="Fritzi Ritz", raw_year=1953)
+    imp_file = ImportedFile(
+        file_path=str(file_path),
+        file_name=file_path.name,
+        parsed_series="Fritzi Ritz",
+        parsed_issue_number=1.0,
+        parsed_year=1953,
+        diagnostics={
+            "metadata_signals": {"series_name": MetadataSignal.MYLAR3.value},
+            "source_metadata": {
+                "archive_metadata_loaded": False,
+                "archive_metadata_deferred": True,
+                "has_comicinfo": False,
+                "mylar3_unrecorded_file": {"expected_series": "Fritzi Ritz"},
+            },
+        },
+    )
+
+    metadata = await load_deferred_source_metadata_for_import_file(imp_series, imp_file)
+    conflict = build_import_metadata_conflict(
+        metadata=metadata,
+        target_series_title="Fritzi Ritz",
+        target_series_year=1953,
+        target_issue_number=1.0,
+        target_issue_cv_id=None,
+        target_issue_title=None,
+    )
+
+    assert metadata.diagnostics["mylar3_folder_scope_conflict"] == {
+        "expected_series": "Fritzi Ritz",
+        "parsed_series": "Action Comics",
+        "recorded_issue": False,
+        "signal": "comicinfo",
+    }
+    assert conflict is not None
+    assert conflict["kind"] == "source_scope_review"
+    assert conflict["preserve_series_match"] is True
+
+
+@pytest.mark.asyncio
 async def test_load_deferred_source_metadata_reuses_safety_evidence_without_reopening_archive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -371,6 +371,58 @@ async def test_materialize_mixed_layout_keeps_only_non_fitting_file_in_review(
     }
 
 
+async def test_materialize_mixed_mylar_folder_keeps_foreign_file_in_review(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    owned_file = _discovered_file(name="Fritzi Ritz 001.cbz")
+    owned_file.parsed_series = "Fritzi Ritz"
+    foreign_file = _discovered_file(name="Batman 001.cbz")
+    foreign_file.parsed_series = "Batman"
+    foreign_file.comicvine_series_id = None
+    foreign_file.comicvine_issue_id = None
+    foreign_file.metadata_diagnostics = {
+        "mylar3_folder_scope_conflict": {
+            "expected_series": "Fritzi Ritz",
+            "parsed_series": "Batman",
+            "recorded_issue": False,
+        }
+    }
+    discovered = DiscoveredSeries(
+        raw_series_name="Fritzi Ritz",
+        raw_year=1953,
+        raw_publisher=None,
+        file_count=2,
+        sample_paths=[owned_file.file_path, foreign_file.file_path],
+        source_folder="/tmp/comics/Fritzi Ritz (1953)",
+        source_folder_relative="Fritzi Ritz (1953)",
+        files=[owned_file, foreign_file],
+        has_files=True,
+        mylar3_cv_id=31895,
+    )
+
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+
+    assert pairs[0][1].status == ImportSeriesStatus.PENDING
+    files = (
+        (
+            await db_session.execute(
+                select(ImportedFile)
+                .where(ImportedFile.import_job_id == job.id)
+                .order_by(ImportedFile.file_name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {row.file_name: row.status for row in files} == {
+        "Batman 001.cbz": ImportedFileStatus.NO_MATCH,
+        "Fritzi Ritz 001.cbz": ImportedFileStatus.PENDING,
+    }
+    assert files[0].diagnostics["reason"] == "mylar3_folder_scope_conflict"
+    assert "another series" in files[0].diagnostics["rejection_reason"]
+
+
 async def test_materialize_discovered_scan_results_uses_comicinfo_cv_when_no_mylar_id(
     db_session: AsyncSession,
 ) -> None:

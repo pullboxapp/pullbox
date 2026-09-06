@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy import or_, update
 from sqlalchemy import select as sa_select
 
+from pullbox.core.exceptions import ProviderError
 from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.services.import_metadata_priority import catalog_metadata_work
@@ -24,7 +27,9 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-COMICVINE_BULK_BATCH_SIZE = 5_000
+COMICVINE_BULK_BATCH_SIZE = 100
+CATALOG_HYDRATION_RETRY_DELAY = timedelta(hours=2)
+_RETRYABLE_ERROR_PREFIX = "Retryable ComicVine hydration failure: "
 
 catalog_hydration_tasks: set[asyncio.Task[None]] = set()
 _catalog_hydration_semaphore: asyncio.Semaphore | None = None
@@ -42,6 +47,30 @@ class CatalogHydrationPlan:
 class PendingCatalogHydration:
     series_id: int
     search_on_add: bool
+
+
+class _CatalogHydrationDeferredError(Exception):
+    """Stop the current drain while a shared provider outage cools down."""
+
+
+def _is_retryable_provider_error(exc: Exception) -> bool:
+    if isinstance(exc, ProviderError):
+        details = exc.details if isinstance(exc.details, dict) else {}
+        status_code = details.get("status_code")
+        return bool(details.get("retryable")) or status_code in {408, 420, 429}
+    status_code = getattr(exc, "status_code", None)
+    return bool(getattr(exc, "retryable", False)) or status_code in {408, 420, 429}
+
+
+def _is_retryable_error_text(error: str | None) -> bool:
+    normalized = (error or "").casefold()
+    return bool(
+        normalized.startswith(_RETRYABLE_ERROR_PREFIX.casefold())
+        or "http 420" in normalized
+        or "http 429" in normalized
+        or "rate limit" in normalized
+        or "rate limited" in normalized
+    )
 
 
 def reset_catalog_hydration_gate() -> None:
@@ -128,6 +157,18 @@ async def run_pending_catalog_hydration(
                     add_from_comicvine_prefetched=add_from_comicvine_prefetched,
                 )
             except Exception as exc:
+                if _is_retryable_provider_error(exc):
+                    await mark_catalog_hydration_deferred(
+                        session_factory,
+                        series_ids=[request.series_id],
+                        error=str(exc),
+                    )
+                    logger.warning(
+                        "import_catalog_hydration_provider_deferred",
+                        series_id=request.series_id,
+                        error=str(exc),
+                    )
+                    break
                 await mark_catalog_hydration_failed(
                     session_factory,
                     series_id=request.series_id,
@@ -206,13 +247,16 @@ async def _run_pending_catalog_hydration_batch(
 
     recovered = 0
     for start in range(0, len(planned), COMICVINE_BULK_BATCH_SIZE):
-        recovered += await _run_planned_catalog_hydration_batch(
-            session_factory,
-            planned=planned[start : start + COMICVINE_BULK_BATCH_SIZE],
-            batch_methods=batch_methods,
-            add_from_comicvine_prefetched=add_from_comicvine_prefetched,
-            priority=priority,
-        )
+        try:
+            recovered += await _run_planned_catalog_hydration_batch(
+                session_factory,
+                planned=planned[start : start + COMICVINE_BULK_BATCH_SIZE],
+                batch_methods=batch_methods,
+                add_from_comicvine_prefetched=add_from_comicvine_prefetched,
+                priority=priority,
+            )
+        except _CatalogHydrationDeferredError:
+            break
     return recovered
 
 
@@ -235,6 +279,20 @@ async def _run_planned_catalog_hydration_batch(
     try:
         profiles = await prefetch_profiles(comicvine_ids)
     except Exception as exc:
+        if _is_retryable_provider_error(exc):
+            await mark_catalog_hydration_deferred(
+                session_factory,
+                series_ids=[request.series_id for request, _plan in planned],
+                error=str(exc),
+            )
+            for _request, _plan in planned:
+                await priority.complete_one()
+            logger.warning(
+                "import_catalog_hydration_provider_deferred",
+                affected_series=len(planned),
+                error=str(exc),
+            )
+            raise _CatalogHydrationDeferredError from exc
         for request, _plan in planned:
             await mark_catalog_hydration_failed(
                 session_factory,
@@ -280,6 +338,20 @@ async def _run_planned_catalog_hydration_batch(
     try:
         catalogs = await prefetch_catalogs([plan.comicvine_id for _request, plan in eligible])
     except Exception as exc:
+        if _is_retryable_provider_error(exc):
+            await mark_catalog_hydration_deferred(
+                session_factory,
+                series_ids=[request.series_id for request, _plan in eligible],
+                error=str(exc),
+            )
+            for _request, _plan in eligible:
+                await priority.complete_one()
+            logger.warning(
+                "import_catalog_hydration_provider_deferred",
+                affected_series=len(eligible),
+                error=str(exc),
+            )
+            raise _CatalogHydrationDeferredError from exc
         for request, _plan in eligible:
             await mark_catalog_hydration_failed(
                 session_factory,
@@ -325,10 +397,33 @@ async def load_pending_catalog_hydration(
 ) -> list[PendingCatalogHydration]:
     """Load incomplete catalog rows that should resume after process restart."""
     async with session_factory() as session:
+        retry_cutoff = datetime.now(UTC) - CATALOG_HYDRATION_RETRY_DELAY
+        recent_provider_pause = await session.scalar(
+            sa_select(Series.id)
+            .where(
+                Series.issue_catalog_state == IssueCatalogState.HYDRATING,
+                Series.issue_catalog_error.startswith(_RETRYABLE_ERROR_PREFIX),
+                Series.issue_catalog_last_checked_at.isnot(None),
+                Series.issue_catalog_last_checked_at > retry_cutoff,
+            )
+            .limit(1)
+        )
+        if recent_provider_pause is not None:
+            return []
+
+        retryable_failure = or_(
+            Series.issue_catalog_error.startswith(_RETRYABLE_ERROR_PREFIX),
+            Series.issue_catalog_error.ilike("%HTTP 420%"),
+            Series.issue_catalog_error.ilike("%HTTP 429%"),
+            Series.issue_catalog_error.ilike("%rate limit%"),
+        )
         stmt = (
             sa_select(Series.id, Series.monitored)
             .where(
-                Series.issue_catalog_state == IssueCatalogState.HYDRATING,
+                or_(
+                    Series.issue_catalog_state == IssueCatalogState.HYDRATING,
+                    ((Series.issue_catalog_state == IssueCatalogState.FAILED) & retryable_failure),
+                ),
                 Series.comicvine_id.isnot(None),
             )
             .order_by(Series.id.asc())
@@ -453,7 +548,15 @@ async def load_catalog_hydration_plan(
         series = await session.get(Series, series_id)
         if series is None:
             return None
-        if only_if_hydrating and series.issue_catalog_state != IssueCatalogState.HYDRATING:
+        retryable_failure = (
+            series.issue_catalog_state == IssueCatalogState.FAILED
+            and _is_retryable_error_text(series.issue_catalog_error)
+        )
+        if (
+            only_if_hydrating
+            and series.issue_catalog_state != IssueCatalogState.HYDRATING
+            and not retryable_failure
+        ):
             return None
         if series.comicvine_id is None:
             msg = "Series has no ComicVine ID"
@@ -470,6 +573,29 @@ async def load_catalog_hydration_plan(
             library_root_id=preferred_managed_root_id(series),
             search_on_add=search_on_add,
         )
+
+
+async def mark_catalog_hydration_deferred(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    series_ids: list[int],
+    error: str,
+) -> None:
+    """Keep transient provider failures resumable and persist a shared cooldown marker."""
+    if not series_ids:
+        return
+    async with session_factory() as session:
+        await session.execute(
+            update(Series)
+            .where(Series.id.in_(series_ids))
+            .values(
+                issue_catalog_state=IssueCatalogState.HYDRATING,
+                issue_catalog_error=f"{_RETRYABLE_ERROR_PREFIX}{error}",
+                issue_catalog_last_synced_at=None,
+                issue_catalog_last_checked_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
 
 
 async def mark_catalog_hydration_failed(

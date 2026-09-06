@@ -532,6 +532,9 @@ def run_safety_checks(
     """
     log = logger.bind(download_path=str(download_path))
 
+    if download_path.is_file() and download_path.stat().st_size == 0:
+        raise FileSafetyError("zero_byte_file", details=[str(download_path)])
+
     # 1. Dangerous files on disk
     if block_dangerous:
         dangerous_files = scan_directory_for_dangerous_files(download_path)

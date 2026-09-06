@@ -500,6 +500,55 @@ async def test_retry_source_inspection_prepares_existing_retry_pipeline(
 
 
 @pytest.mark.asyncio
+async def test_retry_source_inspection_includes_failed_completed_rechecks(
+    db_session: AsyncSession,
+) -> None:
+    job, imported_series = await _seed_job(db_session)
+    failed = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path="/comics/recheck-failed.cbr",
+        file_name="recheck-failed.cbr",
+        file_size=1024,
+        file_format="cbr",
+        status=ImportedFileStatus.FAILED,
+        diagnostics={
+            "source_revalidation": {
+                "kind": "source_revalidation",
+                "category": ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED.value,
+                "code": ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED.value,
+                "reason": "Pullbox could not inspect this archive.",
+                "retryable": True,
+                "overrideable": False,
+            }
+        },
+        error_message="Pullbox could not inspect this archive.",
+    )
+    db_session.add(failed)
+    await db_session.commit()
+
+    preview = await preview_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+        actor_id=42,
+    )
+    result = await apply_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+
+    assert preview.affected_file_count == 1
+    assert result.retry_file_ids == (failed.id,)
+    await db_session.refresh(failed)
+    assert failed.status is ImportedFileStatus.FAILED
+    assert failed.diagnostics["source_revalidation"]["retryable"] is True
+
+
+@pytest.mark.asyncio
 async def test_cleanup_preview_cannot_be_reused_after_scope_changes(
     db_session: AsyncSession,
 ) -> None:

@@ -103,6 +103,51 @@ async def test_load_import_results_context_splits_unmatched_queue_counts(db_sess
     assert context["identified_series_file_no_match_count"] == 1
     assert context["no_match_count"] == 1
     assert context["unmatched_queue_count"] == 2
+    assert context["cleanup_needs_review_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_results_count_retryable_failed_inspection_as_safe_next_step(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/tmp/comics",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Archive Retry",
+        status=ImportSeriesStatus.IMPORTED,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    db_session.add(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imported_series.id,
+            file_path="/tmp/comics/archive.cbr",
+            file_name="archive.cbr",
+            file_size=1024,
+            file_format="cbr",
+            status=ImportedFileStatus.FAILED,
+            diagnostics={
+                "source_revalidation": {
+                    "category": ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED.value,
+                    "retryable": True,
+                }
+            },
+        )
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    assert context["cleanup_safe_action_count"] == 1
+    assert context["cleanup_needs_review_count"] == 0
+    assert context["cleanup_action_summaries"][0]["action"] == "retry_source_inspection"
 
 
 @pytest.mark.asyncio

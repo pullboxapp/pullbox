@@ -31,6 +31,7 @@ from pullbox.core.library_layout import (
     compile_source_layout,
     resolve_source_layout_spec,
 )
+from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.naming import parse_filename
 from pullbox.core.naming_type_detection import detect_issue_type
 from pullbox.core.release_parser import normalize_issue_number
@@ -41,6 +42,20 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
 logger = structlog.get_logger(__name__)
+
+_GENERIC_FILENAME_SERIES = frozenset({"book", "comic", "issue", "scan", "unknown"})
+
+
+def _foreign_filename_series(parsed_series: str, mylar_series: str) -> bool:
+    """Return whether a filename clearly names a different series than its Mylar folder."""
+    normalized = NameMatcher.normalize(parsed_series)
+    if (
+        not normalized
+        or normalized in _GENERIC_FILENAME_SERIES
+        or not any(character.isalpha() for character in parsed_series)
+    ):
+        return False
+    return not NameMatcher().match(parsed_series, mylar_series).is_match
 
 
 @dataclass(frozen=True, slots=True)
@@ -995,6 +1010,21 @@ class Mylar3Reader:
                 diagnostics["series_status"] = series_status
             if issue_count_hint is not None:
                 diagnostics["issue_count_hint"] = issue_count_hint
+            unrecorded_files = [
+                file for file in discovered_files if "mylar3_issue" not in file.metadata_diagnostics
+            ]
+            folder_scope_conflicts = [
+                file
+                for file in unrecorded_files
+                if "mylar3_folder_scope_conflict" in file.metadata_diagnostics
+            ]
+            if folder_scope_conflicts:
+                diagnostics["mylar3_folder_scope"] = {
+                    "review_required": True,
+                    "unrecorded_file_count": len(unrecorded_files),
+                    "conflicting_file_count": len(folder_scope_conflicts),
+                    "examples": [file.file_name for file in folder_scope_conflicts[:5]],
+                }
 
             results.append(
                 DiscoveredSeries(
@@ -1344,12 +1374,16 @@ class Mylar3Reader:
                 file_size = 0
 
             parsed = parse_filename(file_name)
+            release_series_candidate = (
+                parsed.series if parsed else extractor.from_release_title(file_name).series_name
+            )
             parsed_series: str | None = series_name
             parsed_issue_number: float | None = None
             parsed_year: int | None = series_year
             parsed_publisher: str | None = series_publisher
             issue_type = IssueType.ISSUE
             issue_number_raw: str | None = None
+            folder_scope_conflict: dict[str, object] | None = None
             metadata_signals: dict[str, str] = {
                 "series_name": MetadataSignal.MYLAR3.value,
             }
@@ -1368,6 +1402,18 @@ class Mylar3Reader:
                     metadata_signals["issue_number"] = MetadataSignal.RELEASE_TITLE.value
                 if parsed.issue_type != IssueType.ISSUE.value:
                     metadata_signals["issue_type"] = MetadataSignal.RELEASE_TITLE.value
+            if (
+                issue_record is None
+                and release_series_candidate
+                and _foreign_filename_series(release_series_candidate, series_name)
+            ):
+                parsed_series = release_series_candidate
+                metadata_signals["series_name"] = MetadataSignal.RELEASE_TITLE.value
+                folder_scope_conflict = {
+                    "expected_series": series_name,
+                    "parsed_series": release_series_candidate,
+                    "recorded_issue": False,
+                }
 
             if issue_record is not None and issue_record.issue_number:
                 issue_number_raw = issue_record.issue_number
@@ -1386,12 +1432,18 @@ class Mylar3Reader:
                 "has_comicinfo": False,
                 "mylar3_folder_metadata_scanned": True,
             }
+            if issue_record is None:
+                metadata_diagnostics["mylar3_unrecorded_file"] = {
+                    "expected_series": series_name,
+                }
             if fpath in reconciled:
                 metadata_diagnostics["mylar3_path_reconciliation"] = {
                     "recorded_path": str(reconciled[fpath]),
                     "actual_path": str(fpath),
                     "method": "unique_same_folder_normalized_stem",
                 }
+            if folder_scope_conflict is not None:
+                metadata_diagnostics["mylar3_folder_scope_conflict"] = folder_scope_conflict
             if sidecar_data is not None and (
                 sidecar_data.get("files_present")
                 or sidecar_data.get("series_id") is not None
@@ -1459,13 +1511,17 @@ class Mylar3Reader:
                 metadata_diagnostics["identity_conflicts"] = identity_conflicts
 
             comicvine_issue_id = sidecar_issue_id
-            comicvine_series_id = series_cv_id or sidecar_series_id
+            comicvine_series_id = (
+                sidecar_series_id
+                if folder_scope_conflict is not None
+                else series_cv_id or sidecar_series_id
+            )
             if comicvine_issue_id is not None:
                 metadata_signals["comicvine_issue_id"] = MetadataSignal.SIDECAR.value
             if comicvine_series_id is not None:
                 metadata_signals["comicvine_series_id"] = (
                     MetadataSignal.MYLAR3.value
-                    if series_cv_id is not None
+                    if series_cv_id is not None and folder_scope_conflict is None
                     else MetadataSignal.SIDECAR.value
                 )
             if issue_record is not None:
