@@ -31,6 +31,11 @@ Available recovery actions are intentionally narrow:
   exactly one high-confidence preferred file and the issue is not already
   owned. Alternatives in that group are skipped and the preferred file alone
   is retried.
+- **Resolve mixed-folder files** uses exact ComicInfo or trusted sidecar series
+  and issue identity to correct files assigned to the wrong imported series or
+  issue. Ambiguous titles, filename-only guesses, conflicting target files,
+  stale references, and managed files remain review-only. The source path and
+  source artifact are never changed.
 
 Every mutation requires a fresh, actor-bound signed preview. Pullbox rejects an
 expired preview or any action whose row set changed after preview. Mutations run
@@ -42,6 +47,39 @@ Once cleanup is complete, **Archive results** hides the finished job from the
 current history view without deleting its rows, logs, decisions, or rollback
 evidence. Archived jobs can be restored later. **Clear History** never deletes
 archived jobs.
+
+## Building A Clean Pullbox Library
+
+A completed reference-only import can be used as the reviewed source for a
+separate clean managed library. The results screen shows the exact file count,
+series count, and source size, then requires the operator to choose an enabled
+writable library root that does not overlap any source root.
+
+The clean-library build creates a normal background Step 4 import. It copies
+only files with an exact, current imported-file to library-file to issue
+lineage. The destination root's current folder naming, file naming, CBZ
+conversion, and ComicInfo policy are applied. Existing skip-existing behavior
+does not prevent this explicit adoption, because each verified source reference
+is being replaced by its newly managed Pullbox copy.
+
+The operation is intentionally source-preserving:
+
+- The Mylar database, folders, filenames, permissions, and file content remain
+  unchanged.
+- The destination must have sufficient capacity under the ordinary managed-copy
+  preflight, including conversion workspace reserve when conversion is enabled.
+- The preview token is actor-bound, expires after 15 minutes, and covers the
+  exact source rows and destination root. Changed scope requires a new preview.
+- Each completed placement records the prior reference and source identity.
+  Rollback removes only an unchanged Pullbox-managed destination, restores the
+  original referenced library record, and leaves the Mylar file in place.
+- A missing or changed source, occupied old identity/path, stale database
+  lineage, or modified managed destination fails closed and preserves the clean
+  managed file for review.
+
+Validate the managed library before disabling or retiring the legacy Mylar
+root. Source retirement is a separate operator decision; this workflow never
+deletes the legacy tree automatically.
 
 ## Safety And Scope
 

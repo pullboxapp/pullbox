@@ -16,7 +16,8 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
-from pullbox.models.library import LibraryFile
+from pullbox.models.issue import Issue
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
@@ -32,8 +33,7 @@ from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEn
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
 from pullbox.services.import_completed_cleanup import (
     CompletedImportCleanupAction,
-    count_completed_import_cleanup_scope,
-    list_completed_import_cleanup_examples,
+    summarize_completed_import_cleanup_scope,
 )
 from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
@@ -80,6 +80,90 @@ _MANAGED_PLACEMENT_MODES = frozenset(
         StoryArcPlacementMode.SYMLINK,
     }
 )
+
+
+def _library_paths_overlap(first: str, second: str) -> bool:
+    from pathlib import Path
+
+    first_path = Path(first).resolve(strict=False)
+    second_path = Path(second).resolve(strict=False)
+    return (
+        first_path == second_path
+        or first_path.is_relative_to(second_path)
+        or second_path.is_relative_to(first_path)
+    )
+
+
+async def _load_clean_library_summary(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[str, object]:
+    eligibility = (
+        ImportedFile.import_job_id == job_id,
+        ImportedFile.status == ImportedFileStatus.IMPORTED,
+        ImportedFile.matched_issue_id == Issue.id,
+        ImportedFile.library_file_id == LibraryFile.id,
+        LibraryFile.issue_id == Issue.id,
+        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED,
+        LibraryFile.file_path == ImportedFile.file_path,
+    )
+    count_row = (
+        await session.execute(
+            select(
+                func.count(ImportedFile.id),
+                func.count(func.distinct(Issue.series_id)),
+                func.coalesce(func.sum(LibraryFile.file_size), 0),
+            )
+            .select_from(ImportedFile)
+            .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+            .join(Issue, Issue.id == LibraryFile.issue_id)
+            .where(*eligibility)
+        )
+    ).one()
+    reference_count = int(count_row[0] or 0)
+    if reference_count == 0:
+        return {
+            "clean_library_reference_count": 0,
+            "clean_library_reference_series_count": 0,
+            "clean_library_reference_bytes": 0,
+            "clean_library_target_roots": [],
+        }
+    source_root_paths = set(
+        (
+            await session.scalars(
+                select(LibraryRoot.path)
+                .select_from(ImportedFile)
+                .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+                .join(Issue, Issue.id == LibraryFile.issue_id)
+                .join(LibraryRoot, LibraryRoot.id == LibraryFile.library_root_id)
+                .where(*eligibility)
+                .distinct()
+            )
+        ).all()
+    )
+    roots = list(
+        (
+            await session.scalars(
+                select(LibraryRoot)
+                .where(
+                    LibraryRoot.enabled.is_(True),
+                    LibraryRoot.allow_managed_writes.is_(True),
+                )
+                .order_by(LibraryRoot.name, LibraryRoot.id)
+            )
+        ).all()
+    )
+    targets = [
+        {"id": root.id, "name": root.name, "path": root.path}
+        for root in roots
+        if not any(_library_paths_overlap(root.path, source) for source in source_root_paths)
+    ]
+    return {
+        "clean_library_reference_count": reference_count,
+        "clean_library_reference_series_count": int(count_row[1] or 0),
+        "clean_library_reference_bytes": int(count_row[2] or 0),
+        "clean_library_target_roots": targets,
+    }
 
 
 async def _count_series_status(
@@ -239,6 +323,15 @@ _CLEANUP_ACTION_PRESENTATION = {
         "button_label": "Accept recommendations",
         "tone": "warning",
     },
+    CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES: {
+        "label": "Resolve mixed-folder files",
+        "description": (
+            "Use exact embedded ComicInfo identity to assign misplaced files to the correct "
+            "Pullbox series and issue. Mylar folders and source files remain unchanged."
+        ),
+        "button_label": "Resolve and retry",
+        "tone": "warning",
+    },
 }
 
 
@@ -248,28 +341,24 @@ async def _load_cleanup_action_summaries(
 ) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
     for action, presentation in _CLEANUP_ACTION_PRESENTATION.items():
-        affected_count, affected_file_count = await count_completed_import_cleanup_scope(
+        summary = await summarize_completed_import_cleanup_scope(
             session,
             job_id,
             action,
         )
-        if affected_count == 0:
+        if summary.affected_count == 0:
             continue
         summaries.append(
             {
                 "action": action.value,
-                "affected_count": affected_count,
-                "affected_file_count": affected_file_count,
+                "affected_count": summary.affected_count,
+                "affected_file_count": summary.affected_file_count,
                 "item_unit": (
                     "group"
                     if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
                     else "file"
                 ),
-                "examples": await list_completed_import_cleanup_examples(
-                    session,
-                    job_id,
-                    action,
-                ),
+                "examples": summary.examples,
                 **presentation,
             }
         )
@@ -807,7 +896,24 @@ async def load_import_results_context(
         if job.status is ImportJobStatus.COMPLETED and job.archived_at is None
         else []
     )
+    clean_library_summary = (
+        await _load_clean_library_summary(session, job_id)
+        if job.status is ImportJobStatus.COMPLETED and job.archived_at is None
+        else {
+            "clean_library_reference_count": 0,
+            "clean_library_reference_series_count": 0,
+            "clean_library_reference_bytes": 0,
+            "clean_library_target_roots": [],
+        }
+    )
     cleanup_by_action = {str(item["action"]): item for item in cleanup_action_summaries}
+    mixed_folder_summary = cleanup_by_action.get(
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES.value,
+        {},
+    )
+    clean_library_summary["clean_library_mixed_folder_repair_count"] = (
+        _positive_int(mixed_folder_summary.get("affected_file_count")) or 0
+    )
     recommended_summary = cleanup_by_action.get(
         CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS.value,
         {},
@@ -899,5 +1005,6 @@ async def load_import_results_context(
         "cleanup_no_action_count": files_duplicate + files_already_owned + files_skipped,
         "cleanup_safe_action_count": cleanup_safe_action_count,
         "cleanup_needs_review_count": cleanup_needs_review_count,
+        **clean_library_summary,
         **rollback_journal_summary,
     }

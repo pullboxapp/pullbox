@@ -1452,6 +1452,49 @@ class TestReplacementRegistration:
     """Explicit replacement refreshes the existing library file row."""
 
     @pytest.mark.asyncio
+    async def test_source_preserving_replacement_never_stages_referenced_artifact(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        source_file: Path,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import _stage_replacement_file
+
+        root = (await session.scalars(select(LibraryRoot).limit(1))).one()
+        referenced = LibraryFile(
+            file_path=str(source_file),
+            file_name=source_file.name,
+            file_size=source_file.stat().st_size,
+            file_format=FileFormat.CBZ,
+            file_modified_at=datetime.fromtimestamp(source_file.stat().st_mtime, tz=UTC),
+            match_confidence=MatchConfidence.HIGH,
+            issue_id=issue.id,
+            library_root_id=root.id,
+            storage_mode=LibraryFileStorageMode.REFERENCED,
+        )
+        session.add(referenced)
+        await session.flush()
+        issue.library_file = referenced
+        prepared_copy = comics_dir_config / ".staging" / "Batman 017.cbz"
+        prepared_copy.parent.mkdir()
+        prepared_copy.write_bytes(b"prepared managed copy")
+
+        stash = await _stage_replacement_file(
+            issue,
+            prepared_copy,
+            replace_existing_library_file=True,
+            replacement_trash_dir=None,
+            preserve_replaced_artifact=True,
+        )
+
+        assert stash is not None
+        assert stash.library_file is referenced
+        assert stash.staged_path is None
+        assert source_file.exists()
+        assert source_file.read_bytes() != prepared_copy.read_bytes()
+
+    @pytest.mark.asyncio
     async def test_replacement_same_path_updates_existing_metadata(
         self,
         session: AsyncSession,

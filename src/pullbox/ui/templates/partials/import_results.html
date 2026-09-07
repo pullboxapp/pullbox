@@ -38,6 +38,7 @@
     failedCount: {{ failed_count }},
     failedFilesCount: {{ files_failed }},
     canRollback: {{ can_rollback|tojson|forceescape }},
+    defaultCleanLibraryRootId: {{ (clean_library_target_roots|default([])|first|default({})).get('id', '')|tojson|forceescape }},
   })"
   data-testid="import-collection-results"
   class="space-y-6"
@@ -438,6 +439,70 @@
       {% endif %}
 
       <p x-show="cleanupError" x-cloak x-text="cleanupError" class="text-xs text-pb-error"></p>
+    </div>
+  </section>
+  {% endif %}
+
+  {% set clean_library_reference_count = clean_library_reference_count|default(0) %}
+  {% set clean_library_target_roots = clean_library_target_roots|default([]) %}
+  {% set clean_library_mixed_folder_repair_count = clean_library_mixed_folder_repair_count|default(0) %}
+  {% if job.status.value == 'completed' and not job.archived_at and clean_library_reference_count > 0 %}
+  <section data-testid="import-results-clean-library" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Library organizer</p>
+        <h3 class="section-title-plain">Build a clean Pullbox library</h3>
+        <p class="section-copy">
+          Copy {{ "{:,}".format(clean_library_reference_count) }} referenced file{{ '' if clean_library_reference_count == 1 else 's' }} across
+          {{ "{:,}".format(clean_library_reference_series_count|default(0)) }} series into a separate Pullbox-managed root. Pullbox applies the destination root's current folder naming, file naming, CBZ conversion, and ComicInfo rules while leaving every Mylar source file unchanged.
+        </p>
+      </div>
+      <span class="pill pill-neutral">{{ clean_library_reference_bytes|default(0)|filesizeformat }}</span>
+    </div>
+    <div class="section-body space-y-4">
+      {% if clean_library_mixed_folder_repair_count > 0 %}
+      <div data-testid="clean-library-mixed-folder-blocked" class="inline-alert inline-alert-warning">
+        Resolve {{ "{:,}".format(clean_library_mixed_folder_repair_count) }} exact mixed-folder file assignment{{ '' if clean_library_mixed_folder_repair_count == 1 else 's' }} above before building the clean library. This prevents Pullbox from organizing a known misplaced file into the wrong series folder.
+      </div>
+      {% elif clean_library_target_roots %}
+      <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+        <div>
+          <label for="clean-library-target-root" class="field-label">Clean managed destination</label>
+          <select
+            id="clean-library-target-root"
+            data-testid="clean-library-target-root"
+            class="input-pb mt-2 w-full"
+            x-model.number="cleanLibraryTargetRootId"
+          >
+            {% for root in clean_library_target_roots %}
+            <option value="{{ root.id }}">{{ root.name }} - {{ root.path }}</option>
+            {% endfor %}
+          </select>
+          <p class="mt-2 text-xs leading-5 text-pb-text-dim">
+            The destination must not overlap the Mylar source. Validate the clean library before retiring the legacy Mylar folders.
+          </p>
+        </div>
+        <button
+          type="button"
+          data-testid="clean-library-preview-action"
+          class="btn-primary inline-flex items-center justify-center gap-2"
+          :disabled="cleanLibraryRunning || !cleanLibraryTargetRootId"
+          @click="buildCleanLibrary()"
+        >
+          <svg x-show="cleanLibraryRunning" x-cloak class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          </svg>
+          <span x-text="cleanLibraryRunning ? 'Starting...' : 'Preview clean library'"></span>
+        </button>
+      </div>
+      {% else %}
+      <div class="inline-alert inline-alert-warning">
+        Add a separate writable managed library root before organizing these referenced files.
+        <a href="/settings?tab=media" class="font-medium text-pb-interactive hover:underline">Configure library roots</a>
+      </div>
+      {% endif %}
+      <p x-show="cleanLibraryError" x-cloak x-text="cleanLibraryError" class="text-xs text-pb-error"></p>
     </div>
   </section>
   {% endif %}

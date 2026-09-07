@@ -7642,6 +7642,9 @@ function importResultsData(config) {
     safetyRetryingFileId: null,
     cleanupRunningAction: "",
     cleanupError: "",
+    cleanLibraryTargetRootId: cfg.defaultCleanLibraryRootId || "",
+    cleanLibraryRunning: false,
+    cleanLibraryError: "",
     retryError: "",
 
     toggleFailedSeries: function () {
@@ -7841,6 +7844,87 @@ function importResultsData(config) {
         }
       } finally {
         this.cleanupRunningAction = "";
+      }
+    },
+
+    buildCleanLibrary: async function () {
+      if (!this.jobId || !this.cleanLibraryTargetRootId || this.cleanLibraryRunning) {
+        return;
+      }
+      this.cleanLibraryRunning = true;
+      this.cleanLibraryError = "";
+      try {
+        var targetRootId = Number(this.cleanLibraryTargetRootId);
+        var previewResponse = await fetch(
+          "/api/v1/import/" +
+            this.jobId +
+            "/clean-library/preview?target_root_id=" +
+            encodeURIComponent(targetRootId)
+        );
+        var preview = await previewResponse.json().catch(function () {
+          return {};
+        });
+        if (!previewResponse.ok) {
+          throw new Error(preview.detail || "Could not preview the clean library.");
+        }
+        var fileCount = Math.max(0, Number(preview.eligible_file_count) || 0);
+        var seriesCount = Math.max(0, Number(preview.eligible_series_count) || 0);
+        var byteCount = Math.max(0, Number(preview.total_bytes) || 0);
+        var formattedBytes =
+          window._pb && typeof window._pb.formatBytes === "function"
+            ? window._pb.formatBytes(byteCount)
+            : byteCount.toLocaleString() + " bytes";
+        var confirmed = await pbConfirm({
+          title: "Build a clean Pullbox library?",
+          message:
+            "Pullbox will copy and standardize " +
+            fileCount.toLocaleString() +
+            " files across " +
+            seriesCount.toLocaleString() +
+            " series (" +
+            formattedBytes +
+            ") in the selected managed root. The original Mylar files will remain unchanged.",
+          confirmText: "Build clean library",
+          destructive: false,
+        });
+        if (!confirmed) {
+          return;
+        }
+        var response = await fetch(
+          "/api/v1/import/" + this.jobId + "/clean-library",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": readCsrfTokenFromBody(),
+            },
+            body: JSON.stringify({
+              target_root_id: targetRootId,
+              preview_token: preview.preview_token,
+              confirmation: "BUILD CLEAN LIBRARY",
+            }),
+          }
+        );
+        var result = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          throw new Error(result.detail || "Could not start the clean-library build.");
+        }
+        dispatchImportWizardAdvance({
+          step: 4,
+          jobId: result.job_id,
+          jobStatus: "importing",
+        });
+      } catch (err) {
+        var message =
+          err && err.message ? err.message : "Could not start the clean-library build.";
+        this.cleanLibraryError = message;
+        if (typeof showToast === "function") {
+          showToast({ message: message, level: "error" });
+        }
+      } finally {
+        this.cleanLibraryRunning = false;
       }
     },
 

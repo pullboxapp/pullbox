@@ -10,10 +10,18 @@
     {% for item in cleanup_page.items %}
       {% set diagnostics = item.diagnostics or {} %}
       {% set safety_block = diagnostics.get('safety_block', {}) %}
+      {% set source_metadata = diagnostics.get('source_metadata', {}) %}
+      {% set comicinfo = source_metadata.get('comicinfo', {}) %}
       <div class="px-3 py-2.5">
         <p class="break-words font-mono text-xs font-medium text-pb-text">{{ item.file_name }}</p>
         <p class="mt-1 break-words text-xs text-pb-text-dim">
-          {{ safety_block.get('reason') or item.error_message or 'Pullbox found a safe completed-import follow-up for this file.' }}
+          {% if cleanup_action == 'resolve_mixed_folder_files' %}
+            Embedded ComicInfo identifies this as
+            <span class="font-medium text-pb-text">{{ comicinfo.get('series') }} #{{ comicinfo.get('number') }}</span>.
+            Pullbox will correct its library assignment without changing the source file.
+          {% else %}
+            {{ safety_block.get('reason') or item.error_message or 'Pullbox found a safe completed-import follow-up for this file.' }}
+          {% endif %}
         </p>
       </div>
     {% endfor %}

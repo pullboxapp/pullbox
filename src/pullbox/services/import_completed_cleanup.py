@@ -15,6 +15,8 @@ from sqlalchemy.orm import aliased
 
 from pullbox.core.config_resolver import get_application_secret
 from pullbox.core.exceptions import NotFoundError, ValidationError
+from pullbox.core.issue_numbers import parse_issue_number_text
+from pullbox.core.name_matcher import NameMatcher
 from pullbox.models.audit_log import AuditEventType
 from pullbox.models.import_job import (
     ImportControlRequest,
@@ -26,7 +28,9 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
-from pullbox.models.library import LibraryFile
+from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode
+from pullbox.models.series import Series
 from pullbox.services.audit_service import AuditService
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
 from pullbox.services.import_review_actions import apply_safety_allow_once_to_file
@@ -53,6 +57,7 @@ class CompletedImportCleanupAction(enum.StrEnum):
     RETRY_SOURCE_INSPECTION = "retry_source_inspection"
     NORMALIZE_ALREADY_OWNED = "normalize_already_owned"
     ACCEPT_RECOMMENDED_CONFLICTS = "accept_recommended_conflicts"
+    RESOLVE_MIXED_FOLDER_FILES = "resolve_mixed_folder_files"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +106,37 @@ class CompletedImportCleanupFilePage:
     page: int
     page_size: int
     total_pages: int
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedImportCleanupSummary:
+    """Counts and examples for one results-page recovery card."""
+
+    affected_count: int
+    affected_file_count: int
+    examples: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _MixedFolderResolution:
+    """One exact, source-preserving mixed-folder ownership correction."""
+
+    file_id: int
+    source_import_series_id: int
+    source_import_series_name: str
+    target_series_id: int
+    target_series_title: str
+    target_issue_id: int
+    target_issue_cv_id: int | None
+    target_issue_number: float
+    target_issue_number_text: str
+    target_library_file_id: int | None
+    source_library_file_id: int | None
+    source_issue_id: int | None
+    source_library_updated_at: str | None
+    evidence_source: str
+    source_series_name: str
+    source_updated_at: str
 
 
 def _serializer() -> URLSafeTimedSerializer:
@@ -271,9 +307,323 @@ def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[An
                 ImportedFile.conflict_group_id.in_(_eligible_conflict_groups(job_id)),
             ]
         )
+    elif action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
+        filters.append(
+            ImportedFile.status.in_((ImportedFileStatus.NO_MATCH, ImportedFileStatus.IMPORTED))
+        )
     else:  # pragma: no cover - exhaustive enum guard
         raise ValidationError("Unsupported completed-import cleanup action.")
     return tuple(filters)
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _safe_int(value: object) -> int | None:
+    if not isinstance(value, str | bytes | bytearray | int | float):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mixed_folder_source_identity(
+    imported_file: ImportedFile,
+) -> tuple[str, str | float | int, int | None, int | None, str] | None:
+    """Return only embedded or sidecar identity strong enough for bulk correction."""
+    diagnostics = _mapping(imported_file.diagnostics)
+    signals = _mapping(diagnostics.get("metadata_signals"))
+    series_signal = str(signals.get("series_name") or "")
+    issue_signal = str(signals.get("issue_number") or "")
+    trusted_signals = {"comicinfo", "sidecar"}
+    if series_signal not in trusted_signals or issue_signal not in trusted_signals:
+        return None
+
+    source_metadata = _mapping(diagnostics.get("source_metadata"))
+    comicinfo = _mapping(source_metadata.get("comicinfo"))
+    if series_signal == "comicinfo":
+        source_series_name = str(comicinfo.get("series") or "").strip()
+    else:
+        source_series_name = str(imported_file.parsed_series or "").strip()
+    if issue_signal == "comicinfo":
+        source_issue_number = comicinfo.get("number")
+    else:
+        source_issue_number = imported_file.issue_number_raw or imported_file.parsed_issue_number
+    if not source_series_name or not isinstance(source_issue_number, str | float | int):
+        return None
+
+    trusted_series_cv_id = (
+        _safe_int(diagnostics.get("comicvine_series_id"))
+        if str(signals.get("comicvine_series_id") or "") in trusted_signals
+        else None
+    )
+    trusted_issue_cv_id = (
+        imported_file.comicvine_issue_id
+        if str(signals.get("comicvine_issue_id") or "") in trusted_signals
+        else None
+    )
+    return (
+        source_series_name,
+        source_issue_number,
+        trusted_series_cv_id,
+        trusted_issue_cv_id,
+        series_signal,
+    )
+
+
+async def _load_mixed_folder_resolutions(
+    session: AsyncSession,
+    job_id: int,
+) -> tuple[_MixedFolderResolution, ...]:
+    """Resolve exact local targets without provider calls or source-file access."""
+    source_rows = (
+        await session.execute(
+            select(ImportedFile, ImportedSeries)
+            .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
+            .where(
+                ImportedFile.import_job_id == job_id,
+                ImportedFile.status.in_((ImportedFileStatus.NO_MATCH, ImportedFileStatus.IMPORTED)),
+            )
+            .order_by(ImportedFile.id)
+        )
+    ).all()
+    if not source_rows:
+        return ()
+
+    current_library_by_file_id: dict[int, LibraryFile] = {}
+    imported_library_ids = {
+        int(imported_file.library_file_id)
+        for imported_file, _imported_series in source_rows
+        if imported_file.status is ImportedFileStatus.IMPORTED
+        and imported_file.library_file_id is not None
+    }
+    if imported_library_ids:
+        current_library_by_id = {
+            int(library_file.id): library_file
+            for library_file in (
+                await session.scalars(
+                    select(LibraryFile).where(LibraryFile.id.in_(imported_library_ids))
+                )
+            ).all()
+        }
+        for imported_file, _imported_series in source_rows:
+            if imported_file.library_file_id is None:
+                continue
+            library_file = current_library_by_id.get(int(imported_file.library_file_id))
+            if (
+                library_file is not None
+                and library_file.storage_mode is LibraryFileStorageMode.REFERENCED
+                and library_file.file_path == imported_file.file_path
+                and library_file.issue_id == imported_file.matched_issue_id
+            ):
+                current_library_by_file_id[int(imported_file.id)] = library_file
+
+    source_candidates: list[
+        tuple[ImportedFile, ImportedSeries, str, str, int | None, int | None, str]
+    ] = []
+    normalized_titles: set[str] = set()
+    trusted_series_cv_ids: set[int] = set()
+    for imported_file, imported_series in source_rows:
+        if (
+            imported_file.status is ImportedFileStatus.IMPORTED
+            and int(imported_file.id) not in current_library_by_file_id
+        ):
+            continue
+        identity = _mixed_folder_source_identity(imported_file)
+        if identity is None:
+            continue
+        source_title, raw_number, series_cv_id, issue_cv_id, evidence_source = identity
+        normalized_source_title = NameMatcher.normalize(source_title)
+        parent_title = imported_series.cv_title or imported_series.raw_series_name
+        if not normalized_source_title or normalized_source_title == NameMatcher.normalize(
+            parent_title
+        ):
+            continue
+        try:
+            _numeric_number, exact_number = parse_issue_number_text(raw_number)
+        except ValueError:
+            continue
+        source_candidates.append(
+            (
+                imported_file,
+                imported_series,
+                source_title,
+                exact_number,
+                series_cv_id,
+                issue_cv_id,
+                evidence_source,
+            )
+        )
+        normalized_titles.add(normalized_source_title)
+        if series_cv_id is not None:
+            trusted_series_cv_ids.add(series_cv_id)
+    if not source_candidates:
+        return ()
+
+    local_series = list((await session.scalars(select(Series))).all())
+    series_by_cv_id = {
+        int(series.comicvine_id): series
+        for series in local_series
+        if series.comicvine_id is not None and int(series.comicvine_id) in trusted_series_cv_ids
+    }
+    series_by_title: dict[str, list[Series]] = {}
+    for series in local_series:
+        normalized = NameMatcher.normalize(series.title)
+        if normalized in normalized_titles:
+            series_by_title.setdefault(normalized, []).append(series)
+
+    candidate_targets: list[
+        tuple[ImportedFile, ImportedSeries, str, str, str, Series, int | None]
+    ] = []
+    target_series_ids: set[int] = set()
+    for (
+        imported_file,
+        imported_series,
+        source_title,
+        exact_number,
+        series_cv_id,
+        issue_cv_id,
+        evidence_source,
+    ) in source_candidates:
+        target_series = series_by_cv_id.get(series_cv_id) if series_cv_id is not None else None
+        if target_series is None:
+            title_matches = series_by_title.get(NameMatcher.normalize(source_title), [])
+            if len(title_matches) != 1:
+                continue
+            target_series = title_matches[0]
+        if imported_series.series_id == target_series.id:
+            continue
+        candidate_targets.append(
+            (
+                imported_file,
+                imported_series,
+                source_title,
+                exact_number,
+                evidence_source,
+                target_series,
+                issue_cv_id,
+            )
+        )
+        target_series_ids.add(int(target_series.id))
+    if not candidate_targets:
+        return ()
+
+    target_issues = list(
+        (
+            await session.scalars(
+                select(Issue).where(Issue.series_id.in_(sorted(target_series_ids)))
+            )
+        ).all()
+    )
+    issues_by_cv_id = {
+        int(issue.comicvine_id): issue for issue in target_issues if issue.comicvine_id is not None
+    }
+    issues_by_number: dict[tuple[int, str], list[Issue]] = {}
+    for issue in target_issues:
+        issues_by_number.setdefault(
+            (int(issue.series_id), issue.effective_issue_number_text), []
+        ).append(issue)
+
+    resolved_targets: list[tuple[ImportedFile, ImportedSeries, str, str, Series, Issue]] = []
+    for (
+        imported_file,
+        imported_series,
+        source_title,
+        exact_number,
+        evidence_source,
+        target_series,
+        issue_cv_id,
+    ) in candidate_targets:
+        target_issue: Issue | None = (
+            issues_by_cv_id.get(issue_cv_id) if issue_cv_id is not None else None
+        )
+        if target_issue is not None and target_issue.series_id != target_series.id:
+            target_issue = None
+        if target_issue is None:
+            number_matches = issues_by_number.get((int(target_series.id), exact_number), [])
+            if len(number_matches) != 1:
+                continue
+            target_issue = number_matches[0]
+        resolved_targets.append(
+            (
+                imported_file,
+                imported_series,
+                source_title,
+                evidence_source,
+                target_series,
+                target_issue,
+            )
+        )
+    if not resolved_targets:
+        return ()
+
+    target_issue_ids = {int(item[5].id) for item in resolved_targets}
+    owned_files_by_issue_id: dict[int, list[int]] = {}
+    for library_file in (
+        await session.scalars(
+            select(LibraryFile).where(LibraryFile.issue_id.in_(sorted(target_issue_ids)))
+        )
+    ).all():
+        if library_file.issue_id is not None:
+            owned_files_by_issue_id.setdefault(int(library_file.issue_id), []).append(
+                int(library_file.id)
+            )
+    files_by_target_issue: dict[int, list[int]] = {}
+    for imported_file, _series, _title, _source, _target_series, issue in resolved_targets:
+        files_by_target_issue.setdefault(int(issue.id), []).append(int(imported_file.id))
+
+    resolutions: list[_MixedFolderResolution] = []
+    for (
+        imported_file,
+        imported_series,
+        source_title,
+        evidence_source,
+        target_series,
+        issue,
+    ) in resolved_targets:
+        existing_library_file_ids = owned_files_by_issue_id.get(int(issue.id), [])
+        if len(existing_library_file_ids) > 1:
+            continue
+        library_file_id = existing_library_file_ids[0] if existing_library_file_ids else None
+        if library_file_id is None and len(files_by_target_issue[int(issue.id)]) != 1:
+            continue
+        current_library_file = current_library_by_file_id.get(int(imported_file.id))
+        resolutions.append(
+            _MixedFolderResolution(
+                file_id=int(imported_file.id),
+                source_import_series_id=int(imported_series.id),
+                source_import_series_name=imported_series.raw_series_name,
+                target_series_id=int(target_series.id),
+                target_series_title=target_series.title,
+                target_issue_id=int(issue.id),
+                target_issue_cv_id=(
+                    int(issue.comicvine_id) if issue.comicvine_id is not None else None
+                ),
+                target_issue_number=float(issue.issue_number),
+                target_issue_number_text=issue.effective_issue_number_text,
+                target_library_file_id=library_file_id,
+                source_library_file_id=(
+                    int(current_library_file.id) if current_library_file is not None else None
+                ),
+                source_issue_id=(
+                    int(current_library_file.issue_id)
+                    if current_library_file is not None
+                    and current_library_file.issue_id is not None
+                    else None
+                ),
+                source_library_updated_at=(
+                    current_library_file.updated_at.isoformat(timespec="microseconds")
+                    if current_library_file is not None
+                    else None
+                ),
+                evidence_source=evidence_source,
+                source_series_name=source_title,
+                source_updated_at=imported_file.updated_at.isoformat(timespec="microseconds"),
+            )
+        )
+    return tuple(resolutions)
 
 
 async def _load_completed_job(session: AsyncSession, job_id: int) -> ImportJob:
@@ -301,6 +651,31 @@ async def _load_snapshot(
     job_id: int,
     action: CompletedImportCleanupAction,
 ) -> CompletedImportCleanupSnapshot:
+    if action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
+        resolutions = await _load_mixed_folder_resolutions(session, job_id)
+        digest = sha256()
+        for resolution in resolutions:
+            digest.update(
+                (
+                    f"{resolution.file_id}|{resolution.target_series_id}|"
+                    f"{resolution.target_issue_id}|{resolution.target_library_file_id or 0}|"
+                    f"{resolution.source_library_file_id or 0}|"
+                    f"{resolution.source_library_updated_at or ''}|"
+                    f"{resolution.source_updated_at}\n"
+                ).encode()
+            )
+        file_ids = [resolution.file_id for resolution in resolutions]
+        return CompletedImportCleanupSnapshot(
+            affected_count=len(resolutions),
+            affected_file_count=len(resolutions),
+            min_file_id=min(file_ids) if file_ids else None,
+            max_file_id=max(file_ids) if file_ids else None,
+            max_updated_at=max(
+                (resolution.source_updated_at for resolution in resolutions),
+                default=None,
+            ),
+            scope_digest=digest.hexdigest(),
+        )
     filters = _file_filters(job_id, action)
     aggregate = (
         await session.execute(
@@ -360,6 +735,9 @@ async def count_completed_import_cleanup_scope(
     action: CompletedImportCleanupAction,
 ) -> tuple[int, int]:
     """Return action and file counts without hashing the full preview scope."""
+    if action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
+        count = len(await _load_mixed_folder_resolutions(session, job_id))
+        return count, count
     filters = _file_filters(job_id, action)
     file_count = int(
         (await session.scalar(select(func.count(ImportedFile.id)).where(*filters))) or 0
@@ -389,6 +767,31 @@ async def list_completed_import_cleanup_files(
     await _load_completed_job(session, job_id)
     normalized_page = max(1, int(page))
     normalized_page_size = min(max(1, int(page_size)), 100)
+    if action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
+        resolutions = await _load_mixed_folder_resolutions(session, job_id)
+        eligible_file_ids = [resolution.file_id for resolution in resolutions]
+        total = len(eligible_file_ids)
+        total_pages = max(1, (total + normalized_page_size - 1) // normalized_page_size)
+        normalized_page = min(normalized_page, total_pages)
+        page_file_ids = eligible_file_ids[
+            (normalized_page - 1) * normalized_page_size : normalized_page * normalized_page_size
+        ]
+        items_by_id = {
+            int(item.id): item
+            for item in (
+                await session.scalars(
+                    select(ImportedFile).where(ImportedFile.id.in_(page_file_ids))
+                )
+            ).all()
+        }
+        items = tuple(items_by_id[file_id] for file_id in page_file_ids)
+        return CompletedImportCleanupFilePage(
+            items=items,
+            total=total,
+            page=normalized_page,
+            page_size=normalized_page_size,
+            total_pages=total_pages,
+        )
     filters = _file_filters(job_id, action)
     total = int((await session.scalar(select(func.count(ImportedFile.id)).where(*filters))) or 0)
     total_pages = max(1, (total + normalized_page_size - 1) // normalized_page_size)
@@ -421,6 +824,20 @@ async def list_completed_import_cleanup_examples(
     limit: int = _EXAMPLE_LIMIT,
 ) -> tuple[str, ...]:
     """Return sanitized example filenames without hydrating the full scope."""
+    if action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
+        resolutions = await _load_mixed_folder_resolutions(session, job_id)
+        file_ids = [resolution.file_id for resolution in resolutions[:limit]]
+        names_by_id = {
+            int(file_id): file_name
+            for file_id, file_name in (
+                await session.execute(
+                    select(ImportedFile.id, ImportedFile.file_name).where(
+                        ImportedFile.id.in_(file_ids)
+                    )
+                )
+            ).all()
+        }
+        return tuple(_safe_example_name(names_by_id[file_id]) for file_id in file_ids)
     names = (
         await session.scalars(
             select(ImportedFile.file_name)
@@ -430,6 +847,54 @@ async def list_completed_import_cleanup_examples(
         )
     ).all()
     return tuple(_safe_example_name(name) for name in names)
+
+
+async def summarize_completed_import_cleanup_scope(
+    session: AsyncSession,
+    job_id: int,
+    action: CompletedImportCleanupAction,
+    *,
+    example_limit: int = _EXAMPLE_LIMIT,
+) -> CompletedImportCleanupSummary:
+    """Load a recovery-card summary without resolving mixed folders twice."""
+    normalized_limit = min(max(1, int(example_limit)), 10)
+    if action is not CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
+        affected_count, affected_file_count = await count_completed_import_cleanup_scope(
+            session,
+            job_id,
+            action,
+        )
+        examples = (
+            await list_completed_import_cleanup_examples(
+                session,
+                job_id,
+                action,
+                limit=normalized_limit,
+            )
+            if affected_count
+            else ()
+        )
+        return CompletedImportCleanupSummary(
+            affected_count=affected_count,
+            affected_file_count=affected_file_count,
+            examples=examples,
+        )
+
+    resolutions = await _load_mixed_folder_resolutions(session, job_id)
+    file_ids = [resolution.file_id for resolution in resolutions[:normalized_limit]]
+    names_by_id = {
+        int(file_id): file_name
+        for file_id, file_name in (
+            await session.execute(
+                select(ImportedFile.id, ImportedFile.file_name).where(ImportedFile.id.in_(file_ids))
+            )
+        ).all()
+    }
+    return CompletedImportCleanupSummary(
+        affected_count=len(resolutions),
+        affected_file_count=len(resolutions),
+        examples=tuple(_safe_example_name(names_by_id[file_id]) for file_id in file_ids),
+    )
 
 
 def _snapshot_payload(snapshot: CompletedImportCleanupSnapshot) -> dict[str, object]:
@@ -683,6 +1148,232 @@ async def _apply_recommended_conflicts(
     return {int(series_id) for series_id in affected_series_ids}
 
 
+async def _apply_mixed_folder_resolutions(
+    session: AsyncSession,
+    job: ImportJob,
+) -> tuple[set[int], set[int]]:
+    """Rebucket exact embedded identities while preserving every source artifact."""
+    resolutions = await _load_mixed_folder_resolutions(session, int(job.id))
+    if not resolutions:
+        return set(), set()
+
+    target_series_ids = {resolution.target_series_id for resolution in resolutions}
+    target_series_by_id = {
+        int(series.id): series
+        for series in (
+            await session.scalars(select(Series).where(Series.id.in_(target_series_ids)))
+        ).all()
+    }
+    target_issue_by_id = {
+        int(issue.id): issue
+        for issue in (
+            await session.scalars(
+                select(Issue).where(
+                    Issue.id.in_({resolution.target_issue_id for resolution in resolutions})
+                )
+            )
+        ).all()
+    }
+    source_library_by_id = {
+        int(library_file.id): library_file
+        for library_file in (
+            await session.scalars(
+                select(LibraryFile).where(
+                    LibraryFile.id.in_(
+                        {
+                            resolution.source_library_file_id
+                            for resolution in resolutions
+                            if resolution.source_library_file_id is not None
+                        }
+                    )
+                )
+            )
+        ).all()
+    }
+    source_issue_by_id = {
+        int(issue.id): issue
+        for issue in (
+            await session.scalars(
+                select(Issue).where(
+                    Issue.id.in_(
+                        {
+                            resolution.source_issue_id
+                            for resolution in resolutions
+                            if resolution.source_issue_id is not None
+                        }
+                    )
+                )
+            )
+        ).all()
+    }
+    source_series_by_id = {
+        int(series.id): series
+        for series in (
+            await session.scalars(
+                select(Series).where(
+                    Series.id.in_({issue.series_id for issue in source_issue_by_id.values()})
+                )
+            )
+        ).all()
+    }
+    source_issue_owner_counts = {
+        int(issue_id): int(owner_count)
+        for issue_id, owner_count in (
+            await session.execute(
+                select(LibraryFile.issue_id, func.count(LibraryFile.id))
+                .where(LibraryFile.issue_id.in_(set(source_issue_by_id)))
+                .group_by(LibraryFile.issue_id)
+            )
+        ).all()
+        if issue_id is not None
+    }
+    imported_target_by_series_id: dict[int, ImportedSeries] = {}
+    existing_target_rows = list(
+        (
+            await session.scalars(
+                select(ImportedSeries)
+                .where(
+                    ImportedSeries.import_job_id == job.id,
+                    ImportedSeries.series_id.in_(target_series_ids),
+                )
+                .order_by(ImportedSeries.id)
+            )
+        ).all()
+    )
+    for imported_series in existing_target_rows:
+        if imported_series.series_id is not None:
+            imported_target_by_series_id.setdefault(int(imported_series.series_id), imported_series)
+
+    affected_series_ids: set[int] = set()
+    retry_series_ids: set[int] = set()
+    for resolution in resolutions:
+        target_import_series = imported_target_by_series_id.get(resolution.target_series_id)
+        if target_import_series is None:
+            target_series = target_series_by_id[resolution.target_series_id]
+            target_import_series = ImportedSeries(
+                import_job_id=job.id,
+                raw_series_name=target_series.title,
+                raw_year=target_series.year_start,
+                file_count=0,
+                sample_paths=[],
+                has_files=True,
+                cv_id=target_series.comicvine_id,
+                cv_title=target_series.title,
+                cv_year=target_series.year_start,
+                cv_match_score=1.0,
+                cv_match_method="completed_import_mixed_folder_recovery",
+                status=ImportSeriesStatus.DUPLICATE,
+                selected_for_import=False,
+                series_id=target_series.id,
+                diagnostics={
+                    "kind": "completed_import_mixed_folder_recovery",
+                    "existing_series_id": target_series.id,
+                    "source_preserved": True,
+                },
+            )
+            session.add(target_import_series)
+            await session.flush()
+            imported_target_by_series_id[resolution.target_series_id] = target_import_series
+
+        imported_file = await session.get(ImportedFile, resolution.file_id)
+        if imported_file is None:  # pragma: no cover - signed snapshot guards deletion
+            raise ValidationError("A mixed-folder file disappeared. Preview the action again.")
+        diagnostics = dict(imported_file.diagnostics or {})
+        diagnostics["completed_import_cleanup"] = {
+            "action": CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES.value,
+            "resolved_at": datetime.now(UTC).isoformat(),
+            "source_preserved": True,
+            "evidence_source": resolution.evidence_source,
+            "source_import_series_id": resolution.source_import_series_id,
+            "source_import_series_name": resolution.source_import_series_name,
+            "source_series_name": resolution.source_series_name,
+            "target_import_series_id": target_import_series.id,
+            "target_series_id": resolution.target_series_id,
+            "target_series_title": resolution.target_series_title,
+            "target_issue_id": resolution.target_issue_id,
+            "target_issue_number": resolution.target_issue_number_text,
+        }
+        imported_file.import_series_id = int(target_import_series.id)
+        imported_file.parsed_series = resolution.target_series_title
+        imported_file.parsed_issue_number = resolution.target_issue_number
+        imported_file.issue_number_raw = resolution.target_issue_number_text
+        imported_file.matched_issue_id = resolution.target_issue_id
+        imported_file.matched_issue_cv_id = resolution.target_issue_cv_id
+        imported_file.match_confidence = "high"
+        imported_file.match_method = "completed_import_metadata_reassignment"
+        imported_file.conflict_group_id = None
+        imported_file.duplicate_group_id = None
+        imported_file.duplicate_of_file_id = None
+        imported_file.is_preferred = False
+        imported_file.error_message = None
+        imported_file.diagnostics = diagnostics
+        source_library_file = (
+            source_library_by_id.get(resolution.source_library_file_id)
+            if resolution.source_library_file_id is not None
+            else None
+        )
+        target_issue = target_issue_by_id[resolution.target_issue_id]
+        if source_library_file is not None:
+            source_issue_id_before = source_library_file.issue_id
+            previous_issue = (
+                source_issue_by_id.get(resolution.source_issue_id)
+                if resolution.source_issue_id is not None
+                else None
+            )
+            if source_library_file.issue_id == resolution.target_issue_id:
+                imported_file.status = ImportedFileStatus.IMPORTED
+                imported_file.include_in_import = False
+                imported_file.library_file_id = source_library_file.id
+                target_issue.status = IssueStatus.OWNED
+            elif (
+                resolution.target_library_file_id is not None
+                and resolution.target_library_file_id != source_library_file.id
+            ):
+                imported_file.status = ImportedFileStatus.ALREADY_OWNED
+                imported_file.include_in_import = False
+                imported_file.library_file_id = resolution.target_library_file_id
+                await session.delete(source_library_file)
+                target_issue.status = IssueStatus.OWNED
+            else:
+                source_library_file.issue_id = resolution.target_issue_id
+                imported_file.status = ImportedFileStatus.IMPORTED
+                imported_file.include_in_import = False
+                imported_file.library_file_id = source_library_file.id
+                target_issue.status = IssueStatus.OWNED
+            if previous_issue is not None and previous_issue.id != resolution.target_issue_id:
+                previous_series = source_series_by_id.get(int(previous_issue.series_id))
+                remaining_owners = source_issue_owner_counts.get(int(previous_issue.id), 0)
+                if source_issue_id_before == previous_issue.id:
+                    remaining_owners = max(0, remaining_owners - 1)
+                    source_issue_owner_counts[int(previous_issue.id)] = remaining_owners
+                if remaining_owners:
+                    previous_issue.status = IssueStatus.OWNED
+                else:
+                    previous_issue.status = (
+                        IssueStatus.WANTED
+                        if previous_series is not None and previous_series.monitored
+                        else IssueStatus.SKIPPED
+                    )
+        elif resolution.target_library_file_id is not None:
+            imported_file.status = ImportedFileStatus.ALREADY_OWNED
+            imported_file.include_in_import = False
+            imported_file.library_file_id = resolution.target_library_file_id
+            target_issue.status = IssueStatus.OWNED
+        else:
+            imported_file.status = ImportedFileStatus.CONFIRMED
+            imported_file.include_in_import = True
+            retry_series_ids.add(int(target_import_series.id))
+            target_import_series.status = ImportSeriesStatus.DUPLICATE
+            target_import_series.selected_for_import = True
+            target_import_series.error_message = None
+
+        affected_series_ids.update(
+            {resolution.source_import_series_id, int(target_import_series.id)}
+        )
+    await session.flush()
+    return affected_series_ids, retry_series_ids
+
+
 async def _prepare_series_for_retry(
     session: AsyncSession,
     job: ImportJob,
@@ -743,6 +1434,10 @@ async def apply_completed_import_cleanup(
         affected_series_ids = await _apply_recommended_conflicts(session, job)
         affected_file_ids: tuple[int, ...] = ()
         requires_import_retry = await _prepare_series_for_retry(session, job, affected_series_ids)
+    elif action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
+        affected_series_ids, retry_series_ids = await _apply_mixed_folder_resolutions(session, job)
+        affected_file_ids = ()
+        requires_import_retry = await _prepare_series_for_retry(session, job, retry_series_ids)
     else:
         affected_series_ids, affected_file_ids, requires_import_retry = await _apply_file_action(
             session, job, action

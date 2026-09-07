@@ -6,6 +6,9 @@ from fastapi import APIRouter, Request
 
 from pullbox.api.deps import DbSession, InteractiveOperatorUser  # noqa: TC001
 from pullbox.schemas.import_completed_cleanup import (
+    CleanLibraryImportCreateRequest,
+    CleanLibraryImportPreviewRead,
+    CleanLibraryImportResultRead,
     CompletedImportCleanupApplyRequest,
     CompletedImportCleanupPreviewRead,
     CompletedImportCleanupResultRead,
@@ -16,9 +19,56 @@ from pullbox.services.import_completed_cleanup import (
     apply_completed_import_cleanup,
     preview_completed_import_cleanup,
 )
+from pullbox.services.import_library_adoption import (
+    create_clean_library_import,
+    preview_clean_library_import,
+)
 from pullbox.tasks.import_task import trigger_import_execute
 
 router = APIRouter(prefix="/import", tags=["import"])
+
+
+@router.get(
+    "/{job_id}/clean-library/preview",
+    response_model=CleanLibraryImportPreviewRead,
+)
+async def preview_clean_library_import_route(
+    job_id: int,
+    target_root_id: int,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> CleanLibraryImportPreviewRead:
+    """Preview a source-preserving clean-library build."""
+    preview = await preview_clean_library_import(
+        session,
+        job_id,
+        target_root_id=target_root_id,
+        actor_id=_user.id,
+    )
+    return CleanLibraryImportPreviewRead.model_validate(preview, from_attributes=True)
+
+
+@router.post(
+    "/{job_id}/clean-library",
+    response_model=CleanLibraryImportResultRead,
+)
+async def create_clean_library_import_route(
+    job_id: int,
+    body: CleanLibraryImportCreateRequest,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> CleanLibraryImportResultRead:
+    """Start a verified managed-copy import from referenced files."""
+    result = await create_clean_library_import(
+        session,
+        job_id,
+        target_root_id=body.target_root_id,
+        actor_id=_user.id,
+        preview_token=body.preview_token,
+    )
+    await session.commit()
+    trigger_import_execute(result.job_id)
+    return CleanLibraryImportResultRead.model_validate(result, from_attributes=True)
 
 
 @router.get(

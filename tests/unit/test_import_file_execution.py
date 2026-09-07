@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import mkdtemp
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from pullbox.core.library_file_ownership import (
     build_file_identity_signature,
     build_managed_placement_signature,
 )
+from pullbox.models.config import SystemConfig
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -37,6 +39,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import (
+    FileFormat,
     LibraryFile,
     LibraryFileStorageMode,
     LibraryRoot,
@@ -2806,6 +2809,163 @@ class TestMoveToLibraryPassedThrough:
         # Default is move_to_library=True
         call_kwargs = mock_register.call_args_list[0].kwargs
         assert call_kwargs.get("move_to_library") is True
+
+    @pytest.mark.asyncio
+    async def test_clean_library_adoption_replaces_reference_and_bypasses_skip_existing(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+    ) -> None:
+        job, _imp_series, imp_files, series, issues = await _setup_full_scenario(
+            db_session,
+            num_issues=1,
+        )
+        source_file = Path(imp_files[0].file_path)
+        source_root = LibraryRoot(
+            name="Legacy Mylar",
+            path=str(source_file.parent),
+            enabled=True,
+            allow_managed_writes=False,
+        )
+        db_session.add(source_root)
+        await db_session.flush()
+        series.path = str(source_file.parent)
+        series.library_root_id = source_root.id
+        series.preferred_library_root_id = source_root.id
+        referenced_file = LibraryFile(
+            file_path=str(source_file),
+            file_name=source_file.name,
+            file_size=source_file.stat().st_size,
+            file_format=FileFormat.CBZ,
+            file_modified_at=datetime.now(UTC),
+            match_confidence=MatchConfidence.HIGH,
+            issue_id=issues[0].id,
+            library_root_id=source_root.id,
+            storage_mode=LibraryFileStorageMode.REFERENCED,
+            source_signature=build_file_identity_signature(source_file),
+        )
+        db_session.add_all(
+            [
+                referenced_file,
+                SystemConfig(key="skip_existing_files", value="true", value_type="bool"),
+            ]
+        )
+        await db_session.flush()
+        source_job = ImportJob(
+            source_path=str(source_file.parent),
+            source_type=ImportSourceType.MYLAR3,
+            status=ImportJobStatus.COMPLETED,
+            file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+        )
+        db_session.add(source_job)
+        await db_session.flush()
+        source_imported_series = ImportedSeries(
+            import_job_id=source_job.id,
+            raw_series_name=series.title,
+            raw_year=series.year_start,
+            status=ImportSeriesStatus.IMPORTED,
+            series_id=series.id,
+            file_count=1,
+        )
+        db_session.add(source_imported_series)
+        await db_session.flush()
+        source_imported_file = ImportedFile(
+            import_job_id=source_job.id,
+            import_series_id=source_imported_series.id,
+            file_path=str(source_file),
+            file_name=source_file.name,
+            file_size=source_file.stat().st_size,
+            file_format="cbz",
+            parsed_series=series.title,
+            parsed_issue_number=issues[0].issue_number,
+            status=ImportedFileStatus.IMPORTED,
+            matched_issue_id=issues[0].id,
+            match_confidence="high",
+            match_method="mylar_reference",
+            source_signature=dict(referenced_file.source_signature),
+            library_file_id=referenced_file.id,
+        )
+        db_session.add(source_imported_file)
+        await db_session.flush()
+        imp_files[0].diagnostics = {
+            "library_adoption": {
+                "schema_version": 1,
+                "source_import_job_id": source_job.id,
+                "source_imported_file_id": source_imported_file.id,
+                "source_library_file_id": referenced_file.id,
+                "source_path": referenced_file.file_path,
+                "source_library_root_id": source_root.id,
+                "source_signature": dict(referenced_file.source_signature),
+                "source_storage_mode": "referenced",
+                "source_preserved": True,
+            }
+        }
+        job.file_handling_mode = ImportFileHandlingMode.MANAGED_COPY
+        job.effective_transfer_method = "copy"
+        job.source_preserved = True
+        job.progress_snapshot = {
+            "clean_library_adoption": True,
+            "source_import_job_id": source_job.id,
+        }
+        await db_session.flush()
+
+        target_root = await db_session.get(LibraryRoot, job.target_library_root_id)
+        assert target_root is not None
+        target_path = Path(target_root.path) / "Action Comics 1002.cbz"
+        mock_register = AsyncMock()
+
+        async def _adopt_reference(
+            _session: AsyncSession,
+            _source_path: Path,
+            _issue: Issue,
+            _confidence: MatchConfidence,
+            **_kwargs: object,
+        ) -> LibraryFile:
+            target_path.write_bytes(source_file.read_bytes())
+            referenced_file.file_path = str(target_path)
+            referenced_file.file_name = target_path.name
+            referenced_file.library_root_id = target_root.id
+            referenced_file.storage_mode = LibraryFileStorageMode.MANAGED
+            return referenced_file
+
+        mock_register.side_effect = _adopt_reference
+        mock_ss = AsyncMock()
+        mock_ss.add_from_comicvine.return_value = series
+        svc = _make_service(series_service=mock_ss)
+
+        with patch(
+            "pullbox.services.import_service.register_library_file",
+            mock_register,
+        ):
+            await svc.run_import(db_session, job.id)
+
+        assert mock_register.call_count == 1
+        call_kwargs = mock_register.call_args.kwargs
+        assert call_kwargs["replace_existing_library_file"] is True
+        assert call_kwargs["replacement_trash_dir"] is None
+        assert call_kwargs["preserve_replaced_artifact"] is True
+        assert source_file.exists()
+        assert series.path == str(target_path.parent)
+        assert series.library_root_id == target_root.id
+        assert series.preferred_library_root_id == target_root.id
+        await db_session.refresh(imp_files[0])
+        assert imp_files[0].status is ImportedFileStatus.IMPORTED
+        action = await db_session.scalar(
+            select(ImportJobAction).where(
+                ImportJobAction.import_job_id == job.id,
+                ImportJobAction.action_type == "library_file_registered",
+            )
+        )
+        assert action is not None
+        adoption_snapshot = dict(action.payload or {}).get("adopted_reference")
+        assert isinstance(adoption_snapshot, dict)
+        assert adoption_snapshot["source_imported_file_id"] == source_imported_file.id
+        assert adoption_snapshot["source_library_file_id"] == referenced_file.id
+        assert adoption_snapshot["file_path"] == str(source_file)
+        assert adoption_snapshot["previous_series_path"] == str(source_file.parent)
+        assert adoption_snapshot["previous_series_library_root_id"] == source_root.id
+        assert adoption_snapshot["installed_series_path"] == str(target_path.parent)
+        assert adoption_snapshot["installed_series_library_root_id"] == target_root.id
 
     @pytest.mark.asyncio
     async def test_mylar_managed_copy_uses_series_source_folder_as_strict_boundary(

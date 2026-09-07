@@ -787,6 +787,13 @@ class TestImportResultsPartial:
                     "examples": ("missing-1.cbz", "missing-2.cbz", "missing-3.cbz"),
                 }
             ],
+            clean_library_reference_count=116061,
+            clean_library_reference_series_count=19420,
+            clean_library_reference_bytes=987654321,
+            clean_library_mixed_folder_repair_count=0,
+            clean_library_target_roots=[
+                {"id": 9, "name": "Clean library", "path": "/library-clean"}
+            ],
             safety_category_summaries=[
                 {
                     "category": "source_missing",
@@ -809,6 +816,12 @@ class TestImportResultsPartial:
         assert 'data-testid="import-cleanup-apply-dismiss_missing_references"' in html
         assert 'data-testid="import-cleanup-review-dismiss_missing_references"' in html
         assert 'data-testid="import-results-archive-action"' in html
+        assert 'data-testid="import-results-clean-library"' in html
+        assert 'data-testid="clean-library-target-root"' in html
+        assert 'data-testid="clean-library-preview-action"' in html
+        assert "Build a clean Pullbox library" in html
+        assert "leaving every Mylar source file unchanged" in html
+        assert 'data-testid="clean-library-mixed-folder-blocked"' not in html
 
     def test_failed_results_template_preserves_bounded_safety_actions(self) -> None:
         from types import SimpleNamespace

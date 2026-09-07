@@ -13,7 +13,10 @@ from sqlalchemy.dialects import postgresql
 
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.exceptions import NotFoundError
-from pullbox.core.library_file_ownership import build_managed_placement_signature
+from pullbox.core.library_file_ownership import (
+    build_file_identity_signature,
+    build_managed_placement_signature,
+)
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.import_job import (
     ImportedFile,
@@ -27,7 +30,13 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.series import Series
 from pullbox.services.import_job_actions import (
     _series_issue_rollback_lock_statement,
@@ -183,6 +192,149 @@ async def test_rollback_action_removes_copied_library_file_and_journal_row(
     assert not destination_path.exists()
     assert action.status == ImportJobActionStatus.ROLLED_BACK
     assert action.rolled_back_at is not None
+
+
+async def test_rollback_clean_library_adoption_restores_original_reference(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    service = _make_service()
+    source_job = await _create_job_row(db_session)
+    source_job.status = ImportJobStatus.COMPLETED
+    adoption_job = await _create_job_row(db_session)
+    source_root = LibraryRoot(
+        name="Legacy Mylar",
+        path=str(tmp_path / "mylar"),
+        allow_managed_writes=False,
+    )
+    managed_root = LibraryRoot(name="Clean Library", path=str(tmp_path / "clean"))
+    db_session.add_all([source_root, managed_root])
+    await db_session.flush()
+    source_path = tmp_path / "mylar" / "Batman" / "Batman 001.cbr"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"legacy source")
+    destination_path = tmp_path / "clean" / "Batman (2016)" / "Batman 001.cbz"
+    destination_path.parent.mkdir(parents=True)
+    destination_path.write_bytes(b"managed copy")
+    series = Series(
+        title="Batman",
+        sort_title="batman",
+        year_start=2016,
+        path=str(destination_path.parent),
+        library_root_id=managed_root.id,
+        preferred_library_root_id=managed_root.id,
+    )
+    db_session.add(series)
+    await db_session.flush()
+    issue = Issue(
+        series_id=series.id,
+        issue_number=1.0,
+        issue_number_text="1",
+        status=IssueStatus.OWNED,
+    )
+    db_session.add(issue)
+    await db_session.flush()
+    managed_file = LibraryFile(
+        file_path=str(destination_path),
+        file_name=destination_path.name,
+        file_size=destination_path.stat().st_size,
+        file_format=FileFormat.CBZ,
+        file_modified_at=datetime.now(UTC),
+        match_confidence=MatchConfidence.HIGH,
+        issue_id=issue.id,
+        library_root_id=managed_root.id,
+        storage_mode=LibraryFileStorageMode.MANAGED,
+        source_signature=build_managed_placement_signature(destination_path),
+    )
+    db_session.add(managed_file)
+    await db_session.flush()
+    source_imported_series = ImportedSeries(
+        import_job_id=source_job.id,
+        raw_series_name=series.title,
+        raw_year=series.year_start,
+        status=ImportSeriesStatus.IMPORTED,
+        series_id=series.id,
+        file_count=1,
+    )
+    db_session.add(source_imported_series)
+    await db_session.flush()
+    source_imported_file = ImportedFile(
+        import_job_id=source_job.id,
+        import_series_id=source_imported_series.id,
+        file_path=str(source_path),
+        file_name=source_path.name,
+        file_size=source_path.stat().st_size,
+        file_format="cbr",
+        status=ImportedFileStatus.IMPORTED,
+        matched_issue_id=issue.id,
+        match_confidence="high",
+        source_signature=build_file_identity_signature(source_path),
+    )
+    db_session.add(source_imported_file)
+    await db_session.flush()
+    original_library_file_id = managed_file.id + 100
+    action = ImportJobAction(
+        import_job_id=adoption_job.id,
+        sequence_no=1,
+        phase="import",
+        action_type="library_file_registered",
+        status=ImportJobActionStatus.COMPLETED,
+        payload={
+            "library_file_id": managed_file.id,
+            "destination_path": str(destination_path),
+            "destination_signature": dict(managed_file.source_signature),
+            "original_source_path": str(source_path),
+            "transfer_method": "copy",
+            "storage_mode": "managed",
+            "adopted_reference": {
+                "schema_version": 1,
+                "source_imported_file_id": source_imported_file.id,
+                "source_library_file_id": original_library_file_id,
+                "file_path": str(source_path),
+                "file_name": source_path.name,
+                "file_size": source_path.stat().st_size,
+                "file_format": "cbr",
+                "file_hash": None,
+                "file_modified_at": datetime.now(UTC).isoformat(),
+                "match_confidence": "high",
+                "parsed_series": "Batman",
+                "parsed_issue_number": 1.0,
+                "parsed_year": 2016,
+                "parsed_publisher": "DC Comics",
+                "has_comicinfo": True,
+                "naming_snapshot": {},
+                "storage_mode": "referenced",
+                "source_signature": dict(source_imported_file.source_signature),
+                "issue_id": issue.id,
+                "library_root_id": source_root.id,
+                "source_series_id": series.id,
+                "previous_series_path": str(source_path.parent),
+                "previous_series_library_root_id": source_root.id,
+                "previous_series_preferred_library_root_id": source_root.id,
+                "installed_series_path": str(destination_path.parent),
+                "installed_series_library_root_id": managed_root.id,
+                "installed_series_preferred_library_root_id": managed_root.id,
+            },
+        },
+    )
+    db_session.add(action)
+    await db_session.flush()
+
+    await service._rollback_action(db_session, _rollback_plan(action))
+
+    restored = await db_session.get(LibraryFile, original_library_file_id)
+    await db_session.refresh(source_imported_file)
+    assert restored is not None
+    assert restored.file_path == str(source_path)
+    assert restored.storage_mode is LibraryFileStorageMode.REFERENCED
+    assert restored.issue_id == issue.id
+    assert source_imported_file.library_file_id == restored.id
+    assert series.path == str(source_path.parent)
+    assert series.library_root_id == source_root.id
+    assert series.preferred_library_root_id == source_root.id
+    assert source_path.read_bytes() == b"legacy source"
+    assert not destination_path.exists()
+    assert action.status is ImportJobActionStatus.ROLLED_BACK
 
 
 async def test_rollback_action_preserves_managed_file_changed_after_registration(
