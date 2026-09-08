@@ -31,6 +31,7 @@
       - rollback_actions_rolled_back: int
 -#}
 {% from "components/settings_shell.html" import inline_alert %}
+{% from "components/dropdown_select.html" import dropdown_select %}
 
 <div
   x-data="importResultsData({
@@ -468,16 +469,21 @@
       <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div>
           <label for="clean-library-target-root" class="field-label">Clean managed destination</label>
-          <select
-            id="clean-library-target-root"
-            data-testid="clean-library-target-root"
-            class="input-pb mt-2 w-full"
-            x-model.number="cleanLibraryTargetRootId"
-          >
-            {% for root in clean_library_target_roots %}
-            <option value="{{ root.id }}">{{ root.name }} - {{ root.path }}</option>
-            {% endfor %}
-          </select>
+          {% set clean_library_root_options = [] %}
+          {% for root in clean_library_target_roots %}
+            {% set _ = clean_library_root_options.append((root.id|string, root.name ~ " - " ~ root.path)) %}
+          {% endfor %}
+          {{ dropdown_select(
+            name="clean_library_target_root_id",
+            value=(clean_library_target_roots|first).id,
+            options=clean_library_root_options,
+            local_model="cleanLibraryTargetRootId",
+            local_on_change="cleanLibraryTargetRootId = $event.detail.value ? Number($event.detail.value) : null",
+            trigger_id="clean-library-target-root",
+            root_testid="clean-library-target-root",
+            wrap_options=true,
+            class_name="mt-2 w-full"
+          ) }}
           <p class="mt-2 text-xs leading-5 text-pb-text-dim">
             The destination must not overlap the Mylar source. Validate the clean library before retiring the legacy Mylar folders.
           </p>

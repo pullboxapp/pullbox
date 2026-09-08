@@ -857,6 +857,8 @@ class TestImportShellRouteContracts:
         assert "Keep files in place" in response.text
         assert "rename, convert, rewrite metadata, or change permissions on them." in response.text
         assert 'data-testid="import-managed-library-root"' in response.text
+        assert response.text.count('data-dropdown-select-contract="v1"') >= 3
+        assert "<select" not in response.text
         assert 'data-testid="import-library-roots-manage"' in response.text
         assert 'data-testid="import-library-roots-refresh"' in response.text
         assert 'href="/settings?tab=media"' in response.text
@@ -923,6 +925,7 @@ class TestImportShellRouteContracts:
         assert '"/api/v1/config/library-roots/"' in source_controller
         assert 'fetch("/api/v1/config/library-roots"' in source_controller
         assert "refreshImportLibraryRoots: async function" in source_controller
+        assert "managedLibraryRootOptions: function" in source_controller
         assert 'fetch("/api/v1/import/story-arc-preview"' in source_controller
         assert 'fetch("/api/v1/import/mylar-path-preview"' in source_controller
         assert "mylarPathPreviewRequestId" in source_controller
@@ -949,7 +952,8 @@ class TestImportShellRouteContracts:
 
         assert 'data-testid="import-review-split-series"' in template
         assert 'data-testid="import-review-split-series-item"' in template
-        assert 'data-testid="import-review-preferred-root"' in template
+        assert 'root_testid="import-review-preferred-root"' in template
+        assert "dropdown_select(" in template
         assert "Existing files remain in place" in template
         assert "splitSeriesRequiresPreferredRoot" in review_controller
         assert "hasRequiredPreferredRoot" in review_controller

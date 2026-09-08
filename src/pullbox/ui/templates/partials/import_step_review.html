@@ -10,6 +10,7 @@
     Shared controller: importReviewData() from pullbox.js.
 -#}
 {% from "components/settings_shell.html" import ui_icon, inline_alert %}
+{% from "components/dropdown_select.html" import dropdown_select %}
 
 {% set overall_series_total = review_summary.series_total if review_summary else total %}
 {% set overall_importable_total = review_summary.importable_items_total if review_summary else 0 %}
@@ -372,19 +373,21 @@
         <label for="import-review-preferred-root" class="field-label">
           Preferred managed destination <span class="text-pb-error" aria-hidden="true">*</span>
         </label>
-        <select
-          id="import-review-preferred-root"
-          data-testid="import-review-preferred-root"
-          class="input-pb mt-2 w-full"
-          x-model.number="preferredRootId"
-          @change="confirmError = ''; syncSelectionSummaryUi()"
-          required
-        >
-          <option value="">Choose a managed destination</option>
-          {% for root in managed_library_root_options %}
-          <option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>
-          {% endfor %}
-        </select>
+        {% set preferred_root_options = [("", "Choose a managed destination")] %}
+        {% for root in managed_library_root_options %}
+          {% set _ = preferred_root_options.append((root.id|string, root.name ~ " — " ~ root.path)) %}
+        {% endfor %}
+        {{ dropdown_select(
+          name="preferred_root_id",
+          value=job.target_library_root_id or "",
+          options=preferred_root_options,
+          local_model="preferredRootId",
+          local_on_change="preferredRootId = $event.detail.value ? Number($event.detail.value) : null; confirmError = ''; syncSelectionSummaryUi()",
+          trigger_id="import-review-preferred-root",
+          root_testid="import-review-preferred-root",
+          wrap_options=true,
+          class_name="mt-2 w-full"
+        ) }}
         {% if not managed_library_root_options %}
         <p class="mt-2 text-xs leading-5 text-pb-error">
           No enabled, available, readable, and writable managed destination is ready.

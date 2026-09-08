@@ -3160,6 +3160,23 @@ function importSourceData(config) {
       });
     },
 
+    managedLibraryRootOptions: function (emptyLabel) {
+      var options = this.managedLibraryRoots().map(function (root) {
+        return {
+          value: String(root.id),
+          label:
+            String(root.name || "Library") +
+            " — " +
+            String(root.path || "") +
+            (root.is_default_managed_destination ? " (default)" : ""),
+        };
+      });
+      if (emptyLabel) {
+        options.unshift({ value: "", label: String(emptyLabel) });
+      }
+      return options;
+    },
+
     refreshImportLibraryRoots: async function () {
       if (this.libraryRootsRefreshing) {
         return;
@@ -7055,6 +7072,21 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       var rootId = materialize && rootElement ? Number(rootElement.value) : null;
       if (!Number.isFinite(rootId)) {
         rootId = null;
+      }
+      if (materialize && rootId === null) {
+        var rootTrigger = formElement.querySelector(
+          "[data-testid^='import-story-arc-policy-root-'] [data-dropdown-select-trigger]",
+        );
+        if (rootTrigger) {
+          rootTrigger.focus();
+        }
+        if (typeof showToast === "function") {
+          showToast({
+            message: "Choose an approved library root before confirming this policy.",
+            level: "warning",
+          });
+        }
+        return;
       }
       var destinationElement = field("destination_root");
       var symlinkElement = field("symlink_style");
@@ -13403,33 +13435,36 @@ function downloadsPage(config) {
 
 function dropdownSelectData(config) {
   var cfg = config || {};
-  var rawOptions = Array.isArray(cfg.options) ? cfg.options : [];
-  var normalizedOptions = rawOptions.map(function (option) {
-    if (Array.isArray(option)) {
-      return {
-        value: option[0] == null ? "" : String(option[0]),
-        label:
-          option[1] == null
-            ? option[0] == null
-              ? ""
-              : String(option[0])
-            : String(option[1]),
-        disabled: false,
-      };
-    }
+  function normalizeOptions(options) {
+    return (Array.isArray(options) ? options : []).map(function (option) {
+      if (Array.isArray(option)) {
+        return {
+          value: option[0] == null ? "" : String(option[0]),
+          label:
+            option[1] == null
+              ? option[0] == null
+                ? ""
+                : String(option[0])
+              : String(option[1]),
+          disabled: false,
+        };
+      }
 
-    var item = option || {};
-    return {
-      value: item.value == null ? "" : String(item.value),
-      label:
-        item.label == null
-          ? item.value == null
-            ? ""
-            : String(item.value)
-          : String(item.label),
-      disabled: Boolean(item.disabled),
-    };
-  });
+      var item = option || {};
+      return {
+        value: item.value == null ? "" : String(item.value),
+        label:
+          item.label == null
+            ? item.value == null
+              ? ""
+              : String(item.value)
+            : String(item.label),
+        disabled: Boolean(item.disabled),
+      };
+    });
+  }
+
+  var normalizedOptions = normalizeOptions(cfg.options);
 
   function findIndexByValue(value) {
     var normalizedValue = value == null ? "" : String(value);
@@ -13534,6 +13569,44 @@ function dropdownSelectData(config) {
       this.syncFromValue();
       this.syncInput();
       this.applyFitWidth();
+    },
+
+    syncExternalOptions: function (nextOptions) {
+      var normalizedNext = normalizeOptions(nextOptions);
+      var unchanged =
+        normalizedNext.length === normalizedOptions.length &&
+        normalizedNext.every(function (option, index) {
+          var current = normalizedOptions[index];
+          return !!(
+            current &&
+            current.value === option.value &&
+            current.label === option.label &&
+            current.disabled === option.disabled
+          );
+        });
+      if (unchanged) {
+        return;
+      }
+
+      normalizedOptions = normalizedNext;
+      this.options = normalizedNext;
+      this.syncFromValue();
+      this.syncInput();
+      this.applyFitWidth();
+      if (this.open) {
+        this.schedulePanelPositionUpdate();
+      }
+    },
+
+    syncExternalDisabled: function (nextDisabled) {
+      var disabled = Boolean(nextDisabled);
+      if (disabled === this.disabled) {
+        return;
+      }
+      this.disabled = disabled;
+      if (disabled && this.open) {
+        this.close(false);
+      }
     },
 
     runChangeExpression: function () {

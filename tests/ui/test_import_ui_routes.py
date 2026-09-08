@@ -818,6 +818,8 @@ class TestImportResultsPartial:
         assert 'data-testid="import-results-archive-action"' in html
         assert 'data-testid="import-results-clean-library"' in html
         assert 'data-testid="clean-library-target-root"' in html
+        assert 'data-dropdown-select-contract="v1"' in html
+        assert "<select" not in html
         assert 'data-testid="clean-library-preview-action"' in html
         assert "Build a clean Pullbox library" in html
         assert "leaving every Mylar source file unchanged" in html
@@ -2438,6 +2440,18 @@ class TestImportUnmatchedTab:
         assert "wrapOptions: Boolean(cfg.wrapOptions)" in dropdown_controller
         assert "this.wrapOptions" in dropdown_controller
         assert "? Math.ceil(triggerRect.width)" in dropdown_controller
+
+    def test_dropdown_contract_tracks_reactive_options_and_disabled_state(self) -> None:
+        """Reactive import dropdowns keep the shared control synchronized."""
+        source = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = source.index("function dropdownSelectData")
+        end = source.index("function _readSearchHistory")
+        dropdown_controller = source[start:end]
+
+        assert "syncExternalOptions: function" in dropdown_controller
+        assert "normalizedOptions = normalizedNext;" in dropdown_controller
+        assert "syncExternalDisabled: function" in dropdown_controller
+        assert "if (disabled && this.open)" in dropdown_controller
 
     def test_orphaned_table_uses_centered_status_pills_and_icon_actions(self) -> None:
         """Unmatched rows use centered pills and standard icon action buttons."""

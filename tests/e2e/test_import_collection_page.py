@@ -23,6 +23,35 @@ pytestmark = pytest.mark.e2e
 class TestImportCollectionTab:
     """Behavior-first E2E checks for the Import workspace collection tab."""
 
+    def test_source_destination_dropdowns_follow_shared_contract(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        from playwright.sync_api import expect
+
+        page = ImportPage(authed_page, seeded_server)
+        page.goto(tab="collection")
+        page.show_collection_source_step()
+        page.source_filesystem_card.click()
+
+        managed_root = page.dropdown("import-managed-library-root")
+        expect(managed_root).to_be_visible()
+        expect(managed_root).to_have_attribute("data-dropdown-select-contract", "v1")
+        expect(managed_root.locator("select")).to_have_count(0)
+        managed_root.locator("[data-dropdown-select-trigger]").click()
+        panel = authed_page.locator("[data-dropdown-select-panel]:visible").first
+        expect(panel).to_contain_text("E2E Library")
+        panel.locator("[data-dropdown-option][data-value]:not([data-value=''])").first.click()
+        expect(managed_root.locator("[data-dropdown-select-input]")).not_to_have_value("")
+
+        page.file_handling_in_place.click()
+        in_place_root = page.dropdown("import-in-place-library-root")
+        expect(in_place_root).to_be_visible()
+        expect(in_place_root.locator("[data-dropdown-select-trigger-label]")).to_have_text(
+            "No preferred destination"
+        )
+
     def test_mylar_missing_paths_require_acknowledgement_and_reset_on_reanalysis(
         self,
         authed_page: Page,
@@ -2975,15 +3004,18 @@ class TestImportCollectionTab:
             timeout=5000,
         )
 
-        root_selector = authed_page.get_by_test_id("import-in-place-library-root")
+        root_selector = import_page.dropdown("import-in-place-library-root")
         root_selector.wait_for(state="visible", timeout=5000)
-        root_value = root_selector.locator("option[value]:not([value=''])").first.get_attribute(
-            "value"
-        )
+        root_selector.locator("[data-dropdown-select-trigger]").click()
+        root_panel = authed_page.locator("[data-dropdown-select-panel]:visible").first
+        root_value = root_panel.locator(
+            "[data-dropdown-option][data-value]:not([data-value=''])"
+        ).first.get_attribute("data-value")
+        root_panel.locator("[data-dropdown-option][data-value='']").click()
         assert root_value
-        assert root_selector.input_value() == ""
+        assert import_page.dropdown_value("import-in-place-library-root") == ""
         assert import_page.start_scan_button.is_enabled()
-        root_selector.select_option(root_value)
+        import_page.select_dropdown_option("import-in-place-library-root", root_value)
         assert import_page.start_scan_button.is_enabled()
         assert import_page.source_layout_analyze_button.is_hidden()
         assert "after path mapping" in (

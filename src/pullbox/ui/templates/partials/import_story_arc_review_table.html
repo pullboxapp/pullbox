@@ -1,3 +1,5 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+
 <section data-testid="import-review-story-arcs" aria-labelledby="import-story-arc-review-heading">
   <div class="border-b border-pb-border px-4 py-4">
     <h3 id="import-story-arc-review-heading" class="text-sm font-semibold text-pb-text">
@@ -77,25 +79,27 @@
           </td>
           <td>
             <label for="import-story-arc-target-{{ arc.id }}" class="sr-only">Import target for {{ arc.name }}</label>
-            <select
-              id="import-story-arc-target-{{ arc.id }}"
-              class="input-pb min-w-48 text-xs"
-              {% if arc.selection_blocked %}disabled{% endif %}
-            >
-              <option value="" {% if not arc.proposed_story_arc_id %}selected{% endif %}>Create new story arc</option>
-              {% for candidate in arc.merge_candidates %}
-              <option value="{{ candidate.id }}" {% if candidate.id == arc.proposed_story_arc_id %}selected{% endif %}>
-                Merge into {{ candidate.name }}
-              </option>
-              {% endfor %}
-            </select>
+            {% set arc_target_options = [("", "Create new story arc")] %}
+            {% for candidate in arc.merge_candidates %}
+              {% set _ = arc_target_options.append((candidate.id|string, "Merge into " ~ candidate.name)) %}
+            {% endfor %}
+            {{ dropdown_select(
+              name="story_arc_target_" ~ arc.id,
+              value=arc.proposed_story_arc_id or "",
+              options=arc_target_options,
+              trigger_id="import-story-arc-target-" ~ arc.id,
+              root_testid="import-story-arc-target-" ~ arc.id,
+              disabled=arc.selection_blocked,
+              wrap_options=true,
+              class_name="min-w-48 text-xs"
+            ) }}
           </td>
           <td class="is-right">
             <fieldset aria-label="Story arc decision for {{ arc.name }}" class="flex flex-wrap justify-end gap-2">
               <button
                 type="button"
                 data-testid="import-story-arc-select-{{ arc.id }}"
-                @click="updateStoryArcDecision({{ arc.id }}, 'select', document.getElementById('import-story-arc-target-{{ arc.id }}'))"
+                @click="updateStoryArcDecision({{ arc.id }}, 'select', document.querySelector('[data-testid=&quot;import-story-arc-target-{{ arc.id }}&quot;] [data-dropdown-select-input]'))"
                 {% if arc.selection_blocked %}disabled{% endif %}
                 class="btn-primary btn-sm disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -198,33 +202,33 @@
 
                 <div x-show="materialize">
                   <label for="import-story-arc-policy-mode-{{ arc.id }}" class="mb-1 block text-xs font-medium text-pb-text-sec">Placement mode</label>
-                  <select
-                    id="import-story-arc-policy-mode-{{ arc.id }}"
-                    name="mode"
-                    x-model="mode"
-                    class="input-pb w-full text-xs"
-                  >
-                    <option value="copy">Copy</option>
-                    <option value="hardlink">Hardlink</option>
-                    <option value="symlink">Symlink</option>
-                    <option value="reference_only">Reference existing files only</option>
-                  </select>
+                  {{ dropdown_select(
+                    name="mode",
+                    value=policy.mode if policy.mode != "logical" else "copy",
+                    options=[("copy", "Copy"), ("hardlink", "Hardlink"), ("symlink", "Symlink"), ("reference_only", "Reference existing files only")],
+                    local_model="mode",
+                    trigger_id="import-story-arc-policy-mode-" ~ arc.id,
+                    root_testid="import-story-arc-policy-mode-" ~ arc.id,
+                    wrap_options=true,
+                    class_name="w-full text-xs"
+                  ) }}
                 </div>
 
                 <div x-show="materialize">
                   <label for="import-story-arc-policy-root-{{ arc.id }}" class="mb-1 block text-xs font-medium text-pb-text-sec">Approved library root</label>
-                  <select
-                    id="import-story-arc-policy-root-{{ arc.id }}"
-                    name="target_library_root_id"
-                    data-testid="import-story-arc-policy-root-{{ arc.id }}"
-                    :required="materialize"
-                    class="input-pb w-full text-xs"
-                  >
-                    <option value="">Choose a library root</option>
-                    {% for root in library_roots %}
-                    <option value="{{ root.id }}" {% if root.id == policy.target_library_root_id %}selected{% endif %}>{{ root.name }}</option>
-                    {% endfor %}
-                  </select>
+                  {% set story_arc_root_options = [("", "Choose a library root")] %}
+                  {% for root in library_roots %}
+                    {% set _ = story_arc_root_options.append((root.id|string, root.name)) %}
+                  {% endfor %}
+                  {{ dropdown_select(
+                    name="target_library_root_id",
+                    value=policy.target_library_root_id or "",
+                    options=story_arc_root_options,
+                    trigger_id="import-story-arc-policy-root-" ~ arc.id,
+                    root_testid="import-story-arc-policy-root-" ~ arc.id,
+                    wrap_options=true,
+                    class_name="w-full text-xs"
+                  ) }}
                 </div>
 
                 <div x-show="materialize" class="lg:col-span-2">
@@ -253,10 +257,14 @@
 
                 <div x-show="materialize && mode === 'symlink'">
                   <label for="import-story-arc-policy-symlink-{{ arc.id }}" class="mb-1 block text-xs font-medium text-pb-text-sec">Symlink target style</label>
-                  <select id="import-story-arc-policy-symlink-{{ arc.id }}" name="symlink_style" class="input-pb w-full text-xs">
-                    <option value="absolute" {% if policy.symlink_style == 'absolute' %}selected{% endif %}>Absolute</option>
-                    <option value="relative" {% if policy.symlink_style == 'relative' %}selected{% endif %}>Relative</option>
-                  </select>
+                  {{ dropdown_select(
+                    name="symlink_style",
+                    value=policy.symlink_style or "absolute",
+                    options=[("absolute", "Absolute"), ("relative", "Relative")],
+                    trigger_id="import-story-arc-policy-symlink-" ~ arc.id,
+                    root_testid="import-story-arc-policy-symlink-" ~ arc.id,
+                    class_name="w-full text-xs"
+                  ) }}
                 </div>
 
                 <fieldset class="flex flex-wrap gap-x-4 gap-y-2 lg:col-span-2" aria-label="Story arc automation choices">
@@ -340,21 +348,19 @@
           <label for="import-story-arc-entry-state" class="mb-1 block text-xs font-medium text-pb-text-sec">
             Entry state
           </label>
-          <select
-            id="import-story-arc-entry-state"
-            name="arc_entry_state"
-            data-testid="import-story-arc-entry-filter"
-            class="input-pb min-w-40 text-xs"
-          >
-            {% for state_option in story_arc_entry_state_options %}
-            <option
-              value="{{ state_option.value }}"
-              {% if state_option == story_arc_entry_state_filter %}selected{% endif %}
-            >
-              {{ 'All states' if state_option.value == 'all' else state_option.value|replace('_', ' ')|title }}
-            </option>
-            {% endfor %}
-          </select>
+          {% set story_arc_entry_options = [] %}
+          {% for state_option in story_arc_entry_state_options %}
+            {% set state_label = 'All states' if state_option.value == 'all' else state_option.value|replace('_', ' ')|title %}
+            {% set _ = story_arc_entry_options.append((state_option.value, state_label)) %}
+          {% endfor %}
+          {{ dropdown_select(
+            name="arc_entry_state",
+            value=story_arc_entry_state_filter.value,
+            options=story_arc_entry_options,
+            trigger_id="import-story-arc-entry-state",
+            root_testid="import-story-arc-entry-filter",
+            class_name="min-w-40 text-xs"
+          ) }}
         </div>
         <button type="submit" class="btn-secondary btn-sm">Apply filter</button>
       </form>

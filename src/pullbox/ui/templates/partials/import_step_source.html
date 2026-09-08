@@ -1,3 +1,5 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+
 <div
   x-data="importSourceData({ libraryRoots: {{ library_root_options|default([])|tojson|forceescape }} })"
   data-testid="import-collection-source"
@@ -464,21 +466,19 @@
             <label for="import-managed-library-root" class="block text-xs font-medium text-pb-text-sec">
               Managed destination
             </label>
-            <select
-              id="import-managed-library-root"
-              x-model.number="targetLibraryRootId"
-              class="input-pb w-full"
-              aria-describedby="import-managed-library-root-help"
-              data-testid="import-managed-library-root"
-            >
-              <option value="">Choose a writable managed destination</option>
-              <template x-for="root in managedLibraryRoots()" :key="root.id">
-                <option
-                  :value="root.id"
-                  x-text="root.name + ' — ' + root.path + (root.is_default_managed_destination ? ' (default)' : '')"
-                ></option>
-              </template>
-            </select>
+            {{ dropdown_select(
+              name="managed_library_root_id",
+              value="",
+              options=[],
+              options_expression='managedLibraryRootOptions("Choose a writable managed destination")',
+              local_model="targetLibraryRootId",
+              local_on_change="targetLibraryRootId = $event.detail.value ? Number($event.detail.value) : null",
+              trigger_id="import-managed-library-root",
+              root_testid="import-managed-library-root",
+              describedby="import-managed-library-root-help",
+              wrap_options=true,
+              class_name="w-full"
+            ) }}
           </div>
           <div id="import-managed-library-root-help" class="inline-alert inline-alert-info">
             Pullbox copies source files into this library. Naming, archive, metadata, and
@@ -494,21 +494,19 @@
             <label for="import-in-place-library-root" class="block text-xs font-medium text-pb-text-sec">
               Preferred destination for future files — optional
             </label>
-            <select
-              id="import-in-place-library-root"
-              x-model.number="targetLibraryRootId"
-              class="input-pb w-full"
-              aria-describedby="import-mylar-in-place-help"
-              data-testid="import-in-place-library-root"
-            >
-              <option value="">No preferred destination</option>
-              <template x-for="root in managedLibraryRoots()" :key="root.id">
-                <option
-                  :value="root.id"
-                  x-text="root.name + ' — ' + root.path + (root.is_default_managed_destination ? ' (default)' : '')"
-                ></option>
-              </template>
-            </select>
+            {{ dropdown_select(
+              name="in_place_library_root_id",
+              value="",
+              options=[],
+              options_expression='managedLibraryRootOptions("No preferred destination")',
+              local_model="targetLibraryRootId",
+              local_on_change="targetLibraryRootId = $event.detail.value ? Number($event.detail.value) : null",
+              trigger_id="import-in-place-library-root",
+              root_testid="import-in-place-library-root",
+              describedby="import-mylar-in-place-help",
+              wrap_options=true,
+              class_name="w-full"
+            ) }}
           </div>
           <div
             id="import-mylar-in-place-help"
@@ -998,21 +996,19 @@
           <label for="import-future-library-root" class="block text-xs font-medium text-pb-text-sec">
             Target library
           </label>
-          <select
-            id="import-future-library-root"
-            x-model.number="targetLibraryRootId"
-            @change="futureLayoutRootChanged()"
-            :disabled="futurePolicyLoading"
-            class="input-pb max-w-2xl"
-            data-testid="import-future-layout-root"
-          >
-            <template x-for="root in managedLibraryRoots()" :key="root.id">
-              <option
-                :value="root.id"
-                x-text="root.name + ' — ' + root.path + (root.is_default_managed_destination ? ' (default)' : '')"
-              ></option>
-            </template>
-          </select>
+          {{ dropdown_select(
+            name="future_library_root_id",
+            value="",
+            options=[],
+            options_expression="managedLibraryRootOptions()",
+            local_model="targetLibraryRootId",
+            local_on_change="targetLibraryRootId = $event.detail.value ? Number($event.detail.value) : null; futureLayoutRootChanged()",
+            disabled_expression="futurePolicyLoading",
+            trigger_id="import-future-library-root",
+            root_testid="import-future-layout-root",
+            wrap_options=true,
+            class_name="w-full max-w-2xl"
+          ) }}
         </div>
 
         <div x-show="!managedLibraryRoots().length" class="inline-alert inline-alert-warning">

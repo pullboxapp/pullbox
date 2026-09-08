@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from sqlalchemy import event
@@ -330,6 +331,8 @@ async def test_story_arc_review_partial_shows_entry_evidence_without_private_pat
     assert response.status_code == 200
     assert 'data-testid="import-story-arc-entry-review"' in response.text
     assert 'data-testid="import-story-arc-entry-filter"' in response.text
+    assert response.text.count('data-dropdown-select-contract="v1"') >= 5
+    assert "<select" not in response.text
     assert "Source order 1" in response.text
     assert "Reading order 010" in response.text
     assert "1000000" in response.text
@@ -512,6 +515,17 @@ async def test_story_arc_entry_review_explains_empty_arc_and_empty_filter(
     assert filtered_response.status_code == 200
     assert "No missing entries in this story arc." in filtered_response.text
     assert "Choose All states to review every entry." in filtered_response.text
+
+
+def test_story_arc_policy_dropdown_requires_a_materialization_root() -> None:
+    script = Path("src/pullbox/ui/static/js/pullbox.js").read_text(encoding="utf-8")
+    start = script.index("confirmStoryArcPolicy: async function")
+    end = script.index("refreshReviewSummary: async function", start)
+    controller = script[start:end]
+
+    assert "if (materialize && rootId === null)" in controller
+    assert "Choose an approved library root before confirming this policy." in controller
+    assert "rootTrigger.focus()" in controller
 
 
 @pytest.mark.asyncio
