@@ -24,6 +24,11 @@ MylarPathOutcome = Literal[
     "ambiguous",
     "invalid",
 ]
+MylarPathAttentionActionKind = Literal[
+    "acknowledge_unavailable",
+    "register_reference_root",
+    "remove_ineffective_mapping",
+]
 
 
 class MylarPathMappingDraft(BaseModel):
@@ -118,6 +123,39 @@ class MylarPathProblemGroup(BaseModel):
     can_register_reference_root: bool = False
 
 
+class MylarPathAttentionAction(BaseModel):
+    """One server-authorized, deterministic Step 1 resolution."""
+
+    kind: MylarPathAttentionActionKind
+    fingerprint: str = Field(min_length=64, max_length=64)
+    root_path: str | None = None
+    stored_prefix: str | None = None
+    pullbox_prefix: str | None = None
+
+
+class MylarPathAttentionDetails(BaseModel):
+    """Plain-language evidence and manual next steps for one grouped finding."""
+
+    title: str
+    series_count: int = Field(ge=0)
+    location_count: int = Field(ge=0)
+    known_paths: list[str] = Field(default_factory=list, max_length=6)
+    steps: list[str] = Field(default_factory=list, min_length=1, max_length=6)
+
+
+class MylarPathAttentionItem(BaseModel):
+    """One grouped issue that Step 1 can resolve or explain."""
+
+    key: str = Field(min_length=64, max_length=64)
+    code: str
+    blocks_import: bool
+    reason: str
+    suggested_action: str
+    root_path: str | None = None
+    action: MylarPathAttentionAction | None = None
+    details: MylarPathAttentionDetails
+
+
 class MylarIdentityGroupPreview(BaseModel):
     """Identity-resolved paths grouped under one enabled root."""
 
@@ -159,6 +197,8 @@ class MylarPathPreviewResponse(BaseModel):
     exception_count: int = 0
     exceptions: list[MylarPathException] = Field(default_factory=list)
     problem_groups: list[MylarPathProblemGroup] = Field(default_factory=list)
+    attention_items: list[MylarPathAttentionItem] = Field(default_factory=list)
+    attention_fingerprint: str | None = None
     report_id: str | None = None
     blocking_reasons: list[str] = Field(default_factory=list)
     partial: bool = False

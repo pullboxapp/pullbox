@@ -686,6 +686,48 @@ class TestImportLayoutPreview:
 class TestMylarPathPreview:
     """Test POST /api/v1/import/mylar-path-preview."""
 
+    async def test_report_storage_failure_has_nonblocking_action_plan(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "comics"
+        (root / "Existing").mkdir(parents=True)
+        database = tmp_path / "mylar.db"
+        self._write_mylar_database(database, [str(root / "Existing")])
+        async with _db_factory() as session:
+            session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
+            await session.commit()
+
+        report_directory = tmp_path / "diagnostics" / "mylar-preflight"
+        with (
+            patch(
+                "pullbox.api.v1.import_jobs.path_reports.save_report",
+                side_effect=OSError("disk full"),
+            ),
+            patch(
+                "pullbox.api.v1.import_jobs.path_reports.report_directory",
+                return_value=report_directory,
+            ),
+        ):
+            response = await client.post(
+                "/api/v1/import/mylar-path-preview",
+                json={"source_path": str(database)},
+            )
+
+        assert response.status_code == 200
+        preview = response.json()
+        assert "report_unavailable" in preview["warnings"]
+        attention = next(
+            item for item in preview["attention_items"] if item["code"] == "report_unavailable"
+        )
+        assert attention["blocks_import"] is False
+        assert attention["action"] is None
+        assert attention["details"]["known_paths"] == [str(report_directory)]
+        assert any("free space" in step.lower() for step in attention["details"]["steps"])
+        assert preview["attention_fingerprint"]
+
     async def test_exception_report_is_paged_searchable_and_downloadable(
         self,
         client: AsyncClient,

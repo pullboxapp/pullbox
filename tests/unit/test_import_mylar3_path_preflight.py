@@ -185,6 +185,21 @@ async def test_in_place_outside_paths_are_grouped_by_unregistered_root(
             "can_register_reference_root": True,
         }
     ]
+    assert len(preview.attention_items) == 1
+    attention = preview.attention_items[0]
+    assert attention.code == "outside_root"
+    assert attention.blocks_import is True
+    assert attention.root_path == str(source_root)
+    assert attention.action is not None
+    assert attention.action.kind == "register_reference_root"
+    assert attention.action.root_path == str(source_root)
+    assert len(attention.action.fingerprint) == 64
+    assert attention.details.series_count == 2
+    assert attention.details.location_count == 2
+    assert attention.details.known_paths[0] == str(source_root)
+    assert str(source_root / "Batman (2025)") in attention.details.known_paths
+    assert any(str(source_root) in step for step in attention.details.steps)
+    assert preview.attention_fingerprint
 
 
 async def test_in_place_nested_publisher_paths_share_one_unregistered_root_group(
@@ -414,6 +429,17 @@ async def test_identity_missing_paths_have_actionable_exceptions_and_safe_contin
     assert data.get("can_continue_with_unresolved") is True
     assert data.get("requires_unresolved_acknowledgement") is True
     assert preview.can_confirm is False
+    unresolved_attention = {
+        item.code: item for item in preview.attention_items if item.code in {"missing", "unmapped"}
+    }
+    assert set(unresolved_attention) == {"missing", "unmapped"}
+    for item in unresolved_attention.values():
+        assert item.blocks_import is False
+        assert item.action is not None
+        assert item.action.kind == "acknowledge_unavailable"
+        assert item.action.fingerprint
+        assert item.details.known_paths
+        assert item.details.steps
     missing = next(
         item for item in data["exceptions"] if item["stored_path"] == str(root / "Missing")
     )
@@ -476,6 +502,10 @@ async def test_entirely_unavailable_library_cannot_continue(
         )
         assert preview.can_confirm is False
         assert preview.model_dump().get("can_continue_with_unresolved") is False
+        assert preview.attention_items
+        assert all(item.blocks_import for item in preview.attention_items)
+        assert all(item.action is None for item in preview.attention_items)
+        assert all(item.details.steps for item in preview.attention_items)
 
 
 async def test_io_errors_and_sensitive_missing_paths_are_not_skippable(

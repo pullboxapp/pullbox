@@ -28,6 +28,9 @@ from pullbox.models.import_job import ImportFileHandlingMode, ImportSourceType
 from pullbox.models.library import LibraryRoot
 from pullbox.schemas.import_mylar3_path_preflight import (
     MylarIdentityGroupPreview,
+    MylarPathAttentionAction,
+    MylarPathAttentionDetails,
+    MylarPathAttentionItem,
     MylarPathExample,
     MylarPathException,
     MylarPathMappingDraft,
@@ -248,6 +251,29 @@ class Mylar3PathPreflightAnalyzer:
                 automatic_evidence_blocked,
             )
         )
+        can_continue_with_unresolved = bool(safe and unresolved)
+        problem_groups = _group_path_problems(exceptions)
+        unavailable_root_models = [
+            root for root in root_models if root.id not in {snapshot.root_id for snapshot in roots}
+        ]
+        blocking_reasons = [
+            f"Library root '{root.name}' ({root.path}) is unavailable or unreadable. "
+            "Check its mount and permissions."
+            for root in unavailable_root_models
+        ] + [
+            f"Mapping {state.stored_prefix} to {state.pullbox_prefix}: {reason.replace('_', ' ')}."
+            for state in mapping_states.values()
+            for reason in state.blockers
+        ]
+        attention_items = _build_attention_items(
+            exceptions=exceptions,
+            can_continue_with_unresolved=can_continue_with_unresolved,
+            unavailable_roots=unavailable_root_models,
+            available_roots=roots,
+            mapping_states=list(mapping_states.values()),
+            warnings=warnings,
+            partial=partial,
+        )
         return MylarPathPreviewResponse(
             source_type=ImportSourceType.MYLAR3,
             resolution=total.response(),
@@ -265,24 +291,15 @@ class Mylar3PathPreflightAnalyzer:
             path_map=supplied_map,
             requires_confirmation=bool(supplied_map),
             can_confirm=can_confirm,
-            can_continue_with_unresolved=bool(safe and unresolved),
+            can_continue_with_unresolved=can_continue_with_unresolved,
             requires_unresolved_acknowledgement=bool(unresolved),
             unresolved_fingerprint=_exception_fingerprint(exceptions) if unresolved else None,
             exceptions=exceptions,
             exception_count=len(exceptions),
-            problem_groups=_group_path_problems(exceptions),
-            blocking_reasons=[
-                f"Library root '{root.name}' ({root.path}) is unavailable or unreadable. "
-                "Check its mount and permissions."
-                for root in root_models
-                if root.id not in {snapshot.root_id for snapshot in roots}
-            ]
-            + [
-                f"Mapping {state.stored_prefix} to {state.pullbox_prefix}: "
-                f"{reason.replace('_', ' ')}."
-                for state in mapping_states.values()
-                for reason in state.blockers
-            ],
+            problem_groups=problem_groups,
+            attention_items=attention_items,
+            attention_fingerprint=_attention_fingerprint(attention_items),
+            blocking_reasons=blocking_reasons,
             partial=partial,
             warnings=list(dict.fromkeys(warnings)),
         )
@@ -726,6 +743,405 @@ def _group_path_problems(
             )
         )
     return results
+
+
+def _attention_key(*parts: object) -> str:
+    """Return a stable opaque identity for one preview finding or action."""
+    payload = json.dumps(parts, ensure_ascii=True, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _attention_fingerprint(items: list[MylarPathAttentionItem]) -> str | None:
+    if not items:
+        return None
+    return _attention_key("mylar_path_attention", [item.key for item in items])
+
+
+def add_report_unavailable_attention(
+    preview: MylarPathPreviewResponse,
+    report_directory: str | Path,
+) -> MylarPathPreviewResponse:
+    """Explain a nonblocking report-storage failure through the Step 1 action contract."""
+    path = str(report_directory)
+    key = _attention_key("report_unavailable", path)
+    item = MylarPathAttentionItem(
+        key=key,
+        code="report_unavailable",
+        blocks_import=False,
+        reason="Pullbox could not save the full Mylar path report.",
+        suggested_action=(
+            "You can continue, but only the first 25 path exceptions are available until "
+            "report storage is restored."
+        ),
+        root_path=path,
+        details=MylarPathAttentionDetails(
+            title="Restore the full path report",
+            series_count=0,
+            location_count=preview.exception_count,
+            known_paths=[path],
+            steps=[
+                f"Confirm that the Pullbox data volume containing {path} has free space.",
+                f"Give Pullbox permission to create and replace files inside {path}.",
+                "If storage is healthy and the report is still too large, split the migration "
+                "into smaller source databases.",
+                "Return to Pullbox and recheck the import issues.",
+            ],
+        ),
+    )
+    items = [*preview.attention_items, item]
+    return preview.model_copy(
+        update={
+            "attention_items": items,
+            "attention_fingerprint": _attention_fingerprint(items),
+        }
+    )
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    try:
+        return Path(path).absolute().is_relative_to(Path(root).expanduser().absolute())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _known_paths(root_path: str, entries: list[MylarPathException]) -> list[str]:
+    paths = [root_path]
+    for entry in entries:
+        paths.extend((entry.stored_path, entry.attempted_path))
+    return list(dict.fromkeys(path for path in paths if path))[:6]
+
+
+def _path_attention_steps(
+    outcome: MylarPathOutcome,
+    root_path: str,
+    *,
+    can_continue: bool,
+) -> list[str]:
+    if outcome in {"missing", "mapped_missing"}:
+        return [
+            f"Check whether {root_path} was renamed, moved, or deleted after Mylar recorded it.",
+            "If the content still exists, correct its recorded Mylar location or path mapping.",
+            "Return to Pullbox and recheck the import issues.",
+        ]
+    if outcome == "unmapped":
+        return [
+            f"Make the source available inside the Pullbox container at {root_path}, "
+            "or map its Mylar prefix to the correct container-visible path.",
+            "Choose the host-side source folder in your container configuration; "
+            "Pullbox cannot infer that host path.",
+            "Register the container-visible path for existing files, then recheck "
+            "the import issues.",
+        ]
+    if outcome == "unreadable":
+        return [
+            f"Give the Pullbox container read and directory-traverse access to {root_path}.",
+            "If this is a Docker mount, confirm the mount is not hidden by another "
+            "overlapping mount.",
+            "Recheck the import issues after access is restored.",
+        ]
+    if outcome == "ambiguous":
+        return [
+            "Review the configured library roots and Mylar mappings that can both "
+            f"claim {root_path}.",
+            "Keep one unambiguous container-visible root or add one explicit "
+            "non-overlapping mapping.",
+            "Recheck the import issues after removing the overlap.",
+        ]
+    if outcome == "outside_root":
+        return [
+            f"Confirm that {root_path} is the intended container-visible source root.",
+            "Register only that source root for existing files; do not expose the "
+            "container filesystem root.",
+            "Recheck the import issues after the root is registered.",
+        ]
+    if outcome == "invalid":
+        return [
+            f"Correct the unsafe or malformed path recorded beneath {root_path} in Mylar.",
+            "Remove traversal components, invalid path text, or symlink loops instead "
+            "of broadening Pullbox access.",
+            "Recheck the import issues after the stored path is corrected.",
+        ]
+    if can_continue:
+        return ["Resolve this finding for the current import, then continue to the scan."]
+    return ["Correct the source location, then recheck the import issues."]
+
+
+def _path_attention_items(
+    exceptions: list[MylarPathException],
+    problem_groups: list[MylarPathProblemGroup],
+    *,
+    can_continue_with_unresolved: bool,
+) -> list[MylarPathAttentionItem]:
+    items: list[MylarPathAttentionItem] = []
+    for group in problem_groups:
+        entries = [
+            entry
+            for entry in exceptions
+            if entry.outcome == group.outcome
+            and (
+                (
+                    group.outcome == "outside_root"
+                    and _path_is_under(entry.stored_path, group.root_path)
+                )
+                or (
+                    group.outcome != "outside_root" and str(_problem_root(entry)) == group.root_path
+                )
+            )
+        ]
+        unresolved = group.outcome in {"missing", "mapped_missing", "unmapped"}
+        blocks_import = not (unresolved and can_continue_with_unresolved)
+        action_kind: Literal["acknowledge_unavailable", "register_reference_root"] | None = None
+        if group.can_register_reference_root:
+            action_kind = "register_reference_root"
+        elif unresolved and can_continue_with_unresolved:
+            action_kind = "acknowledge_unavailable"
+        key = _attention_key(
+            "path_group",
+            group.outcome,
+            group.root_path,
+            sorted((entry.series_id, entry.stored_path, entry.attempted_path) for entry in entries),
+        )
+        action = (
+            MylarPathAttentionAction(
+                kind=action_kind,
+                fingerprint=_attention_key("action", action_kind, key),
+                root_path=group.root_path,
+            )
+            if action_kind is not None
+            else None
+        )
+        title = {
+            "missing": "Review missing Mylar locations",
+            "mapped_missing": "Review missing mapped locations",
+            "unmapped": "Connect an unavailable Mylar source",
+            "unreadable": "Restore read access",
+            "ambiguous": "Choose one source path",
+            "outside_root": "Register the existing library source",
+            "invalid": "Correct unsafe Mylar paths",
+        }.get(group.outcome, "Review this Mylar path issue")
+        items.append(
+            MylarPathAttentionItem(
+                key=key,
+                code=group.outcome,
+                blocks_import=blocks_import,
+                reason=group.reason,
+                suggested_action=group.suggested_action,
+                root_path=group.root_path,
+                action=action,
+                details=MylarPathAttentionDetails(
+                    title=title,
+                    series_count=group.series_count,
+                    location_count=group.location_count,
+                    known_paths=_known_paths(group.root_path, entries),
+                    steps=_path_attention_steps(
+                        group.outcome,
+                        group.root_path,
+                        can_continue=can_continue_with_unresolved,
+                    ),
+                ),
+            )
+        )
+    return items
+
+
+def _mapping_attention_item(
+    state: _MappingState,
+    reason: str,
+) -> MylarPathAttentionItem:
+    code = reason
+    key = _attention_key("mapping", state.stored_prefix, state.pullbox_prefix, reason)
+    action: MylarPathAttentionAction | None = None
+    if reason == "mapping_does_not_improve_coverage":
+        action = MylarPathAttentionAction(
+            kind="remove_ineffective_mapping",
+            fingerprint=_attention_key("action", "remove_ineffective_mapping", key),
+            stored_prefix=state.stored_prefix,
+            pullbox_prefix=state.pullbox_prefix,
+        )
+    elif reason == "mapping_target_outside_enabled_root":
+        target = Path(state.pullbox_prefix)
+        if target.is_dir() and _location_is_readable(target) and not is_sensitive_path(target):
+            action = MylarPathAttentionAction(
+                kind="register_reference_root",
+                fingerprint=_attention_key("action", "register_reference_root", key),
+                root_path=state.pullbox_prefix,
+            )
+    labels = {
+        "mapping_does_not_improve_coverage": (
+            "This path mapping does not match any Mylar locations.",
+            "Remove the unused mapping, then let Pullbox analyze the remaining paths again.",
+            "Remove an unused path mapping",
+        ),
+        "mapping_target_outside_enabled_root": (
+            "This mapping points outside every enabled existing-file library root.",
+            "Register the mapped container path for existing files or choose another mapped path.",
+            "Register the mapped source",
+        ),
+        "mapping_target_unsafe": (
+            "This mapping points to a protected or unsafe location.",
+            "Choose a narrower container-visible comic folder instead of a system location.",
+            "Choose a safe mapped folder",
+        ),
+        "mapping_target_unavailable": (
+            "This mapping points to a location Pullbox cannot find.",
+            "Correct the container-visible target or add the missing Docker mount.",
+            "Make the mapped folder available",
+        ),
+        "mapping_target_unreadable": (
+            "This mapping points to a folder Pullbox cannot read.",
+            "Restore read and directory-traverse access, then recheck the import issues.",
+            "Restore mapped-folder access",
+        ),
+        "mapping_target_root_ambiguous": (
+            "More than one configured root can claim this mapping target.",
+            "Remove the overlapping root or map to one unambiguous container path.",
+            "Remove the root overlap",
+        ),
+    }
+    reason_text, suggested_action, title = labels.get(
+        reason,
+        (
+            "This Mylar path mapping needs attention.",
+            "Review the mapping and recheck the import issues.",
+            "Review this path mapping",
+        ),
+    )
+    return MylarPathAttentionItem(
+        key=key,
+        code=code,
+        blocks_import=True,
+        reason=reason_text,
+        suggested_action=suggested_action,
+        root_path=state.pullbox_prefix,
+        action=action,
+        details=MylarPathAttentionDetails(
+            title=title,
+            series_count=0,
+            location_count=state.counts.locations,
+            known_paths=[state.stored_prefix, state.pullbox_prefix],
+            steps=[
+                f"Review the Mylar prefix {state.stored_prefix}.",
+                f"Verify that its Pullbox container path is {state.pullbox_prefix}.",
+                "Correct or remove the mapping, then recheck the import issues.",
+            ],
+        ),
+    )
+
+
+def _build_attention_items(
+    *,
+    exceptions: list[MylarPathException],
+    can_continue_with_unresolved: bool,
+    unavailable_roots: list[LibraryRoot],
+    available_roots: list[_RootBoundary],
+    mapping_states: list[_MappingState],
+    warnings: list[str],
+    partial: bool,
+) -> list[MylarPathAttentionItem]:
+    root_exceptions = {
+        id(entry)
+        for root in unavailable_roots
+        for entry in exceptions
+        if _path_is_under(entry.stored_path, root.path)
+    }
+    remaining_exceptions = [entry for entry in exceptions if id(entry) not in root_exceptions]
+    items = _path_attention_items(
+        remaining_exceptions,
+        _group_path_problems(remaining_exceptions),
+        can_continue_with_unresolved=can_continue_with_unresolved,
+    )
+    for root in unavailable_roots:
+        related = [entry for entry in exceptions if _path_is_under(entry.stored_path, root.path)]
+        key = _attention_key("library_root_unavailable", root.id, root.path)
+        items.insert(
+            0,
+            MylarPathAttentionItem(
+                key=key,
+                code="library_root_unavailable",
+                blocks_import=True,
+                reason=f"The configured library root {root.path} is unavailable or unreadable.",
+                suggested_action=(
+                    "Restore its container mount or read access, then recheck the import issues."
+                ),
+                root_path=root.path,
+                details=MylarPathAttentionDetails(
+                    title=f"Restore access to {root.name}",
+                    series_count=len({entry.series_id for entry in related}),
+                    location_count=len(related),
+                    known_paths=[root.path],
+                    steps=[
+                        f"Confirm that {root.path} exists inside the Pullbox container.",
+                        "If it is a Docker mount, choose the correct host-side source "
+                        "folder; Pullbox cannot infer that host path.",
+                        f"Give Pullbox read and directory-traverse access to {root.path}, "
+                        "then recheck the import issues.",
+                    ],
+                ),
+            ),
+        )
+    for state in mapping_states:
+        items.extend(_mapping_attention_item(state, reason) for reason in state.blockers)
+    root_paths = [str(root.lexical) for root in available_roots]
+    aggregate_findings = {
+        "library_root_alias": (
+            "Two library roots point to the same physical folder.",
+            "Disable or remove the duplicate root before continuing.",
+            "Remove a duplicate library root",
+        ),
+        "nested_library_roots_ambiguous": (
+            "Configured library roots overlap or are nested.",
+            "Keep one clear root boundary for these files before continuing.",
+            "Remove overlapping library roots",
+        ),
+    }
+    for code, (reason, suggested_action, title) in aggregate_findings.items():
+        if code not in warnings:
+            continue
+        key = _attention_key(code, root_paths)
+        items.append(
+            MylarPathAttentionItem(
+                key=key,
+                code=code,
+                blocks_import=True,
+                reason=reason,
+                suggested_action=suggested_action,
+                details=MylarPathAttentionDetails(
+                    title=title,
+                    series_count=0,
+                    location_count=0,
+                    known_paths=root_paths[:6],
+                    steps=[
+                        "Open Media Management and compare the configured library-root "
+                        "paths shown here.",
+                        "Disable or remove the duplicate or nested root without changing "
+                        "the source files.",
+                        "Return here and recheck the import issues.",
+                    ],
+                ),
+            )
+        )
+    if partial:
+        key = _attention_key("partial_preview", _MAX_LOCATIONS)
+        items.append(
+            MylarPathAttentionItem(
+                key=key,
+                code="partial_preview",
+                blocks_import=True,
+                reason="The Mylar path check reached its safe inspection limit.",
+                suggested_action="Reduce the selected database scope before starting this import.",
+                details=MylarPathAttentionDetails(
+                    title="Path analysis is incomplete",
+                    series_count=0,
+                    location_count=_MAX_LOCATIONS,
+                    steps=[
+                        f"This preview inspected the first {_MAX_LOCATIONS:,} stored locations.",
+                        "Use a smaller Mylar database or split the migration into bounded groups.",
+                        "Recheck the import issues after reducing the source scope.",
+                    ],
+                ),
+            )
+        )
+    return list({item.key: item for item in items}.values())
 
 
 def _path_exception(

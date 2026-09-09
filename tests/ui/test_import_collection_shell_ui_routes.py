@@ -815,11 +815,14 @@ class TestImportShellRouteContracts:
         assert response.status_code == 200
         assert 'data-testid="import-mylar-path-confirm"' not in response.text
         assert 'data-testid="import-mylar-unresolved-confirm"' not in response.text
-        assert "missing or stale Mylar references" in template
+        assert "missing or stale Mylar references" not in template
         assert 'data-testid="import-layout-advanced"' in template
         assert 'data-testid="import-story-arc-section"' not in response.text
         assert 'data-testid="import-future-layout-section"' not in response.text
-        assert "Analyze library" in template
+        assert "Start library scan" in template
+        assert "Analyze library" not in template
+        assert "Recheck import setup" in template
+        assert "Analyze Mylar paths" not in template
         assert 'mylar3_allow_unresolved_paths: this.sourceType === "mylar3" &&' in script
         assert "this.mylarPathPreview.can_continue_with_unresolved" in script
 
@@ -863,27 +866,31 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-collection-source-mylar3"' in response.text
         assert "sourceType === 'filesystem' ? '/imports' : '/imports/mylar.db'" in response.text
         assert 'data-testid="import-collection-source-browse"' in response.text
-        assert "Collection imports preserve source files." in response.text
-        assert "Files and folders in the selected source stay untouched" in response.text
+        assert "Collection imports preserve source files." not in response.text
+        assert "Files and folders in the selected source stay untouched" not in response.text
         assert 'data-testid="import-mylar-path-section"' in response.text
-        assert 'data-testid="import-mylar-path-analyze"' in response.text
+        assert 'data-testid="import-setup-recheck"' in response.text
+        assert response.text.index('data-testid="import-setup-recheck"') < response.text.index(
+            'data-testid="import-mylar-path-section"'
+        )
+        assert 'data-testid="import-mylar-path-analyze"' not in response.text
         assert 'data-testid="import-mylar-path-mapping-row"' in response.text
         assert 'data-testid="import-mylar-path-add"' in response.text
         assert 'data-testid="import-mylar-path-confirm"' not in response.text
         assert 'data-testid="import-mylar-unresolved-confirm"' not in response.text
-        assert 'data-testid="import-mylar-stale-reference-notice"' in response.text
-        assert 'data-testid="import-mylar-path-technical-summary"' in response.text
-        assert 'data-testid="import-mylar-path-total"' in response.text
-        assert 'data-testid="import-mylar-path-unmapped"' in response.text
-        assert 'data-testid="import-mylar-path-invalid"' in response.text
-        assert 'data-testid="import-mylar-path-identity-groups"' in response.text
+        assert 'data-testid="import-mylar-stale-reference-notice"' not in response.text
+        assert 'data-testid="import-mylar-path-technical-summary"' not in response.text
+        assert 'data-testid="import-mylar-path-total"' not in response.text
+        assert 'data-testid="import-mylar-path-unmapped"' not in response.text
+        assert 'data-testid="import-mylar-path-invalid"' not in response.text
+        assert 'data-testid="import-mylar-path-identity-groups"' not in response.text
         assert 'data-testid="import-mylar-path-mapping-blockers"' in response.text
         assert 'data-testid="import-mylar-path-mapping-examples"' in response.text
-        assert 'data-testid="import-mylar-path-warnings"' in response.text
+        assert 'data-testid="import-mylar-path-warnings"' not in response.text
         assert 'data-testid="import-mylar-path-problem-groups"' in response.text
-        assert 'data-testid="import-mylar-path-exception-details"' in response.text
-        assert 'data-testid="import-mylar-register-reference-root"' in response.text
-        assert "registerMylarReferenceRoot" in response.text
+        assert 'data-testid="import-mylar-path-optional-follow-up"' not in response.text
+        assert 'data-testid="import-mylar-path-exception-details"' not in response.text
+        assert 'data-testid="import-mylar-register-reference-root"' not in response.text
         assert "Path stored in Mylar" in response.text
         assert "Path visible inside Pullbox" in response.text
         assert 'data-testid="import-file-handling-section"' in response.text
@@ -893,11 +900,65 @@ class TestImportShellRouteContracts:
         assert "Copy into Pullbox library" in response.text
         assert "Keep files in place" in response.text
         assert "rename, convert, rewrite metadata, or change permissions on them." in response.text
+        assert 'data-testid="import-source-preservation"' not in response.text
         assert 'data-testid="import-advanced-options"' in response.text
         assert 'data-testid="import-advanced-options-attention-count"' in response.text
+        assert 'data-testid="import-advanced-options-checking"' in response.text
+        assert (
+            "sourceType === 'mylar3' && mylarPathPreviewLoading && !mylarPathPreview"
+            in response.text
+        )
+        assert "Checking..." in response.text
+        assert 'data-testid="import-advanced-options-attention-list"' in response.text
+        assert 'data-testid="import-advanced-options-attention-icon"' in response.text
+        assert 'data-testid="import-attention-status-row"' in response.text
+        assert 'data-testid="import-attention-resolve"' in response.text
+        assert 'data-testid="import-attention-skip"' in response.text
+        assert 'data-testid="import-attention-details"' in response.text
+        resolve_button = response.text[
+            response.text.index('data-testid="import-attention-resolve"') - 500 :
+        ]
+        details_button = response.text[
+            response.text.index('data-testid="import-attention-details"') - 300 :
+        ]
+        skip_button = response.text[
+            response.text.index('data-testid="import-attention-skip"') - 300 :
+        ]
+        assert 'class="btn-primary btn-sm' in resolve_button
+        assert 'class="btn-ghost btn-sm' in details_button
+        assert 'class="btn-ghost btn-sm' in skip_button
+        assert "Skip for this import" in response.text
+        assert 'data-testid="import-attention-action-error"' in response.text
+        assert 'data-testid="import-attention-details-modal"' in response.text
+        assert 'data-testid="import-attention-details-status"' in response.text
+        assert 'data-testid="import-attention-details-paths"' in response.text
+        assert 'data-testid="import-attention-details-steps"' in response.text
+        assert 'data-testid="import-attention-details-ok"' in response.text
+        assert 'role="dialog"' in response.text
+        assert 'aria-modal="true"' in response.text
+        assert "M12 9v3.75m9.303 3.376c.866 1.5-.217 3.374-1.948 3.374H4.645" in response.text
+        assert 'data-testid="import-advanced-file-management"' in response.text
+        assert 'data-testid="import-advanced-file-management-summary"' in response.text
+        assert 'data-testid="import-advanced-file-management-chevron"' in response.text
+        assert 'data-testid="import-advanced-file-management-copy"' in response.text
+        assert 'data-testid="import-mylar-path-summary"' in response.text
+        assert 'data-testid="import-mylar-path-summary-chevron"' in response.text
+        assert 'data-testid="import-mylar-path-summary-copy"' in response.text
         assert 'data-testid="import-advanced-scan-options"' in response.text
         assert "Advanced Options" in response.text
+        assert "Advanced file management" in response.text
         assert "Advanced scan options" not in response.text
+        assert "Check existing Mylar library access" not in response.text
+        assert "Manual path mapping" in response.text
+        assert "Mylar library access details" not in response.text
+        assert "Diagnostic report" not in response.text
+        assert "Optional troubleshooting details" not in response.text
+        assert "Some stored locations need a verified container-path mapping" not in response.text
+        assert (
+            "Some folders or files are missing inside an accessible library root"
+            not in response.text
+        )
+        assert "Automatic analysis could not resolve every location" not in response.text
         assert 'data-testid="import-managed-library-root"' in response.text
         assert response.text.count('data-dropdown-select-contract="v1"') >= 2
         assert "<select" not in response.text
@@ -914,9 +975,18 @@ class TestImportShellRouteContracts:
             response.text.index('data-testid="import-advanced-options"')
         )
         assert response.text.index('data-testid="import-advanced-options"') < (
+            response.text.index('data-testid="import-advanced-options-attention-list"')
+        )
+        assert response.text.index('data-testid="import-advanced-options-attention-list"') < (
+            response.text.index('data-testid="import-advanced-file-management"')
+        )
+        assert response.text.index('data-testid="import-advanced-options-attention-list"') < (
             response.text.index('data-testid="import-mylar-path-section"')
         )
         assert 'data-testid="import-layout-advanced"' in response.text
+        assert 'data-testid="import-layout-advanced-summary"' in response.text
+        assert 'data-testid="import-layout-advanced-chevron"' in response.text
+        assert 'data-testid="import-layout-advanced-copy"' in response.text
         assert 'data-testid="import-layout-auto"' in response.text
         assert 'data-testid="import-layout-series-folders"' in response.text
         assert 'data-testid="import-layout-publisher-series"' in response.text
@@ -930,7 +1000,8 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-future-layout-section"' not in response.text
         assert 'data-testid="import-story-arc-section"' not in response.text
         assert "Advanced layout and matching" in response.text
-        assert "Analyze library" in response.text
+        assert "Start library scan" in response.text
+        assert "Analyze library" not in response.text
         assert 'data-testid="file-browser-modal"' in response.text
         assert 'data-testid="import-collection-modal-host"' in response.text
 
@@ -972,8 +1043,32 @@ class TestImportShellRouteContracts:
         assert 'fetch("/api/v1/import/story-arc-preview"' in source_controller
         assert 'fetch("/api/v1/import/mylar-path-preview"' in source_controller
         assert "mylarPathPreviewRequestId" in source_controller
-        assert "mylarPathAttentionCount: function" in source_controller
-        assert "this.mylarPathPreview.problem_groups" in source_controller
+        assert "advancedAttentionItems: function" in source_controller
+        assert "advancedAttentionCount: function" in source_controller
+        assert "return this.advancedAttentionItems().length" in source_controller
+        assert "this.mylarPathPreview.attention_items" in source_controller
+        assert "resolveAdvancedAttention: async function" in source_controller
+        assert "skipAdvancedAttention: async function" in source_controller
+        assert "restoreSkippedAttentionActions: function" in source_controller
+        assert "persistSkippedAttentionActions: function" in source_controller
+        assert "sessionStorage" in source_controller
+        assert "openAdvancedAttentionDetails: function" in source_controller
+        assert "closeAdvancedAttentionDetails: function" in source_controller
+        assert 'case "register_reference_root"' in source_controller
+        assert 'case "remove_ineffective_mapping"' in source_controller
+        assert 'case "select_managed_destination"' in source_controller
+        assert 'case "switch_to_managed_copy"' in source_controller
+        attention_start = source_controller.index("advancedAttentionItems: function")
+        attention_end = source_controller.index("advancedAttentionCount: function", attention_start)
+        attention_controller = source_controller[attention_start:attention_end]
+        assert "can_register_reference_root" not in attention_controller
+        resolve_start = source_controller.index("resolveAdvancedAttention: async function")
+        resolve_end = source_controller.index(
+            "skipAdvancedAttention: async function",
+            resolve_start,
+        )
+        resolve_controller = source_controller[resolve_start:resolve_end]
+        assert 'case "acknowledge_unavailable"' not in resolve_controller
         assert "clearMylarPathPreview: function" in source_controller
         assert "mylarPathMappingChanged: function" in source_controller
         assert "this.mylarPathPreview.can_confirm" in source_controller
@@ -989,6 +1084,26 @@ class TestImportShellRouteContracts:
             "story_arc_materialization_requested: this.storyArcMaterializationRequested"
             in source_controller
         )
+
+    async def test_import_source_switch_and_recheck_preserve_ui_contract(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = script.index("function importSourceData")
+        end = script.index("function importJobLogViewerData", start)
+        source_controller = script[start:end]
+        select_start = source_controller.index("selectSourceType: function")
+        select_end = source_controller.index("selectImportSource: function", select_start)
+        select_source = source_controller[select_start:select_end]
+        preview_start = source_controller.index("previewMylarPaths: async function")
+        preview_end = source_controller.index(
+            "mylarPathMappingEvidence: function",
+            preview_start,
+        )
+        preview = source_controller[preview_start:preview_end]
+
+        assert "previousSourceType" in select_source
+        assert 'this.sourcePath = "";' in select_source
+        assert "previousSourceType !== sourceType" in select_source
+        assert "this.mylarPathPreview = null;" not in preview
 
     async def test_import_review_keeps_detailed_statuses_behind_follow_up_controls(
         self,

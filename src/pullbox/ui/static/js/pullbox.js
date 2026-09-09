@@ -2915,75 +2915,6 @@ function importCollectionFooterData(config) {
   };
 }
 
-function mylarPathProblemsData() {
-  return {
-    reportId: null,
-    items: [],
-    total: 0,
-    page: 1,
-    pageSize: 25,
-    search: "",
-    loading: false,
-    error: "",
-    controller: null,
-    requestId: 0,
-    init() {
-      this.setReport(this.mylarPathPreview);
-      this.$watch("mylarPathPreview", (preview) => this.setReport(preview));
-    },
-    destroy() {
-      this.requestId += 1;
-      if (this.controller) this.controller.abort();
-    },
-    setReport(preview) {
-      this.destroy();
-      this.reportId = preview && preview.report_id;
-      this.items = (preview && preview.exceptions) || [];
-      this.total = (preview && preview.exception_count) || 0;
-      this.page = 1;
-      this.search = "";
-      this.error = "";
-      this.loading = false;
-    },
-    get pages() {
-      return Math.max(1, Math.ceil(this.total / this.pageSize));
-    },
-    get exportUrl() {
-      return this.reportId
-        ? "/api/v1/import/mylar-path-reports/" + encodeURIComponent(this.reportId) + "/export"
-        : "";
-    },
-    async load(page) {
-      if (!this.reportId) return;
-      if (this.controller) this.controller.abort();
-      const controller = new AbortController();
-      this.controller = controller;
-      const requestId = ++this.requestId;
-      this.loading = true;
-      this.error = "";
-      try {
-        const query = new URLSearchParams({ page: String(page), search: this.search });
-        const response = await fetch(
-          "/api/v1/import/mylar-path-reports/" + encodeURIComponent(this.reportId) + "?" + query,
-          { signal: controller.signal },
-        );
-        if (!response.ok) throw new Error("Report unavailable or expired. Analyze Mylar paths again.");
-        const data = await response.json();
-        if (requestId !== this.requestId) return;
-        this.items = data.items;
-        this.total = data.total;
-        this.page = data.page;
-      } catch (error) {
-        if (error.name !== "AbortError" && requestId === this.requestId) {
-          this.error = error.message;
-        }
-      } finally {
-        if (requestId === this.requestId) this.loading = false;
-      }
-    },
-  };
-}
-
 function importSourceData(config) {
   var cfg = config || {};
   var libraryRoots = Array.isArray(cfg.libraryRoots) ? cfg.libraryRoots : [];
@@ -3067,6 +2998,12 @@ function importSourceData(config) {
     mylarRootRegistrationPath: "",
     mylarRootRegistrationErrorPath: "",
     mylarRootRegistrationError: "",
+    attentionResolvingKey: "",
+    attentionResolutionErrors: {},
+    acknowledgedAttentionActions: {},
+    attentionDetailsOpen: false,
+    attentionDetailsItem: null,
+    attentionDetailsReturnFocus: null,
     storyArcPreview: emptyStoryArcPreview(),
     storyArcPreviewLoading: false,
     storyArcPreviewError: "",
@@ -3094,6 +3031,10 @@ function importSourceData(config) {
     futurePolicyRequestId: 0,
 
     selectSourceType: function (sourceType) {
+      var previousSourceType = this.sourceType;
+      if (previousSourceType !== sourceType) {
+        this.sourcePath = "";
+      }
       this.sourceType = sourceType;
       if (sourceType !== "filesystem" && sourceType !== "mylar3") {
         this.fileHandlingMode = "managed_copy";
@@ -3227,7 +3168,7 @@ function importSourceData(config) {
     registerMylarReferenceRoot: async function (group) {
       var rootPath = String((group && group.root_path) || "").trim();
       if (!rootPath || this.mylarRootRegistrationPath) {
-        return;
+        return false;
       }
       var leaf = rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "library";
       var rootPayload = {
@@ -3285,10 +3226,12 @@ function importSourceData(config) {
         if (typeof showToast === "function") {
           showToast({ message: "Existing-file library root registered.", level: "success" });
         }
+        return true;
       } catch (err) {
         this.mylarRootRegistrationErrorPath = rootPath;
         this.mylarRootRegistrationError =
           err && err.message ? err.message : "Pullbox could not register this library root.";
+        return false;
       } finally {
         this.mylarRootRegistrationPath = "";
       }
@@ -3577,25 +3520,364 @@ function importSourceData(config) {
       });
     },
 
-    mylarPathAttentionCount: function () {
+    advancedAttentionItems: function () {
+      if (!this.sourceType || !this.sourcePath.trim()) {
+        return [];
+      }
+      var items = [];
+      if (this.requiresManagedDestination() && !this.hasSelectedManagedDestination()) {
+        var managedRoots = this.managedLibraryRoots();
+        var preferredRoot = managedRoots.find(function (root) {
+          return !!root.is_default_managed_destination;
+        });
+        if (!preferredRoot && managedRoots.length === 1) {
+          preferredRoot = managedRoots[0];
+        }
+        items.push({
+          key: "managed-destination",
+          code: "managed_destination_required",
+          blocks_import: true,
+          reason: "Choose a managed destination",
+          suggested_action:
+            "Open Advanced file management and select an available, writable Pullbox library.",
+          root_path: "",
+          action: preferredRoot
+            ? { kind: "select_managed_destination", library_root_id: Number(preferredRoot.id) }
+            : null,
+          details: {
+            title: "Choose where Pullbox will manage files",
+            series_count: 0,
+            location_count: 0,
+            known_paths: managedRoots.map(function (root) {
+              return String(root.path || "");
+            }),
+            steps: [
+              "Open Advanced file management.",
+              "Choose an available, writable Pullbox library.",
+              "Recheck the import issues before starting the scan.",
+            ],
+          },
+        });
+      }
+      if (
+        this.sourceType === "filesystem" &&
+        this.fileHandlingMode === "in_place" &&
+        this.layoutPreview &&
+        !this.layoutPreview.can_keep_in_place
+      ) {
+        items.push({
+          key: "in-place-layout",
+          code: "in_place_layout_unavailable",
+          blocks_import: true,
+          reason: "This folder cannot be kept in place yet",
+          suggested_action:
+            "Review the layout details below or choose Copy into Pullbox library.",
+          root_path: this.sourcePath.trim(),
+          action: this.managedLibraryRoots().length ? { kind: "switch_to_managed_copy" } : null,
+          details: {
+            title: "Choose a safe file-handling mode",
+            series_count: 0,
+            location_count: Number(this.layoutPreview.files_considered || 0),
+            known_paths: [this.sourcePath.trim()],
+            steps: [
+              "Review the folder-layout details for paths Pullbox could not safely reference.",
+              "Correct the source layout or choose Copy into Pullbox library.",
+              "Recheck the import issues before starting the scan.",
+            ],
+          },
+        });
+      }
       if (this.sourceType !== "mylar3") {
-        return 0;
+        return items;
       }
       if (this.mylarPathPreviewError) {
-        return 1;
+        items.push({
+          key: "mylar-path-error",
+          code: "mylar_path_analysis_failed",
+          blocks_import: true,
+          reason: "Pullbox could not analyze the Mylar library paths",
+          suggested_action: this.mylarPathPreviewError,
+          root_path: this.sourcePath.trim(),
+          action: null,
+          details: {
+            title: "Mylar path analysis did not finish",
+            series_count: 0,
+            location_count: 0,
+            known_paths: [this.sourcePath.trim()],
+            steps: [
+              "Confirm that the selected Mylar database still exists and is readable inside Pullbox.",
+              "Correct the mount or file permissions if the database is unavailable.",
+              "Run the path check again after access is restored.",
+            ],
+          },
+        });
+        return items;
       }
       if (!this.mylarPathPreview) {
-        return 0;
+        return items;
       }
-      var problemGroups = Array.isArray(this.mylarPathPreview.problem_groups)
-        ? this.mylarPathPreview.problem_groups
+      var serverItems = Array.isArray(this.mylarPathPreview.attention_items)
+        ? this.mylarPathPreview.attention_items
         : [];
-      if (problemGroups.length) {
-        return problemGroups.length;
+      serverItems.forEach(
+        function (item) {
+          var action = item && item.action ? item.action : null;
+          var acknowledged = action
+            ? this.acknowledgedAttentionActions[String(item.key || "")]
+            : null;
+          if (
+            action &&
+            action.kind === "acknowledge_unavailable" &&
+            acknowledged === action.fingerprint
+          ) {
+            return;
+          }
+          items.push(item);
+        }.bind(this),
+      );
+      return items;
+    },
+
+    advancedAttentionCount: function () {
+      return this.advancedAttentionItems().length;
+    },
+
+    advancedAttentionError: function (item) {
+      return this.attentionResolutionErrors[String((item && item.key) || "")] || "";
+    },
+
+    restoreSkippedAttentionActions: function (preview) {
+      this.acknowledgedAttentionActions = {};
+      var sourcePath = this.sourcePath.trim();
+      var attentionFingerprint = String((preview && preview.attention_fingerprint) || "");
+      if (!sourcePath || !attentionFingerprint) {
+        return;
       }
-      return Array.isArray(this.mylarPathPreview.blocking_reasons)
-        ? this.mylarPathPreview.blocking_reasons.length
-        : 0;
+      try {
+        var raw = window.sessionStorage.getItem("pb-import-mylar-skips:v1");
+        if (!raw) {
+          return;
+        }
+        var stored = JSON.parse(raw);
+        if (
+          !stored ||
+          stored.source_path !== sourcePath ||
+          stored.attention_fingerprint !== attentionFingerprint
+        ) {
+          window.sessionStorage.removeItem("pb-import-mylar-skips:v1");
+          return;
+        }
+        var available = {};
+        (Array.isArray(preview.attention_items) ? preview.attention_items : []).forEach(
+          function (item) {
+            if (
+              item &&
+              item.action &&
+              item.action.kind === "acknowledge_unavailable" &&
+              item.action.fingerprint
+            ) {
+              available[String(item.key || "")] = String(item.action.fingerprint);
+            }
+          },
+        );
+        var restored = {};
+        Object.keys(stored.actions || {}).forEach(function (key) {
+          var fingerprint = String(stored.actions[key] || "");
+          if (fingerprint && available[key] === fingerprint) {
+            restored[key] = fingerprint;
+          }
+        });
+        this.acknowledgedAttentionActions = restored;
+        if (!Object.keys(restored).length) {
+          window.sessionStorage.removeItem("pb-import-mylar-skips:v1");
+        }
+      } catch (_err) {
+        this.acknowledgedAttentionActions = {};
+        try {
+          window.sessionStorage.removeItem("pb-import-mylar-skips:v1");
+        } catch (_storageErr) {
+          // Storage may be unavailable in privacy-restricted browser contexts.
+        }
+      }
+    },
+
+    persistSkippedAttentionActions: function () {
+      var sourcePath = this.sourcePath.trim();
+      var attentionFingerprint = String(
+        (this.mylarPathPreview && this.mylarPathPreview.attention_fingerprint) || "",
+      );
+      try {
+        if (
+          !sourcePath ||
+          !attentionFingerprint ||
+          !Object.keys(this.acknowledgedAttentionActions).length
+        ) {
+          window.sessionStorage.removeItem("pb-import-mylar-skips:v1");
+          return;
+        }
+        window.sessionStorage.setItem(
+          "pb-import-mylar-skips:v1",
+          JSON.stringify({
+            source_path: sourcePath,
+            attention_fingerprint: attentionFingerprint,
+            actions: this.acknowledgedAttentionActions,
+          }),
+        );
+      } catch (_err) {
+        // Skips still work for this page when browser storage is unavailable.
+      }
+    },
+
+    resolveAdvancedAttention: async function (item) {
+      var key = String((item && item.key) || "");
+      var action = item && item.action ? item.action : null;
+      if (!key || !action || this.attentionResolvingKey) {
+        return;
+      }
+      this.attentionResolvingKey = key;
+      this.attentionResolutionErrors = Object.assign({}, this.attentionResolutionErrors, {
+        [key]: "",
+      });
+      try {
+        switch (action.kind) {
+          case "select_managed_destination":
+            this.targetLibraryRootId = Number(action.library_root_id || 0) || null;
+            if (this.sourceType === "mylar3") {
+              await this.previewMylarPaths();
+            }
+            break;
+          case "switch_to_managed_copy":
+            this.setFileHandlingMode("managed_copy");
+            if (this.sourceType === "mylar3") {
+              await this.previewMylarPaths();
+            } else {
+              await this.previewLayout();
+            }
+            break;
+          case "register_reference_root":
+            if (!(await this.registerMylarReferenceRoot(action))) {
+              throw new Error(
+                this.mylarRootRegistrationError ||
+                  "Pullbox could not register this path for existing files.",
+              );
+            }
+            break;
+          case "remove_ineffective_mapping":
+            var mappingIndex = this.mylarPathMappings.findIndex(function (mapping) {
+              return !!(
+                mapping &&
+                mapping.stored_prefix === action.stored_prefix &&
+                mapping.pullbox_prefix === action.pullbox_prefix
+              );
+            });
+            if (mappingIndex < 0) {
+              throw new Error("This mapping changed. Review the current path details.");
+            }
+            this.mylarPathAutoDetect = false;
+            this.clearMylarPathPreview(false);
+            this.mylarPathMappings.splice(mappingIndex, 1);
+            await this.previewMylarPaths();
+            break;
+          default:
+            throw new Error("This issue does not have a supported automatic resolution.");
+        }
+        if (this.sourceType === "mylar3" && this.mylarPathPreviewError) {
+          throw new Error(this.mylarPathPreviewError);
+        }
+        if (this.sourceType === "filesystem" && this.layoutPreviewError) {
+          throw new Error(this.layoutPreviewError);
+        }
+        if (
+          this.advancedAttentionItems().some(function (candidate) {
+            return String((candidate && candidate.key) || "") === key;
+          })
+        ) {
+          throw new Error(
+            "Pullbox made the change, but this issue is still present after rechecking.",
+          );
+        }
+      } catch (err) {
+        this.attentionResolutionErrors = Object.assign({}, this.attentionResolutionErrors, {
+          [key]: err && err.message ? err.message : "Pullbox could not resolve this issue.",
+        });
+      } finally {
+        this.attentionResolvingKey = "";
+      }
+    },
+
+    skipAdvancedAttention: async function (item) {
+      var key = String((item && item.key) || "");
+      var action = item && item.action ? item.action : null;
+      if (
+        !key ||
+        !action ||
+        action.kind !== "acknowledge_unavailable" ||
+        this.attentionResolvingKey
+      ) {
+        return;
+      }
+      this.attentionResolvingKey = key;
+      this.attentionResolutionErrors = Object.assign({}, this.attentionResolutionErrors, {
+        [key]: "",
+      });
+      try {
+        await this.previewMylarPaths();
+        if (this.mylarPathPreviewError) {
+          throw new Error(this.mylarPathPreviewError);
+        }
+        var attentionItems =
+          this.mylarPathPreview && Array.isArray(this.mylarPathPreview.attention_items)
+            ? this.mylarPathPreview.attention_items
+            : [];
+        var confirmed = attentionItems.find(function (candidate) {
+          return !!(
+            candidate &&
+            candidate.key === key &&
+            candidate.action &&
+            candidate.action.kind === "acknowledge_unavailable" &&
+            candidate.action.fingerprint === action.fingerprint
+          );
+        });
+        if (!confirmed) {
+          throw new Error("The path evidence changed. Review the updated issue before continuing.");
+        }
+        this.acknowledgedAttentionActions = Object.assign(
+          {},
+          this.acknowledgedAttentionActions,
+          { [key]: action.fingerprint },
+        );
+        this.persistSkippedAttentionActions();
+      } catch (err) {
+        this.attentionResolutionErrors = Object.assign({}, this.attentionResolutionErrors, {
+          [key]: err && err.message ? err.message : "Pullbox could not skip this issue.",
+        });
+      } finally {
+        this.attentionResolvingKey = "";
+      }
+    },
+
+    openAdvancedAttentionDetails: function (item, returnFocus) {
+      this.attentionDetailsItem = item || null;
+      this.attentionDetailsReturnFocus = returnFocus || null;
+      this.attentionDetailsOpen = !!item;
+      var self = this;
+      this.$nextTick(function () {
+        if (self.$refs.attentionDetailsDialog) {
+          self.$refs.attentionDetailsDialog.focus();
+        }
+      });
+    },
+
+    closeAdvancedAttentionDetails: function () {
+      var returnFocus = this.attentionDetailsReturnFocus;
+      this.attentionDetailsOpen = false;
+      this.attentionDetailsItem = null;
+      this.attentionDetailsReturnFocus = null;
+      if (returnFocus && typeof returnFocus.focus === "function") {
+        this.$nextTick(function () {
+          returnFocus.focus();
+        });
+      }
     },
 
     toggleStoryArcImport: function () {
@@ -3654,6 +3936,8 @@ function importSourceData(config) {
       this.mylarPathPreviewError = "";
       this.mylarPathConfirmed = false;
       this.mylarUnresolvedConfirmed = false;
+      this.acknowledgedAttentionActions = {};
+      this.attentionResolutionErrors = {};
       if (resetMappings) {
         this.mylarPathMappings = [];
         this.mylarPathAutoDetect = true;
@@ -3721,7 +4005,6 @@ function importSourceData(config) {
       this.mylarPathPreviewController = controller;
       this.mylarPathPreviewLoading = true;
       this.mylarPathPreviewError = "";
-      this.mylarPathPreview = null;
       this.mylarPathConfirmed = false;
       this.mylarUnresolvedConfirmed = false;
       try {
@@ -3767,6 +4050,7 @@ function importSourceData(config) {
         if (requestId !== this.mylarPathPreviewRequestId) {
           return;
         }
+        this.restoreSkippedAttentionActions(payload);
         this.mylarPathPreview = payload;
         this.mylarPathMappings = (payload.mappings || []).map(
           function (mapping) {

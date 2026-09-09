@@ -27,6 +27,11 @@ def _directory() -> Path:
     return get_settings().data_dir / "diagnostics" / "mylar-preflight"
 
 
+def report_directory() -> Path:
+    """Return the private directory used for retained Mylar preflight reports."""
+    return _directory()
+
+
 def save_report(preview: MylarPathPreviewResponse, source_path: str) -> str:
     """Atomically retain recent reports, never opening the source database for writing."""
     report_id = uuid4().hex
@@ -37,7 +42,7 @@ def save_report(preview: MylarPathPreviewResponse, source_path: str) -> str:
     content = json.dumps(report, ensure_ascii=True).encode("utf-8")
     if len(content) > _MAX_REPORT_BYTES:
         raise ValueError("Mylar path report exceeds the diagnostic size limit")
-    directory = _directory()
+    directory = report_directory()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary: Path | None = None
     try:
@@ -58,7 +63,7 @@ def _report_paths() -> list[Path]:
     return sorted(
         (
             path
-            for path in _directory().glob("*.json")
+            for path in report_directory().glob("*.json")
             if _REPORT_ID.fullmatch(path.stem) and not path.is_symlink()
         ),
         key=lambda path: path.stat().st_mtime,
@@ -70,7 +75,7 @@ def load_report(report_id: str) -> dict[str, Any]:
     """Load only an application-generated report, never a caller-supplied path."""
     if not _REPORT_ID.fullmatch(report_id):
         raise FileNotFoundError("Invalid preflight report")
-    path = _directory() / f"{report_id}.json"
+    path = report_directory() / f"{report_id}.json"
     if path.is_symlink():
         raise FileNotFoundError("Invalid preflight report")
     stat = path.stat()

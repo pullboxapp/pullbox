@@ -13,8 +13,6 @@ from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.pages.import_page import ImportPage
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from playwright.sync_api import Page, Route
 
 pytestmark = pytest.mark.e2e
@@ -52,153 +50,166 @@ class TestImportCollectionTab:
             "No preferred destination"
         )
 
-    def test_mylar_missing_paths_require_acknowledgement_and_reset_on_reanalysis(
+    def test_advanced_attention_distinguishes_repairs_skips_and_manual_fixes(
         self,
         authed_page: Page,
         seeded_server: str,
     ) -> None:
         from playwright.sync_api import expect
 
-        preview = self._identity_mylar_path_response(2)
+        preview = self._identity_mylar_path_response(3)
         preview.update(
             can_confirm=False,
             can_continue_with_unresolved=True,
             requires_unresolved_acknowledgement=True,
             unresolved_fingerprint="b" * 64,
-            exception_count=1,
-            report_id="a" * 32,
-            blocking_reasons=[],
-            exceptions=[
+            attention_fingerprint="c" * 64,
+            attention_items=[
                 {
-                    "series_id": "2",
-                    "series_name": "Missing Series",
-                    "stored_path": "/mnt/comics/Missing",
-                    "attempted_path": "/mnt/comics/Missing",
-                    "outcome": "missing",
-                    "reason": "The stored folder is missing.",
-                    "suggested_action": "Check the folder name or review it later.",
+                    "key": "d" * 64,
+                    "code": "missing",
+                    "blocks_import": False,
+                    "reason": "One stored Mylar location is missing.",
+                    "suggested_action": "Skip this stale reference for this import.",
+                    "root_path": "/mnt/comics/missing",
+                    "action": {
+                        "kind": "acknowledge_unavailable",
+                        "fingerprint": "e" * 64,
+                        "root_path": "/mnt/comics/missing",
+                    },
+                    "details": {
+                        "title": "Review missing Mylar locations",
+                        "series_count": 1,
+                        "location_count": 1,
+                        "known_paths": ["/mnt/comics/missing"],
+                        "steps": ["Check whether /mnt/comics/missing was renamed."],
+                    },
+                },
+                {
+                    "key": "f" * 64,
+                    "code": "invalid",
+                    "blocks_import": True,
+                    "reason": "One stored Mylar path is unsafe.",
+                    "suggested_action": "Correct the stored path, then recheck it.",
+                    "root_path": "/mnt/comics/unsafe",
+                    "action": None,
+                    "details": {
+                        "title": "Correct unsafe Mylar paths",
+                        "series_count": 1,
+                        "location_count": 1,
+                        "known_paths": ["/mnt/comics/unsafe"],
+                        "steps": ["Correct /mnt/comics/unsafe in Mylar."],
+                    },
+                },
+                {
+                    "key": "a" * 64,
+                    "code": "ineffective_mapping",
+                    "blocks_import": False,
+                    "reason": "One manual mapping no longer changes any paths.",
+                    "suggested_action": "Remove the unused mapping.",
+                    "root_path": "/mnt/comics",
+                    "action": {
+                        "kind": "remove_ineffective_mapping",
+                        "fingerprint": "9" * 64,
+                        "stored_prefix": "/old/comics",
+                        "pullbox_prefix": "/mnt/comics",
+                    },
+                    "details": {
+                        "title": "Remove an unused mapping",
+                        "series_count": 0,
+                        "location_count": 0,
+                        "known_paths": ["/old/comics", "/mnt/comics"],
+                        "steps": ["Remove the mapping and recheck the import setup."],
+                    },
+                },
+            ],
+            mappings=[
+                {
+                    "stored_prefix": "/old/comics",
+                    "pullbox_prefix": "/mnt/comics",
                 }
             ],
         )
-        preview["resolution"].update(identity_resolved=1, missing=1)
-        authed_page.route(
-            "**/api/v1/import/mylar-path-preview", lambda route: route.fulfill(json=preview)
-        )
-        received = []
-
-        def create(route: Route) -> None:
-            received.append(route.request.post_data_json)
-            route.fulfill(status=422, json={"detail": "Test request captured"})
-
-        authed_page.route("**/api/v1/import", create)
-        page = ImportPage(authed_page, seeded_server)
-        page.goto(tab="collection")
-        page.show_collection_source_step()
-        page.source_mylar3_card.click()
-        page.source_path_input.fill("/imports/mylar.db")
-        report = authed_page.get_by_test_id("import-mylar-path-exceptions")
-        expect(report).to_be_visible(timeout=5000)
-        expect(report).to_contain_text("Missing Series")
-        expect(report).to_contain_text("/mnt/comics/Missing")
-        expect(page.start_scan_button).to_be_disabled()
-        acknowledgement = authed_page.get_by_test_id("import-mylar-unresolved-confirm")
-        acknowledgement.check()
-        expect(page.start_scan_button).to_be_enabled()
-        authed_page.get_by_test_id("import-mylar-path-analyze").click()
-        expect(acknowledgement).not_to_be_checked()
-        expect(page.start_scan_button).to_be_disabled()
-        acknowledgement.check()
-        page.start_scan_button.click()
-        expect(authed_page.get_by_test_id("import-collection-source")).to_contain_text(
-            "Test request captured"
-        )
-        assert received[-1]["mylar3_allow_unresolved_paths"] is True
-        assert received[-1]["mylar3_unresolved_fingerprint"] == "b" * 64
-
-    def test_mylar_exceptions_paginate_and_search_without_reanalyzing(
-        self,
-        authed_page: Page,
-        seeded_server: str,
-        tmp_path: Path,
-    ) -> None:
-        from urllib.parse import parse_qs, urlparse
-
-        from playwright.sync_api import expect
-
-        exceptions = [
-            {
-                "series_id": str(index),
-                "series_name": f"Missing Series {index:02}",
-                "stored_path": f"/mnt/comics/Missing Series {index:02}",
-                "attempted_path": f"/mnt/comics/Missing Series {index:02}",
-                "outcome": "missing",
-                "reason": "The stored folder is missing.",
-                "suggested_action": "Check the folder name or review it later.",
-            }
-            for index in range(31)
-        ]
-        preview = self._identity_mylar_path_response(32)
-        preview.update(
-            can_confirm=False,
-            can_continue_with_unresolved=True,
-            requires_unresolved_acknowledgement=True,
-            unresolved_fingerprint="b" * 64,
-            exception_count=31,
-            exceptions=exceptions[:25],
-            report_id="a" * 32,
-        )
-        analyses: list[str] = []
+        analysis_count = 0
 
         def analyze(route: Route) -> None:
-            analyses.append(route.request.url)
-            route.fulfill(json=preview)
-
-        def report_page(route: Route) -> None:
-            params = parse_qs(urlparse(route.request.url).query)
-            search = params.get("search", [""])[0]
-            page = int(params.get("page", ["1"])[0])
-            found = [item for item in exceptions if search in item["series_name"]]
-            route.fulfill(
-                json={
-                    "items": found[(page - 1) * 25 : page * 25],
-                    "total": len(found),
-                    "page": page,
-                    "page_size": 25,
-                }
-            )
+            nonlocal analysis_count
+            analysis_count += 1
+            response = json.loads(json.dumps(preview))
+            if route.request.post_data_json.get("auto_detect") is False:
+                response["mappings"] = []
+                response["attention_items"] = [
+                    item
+                    for item in response["attention_items"]
+                    if item["code"] != "ineffective_mapping"
+                ]
+            route.fulfill(json=response)
 
         authed_page.route("**/api/v1/import/mylar-path-preview", analyze)
-        authed_page.route("**/api/v1/import/mylar-path-reports/*?*", report_page)
         page = ImportPage(authed_page, seeded_server)
         page.goto(tab="collection")
         page.show_collection_source_step()
         page.source_mylar3_card.click()
         page.source_path_input.fill("/imports/mylar.db")
-        report = authed_page.get_by_test_id("import-mylar-path-exceptions")
-        expect(report.locator("tbody tr")).to_have_count(25)
-        assert report.get_by_role("button", name="Next", exact=True).evaluate(
-            "el => el.getBoundingClientRect().height >= 32"
-        )
-        report.get_by_role("button", name="Next", exact=True).click()
-        expect(report.locator("tbody tr")).to_have_count(6)
-        expect(report).to_contain_text("Missing Series 30")
-        report.get_by_role("searchbox").fill("Series 07")
-        expect(report.locator("tbody tr")).to_have_count(1)
-        expect(report).to_contain_text("Missing Series 07")
-        assert len(analyses) == 1
-        expect(report.get_by_role("link", name="Export full report")).to_have_attribute(
-            "href",
-            "/api/v1/import/mylar-path-reports/" + "a" * 32 + "/export",
-        )
-        assert_no_axe_violations(
-            authed_page,
-            name="mylar-path-exceptions",
-            include=["[data-testid=import-mylar-path-exceptions]"],
-        )
-        report.screenshot(path=str(tmp_path / "mylar-path-exceptions.png"))
-        authed_page.set_viewport_size({"width": 390, "height": 844})
-        expect(report).to_be_visible()
-        assert authed_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+        advanced = authed_page.get_by_test_id("import-advanced-options")
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("3")
+        advanced.locator("summary").first.click()
+        expect(advanced.get_by_role("button", name="Recheck import setup")).to_be_visible()
+        expect(authed_page.get_by_test_id("import-mylar-path-analyze")).to_have_count(0)
+        missing = advanced.locator("article").filter(has_text="One stored Mylar location")
+        unsafe = advanced.locator("article").filter(has_text="One stored Mylar path is unsafe")
+        repair = advanced.locator("article").filter(has_text="One manual mapping")
+        skip = missing.get_by_role("button", name="Skip for this import")
+        missing_details = missing.get_by_role("button", name="Details")
+        details = unsafe.get_by_role("button", name="Details")
+        resolve = repair.get_by_role("button", name="Resolve")
+        expect(skip).to_be_visible()
+        expect(skip).to_have_class(re.compile(r"\bbtn-ghost\b"))
+        expect(missing_details).to_be_visible()
+        expect(missing.get_by_role("button", name="Resolve")).to_have_count(0)
+        expect(resolve).to_be_visible()
+        expect(resolve).to_have_class(re.compile(r"\bbtn-primary\b"))
+        expect(details).to_be_visible()
+        expect(details).to_have_class(re.compile(r"\bbtn-ghost\b"))
+
+        unsafe.get_by_role("button", name="Details").click()
+        modal = authed_page.get_by_test_id("import-attention-details-modal")
+        expect(modal).to_be_visible()
+        expect(modal).to_contain_text("Correct unsafe Mylar paths")
+        expect(modal).to_contain_text("/mnt/comics/unsafe")
+        expect(modal).to_contain_text("Blocks import")
+        modal.get_by_role("button", name="OK", exact=True).click()
+        expect(modal).to_be_hidden()
+
+        resolve.click()
+        expect(repair).to_be_hidden()
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("2")
+
+        skip.click()
+        expect(missing).to_be_hidden()
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("1")
+        assert analysis_count >= 2
+
+        authed_page.reload()
+        page = ImportPage(authed_page, seeded_server)
+        page.show_collection_source_step()
+        page.source_mylar3_card.click()
+        page.source_path_input.fill("/imports/mylar.db")
+        advanced = authed_page.get_by_test_id("import-advanced-options")
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("2")
+        advanced.locator("summary").first.click()
+        expect(
+            advanced.locator("article").filter(has_text="One stored Mylar location")
+        ).to_be_hidden()
+        expect(authed_page.get_by_test_id("import-mylar-path-exceptions")).to_have_count(0)
+
+        preview["attention_fingerprint"] = "8" * 64
+        advanced.get_by_role("button", name="Recheck import setup").click()
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("3")
+        expect(
+            advanced.locator("article").filter(has_text="One stored Mylar location")
+        ).to_be_visible()
 
     @staticmethod
     def _identity_mylar_path_response(locations: int = 1) -> dict[str, object]:
@@ -2784,6 +2795,26 @@ class TestImportCollectionTab:
         import_page.file_browser_modal.wait_for(state="visible", timeout=5000)
         assert import_page.file_browser_title.text_content() == "Browse Files"
 
+    def test_switching_collection_source_clears_the_previous_path(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        from playwright.sync_api import expect
+
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/imports/comics")
+        import_page.source_mylar3_card.click()
+        expect(import_page.source_path_input).to_have_value("")
+
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.source_filesystem_card.click()
+        expect(import_page.source_path_input).to_have_value("")
+
     def test_import_collection_source_step_previews_selected_layout(
         self,
         authed_page,
@@ -2892,6 +2923,8 @@ class TestImportCollectionTab:
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
+        from playwright.sync_api import expect
+
         created_requests: list[dict[str, object]] = []
         layout_preview_requests: list[dict[str, object]] = []
         mylar_path_preview_requests: list[dict[str, object]] = []
@@ -2931,10 +2964,7 @@ class TestImportCollectionTab:
         import_page.source_layout_section.wait_for(state="visible", timeout=5000)
         import_page.source_layout_publisher_series.click()
         import_page.source_layout_fallback_checkbox.uncheck()
-        import_page.mylar_path_preview.get_by_text("No mapping is required.").wait_for(
-            state="visible",
-            timeout=5000,
-        )
+        expect(import_page.start_scan_button).to_be_enabled(timeout=5000)
 
         assert import_page.source_layout_analyze_button.is_hidden()
         assert import_page.start_scan_button.is_enabled()
@@ -2964,6 +2994,8 @@ class TestImportCollectionTab:
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
+        from playwright.sync_api import expect
+
         created_requests: list[dict[str, object]] = []
         layout_preview_requests: list[dict[str, object]] = []
 
@@ -2999,10 +3031,7 @@ class TestImportCollectionTab:
         import_page.source_path_input.fill("/imports/mylar.db")
         import_page.file_handling_in_place.wait_for(state="visible", timeout=5000)
         import_page.file_handling_in_place.click()
-        import_page.mylar_path_preview.get_by_text("No mapping is required.").wait_for(
-            state="visible",
-            timeout=5000,
-        )
+        expect(import_page.start_scan_button).to_be_enabled(timeout=5000)
 
         root_selector = import_page.dropdown("import-in-place-library-root")
         root_selector.wait_for(state="visible", timeout=5000)
@@ -3154,6 +3183,8 @@ class TestImportCollectionTab:
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
+        from playwright.sync_api import expect
+
         created_requests: list[dict[str, object]] = []
 
         def fulfill_arc_preview(route) -> None:  # type: ignore[no-untyped-def]
@@ -3248,10 +3279,7 @@ class TestImportCollectionTab:
 
         import_page.source_mylar3_card.click()
         import_page.source_path_input.fill("/imports/mylar.db")
-        import_page.mylar_path_preview.get_by_text("No mapping is required.").wait_for(
-            state="visible",
-            timeout=5000,
-        )
+        expect(import_page.start_scan_button).to_be_enabled(timeout=5000)
         import_page.story_arc_section.wait_for(state="visible", timeout=5000)
 
         preview_text = import_page.story_arc_preview.text_content() or ""
