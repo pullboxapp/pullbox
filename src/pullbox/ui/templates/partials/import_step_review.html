@@ -222,14 +222,30 @@
   <input type="hidden" name="review_sort" value="{{ sort }}">
   <input type="hidden" name="review_page" value="{{ page }}">
 
-  <section class="rounded-xl border border-pb-border bg-pb-card/50 px-4 py-3">
-    <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-pb-text-dim">Step 3</p>
-    <h2 class="mt-1 text-lg font-semibold text-pb-text">Review your library</h2>
-    <p class="mt-1 max-w-3xl text-sm leading-6 text-pb-text-sec">
-      Import everything Pullbox understands now. Unresolved matches and optional Story Arc details
-      stay available as follow-up and do not block ready comics.
-    </p>
-  </section>
+  <div data-testid="import-review-action-bar" class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3">
+    <div x-show="confirmError" x-cloak class="mb-3">
+      {% call inline_alert(tone="danger", icon="warning") %}
+        <span x-text="confirmError"></span>
+      {% endcall %}
+    </div>
+
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid="import-review-back"
+          @click="window.dispatchEvent(new CustomEvent('wizard:advance', { detail: { step: 2, jobStatus: 'review' } }))"
+          class="btn-ghost btn-sm inline-flex items-center gap-1.5"
+        >
+          <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
+          </svg>
+          Back
+        </button>
+        <button type="button" @click="showCancelModal = true" class="btn-ghost btn-sm inline-flex items-center justify-center">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <section
     data-testid="import-review-guided-summary"
@@ -292,41 +308,6 @@
       </button>
     </div>
   </section>
-
-  {% if job.source_type.value == 'mylar3' and job.mylar3_path_map_confirmed %}
-  <section
-    class="rounded-xl border border-pb-border bg-pb-card/50 px-4 py-4"
-    data-testid="import-review-mylar-path-snapshot"
-  >
-    <div class="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-pb-text-dim">
-          Confirmed Mylar path mapping
-        </p>
-        <p class="mt-1 text-xs leading-5 text-pb-text-sec">
-          This is the frozen Step 1 snapshot used by the scan. Retry revalidates these paths
-          before reusing them.
-        </p>
-      </div>
-      <span class="pill pill-success">Confirmed</span>
-    </div>
-    {% if job.mylar3_path_map %}
-    <div class="mt-3 space-y-2">
-      {% for stored_prefix, pullbox_prefix in job.mylar3_path_map|dictsort %}
-      <div class="grid gap-1 rounded-lg border border-pb-border-subtle bg-pb-bg/35 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center sm:gap-3">
-        <span class="break-all font-mono text-pb-text">{{ stored_prefix }}</span>
-        <span class="text-pb-text-dim" aria-hidden="true">&rarr;</span>
-        <span class="break-all font-mono text-pb-text">{{ pullbox_prefix }}</span>
-      </div>
-      {% endfor %}
-    </div>
-    {% else %}
-    <div class="mt-3 inline-alert inline-alert-success">
-      Identity only. Mylar paths were confirmed without translation.
-    </div>
-    {% endif %}
-  </section>
-  {% endif %}
 
   <div
     x-show="showCancelModal"
@@ -452,32 +433,6 @@
     </div>
   </section>
   {% endif %}
-
-  <div data-testid="import-review-action-bar" class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3">
-    <div x-show="confirmError" x-cloak class="mb-3">
-      {% call inline_alert(tone="danger", icon="warning") %}
-        <span x-text="confirmError"></span>
-      {% endcall %}
-    </div>
-
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div class="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          data-testid="import-review-back"
-          @click="window.dispatchEvent(new CustomEvent('wizard:advance', { detail: { step: 2, jobStatus: 'review' } }))"
-          class="btn-ghost btn-sm inline-flex items-center gap-1.5"
-        >
-          <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
-          </svg>
-          Back
-        </button>
-        <button type="button" @click="showCancelModal = true" class="btn-ghost btn-sm inline-flex items-center justify-center">Cancel</button>
-      </div>
-
-    </div>
-  </div>
 
   <details
     data-testid="import-review-details"

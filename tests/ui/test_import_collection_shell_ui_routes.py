@@ -1352,6 +1352,12 @@ class TestImportShellRouteContracts:
         assert 'data-log-viewer-contract="v1"' not in response.text
         assert 'data-testid="import-progress-log-download"' in response.text
         assert f'href="/api/v1/import/{job_id}/logs/download"' in response.text
+        log_download = response.text.split(
+            'data-testid="import-progress-log-download"', maxsplit=1
+        )[1].split("</a>", maxsplit=1)[0]
+        assert 'class="btn-ghost btn-sm inline-flex items-center gap-2 shrink-0"' in (
+            log_download
+        )
 
     async def test_import_progress_partial_hydrates_review_snapshot(
         self,
@@ -1792,8 +1798,14 @@ class TestImportShellRouteContracts:
         assert '@click="saveConflictChoices()"' not in response.text
         assert '@click="resetConflictChoices()"' not in response.text
         assert "Save conflict choices" not in response.text
+        assert "Review your library" not in response.text
+        assert "Import everything Pullbox understands now." not in response.text
         action_bar_index = response.text.index('data-testid="import-review-action-bar"')
+        guided_summary_index = response.text.index(
+            'data-testid="import-review-guided-summary"'
+        )
         status_bar_index = response.text.index('data-testid="import-review-series-filters"')
+        assert action_bar_index < guided_summary_index
         assert action_bar_index < status_bar_index
 
     async def test_import_review_partial_explains_selected_layout_review(
@@ -1856,7 +1868,7 @@ class TestImportShellRouteContracts:
         assert "The mapped Mylar comic folder is not available to Pullbox." in response.text
         assert "Correct the Mylar path mapping and retry this import." in response.text
 
-    async def test_import_review_repeats_confirmed_mylar_mapping_snapshot(
+    async def test_import_review_hides_confirmed_mylar_mapping_snapshot(
         self,
         authenticated_client,
         sec_db,
@@ -1878,12 +1890,9 @@ class TestImportShellRouteContracts:
         response = await authenticated_client.get(f"/import/{job_id}/review-partial")
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-mylar-path-snapshot"' in response.text
-        assert "Confirmed Mylar path mapping" in response.text
-        assert "/books/current" in response.text
-        assert "/comics/current" in response.text
-        assert "/books/archive" in response.text
-        assert "/comics/archive" in response.text
+        assert 'data-testid="import-review-mylar-path-snapshot"' not in response.text
+        assert "Confirmed Mylar path mapping" not in response.text
+        assert "frozen Step 1 snapshot" not in response.text
 
     async def test_import_review_partial_renders_matched_file_target_tables(
         self,
@@ -2831,7 +2840,7 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Review your library" in response.text
+        assert "Review your library" not in response.text
         assert "Needs Issue Match" in response.text
         assert "Needs issue" in response.text
         assert 'data-testid="import-review-reconcile-action"' in response.text
@@ -2869,7 +2878,7 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Review your library" in response.text
+        assert "Review your library" not in response.text
         assert "Needs Series Match" in response.text
         assert 'data-testid="import-review-search-cv-action"' in response.text
         assert 'data-testid="import-review-reconcile-action"' not in response.text
