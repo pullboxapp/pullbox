@@ -35,6 +35,9 @@ from pullbox.services.audit_service import AuditService
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
 from pullbox.services.import_review_actions import apply_safety_allow_once_to_file
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
+from pullbox.services.import_story_arc_resolution import (
+    refresh_story_arc_entries_for_import_files,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -1065,9 +1068,11 @@ async def _apply_file_action(
         if not files:
             break
         cursor = int(files[-1].id)
+        page_file_ids: list[int] = []
         for file in files:
             affected_series_ids.add(int(file.import_series_id))
             affected_file_ids.append(int(file.id))
+            page_file_ids.append(int(file.id))
             if action in {
                 CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES,
                 CompletedImportCleanupAction.SKIP_PROBABLE_COVERS,
@@ -1086,6 +1091,11 @@ async def _apply_file_action(
                 file.error_message = None
             else:  # pragma: no cover - conflict groups use a separate path
                 raise ValidationError("Unsupported file cleanup action.")
+        await refresh_story_arc_entries_for_import_files(
+            session,
+            import_job_id=job.id,
+            import_file_ids=page_file_ids,
+        )
         await session.flush()
     return affected_series_ids, tuple(affected_file_ids), requires_import_retry
 

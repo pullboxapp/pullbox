@@ -23,6 +23,16 @@
             {{ safety_block.get('reason') or item.error_message or 'Pullbox found a safe completed-import follow-up for this file.' }}
           {% endif %}
         </p>
+        {% if cleanup_action == 'skip_probable_covers' %}
+        <button
+          type="button"
+          class="btn-danger btn-sm mt-3"
+          data-testid="import-results-source-cleanup-preview-{{ item.id }}"
+          hx-get="/import/{{ job_id }}/files/{{ item.id }}/safety/source-cleanup-preview?return_to=results"
+          hx-target="#cv-search-modal"
+          hx-swap="innerHTML"
+        >Move source to Trash</button>
+        {% endif %}
       </div>
     {% endfor %}
   </div>

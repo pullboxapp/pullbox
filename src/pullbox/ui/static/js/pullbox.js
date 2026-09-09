@@ -3064,13 +3064,16 @@ function importSourceData(config) {
     mylarPathAutoDetect: true,
     mylarPathConfirmed: false,
     mylarUnresolvedConfirmed: false,
+    mylarRootRegistrationPath: "",
+    mylarRootRegistrationErrorPath: "",
+    mylarRootRegistrationError: "",
     storyArcPreview: emptyStoryArcPreview(),
     storyArcPreviewLoading: false,
     storyArcPreviewError: "",
     storyArcPreviewTimer: null,
     storyArcPreviewController: null,
     storyArcPreviewRequestId: 0,
-    storyArcImportRequested: false,
+    storyArcImportRequested: true,
     storyArcMaterializationRequested: false,
     libraryRoots: libraryRoots,
     targetLibraryRootId: initialTargetRootId,
@@ -3104,7 +3107,6 @@ function importSourceData(config) {
       } else if (sourceType === "mylar3") {
         this.scheduleMylarPathPreview();
       }
-      this.scheduleStoryArcPreview();
     },
 
     selectImportSource: function (selection) {
@@ -3112,7 +3114,6 @@ function importSourceData(config) {
       this.clearMylarPathPreview(true);
       this.scheduleLayoutPreview();
       this.scheduleMylarPathPreview();
-      this.scheduleStoryArcPreview();
       this.closeFileBrowser();
     },
 
@@ -3120,7 +3121,6 @@ function importSourceData(config) {
       this.clearMylarPathPreview(true);
       this.scheduleLayoutPreview();
       this.scheduleMylarPathPreview();
-      this.scheduleStoryArcPreview();
     },
 
     setFileHandlingMode: function (mode) {
@@ -3221,6 +3221,76 @@ function importSourceData(config) {
           err && err.message ? err.message : "Could not refresh library roots.";
       } finally {
         this.libraryRootsRefreshing = false;
+      }
+    },
+
+    registerMylarReferenceRoot: async function (group) {
+      var rootPath = String((group && group.root_path) || "").trim();
+      if (!rootPath || this.mylarRootRegistrationPath) {
+        return;
+      }
+      var leaf = rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "library";
+      var rootPayload = {
+        name: ("Mylar reference - " + leaf + " - " + rootPath).slice(0, 255),
+        path: rootPath,
+        allow_referenced_registrations: true,
+        allow_managed_writes: false,
+        is_default_managed_destination: false,
+      };
+      var request = async function (path) {
+        var response = await fetch(path, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": this.csrfToken(),
+          },
+          body: JSON.stringify(rootPayload),
+        });
+        var payload = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          var detail = payload.detail;
+          if (Array.isArray(detail)) {
+            detail = detail
+              .map(function (item) {
+                return item && item.msg ? item.msg : "";
+              })
+              .filter(Boolean)
+              .join(" ");
+          }
+          throw new Error(
+            (payload.error && payload.error.message) ||
+              detail ||
+              "Pullbox could not register this library root.",
+          );
+        }
+        return payload;
+      }.bind(this);
+
+      this.mylarRootRegistrationPath = rootPath;
+      this.mylarRootRegistrationErrorPath = "";
+      this.mylarRootRegistrationError = "";
+      try {
+        var preview = await request("/api/v1/config/library-roots/preview");
+        if (!preview.can_create) {
+          throw new Error(
+            (preview.blocking_reasons || []).join(" ") ||
+              "This path cannot be registered for existing files.",
+          );
+        }
+        await request("/api/v1/config/library-roots");
+        await this.refreshImportLibraryRoots();
+        await this.previewMylarPaths();
+        if (typeof showToast === "function") {
+          showToast({ message: "Existing-file library root registered.", level: "success" });
+        }
+      } catch (err) {
+        this.mylarRootRegistrationErrorPath = rootPath;
+        this.mylarRootRegistrationError =
+          err && err.message ? err.message : "Pullbox could not register this library root.";
+      } finally {
+        this.mylarRootRegistrationPath = "";
       }
     },
 
@@ -3507,6 +3577,27 @@ function importSourceData(config) {
       });
     },
 
+    mylarPathAttentionCount: function () {
+      if (this.sourceType !== "mylar3") {
+        return 0;
+      }
+      if (this.mylarPathPreviewError) {
+        return 1;
+      }
+      if (!this.mylarPathPreview) {
+        return 0;
+      }
+      var problemGroups = Array.isArray(this.mylarPathPreview.problem_groups)
+        ? this.mylarPathPreview.problem_groups
+        : [];
+      if (problemGroups.length) {
+        return problemGroups.length;
+      }
+      return Array.isArray(this.mylarPathPreview.blocking_reasons)
+        ? this.mylarPathPreview.blocking_reasons.length
+        : 0;
+    },
+
     toggleStoryArcImport: function () {
       if (!this.storyArcImportRequested) {
         this.storyArcMaterializationRequested = false;
@@ -3523,9 +3614,7 @@ function importSourceData(config) {
       if (
         this.sourceType === "mylar3" &&
         (!this.mylarPathPreview ||
-          !(this.mylarPathPreview.can_confirm || this.mylarPathPreview.can_continue_with_unresolved) ||
-          (this.mylarPathPreview.requires_unresolved_acknowledgement && !this.mylarUnresolvedConfirmed) ||
-          (this.mylarPathPreview.requires_confirmation && !this.mylarPathConfirmed))
+          !(this.mylarPathPreview.can_confirm || this.mylarPathPreview.can_continue_with_unresolved))
       ) {
         return false;
       }
@@ -3688,7 +3777,10 @@ function importSourceData(config) {
             };
           }.bind(this),
         );
-        this.mylarPathConfirmed = !!(payload.can_confirm && !payload.requires_confirmation);
+        this.mylarPathConfirmed = !!(
+          payload.can_confirm || payload.can_continue_with_unresolved
+        );
+        this.mylarUnresolvedConfirmed = !!payload.can_continue_with_unresolved;
       } catch (err) {
         if (err && err.name === "AbortError") {
           return;
@@ -3741,7 +3833,6 @@ function importSourceData(config) {
       this.storyArcPreview = emptyStoryArcPreview();
       this.storyArcPreviewLoading = false;
       this.storyArcPreviewError = "";
-      this.storyArcImportRequested = false;
       this.storyArcMaterializationRequested = false;
     },
 
@@ -3758,7 +3849,6 @@ function importSourceData(config) {
       this.storyArcPreview = emptyStoryArcPreview();
       this.storyArcPreviewLoading = false;
       this.storyArcPreviewError = "";
-      this.storyArcImportRequested = false;
       this.storyArcMaterializationRequested = false;
       if (!this.canAnalyzeStoryArcs()) {
         return;
@@ -3787,7 +3877,6 @@ function importSourceData(config) {
       this.storyArcPreviewLoading = true;
       this.storyArcPreviewError = "";
       this.storyArcPreview = emptyStoryArcPreview();
-      this.storyArcImportRequested = false;
       this.storyArcMaterializationRequested = false;
       try {
         var response = await fetch("/api/v1/import/story-arc-preview", {
@@ -4003,8 +4092,10 @@ function importSourceData(config) {
               ? Object.assign({}, this.mylarPathPreview.path_map || {})
               : {},
             mylar3_path_map_confirmed: this.sourceType === "mylar3",
-            mylar3_allow_unresolved_paths: this.sourceType === "mylar3" && this.mylarUnresolvedConfirmed,
-            mylar3_unresolved_fingerprint: this.sourceType === "mylar3" && this.mylarUnresolvedConfirmed
+            mylar3_allow_unresolved_paths: this.sourceType === "mylar3" &&
+              !!this.mylarPathPreview.can_continue_with_unresolved,
+            mylar3_unresolved_fingerprint: this.sourceType === "mylar3" &&
+              this.mylarPathPreview.can_continue_with_unresolved
               ? this.mylarPathPreview.unresolved_fingerprint : null,
           }),
         });
@@ -6729,6 +6820,9 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       Number(cfg.selectedItemCount) ||
       (Number(cfg.matchedSelectedCount) || 0) + (Number(cfg.duplicateSelectedCount) || 0),
     importableItemCount: Number(cfg.importableItemCount) || 0,
+    needsAttentionCount: Number(cfg.needsAttentionCount) || 0,
+    needsAttentionFileCount: Number(cfg.needsAttentionFileCount) || 0,
+    deferredFollowUpCount: Number(cfg.deferredFollowUpCount) || 0,
     resolvedConflictGroupCount: Number(cfg.resolvedConflictGroupCount) || 0,
     conflictSeriesCount: Number(cfg.conflictSeriesCount) || 0,
     visibleFileConflictGroupCount: 0,
@@ -7310,16 +7404,15 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       }
     },
 
-    selectAllImportable: async function () {
-      try {
-        var seriesResponse = await fetch("/api/v1/import/" + this.jobId + "/series/selection-bulk", {
+    setAllImportableSelection: async function (includeInImport) {
+      var seriesResponse = await fetch("/api/v1/import/" + this.jobId + "/series/selection-bulk", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-CSRF-Token": readCsrfTokenFromBody(),
           },
           body: JSON.stringify({
-            include_in_import: true,
+            include_in_import: includeInImport,
             imported_series_ids: [],
           }),
         });
@@ -7330,7 +7423,12 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
             .catch(function () {
               return {};
             });
-          throw new Error(seriesError.detail || "Failed to select matched series.");
+          throw new Error(
+            seriesError.detail ||
+              (includeInImport
+                ? "Failed to select matched series."
+                : "Failed to clear series selection."),
+          );
         }
 
         var fileResponse = await fetch("/api/v1/import/" + this.jobId + "/files/selection-bulk", {
@@ -7340,7 +7438,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
             "X-CSRF-Token": readCsrfTokenFromBody(),
           },
           body: JSON.stringify({
-            include_in_import: true,
+            include_in_import: includeInImport,
           }),
         });
 
@@ -7350,9 +7448,18 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
             .catch(function () {
               return {};
             });
-          throw new Error(fileError.detail || "Failed to select in-library files.");
+          throw new Error(
+            fileError.detail ||
+              (includeInImport
+                ? "Failed to select in-library files."
+                : "Failed to clear in-library file selection."),
+          );
         }
+    },
 
+    selectAllImportable: async function () {
+      try {
+        await this.setAllImportableSelection(true);
         await this.refreshReviewSummary();
         await this.refreshSeriesReview();
       } catch (err) {
@@ -7369,47 +7476,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     deselectAllImportable: async function () {
       try {
-        var seriesResponse = await fetch("/api/v1/import/" + this.jobId + "/series/selection-bulk", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": readCsrfTokenFromBody(),
-          },
-          body: JSON.stringify({
-            include_in_import: false,
-            imported_series_ids: [],
-          }),
-        });
-
-        if (!seriesResponse.ok) {
-          var seriesError = await seriesResponse
-            .json()
-            .catch(function () {
-              return {};
-            });
-          throw new Error(seriesError.detail || "Failed to clear series selection.");
-        }
-
-        var fileResponse = await fetch("/api/v1/import/" + this.jobId + "/files/selection-bulk", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": readCsrfTokenFromBody(),
-          },
-          body: JSON.stringify({
-            include_in_import: false,
-          }),
-        });
-
-        if (!fileResponse.ok) {
-          var fileError = await fileResponse
-            .json()
-            .catch(function () {
-              return {};
-            });
-          throw new Error(fileError.detail || "Failed to clear in-library file selection.");
-        }
-
+        await this.setAllImportableSelection(false);
         await this.refreshReviewSummary();
         await this.refreshSeriesReview();
       } catch (err) {
@@ -7576,6 +7643,9 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         this.importableItemCount =
           Number(summary.importable_items_total) ||
           (Number(summary.matched_series_importable) || 0) + this.duplicateImportableCount;
+        this.needsAttentionCount = Number(summary.needs_attention_total) || 0;
+        this.needsAttentionFileCount = Number(summary.needs_attention_files_total) || 0;
+        this.deferredFollowUpCount = Number(summary.deferred_follow_up_total) || 0;
         this.resolvedConflictGroupCount = Number(summary.resolved_file_conflict_groups) || 0;
         this.conflictSeriesCount = Number(summary.series_conflicts_total) || 0;
         this.syncConflictCommitFlags();
@@ -7609,6 +7679,48 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     syncSelectionUi: function () {
       this.syncSelectionSummaryUi();
+    },
+
+    importAllReady: async function () {
+      if (this.importableItemCount === 0 || this.confirming) {
+        return;
+      }
+      if (!this.hasRequiredPreferredRoot()) {
+        this.confirmError =
+          "Choose a preferred managed destination for future acquisitions before importing this split series.";
+        return;
+      }
+
+      this.confirming = true;
+      this.confirmError = "";
+      try {
+        await this.setAllImportableSelection(true);
+        var response = await fetch("/api/v1/import/" + this.jobId + "/confirm", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": readCsrfTokenFromBody(),
+          },
+          body: JSON.stringify({
+            series_ids: [],
+            story_arc_ids: [],
+            story_arc_decisions: [],
+            target_library_root_id: this.preferredRootId,
+          }),
+        });
+        if (!response.ok) {
+          var error = await response.json().catch(function () {
+            return { detail: "Failed to confirm import" };
+          });
+          throw new Error(error.detail || "Server error (" + response.status + ")");
+        }
+        clearImportConflictCommitState(this.jobId);
+        dispatchImportWizardAdvance({ step: 4, jobStatus: "importing" });
+      } catch (err) {
+        this.confirmError = err && err.message ? err.message : "Failed to import ready comics.";
+      } finally {
+        this.confirming = false;
+      }
     },
 
     confirmImport: async function () {

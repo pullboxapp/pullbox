@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -21,6 +22,12 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
     ImportSourceType,
 )
+from pullbox.models.story_arc import (
+    ImportedStoryArcStatus,
+    StoryArcResolutionState,
+    StoryArcSourceKind,
+)
+from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.models.user import User
 from pullbox.services.import_safety_bulk_review import (
     ImportSafetyBulkInterruptedError,
@@ -82,9 +89,168 @@ async def _seed_size_blocks(session: AsyncSession, *, count: int) -> int:
     return int(job.id)
 
 
+async def _seed_one_page_blocks(
+    session: AsyncSession,
+    source_root: Path,
+    *,
+    count: int,
+) -> int:
+    if await session.get(User, 42) is None:
+        session.add(
+            User(
+                id=42,
+                username="bulk-operator",
+                password_hash="not-used-in-service-tests",
+            )
+        )
+    job = ImportJob(
+        source_path=str(source_root),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.REVIEW,
+    )
+    session.add(job)
+    await session.flush()
+    series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Needs visual review",
+        status=ImportSeriesStatus.MATCHED,
+        selected_for_import=True,
+    )
+    session.add(series)
+    await session.flush()
+    for index in range(count):
+        path = source_root / f"possible-cover-{index}.cbz"
+        path.write_bytes(b"source stays untouched")
+        block = build_import_safety_diagnostics(
+            ImportSafetyCategory.SINGLE_PAGE_COMIC.value,
+            code=ImportSafetyCategory.SINGLE_PAGE_COMIC.value,
+            overrideable_hint=True,
+        )
+        session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                file_path=str(path),
+                file_name=path.name,
+                file_size=path.stat().st_size,
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_BLOCKED,
+                include_in_import=True,
+                diagnostics={"safety_block": block},
+            )
+        )
+    await session.commit()
+    return int(job.id)
+
+
+async def _link_job_files_to_story_arc(
+    session: AsyncSession,
+    job_id: int,
+) -> tuple[ImportedStoryArc, list[ImportedStoryArcEntry]]:
+    files = list(
+        (
+            await session.scalars(
+                select(ImportedFile)
+                .where(ImportedFile.import_job_id == job_id)
+                .order_by(ImportedFile.id)
+            )
+        ).all()
+    )
+    arc = ImportedStoryArc(
+        import_job_id=job_id,
+        source_kind=StoryArcSourceKind.FOLDER,
+        source_key=f"folder:bulk:{job_id}",
+        source_ordinal=1,
+        name="Bulk safety arc",
+        status=ImportedStoryArcStatus.NEEDS_REVIEW,
+        diagnostics={"safety_incomplete": True},
+    )
+    session.add(arc)
+    await session.flush()
+    entries = [
+        ImportedStoryArcEntry(
+            imported_story_arc_id=arc.id,
+            import_file_id=item.id,
+            source_ordinal=ordinal,
+            source_kind=StoryArcSourceKind.FOLDER,
+            resolution_state=StoryArcResolutionState.AMBIGUOUS,
+            diagnostics={
+                "safety_code": "single_page_comic",
+                "review_reason": "source_file_safety_blocked",
+            },
+        )
+        for ordinal, item in enumerate(files, start=1)
+    ]
+    session.add_all(entries)
+    await session.commit()
+    return arc, entries
+
+
+@pytest.mark.asyncio
+async def test_skip_one_page_archives_uses_preview_and_preserves_sources(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    job_id = await _seed_one_page_blocks(db_session, tmp_path, count=3)
+    arc, entries = await _link_job_files_to_story_arc(db_session, job_id)
+    category = ImportSafetyCategory.SINGLE_PAGE_COMIC
+
+    preview = await bulk_review_service.preview_import_safety_category_skip(
+        db_session,
+        job_id,
+        category,
+        actor_id=42,
+    )
+    assert preview.affected_count == 3
+    assert preview.preview_token is not None
+
+    result = await bulk_review_service.skip_import_safety_category(
+        db_session,
+        job_id,
+        category,
+        actor_id=42,
+        preview_token=preview.preview_token,
+        page_size=2,
+    )
+
+    assert result.affected_count == 3
+    assert result.pages_processed == 2
+    items = list(
+        (
+            await db_session.execute(
+                select(ImportedFile)
+                .where(ImportedFile.import_job_id == job_id)
+                .order_by(ImportedFile.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert all(item.status == ImportedFileStatus.SKIPPED for item in items)
+    assert all(item.include_in_import is False for item in items)
+    assert all(Path(item.file_path).read_bytes() == b"source stays untouched" for item in items)
+    refreshed_entries = list(
+        (
+            await db_session.scalars(
+                select(ImportedStoryArcEntry).where(
+                    ImportedStoryArcEntry.imported_story_arc_id == arc.id
+                )
+            )
+        ).all()
+    )
+    refreshed_arc = await db_session.get(ImportedStoryArc, arc.id)
+    assert all(
+        entry.resolution_state == StoryArcResolutionState.SKIPPED for entry in refreshed_entries
+    )
+    assert all("safety_code" not in entry.diagnostics for entry in refreshed_entries)
+    assert refreshed_arc is not None
+    assert refreshed_arc.diagnostics["safety_incomplete"] is False
+
+
 @pytest.mark.asyncio
 async def test_allow_once_processes_only_bounded_pages(db_session: AsyncSession) -> None:
     job_id = await _seed_size_blocks(db_session, count=5)
+    arc, entries = await _link_job_files_to_story_arc(db_session, job_id)
     category = ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT
     preview = await preview_import_safety_category(
         db_session,
@@ -115,6 +281,22 @@ async def test_allow_once_processes_only_bounded_pages(db_session: AsyncSession)
         )
     ).scalar_one()
     assert approved == 5
+    refreshed_entries = list(
+        (
+            await db_session.scalars(
+                select(ImportedStoryArcEntry).where(
+                    ImportedStoryArcEntry.imported_story_arc_id == arc.id
+                )
+            )
+        ).all()
+    )
+    refreshed_arc = await db_session.get(ImportedStoryArc, arc.id)
+    assert all(
+        entry.resolution_state == StoryArcResolutionState.PENDING for entry in refreshed_entries
+    )
+    assert all("safety_code" not in entry.diagnostics for entry in refreshed_entries)
+    assert refreshed_arc is not None
+    assert refreshed_arc.diagnostics["safety_incomplete"] is False
 
 
 @pytest.mark.asyncio

@@ -180,6 +180,26 @@ async def _load_status_counts(
     return status_counts
 
 
+async def _load_safety_review_counts(
+    session: AsyncSession,
+    job_id: int,
+) -> tuple[int, int]:
+    row = (
+        await session.execute(
+            select(
+                func.count(func.distinct(ImportedFile.import_series_id)),
+                func.count(ImportedFile.id),
+            ).where(
+                ImportedFile.import_job_id == job_id,
+                ImportedFile.status.in_(
+                    (ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED)
+                ),
+            )
+        )
+    ).one()
+    return int(row[0] or 0), int(row[1] or 0)
+
+
 async def _load_safety_blocked_files_by_series_id(
     session: AsyncSession,
     job_id: int,
@@ -377,6 +397,9 @@ async def load_import_review_context(
         library_roots = list(library_roots_result.scalars().all())
 
     split_series_review = await load_selected_split_series_review(session, job)
+    safety_review_series_count, safety_review_file_count = await _load_safety_review_counts(
+        session, job_id
+    )
     managed_library_root_options: list[dict[str, Any]] = []
     if split_series_review.requires_preferred_destination:
         managed_library_root_options = [
@@ -412,6 +435,8 @@ async def load_import_review_context(
         "current_view": current_view,
         "sort": normalized_sort,
         "status_counts": await _load_status_counts(session, job_id),
+        "safety_review_series_count": safety_review_series_count,
+        "safety_review_file_count": safety_review_file_count,
         "review_summary": await load_import_review_summary(session, job),
         "split_series_review": split_series_review,
         "managed_library_root_options": managed_library_root_options,

@@ -131,6 +131,30 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_review_allow_safety_category_once",
         ),
         (
+            "/import/{job_id}/safety/categories/{category}/skip-preview",
+            ("GET",),
+            "import_review_preview_safety_category_skip",
+            "import_review_preview_safety_category_skip",
+        ),
+        (
+            "/import/{job_id}/safety/categories/{category}/skip",
+            ("POST",),
+            "import_review_skip_safety_category",
+            "import_review_skip_safety_category",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/safety/source-cleanup-preview",
+            ("GET",),
+            "import_review_source_cleanup_preview",
+            "import_review_source_cleanup_preview",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/safety/source-cleanup",
+            ("POST",),
+            "import_review_source_cleanup",
+            "import_review_source_cleanup",
+        ),
+        (
             "/import/{job_id}/files/{file_id}/safety/allow-once",
             ("POST",),
             "import_review_allow_safety_file_once",

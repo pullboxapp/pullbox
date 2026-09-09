@@ -794,6 +794,35 @@ class TestImportShellRouteContracts:
         )
         assert "selectCurrentPageMatched" not in script
 
+    async def test_import_review_offers_one_click_ready_import_and_defers_follow_up(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
+
+        assert "importAllReady: async function () {" in script
+        assert 'data-testid="import-review-guided-summary"' in template
+        assert 'data-testid="import-review-import-ready"' in template
+        assert "Import all ready comics" in template
+        assert "Deferred follow-up" in template
+
+    async def test_import_source_uses_automatic_nonblocking_defaults(
+        self,
+        authenticated_client,
+    ) -> None:  # type: ignore[no-untyped-def]
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        template = Path("src/pullbox/ui/templates/partials/import_step_source.html").read_text()
+        response = await authenticated_client.get("/import")
+
+        assert response.status_code == 200
+        assert 'data-testid="import-mylar-path-confirm"' not in response.text
+        assert 'data-testid="import-mylar-unresolved-confirm"' not in response.text
+        assert "missing or stale Mylar references" in template
+        assert 'data-testid="import-layout-advanced"' in template
+        assert 'data-testid="import-story-arc-section"' not in response.text
+        assert 'data-testid="import-future-layout-section"' not in response.text
+        assert "Analyze library" in template
+        assert 'mylar3_allow_unresolved_paths: this.sourceType === "mylar3" &&' in script
+        assert "this.mylarPathPreview.can_continue_with_unresolved" in script
+
     async def test_import_conflict_commit_state_requires_visible_group_match(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
 
@@ -840,7 +869,10 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-mylar-path-analyze"' in response.text
         assert 'data-testid="import-mylar-path-mapping-row"' in response.text
         assert 'data-testid="import-mylar-path-add"' in response.text
-        assert 'data-testid="import-mylar-path-confirm"' in response.text
+        assert 'data-testid="import-mylar-path-confirm"' not in response.text
+        assert 'data-testid="import-mylar-unresolved-confirm"' not in response.text
+        assert 'data-testid="import-mylar-stale-reference-notice"' in response.text
+        assert 'data-testid="import-mylar-path-technical-summary"' in response.text
         assert 'data-testid="import-mylar-path-total"' in response.text
         assert 'data-testid="import-mylar-path-unmapped"' in response.text
         assert 'data-testid="import-mylar-path-invalid"' in response.text
@@ -848,16 +880,26 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-mylar-path-mapping-blockers"' in response.text
         assert 'data-testid="import-mylar-path-mapping-examples"' in response.text
         assert 'data-testid="import-mylar-path-warnings"' in response.text
+        assert 'data-testid="import-mylar-path-problem-groups"' in response.text
+        assert 'data-testid="import-mylar-path-exception-details"' in response.text
+        assert 'data-testid="import-mylar-register-reference-root"' in response.text
+        assert "registerMylarReferenceRoot" in response.text
         assert "Path stored in Mylar" in response.text
         assert "Path visible inside Pullbox" in response.text
         assert 'data-testid="import-file-handling-section"' in response.text
+        assert 'data-testid="import-file-handling-choice-section"' in response.text
         assert 'data-testid="import-file-handling-managed"' in response.text
         assert 'data-testid="import-file-handling-in-place"' in response.text
         assert "Copy into Pullbox library" in response.text
         assert "Keep files in place" in response.text
         assert "rename, convert, rewrite metadata, or change permissions on them." in response.text
+        assert 'data-testid="import-advanced-options"' in response.text
+        assert 'data-testid="import-advanced-options-attention-count"' in response.text
+        assert 'data-testid="import-advanced-scan-options"' in response.text
+        assert "Advanced Options" in response.text
+        assert "Advanced scan options" not in response.text
         assert 'data-testid="import-managed-library-root"' in response.text
-        assert response.text.count('data-dropdown-select-contract="v1"') >= 3
+        assert response.text.count('data-dropdown-select-contract="v1"') >= 2
         assert "<select" not in response.text
         assert 'data-testid="import-library-roots-manage"' in response.text
         assert 'data-testid="import-library-roots-refresh"' in response.text
@@ -868,7 +910,13 @@ class TestImportShellRouteContracts:
             "Each existing file remains associated with its containing library root"
             in response.text
         )
-        assert 'data-testid="import-collection-layout-section"' in response.text
+        assert response.text.index('data-testid="import-file-handling-choice-section"') < (
+            response.text.index('data-testid="import-advanced-options"')
+        )
+        assert response.text.index('data-testid="import-advanced-options"') < (
+            response.text.index('data-testid="import-mylar-path-section"')
+        )
+        assert 'data-testid="import-layout-advanced"' in response.text
         assert 'data-testid="import-layout-auto"' in response.text
         assert 'data-testid="import-layout-series-folders"' in response.text
         assert 'data-testid="import-layout-publisher-series"' in response.text
@@ -879,19 +927,10 @@ class TestImportShellRouteContracts:
         assert "How is this library organized?" in response.text
         assert "Use automatic detection for files that do not fit" in response.text
         assert "Files that do not fit will wait for review" in response.text
-        assert 'data-testid="import-future-layout-section"' in response.text
-        assert 'data-testid="import-future-layout-toggle"' in response.text
-        assert "Use this layout for future files" in response.text
-        assert "Existing files won't be renamed" in response.text
-        assert "Current library policy" in response.text
-        assert "Proposed for new files" in response.text
-        assert 'data-testid="import-story-arc-section"' in response.text
-        assert 'data-testid="import-story-arc-preview"' in response.text
-        assert 'data-testid="import-story-arc-import-toggle"' in response.text
-        assert 'data-testid="import-story-arc-materialize-toggle"' in response.text
-        assert "Import logical story arcs and memberships" in response.text
-        assert "Materialize and synchronize separate arc files" in response.text
-        assert "Step 3 remains the final review" in response.text
+        assert 'data-testid="import-future-layout-section"' not in response.text
+        assert 'data-testid="import-story-arc-section"' not in response.text
+        assert "Advanced layout and matching" in response.text
+        assert "Analyze library" in response.text
         assert 'data-testid="file-browser-modal"' in response.text
         assert 'data-testid="import-collection-modal-host"' in response.text
 
@@ -925,23 +964,46 @@ class TestImportShellRouteContracts:
         assert '"/api/v1/config/library-roots/"' in source_controller
         assert 'fetch("/api/v1/config/library-roots"' in source_controller
         assert "refreshImportLibraryRoots: async function" in source_controller
+        assert "registerMylarReferenceRoot: async function" in source_controller
+        assert 'request("/api/v1/config/library-roots/preview")' in source_controller
+        assert "allow_referenced_registrations: true" in source_controller
+        assert "allow_managed_writes: false" in source_controller
         assert "managedLibraryRootOptions: function" in source_controller
         assert 'fetch("/api/v1/import/story-arc-preview"' in source_controller
         assert 'fetch("/api/v1/import/mylar-path-preview"' in source_controller
         assert "mylarPathPreviewRequestId" in source_controller
+        assert "mylarPathAttentionCount: function" in source_controller
+        assert "this.mylarPathPreview.problem_groups" in source_controller
         assert "clearMylarPathPreview: function" in source_controller
         assert "mylarPathMappingChanged: function" in source_controller
         assert "this.mylarPathPreview.can_confirm" in source_controller
-        assert "this.mylarPathPreview.requires_confirmation" in source_controller
+        assert "this.mylarPathPreview.requires_confirmation" not in source_controller
         assert 'mylar3_path_map: this.sourceType === "mylar3"' in source_controller
         assert 'mylar3_path_map_confirmed: this.sourceType === "mylar3"' in source_controller
-        assert "storyArcImportRequested: false" in source_controller
+        assert "storyArcImportRequested: true" in source_controller
         assert "storyArcMaterializationRequested: false" in source_controller
+        assert source_controller.count("this.scheduleStoryArcPreview();") == 0
+        assert "this.storyArcImportRequested = false;" not in source_controller
         assert "story_arc_import_requested: this.storyArcImportRequested" in source_controller
         assert (
             "story_arc_materialization_requested: this.storyArcMaterializationRequested"
             in source_controller
         )
+
+    async def test_import_review_keeps_detailed_statuses_behind_follow_up_controls(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        job_id = await _seed_import_review_job(sec_db)
+
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+
+        assert response.status_code == 200
+        assert 'data-testid="import-review-details"' in response.text
+        assert 'data-testid="import-review-needs-attention-action"' in response.text
+        assert 'data-testid="import-review-story-arc-follow-up-action"' in response.text
+        assert "Review details" in response.text
 
     async def test_split_series_review_requires_future_destination_without_relocation(self) -> None:
         template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
@@ -1704,7 +1766,11 @@ class TestImportShellRouteContracts:
         authenticated_client,
         sec_db,
     ) -> None:  # type: ignore[no-untyped-def]
-        from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+        from pullbox.models.import_job import (
+            ImportedFile,
+            ImportedFileStatus,
+            ImportedSeries,
+        )
 
         job_id = await _seed_import_review_job(sec_db)
         async with sec_db() as session:
@@ -2320,7 +2386,11 @@ class TestImportShellRouteContracts:
     ) -> None:  # type: ignore[no-untyped-def]
         from sqlalchemy import select
 
-        from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+        from pullbox.models.import_job import (
+            ImportedFile,
+            ImportedFileStatus,
+            ImportedSeries,
+        )
 
         job_id = await _seed_import_review_job(sec_db)
         async with sec_db() as session:
@@ -2637,7 +2707,7 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Reconcile for Import" in response.text
+        assert "Review your library" in response.text
         assert "Needs Issue Match" in response.text
         assert "Needs issue" in response.text
         assert 'data-testid="import-review-reconcile-action"' in response.text
@@ -2675,7 +2745,7 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Reconcile for Import" in response.text
+        assert "Review your library" in response.text
         assert "Needs Series Match" in response.text
         assert 'data-testid="import-review-search-cv-action"' in response.text
         assert 'data-testid="import-review-reconcile-action"' not in response.text
@@ -2720,10 +2790,11 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Blocked Files" in response.text
+        assert "Safety Review" in response.text
         assert "Safety review" in response.text
         assert "Oversized Omnibus.cbz" in response.text
         assert 'data-testid="import-review-safety-category-summary"' in response.text
+        assert 'data-testid="import-review-safety-category-details"' in response.text
         assert "Decompression-size limit" in response.text
         assert "Code: archive_decompressed_size_limit" in response.text
         assert "Retry alone will not help" in response.text
@@ -2785,6 +2856,99 @@ class TestImportShellRouteContracts:
         assert "/safety/allow-once?status=safety_blocked" not in response.text
         assert 'data-testid="import-review-skip-safety-file"' in response.text
         assert "/safety/skip?status=safety_blocked" in response.text
+
+    async def test_import_review_one_page_category_offers_source_preserving_bulk_skip(
+        self,
+        authenticated_client,
+        sec_db,
+        tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from sqlalchemy import select
+
+        from pullbox.core.library_file_ownership import build_file_identity_signature
+        from pullbox.models.config import SystemConfig
+        from pullbox.models.import_job import (
+            ImportedFile,
+            ImportedFileStatus,
+            ImportedSeries,
+            ImportJob,
+        )
+
+        job_id = await _seed_import_review_job(sec_db)
+        source = tmp_path / "possible-cover.cbz"
+        source.write_bytes(b"one-page source")
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 1)
+            assert series is not None
+            series.diagnostics = {"safety_blocked_files": 1}
+            job = await session.get(ImportJob, job_id)
+            assert job is not None
+            job.source_path = str(tmp_path)
+            trash_config = await session.scalar(
+                select(SystemConfig).where(SystemConfig.key == "utility_trash_folder")
+            )
+            if trash_config is None:
+                session.add(
+                    SystemConfig(
+                        key="utility_trash_folder",
+                        value=str(tmp_path / "trash"),
+                        value_type="string",
+                    )
+                )
+            else:
+                trash_config.value = str(tmp_path / "trash")
+            imported_file = ImportedFile(
+                import_job_id=job_id,
+                import_series_id=series.id,
+                file_path=str(source),
+                file_name=source.name,
+                file_size=source.stat().st_size,
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_BLOCKED,
+                include_in_import=True,
+                source_signature=build_file_identity_signature(source),
+                diagnostics={
+                    "safety_block": {
+                        "kind": "file_safety_blocked",
+                        "code": "single_page_comic",
+                        "category": "single_page_comic",
+                        "reason": "The archive contains one image page.",
+                        "details": [],
+                        "overrideable": True,
+                    }
+                },
+            )
+            session.add(imported_file)
+            await session.flush()
+            file_id = imported_file.id
+            await session.commit()
+
+        response = await authenticated_client.get(
+            f"/import/{job_id}/review-partial?status=safety_blocked"
+        )
+        assert response.status_code == 200
+        assert "One-page archive" in response.text
+        assert 'data-testid="import-review-safety-bulk-skip-preview-single_page_comic"' in (
+            response.text
+        )
+        assert 'data-testid="import-review-source-cleanup-preview"' not in response.text
+
+        preview = await authenticated_client.get(
+            f"/import/{job_id}/safety/categories/single_page_comic/skip-preview"
+        )
+        assert preview.status_code == 200
+        assert "Skip these files from this import" in preview.text
+        assert "SKIP FILES" not in preview.text
+        assert "Source files will not be changed or deleted." in preview.text
+
+        cleanup_preview = await authenticated_client.get(
+            f"/import/{job_id}/files/{file_id}/safety/source-cleanup-preview"
+        )
+        assert cleanup_preview.status_code == 200
+        assert 'data-testid="import-source-cleanup-modal"' in cleanup_preview.text
+        assert "Move source to Trash" in cleanup_preview.text
+        assert "This changes the source library" in cleanup_preview.text
+        assert "Type MOVE TO TRASH" not in cleanup_preview.text
 
     async def test_import_review_keeps_approved_file_in_safety_view_while_rematching(
         self,

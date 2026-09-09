@@ -44,11 +44,9 @@ def reconcile_discovered_mylar_paths(discovered_list: list[DiscoveredSeries]) ->
             if not isinstance(evidence, dict) or evidence.get("member_index_scanned") is not True:
                 continue
             sidecar = cached_mylar_sidecar_data(file.metadata_diagnostics)
-            if sidecar is None:
-                continue
             metadata = extractor.from_path(
                 path,
-                sidecar_data=sidecar,
+                sidecar_data=sidecar or {},
                 archive_member_evidence=evidence,
                 include_archive_entry_issue_hint=False,
             )

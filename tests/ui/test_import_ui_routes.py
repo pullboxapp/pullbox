@@ -805,6 +805,8 @@ class TestImportResultsPartial:
                 }
             ],
             remaining_conflict_files=100,
+            story_arcs_created_count=2,
+            story_arcs_follow_up_count=3,
             resume_step=5,
             resume_job_id=35,
             resume_progress_snapshot={},
@@ -824,6 +826,41 @@ class TestImportResultsPartial:
         assert "Build a clean Pullbox library" in html
         assert "leaving every Mylar source file unchanged" in html
         assert 'data-testid="clean-library-mixed-folder-blocked"' not in html
+        assert 'data-testid="import-results-future-organization"' in html
+        assert 'href="/settings?tab=media"' in html
+        assert "Set future library organization" in html
+        assert 'data-testid="import-results-story-arcs"' in html
+        assert "2 created automatically" in html
+        assert "3 saved for later review" in html
+
+    def test_completed_cover_details_offer_explicit_post_import_source_cleanup(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        html = templates.env.get_template("partials/import_completed_cleanup_files.html").render(
+            job_id=35,
+            cleanup_action="skip_probable_covers",
+            cleanup_page=SimpleNamespace(
+                total=1,
+                page=1,
+                total_pages=1,
+                items=[
+                    SimpleNamespace(
+                        id=91,
+                        file_name="possible-cover.cbz",
+                        error_message="The archive contains one image page.",
+                        diagnostics={
+                            "safety_block": {"reason": "The archive contains one image page."}
+                        },
+                    )
+                ],
+            ),
+        )
+
+        assert 'data-testid="import-results-source-cleanup-preview-91"' in html
+        assert "Move source to Trash" in html
+        assert "return_to=results" in html
 
     def test_failed_results_template_preserves_bounded_safety_actions(self) -> None:
         from types import SimpleNamespace

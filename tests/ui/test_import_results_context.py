@@ -626,6 +626,39 @@ async def test_arc_only_results_count_only_completed_verified_story_arc_placemen
     assert context["referenced_files_registered"] == 1
     assert context["rollback_managed_candidates"] == 1
     assert context["rollback_reference_candidates"] == 1
+    assert context["story_arcs_created_count"] == 1
+    assert context["story_arcs_follow_up_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_results_report_unresolved_story_arcs_as_optional_follow_up(
+    db_session,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/imports/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    db_session.add(
+        ImportedStoryArc(
+            import_job=job,
+            source_kind=StoryArcSourceKind.FOLDER,
+            source_key=f"folder:follow-up:{job.id}",
+            source_ordinal=1,
+            name="Review Later Arc",
+            status=ImportedStoryArcStatus.NEEDS_REVIEW,
+        )
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    assert context["story_arcs_created_count"] == 0
+    assert context["story_arcs_follow_up_count"] == 1
 
 
 @pytest.mark.asyncio

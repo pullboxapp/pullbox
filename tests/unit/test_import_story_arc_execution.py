@@ -179,7 +179,7 @@ async def test_arc_only_execution_preserves_million_issue_and_missing_order(
 
 
 @pytest.mark.asyncio
-async def test_normal_exception_after_durable_arc_page_fails_closed_without_losing_provenance(
+async def test_normal_exception_after_durable_arc_page_becomes_nonfatal_follow_up(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -245,21 +245,20 @@ async def test_normal_exception_after_durable_arc_page_fails_closed_without_losi
         if durable_action_page_committed:
             raise RuntimeError("/private/source/should-not-be-persisted")
 
-    with pytest.raises(RuntimeError, match="should-not-be-persisted"):
-        await execution_module._execute_story_arc_materialization(
-            db_session,
-            job,
-            job_id=int(job.id),
-            raise_if_cancelled=fail_after_first_durable_action_page,
-            record_action=record_action,
-            record_actions=None,
-            log_event=logs,
-            emit_progress=AsyncMock(),
-            estimate_remaining_seconds=lambda *_args: None,
-            progress_callback=None,
-            runtime_revision_state={"value": 0},
-            job_started_at=None,
-        )
+    returned_job, materialization = await execution_module._execute_story_arc_materialization(
+        db_session,
+        job,
+        job_id=int(job.id),
+        raise_if_cancelled=fail_after_first_durable_action_page,
+        record_action=record_action,
+        record_actions=None,
+        log_event=logs,
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_args: None,
+        progress_callback=None,
+        runtime_revision_state={"value": 0},
+        job_started_at=None,
+    )
 
     await db_session.refresh(job)
     await db_session.refresh(staged)
@@ -273,10 +272,14 @@ async def test_normal_exception_after_durable_arc_page_fails_closed_without_losi
             )
         ).all()
     )
-    assert job.status is ImportJobStatus.FAILED
+    assert returned_job is job
+    assert materialization.arcs_failed == 1
+    assert job.status is ImportJobStatus.IMPORTING
     assert job.import_completed_at is None
-    assert job.error_message == "Story-arc registration failed; canonical files remain imported."
-    assert job.progress_snapshot["status"] == ImportJobStatus.FAILED.value
+    assert job.error_message == (
+        "Some story arcs need follow-up; canonical comics imported successfully."
+    )
+    assert job.progress_snapshot["status"] == ImportJobStatus.IMPORTING.value
     assert job.progress_snapshot["phase"] == "story_arcs"
     assert "/private" not in str(job.progress_snapshot)
     assert staged.status is ImportedStoryArcStatus.CONFIRMED
@@ -463,7 +466,7 @@ async def test_post_file_resolution_links_new_canonical_issue(
 
 
 @pytest.mark.asyncio
-async def test_materialization_failure_keeps_committed_canonical_registration(
+async def test_materialization_failure_does_not_fail_canonical_import(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     managed_import_root: LibraryRoot,
@@ -531,20 +534,22 @@ async def test_materialization_failure_keeps_committed_canonical_registration(
         raising=False,
     )
     logs = AsyncMock()
-    with pytest.raises(RuntimeError, match="should-not-leak"):
-        await _execute(
-            db_session,
-            job,
-            process_series_files=process_files,
-            log_event=logs,
-        )
+    await _execute(
+        db_session,
+        job,
+        process_series_files=process_files,
+        log_event=logs,
+    )
 
     await db_session.refresh(job)
     await db_session.refresh(staged)
-    assert job.status == ImportJobStatus.FAILED
+    assert job.status == ImportJobStatus.COMPLETED
     assert job.total_files_imported == 1
-    assert job.error_message == "Story-arc registration failed; canonical files remain imported."
-    assert job.progress_snapshot["status"] == ImportJobStatus.FAILED.value
+    assert job.error_message == (
+        "Some story arcs need follow-up; canonical comics imported successfully."
+    )
+    assert job.progress_snapshot["status"] == ImportJobStatus.IMPORTING.value
+    assert job.progress_snapshot["phase"] == "story_arcs"
     assert "/private" not in str(job.progress_snapshot)
     assert staged.status == ImportedStoryArcStatus.CONFIRMED
     assert staged.materialized_story_arc_id is None
@@ -557,8 +562,8 @@ async def test_materialization_failure_keeps_committed_canonical_registration(
     )
     assert failure.kwargs["failure_type"] == "RuntimeError"
     assert "/private" not in failure.kwargs["message"]
-    assert all(
-        len(call.args) < 4 or call.args[3] != "import_completed" for call in logs.await_args_list
+    assert any(
+        len(call.args) >= 4 and call.args[3] == "import_completed" for call in logs.await_args_list
     )
 
 

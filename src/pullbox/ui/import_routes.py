@@ -25,13 +25,18 @@ from pullbox.services.import_completed_cleanup import (
     list_completed_import_cleanup_files,
 )
 from pullbox.services.import_safety_bulk_review import (
-    IMPORT_SAFETY_BULK_CONFIRMATION,
     ImportSafetyBulkInterruptedError,
     ImportSafetyBulkPreview,
     allow_import_safety_category_once,
     preview_import_safety_category,
+    preview_import_safety_category_skip,
+    skip_import_safety_category,
 )
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
+from pullbox.services.import_safety_source_cleanup import (
+    move_one_page_source_to_trash,
+    preview_one_page_source_cleanup,
+)
 from pullbox.services.import_workflow_state import (
     ACTIVE_IMPORT_JOB_STATUSES,
     snapshot_mode_for_job,
@@ -592,6 +597,28 @@ async def _load_import_safety_bulk_preview(
     return preview
 
 
+async def _load_import_safety_bulk_skip_preview(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    category: ImportSafetyCategory,
+    actor_id: int,
+) -> ImportSafetyBulkPreview:
+    """Load an authoritative preview for a source-preserving category skip."""
+    try:
+        preview = await preview_import_safety_category_skip(
+            session,
+            job_id,
+            category,
+            actor_id=actor_id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    if preview.preview_token is None:
+        raise HTTPException(status_code=404, detail="Bulk safety action not available.")
+    return preview
+
+
 @router.get(
     "/import/{job_id}/safety/categories/{category}/preview",
     response_class=HTMLResponse,
@@ -638,7 +665,6 @@ async def import_review_allow_safety_category_once(
     user: InteractiveOperatorUser,
     session: DbSession,
     preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
-    confirmation: Annotated[str, Form(max_length=64)] = "",
     status: str | None = Query("safety_blocked"),
     page: int = Query(1, ge=1),
     sort: str | None = Query(None),
@@ -646,28 +672,6 @@ async def import_review_allow_safety_category_once(
     """Apply one exact signed category preview, then refresh Step 3."""
     if category is not ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT:
         raise HTTPException(status_code=404, detail="Bulk safety action not available.")
-    if confirmation != IMPORT_SAFETY_BULK_CONFIRMATION:
-        preview = await _load_import_safety_bulk_preview(
-            session,
-            job_id=job_id,
-            category=category,
-            actor_id=user.id,
-        )
-        return await _render_import_review_partial(
-            job_id,
-            request,
-            user,
-            session,
-            status=status,
-            page=page,
-            sort=sort,
-            extra_context={
-                "safety_bulk_preview": preview,
-                "safety_bulk_error": "Type ALLOW ONCE exactly to confirm this action.",
-                "safety_bulk_error_category": category.value,
-            },
-        )
-
     try:
         await allow_import_safety_category_once(
             session,
@@ -713,6 +717,192 @@ async def import_review_allow_safety_category_once(
         )
 
     trigger_import_safety_bulk_rematch(job_id)
+    return await import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+    )
+
+
+@router.get(
+    "/import/{job_id}/safety/categories/{category}/skip-preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_preview_safety_category_skip(
+    job_id: int,
+    category: ImportSafetyCategory,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    """Render a signed preview for excluding one-page archives from this import."""
+    preview = await _load_import_safety_bulk_skip_preview(
+        session,
+        job_id=job_id,
+        category=category,
+        actor_id=user.id,
+    )
+    return await _render_import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+        extra_context={
+            "safety_bulk_preview": preview,
+            "safety_bulk_action": "skip",
+        },
+    )
+
+
+@router.post(
+    "/import/{job_id}/safety/categories/{category}/skip",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_skip_safety_category(
+    job_id: int,
+    category: ImportSafetyCategory,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    """Exclude a signed one-page archive set while leaving source files untouched."""
+    try:
+        await skip_import_safety_category(
+            session,
+            job_id,
+            category,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except (ImportSafetyBulkInterruptedError, ValidationError) as exc:
+        await session.rollback()
+        message = (
+            exc.message
+            if isinstance(exc, ValidationError)
+            else "The bulk skip stopped because the import job changed. Review the latest state."
+        )
+        return await _render_import_review_partial(
+            job_id,
+            request,
+            user,
+            session,
+            status=status,
+            page=page,
+            sort=sort,
+            extra_context={
+                "safety_bulk_error": message,
+                "safety_bulk_error_category": category.value,
+            },
+        )
+    return await import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+    )
+
+
+@router.get(
+    "/import/{job_id}/files/{file_id}/safety/source-cleanup-preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_source_cleanup_preview(
+    job_id: int,
+    file_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+    return_to: str = Query("review"),
+) -> Response:
+    """Preview the explicitly destructive source cleanup for one one-page archive."""
+    try:
+        preview = await preview_one_page_source_cleanup(
+            session,
+            job_id,
+            file_id,
+            actor_id=user.id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_source_cleanup_modal.html",
+        _ctx(
+            request,
+            user,
+            preview=preview,
+            status=status or "safety_blocked",
+            page=page,
+            sort=sort or "confidence",
+            return_to="results" if return_to == "results" else "review",
+            error="",
+        ),
+    )
+
+
+@router.post(
+    "/import/{job_id}/files/{file_id}/safety/source-cleanup",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_source_cleanup(
+    job_id: int,
+    file_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+    return_to: str = Query("review"),
+) -> Response:
+    """Move one explicitly confirmed source file to configured Trash."""
+    try:
+        await move_one_page_source_to_trash(
+            session,
+            job_id,
+            file_id,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    if return_to == "results":
+        return Response(
+            status_code=204,
+            headers={
+                "HX-Redirect": (f"/import?tab=collection&resume_job_id={job_id}&resume_step=5")
+            },
+        )
     return await import_review_partial(
         job_id,
         request,

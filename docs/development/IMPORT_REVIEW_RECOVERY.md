@@ -1,5 +1,27 @@
 # Recheck A Saved Import Review
 
+## Guided Import Contract
+
+Collection imports use the same five stages for Mylar and folder sources:
+Source, Analyze, Review, Import, and Finish. The normal path is intentionally
+task-oriented:
+
+- Step 1 asks for the source, copy versus keep-in-place behavior, and a managed
+  destination only when one is needed. Layout overrides and manual path
+  mappings remain under progressive disclosure.
+- Mylar path analysis groups a shared root problem into one actionable card.
+  When at least one source is available, missing or stale Mylar references are
+  retained as non-blocking follow-up instead of requiring an acknowledgement.
+- Step 3 shows Ready, Needs attention, and Deferred follow-up first. **Import
+  all ready comics** selects the safe canonical set without requiring the user
+  to visit every deferred group. Detailed status tables remain available under
+  **Review details**.
+- Trusted, complete Mylar or ComicInfo Story Arc evidence may create a logical
+  Story Arc automatically. Inferred or incomplete arc evidence is retained for
+  later review and never blocks canonical comic import.
+- Source-mutating actions are not presented during Review. Completed Results
+  owns optional cleanup, clean-library organization, and future-policy links.
+
 Use this maintenance procedure when a review was generated before the Mylar
 sidecar parser and comic-content checks were corrected. Normal completed-job
 recovery is available in the import results screen and does not require an
@@ -17,8 +39,14 @@ Available recovery actions are intentionally narrow:
 
 - **Dismiss stale Mylar references** marks missing database references skipped.
   It does not delete a review record or touch Mylar's database.
-- **Skip probable cover files** excludes one-page image archives while leaving
-  the source files intact.
+- **Skip one-page archives** excludes one-page image archives while leaving the
+  source files intact. A one-page archive may be cover art, a damaged archive,
+  or an intentional one-page comic, so Pullbox does not delete it automatically.
+- **Move a reviewed source to Trash** is an individual post-import option for a
+  confirmed cover or unwanted one-page source. It appears only in completed
+  Results, uses a red warning modal and an actor-bound signed preview, and
+  requires configured Trash plus source write permission. Reference-only Mylar
+  roots cannot use it; the non-destructive skip remains available instead.
 - **Skip unusable files** excludes empty, unsupported, and page-less files.
 - **Allow oversized files once** retries only decompression-size blocks marked
   overrideable. It does not change the global archive safety policy or approve
@@ -38,10 +66,12 @@ Available recovery actions are intentionally narrow:
   source artifact are never changed.
 
 Every mutation requires a fresh, actor-bound signed preview. Pullbox rejects an
-expired preview or any action whose row set changed after preview. Mutations run
-in bounded database pages, recompute import counters, and create import and
-security audit records. Dangerous, unknown, and genuinely ambiguous outcomes
-remain manual-review items.
+expired preview or any action whose row set changed after preview. Bounded,
+recoverable actions use a normal confirmation; typed confirmation remains
+reserved for permanent deletion. Mutations run in bounded database pages,
+recompute import counters, and create import and security audit records.
+Dangerous, unknown, and genuinely ambiguous outcomes remain manual-review
+items.
 
 Once cleanup is complete, **Archive results** hides the finished job from the
 current history view without deleting its rows, logs, decisions, or rollback
@@ -237,7 +267,9 @@ under the database's recorded name.
   Replace or skip the file; it cannot be allowed once.
 - `single_page_comic`: possibly an alternate cover, but also possibly an
   intentional one-page comic. Inspect it and approve individually or skip it.
-  Bulk archive-size approval does not approve these files.
+  Bulk archive-size approval does not approve these files. Moving the source to
+  Trash is never automatic and is available only from completed-import cleanup
+  after an explicit red warning on a writable source.
 - Archive read failures remain distinct from empty archives. An unavailable
   RAR backend, corrupt archive, permissions problem, or disappearing source is
   not evidence that the archive has zero pages.

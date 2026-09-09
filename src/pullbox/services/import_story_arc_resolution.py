@@ -123,6 +123,52 @@ async def resolve_staged_story_arc_entries(
     )
 
 
+async def refresh_story_arc_entries_for_import_files(
+    session: AsyncSession,
+    *,
+    import_job_id: int,
+    import_file_ids: Sequence[int],
+) -> int:
+    """Refresh derived arc state after authoritative import-file mutations."""
+    normalized_file_ids = tuple(dict.fromkeys(int(value) for value in import_file_ids))
+    if not normalized_file_ids:
+        return 0
+
+    entries = list(
+        (
+            await session.scalars(
+                select(ImportedStoryArcEntry)
+                .join(
+                    ImportedStoryArc,
+                    ImportedStoryArc.id == ImportedStoryArcEntry.imported_story_arc_id,
+                )
+                .where(
+                    ImportedStoryArc.import_job_id == import_job_id,
+                    ImportedStoryArcEntry.import_file_id.in_(normalized_file_ids),
+                )
+                .order_by(ImportedStoryArcEntry.id)
+            )
+        ).all()
+    )
+    if not entries:
+        return 0
+
+    indexes = await _load_resolution_indexes(
+        session,
+        import_job_id=import_job_id,
+        entries=entries,
+    )
+    for entry in entries:
+        _resolve_entry(entry, indexes)
+
+    await _refresh_arc_safety_diagnostics(
+        session,
+        arc_ids={int(entry.imported_story_arc_id) for entry in entries},
+    )
+    await session.flush()
+    return len(entries)
+
+
 async def _load_resolution_indexes(
     session: AsyncSession,
     *,
@@ -242,6 +288,9 @@ def _resolve_entry(entry: ImportedStoryArcEntry, indexes: _ResolutionIndexes) ->
 
     if candidate is not None:
         entry.import_file_id = candidate.id
+        if candidate.status == ImportedFileStatus.SKIPPED:
+            _mark_skipped(entry, reason="source_file_skipped")
+            return
         if candidate.status == ImportedFileStatus.CONFLICT:
             _mark_review(
                 entry,
@@ -250,12 +299,16 @@ def _resolve_entry(entry: ImportedStoryArcEntry, indexes: _ResolutionIndexes) ->
             )
             return
         if candidate.status == ImportedFileStatus.SAFETY_BLOCKED:
-            _mark_review(
+            _mark_safety_review(
                 entry,
-                StoryArcResolutionState.AMBIGUOUS,
-                "source_file_safety_blocked",
+                candidate,
             )
             return
+
+        stale_safety_review = _review_reason(entry) == "source_file_safety_blocked"
+        _clear_current_safety_diagnostics(entry)
+        if entry.resolution_state == StoryArcResolutionState.AMBIGUOUS and stale_safety_review:
+            entry.resolution_state = StoryArcResolutionState.PENDING
 
         candidate_issue = (
             indexes.issues_by_id.get(candidate.matched_issue_id)
@@ -369,6 +422,7 @@ def _mark_resolved(entry: ImportedStoryArcEntry, issue: Issue, *, method: str) -
     entry.resolution_method = method
     diagnostics = dict(entry.diagnostics or {})
     diagnostics.pop("review_reason", None)
+    _archive_and_remove_safety_code(diagnostics)
     diagnostics["resolution_evidence"] = "trusted_local_exact_identity"
     entry.diagnostics = diagnostics
 
@@ -385,6 +439,89 @@ def _mark_review(
     diagnostics = dict(entry.diagnostics or {})
     diagnostics["review_reason"] = reason
     entry.diagnostics = diagnostics
+
+
+def _mark_safety_review(entry: ImportedStoryArcEntry, item: ImportedFile) -> None:
+    _mark_review(
+        entry,
+        StoryArcResolutionState.AMBIGUOUS,
+        "source_file_safety_blocked",
+    )
+    diagnostics = dict(entry.diagnostics or {})
+    safety_block = item.diagnostics.get("safety_block") if item.diagnostics else None
+    safety_code = safety_block.get("code") if isinstance(safety_block, dict) else None
+    if isinstance(safety_code, str) and safety_code.strip():
+        diagnostics["safety_code"] = safety_code.strip()
+    entry.diagnostics = diagnostics
+
+
+def _mark_skipped(entry: ImportedStoryArcEntry, *, reason: str) -> None:
+    entry.matched_issue_id = None
+    entry.resolution_state = StoryArcResolutionState.SKIPPED
+    entry.resolution_confidence = None
+    entry.resolution_method = None
+    entry.selected_for_import = False
+    diagnostics = dict(entry.diagnostics or {})
+    _archive_and_remove_safety_code(diagnostics)
+    diagnostics["review_reason"] = reason
+    entry.diagnostics = diagnostics
+
+
+def _clear_current_safety_diagnostics(entry: ImportedStoryArcEntry) -> None:
+    diagnostics = dict(entry.diagnostics or {})
+    _archive_and_remove_safety_code(diagnostics)
+    if diagnostics.get("review_reason") == "source_file_safety_blocked":
+        diagnostics.pop("review_reason", None)
+    entry.diagnostics = diagnostics
+
+
+def _archive_and_remove_safety_code(diagnostics: dict[str, object]) -> None:
+    safety_code = diagnostics.pop("safety_code", None)
+    if isinstance(safety_code, str) and safety_code.strip():
+        diagnostics.setdefault("scan_safety_code", safety_code.strip())
+
+
+def _review_reason(entry: ImportedStoryArcEntry) -> str | None:
+    reason = (entry.diagnostics or {}).get("review_reason")
+    return reason if isinstance(reason, str) else None
+
+
+async def _refresh_arc_safety_diagnostics(
+    session: AsyncSession,
+    *,
+    arc_ids: set[int],
+) -> None:
+    if not arc_ids:
+        return
+    blocked_arc_ids = {
+        int(arc_id)
+        for arc_id in (
+            await session.scalars(
+                select(ImportedStoryArcEntry.imported_story_arc_id)
+                .join(ImportedFile, ImportedFile.id == ImportedStoryArcEntry.import_file_id)
+                .where(
+                    ImportedStoryArcEntry.imported_story_arc_id.in_(arc_ids),
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                )
+                .distinct()
+            )
+        ).all()
+    }
+    arcs = list(
+        (
+            await session.scalars(select(ImportedStoryArc).where(ImportedStoryArc.id.in_(arc_ids)))
+        ).all()
+    )
+    for arc in arcs:
+        diagnostics = dict(arc.diagnostics or {})
+        if diagnostics.get("safety_incomplete") is True:
+            diagnostics.setdefault("scan_safety_incomplete", True)
+        if diagnostics.get("safety_blocked") is True:
+            diagnostics.setdefault("scan_safety_blocked", True)
+        has_current_block = int(arc.id) in blocked_arc_ids
+        diagnostics["safety_incomplete"] = has_current_block
+        diagnostics["safety_blocked"] = has_current_block
+        arc.diagnostics = diagnostics
 
 
 def _parse_provider_id(value: str | None) -> int | None:

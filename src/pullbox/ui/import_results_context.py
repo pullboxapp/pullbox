@@ -273,12 +273,12 @@ _CLEANUP_ACTION_PRESENTATION = {
         "tone": "neutral",
     },
     CompletedImportCleanupAction.SKIP_PROBABLE_COVERS: {
-        "label": "Skip probable cover files",
+        "label": "Skip one-page archives",
         "description": (
-            "Exclude one-page image archives that look like series cover art, "
-            "while preserving the source files."
+            "Exclude one-page image archives from this import while preserving the source files. "
+            "They may be cover art, damaged archives, or intentional one-page comics."
         ),
-        "button_label": "Skip cover files",
+        "button_label": "Skip from import",
         "tone": "neutral",
     },
     CompletedImportCleanupAction.SKIP_UNUSABLE_FILES: {
@@ -789,6 +789,39 @@ async def _load_rollback_journal_summary(
     }
 
 
+async def _load_story_arc_results_summary(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[str, int]:
+    """Summarize created arcs separately from retained follow-up evidence."""
+    created_count, follow_up_count = (
+        await session.execute(
+            select(
+                func.sum(
+                    case(
+                        (ImportedStoryArc.materialized_story_arc_id.is_not(None), 1),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case(
+                        (
+                            ImportedStoryArc.materialized_story_arc_id.is_(None)
+                            & (ImportedStoryArc.status != ImportedStoryArcStatus.SKIPPED),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+            ).where(ImportedStoryArc.import_job_id == job_id)
+        )
+    ).one()
+    return {
+        "story_arcs_created_count": int(created_count or 0),
+        "story_arcs_follow_up_count": int(follow_up_count or 0),
+    }
+
+
 async def load_import_results_context(
     session: AsyncSession,
     job: ImportJob,
@@ -953,6 +986,7 @@ async def load_import_results_context(
     )
     catalog_sync_pending_count = len(catalog_sync_series) - catalog_sync_failed_count
     rollback_journal_summary = await _load_rollback_journal_summary(session, job_id)
+    story_arc_results_summary = await _load_story_arc_results_summary(session, job_id)
     rollback_incomplete = bool(
         rollback_journal_summary["rollback_manual_recovery_count"]
         and job.status == ImportJobStatus.FAILED
@@ -1007,4 +1041,5 @@ async def load_import_results_context(
         "cleanup_needs_review_count": cleanup_needs_review_count,
         **clean_library_summary,
         **rollback_journal_summary,
+        **story_arc_results_summary,
     }

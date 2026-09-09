@@ -70,18 +70,6 @@ def detect_folder_story_arc(
         display_name = _collapse_whitespace(item.story_arc)
         normalized_names.setdefault(normalize_story_arc_name(display_name), display_name)
 
-    if any(not item.evidence_complete for item in files) and (
-        len(series_keys) > 1 or bool(named) or bool(ordered)
-    ):
-        return _result(
-            FolderArcClassification.NEEDS_REVIEW,
-            "incomplete_arc_evidence",
-            next(iter(normalized_names.values()), _clean_folder_label(folder_label)),
-            files,
-            series_keys,
-            ordered,
-        )
-
     if len(normalized_names) > 1:
         return _result(
             FolderArcClassification.NEEDS_REVIEW,
@@ -92,8 +80,21 @@ def detect_folder_story_arc(
             ordered,
         )
 
+    ordered_mixed = len(series_keys) > 1 and len(ordered) == len(files) and bool(files)
+    has_strong_arc_evidence = bool(named) or ordered_mixed
+
+    if any(not item.evidence_complete for item in files) and has_strong_arc_evidence:
+        return _result(
+            FolderArcClassification.NEEDS_REVIEW,
+            "incomplete_arc_evidence",
+            next(iter(normalized_names.values()), _clean_folder_label(folder_label)),
+            files,
+            series_keys,
+            ordered,
+        )
+
     order_keys = [_order_key(item.story_arc_number or "") for item in ordered]
-    if len(order_keys) != len(set(order_keys)):
+    if has_strong_arc_evidence and len(order_keys) != len(set(order_keys)):
         return _result(
             FolderArcClassification.NEEDS_REVIEW,
             "duplicate_arc_order",
@@ -113,7 +114,6 @@ def detect_folder_story_arc(
             ordered,
         )
 
-    ordered_mixed = len(series_keys) > 1 and len(ordered) == len(files) and bool(files)
     if ordered_mixed and confirmed_order_pattern:
         return _result(
             FolderArcClassification.STORY_ARC,

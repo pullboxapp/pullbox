@@ -513,6 +513,48 @@
   </section>
   {% endif %}
 
+  {% set story_arcs_created_count = story_arcs_created_count|default(0) %}
+  {% set story_arcs_follow_up_count = story_arcs_follow_up_count|default(0) %}
+  {% if story_arcs_created_count > 0 or story_arcs_follow_up_count > 0 %}
+  <section data-testid="import-results-story-arcs" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Story Arc follow-up</p>
+        <h3 class="section-title-plain">Story Arc evidence preserved</h3>
+        <p class="section-copy">
+          {{ story_arcs_created_count }} created automatically from exact local metadata;
+          {{ story_arcs_follow_up_count }} saved for later review. Canonical comics were imported
+          independently and no separate arc files were required.
+        </p>
+      </div>
+      {% if story_arcs_created_count > 0 %}
+      <div class="section-header-actions">
+        <a href="/story-arcs" class="btn-ghost btn-sm">View Story Arcs</a>
+      </div>
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if job.status.value == 'completed' and not job.archived_at %}
+  <section data-testid="import-results-future-organization" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Optional follow-up</p>
+        <h3 class="section-title-plain">Set future library organization</h3>
+        <p class="section-copy">
+          This import used the current library rules. Adjust folder names, filenames, conversion,
+          ComicInfo, and permissions in Media Management when you want future managed files to use
+          a different organization.
+        </p>
+      </div>
+      <div class="section-header-actions">
+        <a href="/settings?tab=media" class="btn-ghost btn-sm">Open Media Management</a>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
   {% if failed_series %}
   <div class="section-card overflow-hidden">
     <div class="section-header">

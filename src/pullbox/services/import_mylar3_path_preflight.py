@@ -34,6 +34,7 @@ from pullbox.schemas.import_mylar3_path_preflight import (
     MylarPathMappingPreview,
     MylarPathOutcome,
     MylarPathPreviewResponse,
+    MylarPathProblemGroup,
     MylarPathResolutionCounts,
 )
 
@@ -269,6 +270,7 @@ class Mylar3PathPreflightAnalyzer:
             unresolved_fingerprint=_exception_fingerprint(exceptions) if unresolved else None,
             exceptions=exceptions,
             exception_count=len(exceptions),
+            problem_groups=_group_path_problems(exceptions),
             blocking_reasons=[
                 f"Library root '{root.name}' ({root.path}) is unavailable or unreadable. "
                 "Check its mount and permissions."
@@ -605,6 +607,125 @@ def _exception_fingerprint(exceptions: list[MylarPathException]) -> str:
         (item.series_id, item.stored_path, item.attempted_path, item.outcome) for item in exceptions
     )
     return hashlib.sha256(json.dumps(entries, ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def _problem_root(exception: MylarPathException) -> Path:
+    """Return the smallest useful root that explains this stored location."""
+    path = Path(exception.stored_path)
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        resolved = path
+    if resolved.is_file():
+        return resolved.parent.parent
+    return resolved.parent
+
+
+def _problem_directory(exception: MylarPathException) -> Path:
+    """Return the existing directory represented by one stored location."""
+    path = Path(exception.stored_path)
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return path.parent
+    return resolved.parent if resolved.is_file() else resolved
+
+
+def _nearest_safe_mount(path: Path) -> Path | None:
+    """Return the nearest registerable mount boundary containing ``path``."""
+    for candidate in (path, *path.parents):
+        if candidate == candidate.parent:
+            break
+        try:
+            if candidate.is_mount() and not is_sensitive_path(candidate):
+                return candidate
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return None
+
+
+def _outside_root_buckets(
+    exceptions: list[MylarPathException],
+) -> list[tuple[Path, list[MylarPathException]]]:
+    """Group repeated series locations by their actual source boundary."""
+    mounted: dict[Path, list[MylarPathException]] = {}
+    unmounted: list[MylarPathException] = []
+    for exception in exceptions:
+        directory = _problem_directory(exception)
+        mount = _nearest_safe_mount(directory)
+        if mount is None:
+            unmounted.append(exception)
+        else:
+            mounted.setdefault(mount, []).append(exception)
+
+    buckets = list(mounted.items())
+    if not unmounted:
+        return buckets
+
+    directories = [_problem_directory(exception) for exception in unmounted]
+    try:
+        common = Path(os.path.commonpath([str(path) for path in directories]))
+    except ValueError:
+        common = Path()
+    series_count = len({exception.series_id for exception in unmounted})
+    if series_count == 1 and common in directories:
+        common = common.parent
+    if common.is_dir() and common != common.parent and not is_sensitive_path(common):
+        buckets.append((common, unmounted))
+        return buckets
+
+    fallback: dict[Path, list[MylarPathException]] = {}
+    for exception in unmounted:
+        fallback.setdefault(_problem_root(exception), []).append(exception)
+    buckets.extend(fallback.items())
+    return buckets
+
+
+def _group_path_problems(
+    exceptions: list[MylarPathException],
+) -> list[MylarPathProblemGroup]:
+    grouped: dict[tuple[MylarPathOutcome, str], list[MylarPathException]] = {}
+    outside_root: list[MylarPathException] = []
+    for exception in exceptions:
+        if exception.outcome == "outside_root":
+            outside_root.append(exception)
+            continue
+        root = _problem_root(exception)
+        grouped.setdefault((exception.outcome, str(root)), []).append(exception)
+    for root, entries in _outside_root_buckets(outside_root):
+        grouped.setdefault(("outside_root", str(root)), []).extend(entries)
+
+    results: list[MylarPathProblemGroup] = []
+    for (outcome, root_path), entries in sorted(grouped.items(), key=lambda item: item[0]):
+        series_count = len({entry.series_id for entry in entries})
+        location_count = len(entries)
+        if outcome == "outside_root":
+            reason = (
+                f"{series_count} series use {root_path}, which isn't registered as a library root."
+            )
+            suggested_action = (
+                "Register this path for existing files, then Pullbox will analyze the paths again."
+            )
+            root = Path(root_path)
+            can_register = (
+                root.is_dir() and _location_is_readable(root) and not is_sensitive_path(root)
+            )
+        else:
+            reason = entries[0].reason
+            suggested_action = entries[0].suggested_action
+            can_register = False
+        results.append(
+            MylarPathProblemGroup(
+                root_path=root_path,
+                outcome=outcome,
+                series_count=series_count,
+                location_count=location_count,
+                reason=reason,
+                suggested_action=suggested_action,
+                can_register_reference_root=can_register,
+            )
+        )
+    return results
 
 
 def _path_exception(

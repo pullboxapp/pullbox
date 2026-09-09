@@ -106,6 +106,18 @@ class MylarPathException(BaseModel):
     suggested_action: str
 
 
+class MylarPathProblemGroup(BaseModel):
+    """One root-level explanation for repeated path failures."""
+
+    root_path: str
+    outcome: MylarPathOutcome
+    series_count: int = Field(ge=0)
+    location_count: int = Field(ge=0)
+    reason: str
+    suggested_action: str
+    can_register_reference_root: bool = False
+
+
 class MylarIdentityGroupPreview(BaseModel):
     """Identity-resolved paths grouped under one enabled root."""
 
@@ -146,6 +158,7 @@ class MylarPathPreviewResponse(BaseModel):
     unresolved_fingerprint: str | None = None
     exception_count: int = 0
     exceptions: list[MylarPathException] = Field(default_factory=list)
+    problem_groups: list[MylarPathProblemGroup] = Field(default_factory=list)
     report_id: str | None = None
     blocking_reasons: list[str] = Field(default_factory=list)
     partial: bool = False

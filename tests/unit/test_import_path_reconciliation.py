@@ -121,6 +121,20 @@ async def test_scan_reconciliation_reuses_sidecars_already_read_by_mylar(
     assert [file.file_path for file in discovered[0].files] == [str(actual)]
 
 
+async def test_scan_reconciles_unique_trusted_comicinfo_without_mylar_sidecar(db_session, tmp_path):
+    discovered, actual, _db = await _scan(tmp_path)
+    candidate = next(file for file in discovered[0].files if file.file_path == str(actual))
+    candidate.metadata_diagnostics.pop("mylar3_sidecar_data", None)
+    candidate.metadata_diagnostics.pop("mylar3_sidecar", None)
+
+    await validate_discovered_files_safety(db_session, discovered)
+
+    assert [file.file_path for file in discovered[0].files] == [str(actual)]
+    assert candidate.metadata_diagnostics["mylar3_path_reconciliation"]["method"] == (
+        "verified_same_folder_issue_identity"
+    )
+
+
 def test_missing_source_message_does_not_claim_file_changed_after_scan():
     block = build_import_safety_diagnostics("missing", code="source_missing")
     assert block["category"] == "source_missing"

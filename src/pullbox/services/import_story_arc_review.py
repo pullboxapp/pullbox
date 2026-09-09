@@ -10,7 +10,11 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
-from pullbox.models.import_job import ImportJob, ImportJobStatus
+from pullbox.core.story_arc_naming import (
+    DEFAULT_STORY_ARC_FILE_TEMPLATE,
+    DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
+)
+from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportJob, ImportJobStatus
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
     StoryArc,
@@ -75,6 +79,70 @@ StoryArcReviewAction = Literal["select", "skip"]
 StoryArcDecisionTuple = tuple[int, StoryArcReviewAction, int | None]
 
 
+async def auto_confirm_trusted_logical_story_arcs(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    batch_size: int = 100,
+) -> int:
+    """Confirm exact local arc evidence for logical post-import creation only."""
+    if isinstance(batch_size, bool) or batch_size <= 0:
+        raise ValidationError("Story arc auto-confirmation batch size must be positive")
+
+    confirmed = 0
+    last_id = 0
+    while True:
+        arcs = list(
+            (
+                await session.scalars(
+                    select(ImportedStoryArc)
+                    .where(
+                        ImportedStoryArc.import_job_id == job_id,
+                        ImportedStoryArc.id > last_id,
+                        ImportedStoryArc.status.in_(
+                            (
+                                ImportedStoryArcStatus.DETECTED,
+                                ImportedStoryArcStatus.NEEDS_REVIEW,
+                            )
+                        ),
+                        ImportedStoryArc.selected_for_import.is_(False),
+                    )
+                    .options(selectinload(ImportedStoryArc.entries))
+                    .order_by(ImportedStoryArc.id)
+                    .limit(batch_size)
+                )
+            ).all()
+        )
+        if not arcs:
+            break
+
+        blocked_arc_ids = await _load_arc_ids_with_current_safety(
+            session,
+            [int(arc.id) for arc in arcs],
+        )
+        for arc in arcs:
+            if int(arc.id) in blocked_arc_ids or not _has_trusted_complete_arc_evidence(arc):
+                continue
+            arc.proposed_policy_snapshot = _logical_auto_policy(arc.source_kind)
+            diagnostics = dict(arc.diagnostics or {})
+            diagnostics["auto_confirmation"] = {
+                "schema_version": 1,
+                "scope": "logical_membership_only",
+                "evidence": "trusted_local_exact_identity",
+            }
+            arc.diagnostics = diagnostics
+            arc.status = ImportedStoryArcStatus.CONFIRMED
+            arc.selected_for_import = True
+            for entry in arc.entries:
+                entry.selected_for_import = (
+                    entry.resolution_state != StoryArcResolutionState.SKIPPED
+                )
+            confirmed += 1
+        await session.flush()
+        last_id = int(arcs[-1].id)
+    return confirmed
+
+
 async def load_import_story_arc_review_page(
     session: AsyncSession,
     job_id: int,
@@ -110,13 +178,14 @@ async def load_import_story_arc_review_page(
     )
     arc_ids = [int(arc.id) for arc in arcs]
     counts_by_arc_id = await _load_entry_counts(session, arc_ids)
+    safety_blocked_arc_ids = await _load_arc_ids_with_current_safety(session, arc_ids)
     candidates_by_arc_id = await _load_merge_candidates(session, arcs)
 
     rows: list[ImportedStoryArcReviewRow] = []
     for arc in arcs:
         counts = counts_by_arc_id.get(int(arc.id), {})
         conflict_count = counts.get(StoryArcResolutionState.CONFLICT, 0)
-        safety_blocked = _arc_has_safety_findings(arc)
+        safety_blocked = int(arc.id) in safety_blocked_arc_ids
         block_reason: str | None = None
         if safety_blocked:
             block_reason = "Resolve safety findings before selecting this story arc."
@@ -211,7 +280,14 @@ async def update_import_story_arc_decision(
         return staged_arc
 
     await _validate_merge_target(session, proposed_story_arc_id)
-    _assert_story_arc_selectable(staged_arc, entries)
+    safety_blocked_arc_ids = await _load_arc_ids_with_current_safety(
+        session,
+        [int(staged_arc.id)],
+    )
+    _assert_story_arc_selectable(
+        entries,
+        has_current_safety_block=int(staged_arc.id) in safety_blocked_arc_ids,
+    )
     staged_arc.status = ImportedStoryArcStatus.READY
     staged_arc.selected_for_import = True
     staged_arc.proposed_story_arc_id = proposed_story_arc_id
@@ -272,6 +348,10 @@ async def confirm_import_story_arcs(
     )
     merge_targets: dict[int, StoryArc] = {}
     await _load_merge_targets_by_id(session, target_ids, merge_targets)
+    safety_blocked_arc_ids = await _load_arc_ids_with_current_safety(
+        session,
+        requested_id_list,
+    )
 
     for arc_id, action, proposed_story_arc_id in normalized_decisions:
         _apply_loaded_story_arc_decision(
@@ -279,6 +359,7 @@ async def confirm_import_story_arcs(
             action=action,
             proposed_story_arc_id=proposed_story_arc_id,
             merge_targets=merge_targets,
+            has_current_safety_block=arc_id in safety_blocked_arc_ids,
         )
 
     for arc_id in compatibility_ids:
@@ -290,6 +371,7 @@ async def confirm_import_story_arcs(
             action="select",
             proposed_story_arc_id=staged_arc.proposed_story_arc_id,
             merge_targets=merge_targets,
+            has_current_safety_block=arc_id in safety_blocked_arc_ids,
         )
 
     confirmed_count = 0
@@ -315,12 +397,19 @@ async def confirm_import_story_arcs(
             if staged_arc.proposed_story_arc_id is not None
         }
         await _load_merge_targets_by_id(session, page_target_ids, merge_targets)
+        page_safety_blocked_arc_ids = await _load_arc_ids_with_current_safety(
+            session,
+            [int(staged_arc.id) for staged_arc in selected_arcs],
+        )
         for staged_arc in selected_arcs:
             _validate_loaded_merge_target(
                 staged_arc.proposed_story_arc_id,
                 merge_targets,
             )
-            _assert_story_arc_selectable(staged_arc, staged_arc.entries)
+            _assert_story_arc_selectable(
+                staged_arc.entries,
+                has_current_safety_block=(int(staged_arc.id) in page_safety_blocked_arc_ids),
+            )
             if staged_arc.status != ImportedStoryArcStatus.READY:
                 raise ValidationError(
                     "Select each story arc from Step 3 before confirming the import"
@@ -358,6 +447,7 @@ def _apply_loaded_story_arc_decision(
     action: StoryArcReviewAction,
     proposed_story_arc_id: int | None,
     merge_targets: Mapping[int, StoryArc],
+    has_current_safety_block: bool,
 ) -> None:
     if action not in {"select", "skip"}:
         raise ValidationError("Story arc review action must be select or skip")
@@ -372,7 +462,10 @@ def _apply_loaded_story_arc_decision(
         return
 
     _validate_loaded_merge_target(proposed_story_arc_id, merge_targets)
-    _assert_story_arc_selectable(staged_arc, staged_arc.entries)
+    _assert_story_arc_selectable(
+        staged_arc.entries,
+        has_current_safety_block=has_current_safety_block,
+    )
     staged_arc.status = ImportedStoryArcStatus.READY
     staged_arc.selected_for_import = True
     staged_arc.proposed_story_arc_id = proposed_story_arc_id
@@ -391,6 +484,69 @@ def _validate_loaded_merge_target(
         raise NotFoundError("StoryArc", story_arc_id)
     if target.lifecycle == StoryArcLifecycle.ARCHIVED:
         raise ValidationError("An archived story arc cannot be selected as a merge target")
+
+
+def _has_trusted_complete_arc_evidence(staged_arc: ImportedStoryArc) -> bool:
+    if not staged_arc.name or not staged_arc.name.strip() or not staged_arc.entries:
+        return False
+    active_entries = [
+        entry
+        for entry in staged_arc.entries
+        if entry.resolution_state != StoryArcResolutionState.SKIPPED
+    ]
+    if not active_entries or any(
+        entry.resolution_state
+        in {
+            StoryArcResolutionState.PENDING,
+            StoryArcResolutionState.AMBIGUOUS,
+            StoryArcResolutionState.CONFLICT,
+        }
+        for entry in active_entries
+    ):
+        return False
+
+    diagnostics = staged_arc.diagnostics or {}
+    if staged_arc.source_kind == StoryArcSourceKind.MYLAR3:
+        return diagnostics.get("source_name_present") is True and all(
+            _is_provider_id(entry.source_issue_id) for entry in active_entries
+        )
+    if staged_arc.source_kind == StoryArcSourceKind.COMICINFO:
+        return all(
+            entry.resolution_state == StoryArcResolutionState.RESOLVED for entry in active_entries
+        )
+    if staged_arc.source_kind == StoryArcSourceKind.FOLDER:
+        return diagnostics.get("reason") == "consistent_exact_arc_name" and all(
+            entry.resolution_state == StoryArcResolutionState.RESOLVED
+            and (entry.evidence or {}).get("has_comicinfo") is True
+            for entry in active_entries
+        )
+    return False
+
+
+def _is_provider_id(value: str | None) -> bool:
+    return value is not None and value.strip().isdecimal() and int(value.strip()) > 0
+
+
+def _logical_auto_policy(source_kind: StoryArcSourceKind) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "source": source_kind.value,
+        "activation": "confirmed",
+        "monitored": False,
+        "search_missing": False,
+        "include_upcoming": False,
+        "sync_enabled": False,
+        "placement_policy": {
+            "schema_version": 1,
+            "mode": "logical",
+            "target_library_root_id": None,
+            "destination_root": None,
+            "folder_template": DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
+            "file_template": DEFAULT_STORY_ARC_FILE_TEMPLATE,
+            "symlink_style": None,
+            "synchronize": False,
+        },
+    }
 
 
 async def _require_review_job(session: AsyncSession, job_id: int) -> ImportJob:
@@ -413,12 +569,11 @@ async def _validate_merge_target(session: AsyncSession, story_arc_id: int | None
 
 
 def _assert_story_arc_selectable(
-    staged_arc: ImportedStoryArc,
     entries: Sequence[ImportedStoryArcEntry],
+    *,
+    has_current_safety_block: bool,
 ) -> None:
-    if _arc_has_safety_findings(staged_arc) or any(
-        _entry_has_safety_finding(entry) for entry in entries
-    ):
+    if has_current_safety_block:
         raise ValidationError("Resolve story arc safety findings before confirming this arc")
     if any(entry.resolution_state == StoryArcResolutionState.CONFLICT for entry in entries):
         raise ValidationError(
@@ -426,15 +581,27 @@ def _assert_story_arc_selectable(
         )
 
 
-def _arc_has_safety_findings(staged_arc: ImportedStoryArc) -> bool:
-    diagnostics = _mapping(staged_arc.diagnostics)
-    return diagnostics.get("safety_incomplete") is True or diagnostics.get("safety_blocked") is True
-
-
-def _entry_has_safety_finding(entry: ImportedStoryArcEntry) -> bool:
-    diagnostics = _mapping(entry.diagnostics)
-    safety_code = diagnostics.get("safety_code")
-    return isinstance(safety_code, str) and bool(safety_code.strip())
+async def _load_arc_ids_with_current_safety(
+    session: AsyncSession,
+    arc_ids: Sequence[int],
+) -> set[int]:
+    """Return arcs whose currently linked import file is still safety blocked."""
+    if not arc_ids:
+        return set()
+    return {
+        int(arc_id)
+        for arc_id in (
+            await session.scalars(
+                select(ImportedStoryArcEntry.imported_story_arc_id)
+                .join(ImportedFile, ImportedFile.id == ImportedStoryArcEntry.import_file_id)
+                .where(
+                    ImportedStoryArcEntry.imported_story_arc_id.in_(arc_ids),
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                )
+                .distinct()
+            )
+        ).all()
+    }
 
 
 async def _load_entry_counts(

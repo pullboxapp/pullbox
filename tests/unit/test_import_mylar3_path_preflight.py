@@ -134,6 +134,103 @@ async def test_in_place_mapping_is_tried_before_external_identity_is_rejected(
     assert preview.can_confirm is True
 
 
+async def test_in_place_outside_paths_are_grouped_by_unregistered_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "media" / "comics"
+    (source_root / "Batman (2025)").mkdir(parents=True)
+    (source_root / "Superman (2025)").mkdir()
+    managed_root = tmp_path / "pullbox-library"
+    managed_root.mkdir()
+    database = tmp_path / "mylar.db"
+    _write_mylar_path_database(
+        database,
+        comics=[
+            ("CV-1", str(source_root / "Batman (2025)")),
+            ("CV-2", str(source_root / "Superman (2025)")),
+        ],
+        issues=[],
+    )
+    db_session.add(
+        LibraryRoot(
+            name="Pullbox library",
+            path=str(managed_root),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+        )
+    )
+    await db_session.flush()
+
+    preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=True,
+        mappings=[],
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+    )
+
+    assert preview.resolution.outside_root == 2
+    assert [group.model_dump() for group in preview.problem_groups] == [
+        {
+            "root_path": str(source_root),
+            "outcome": "outside_root",
+            "series_count": 2,
+            "location_count": 2,
+            "reason": (f"2 series use {source_root}, which isn't registered as a library root."),
+            "suggested_action": (
+                "Register this path for existing files, then Pullbox will analyze the paths again."
+            ),
+            "can_register_reference_root": True,
+        }
+    ]
+
+
+async def test_in_place_nested_publisher_paths_share_one_unregistered_root_group(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "media" / "comics"
+    (source_root / "DC Comics" / "Batman (2025)").mkdir(parents=True)
+    (source_root / "Marvel" / "Daredevil (2025)").mkdir(parents=True)
+    managed_root = tmp_path / "pullbox-library"
+    managed_root.mkdir()
+    database = tmp_path / "mylar.db"
+    _write_mylar_path_database(
+        database,
+        comics=[
+            ("CV-1", str(source_root / "DC Comics" / "Batman (2025)")),
+            ("CV-2", str(source_root / "Marvel" / "Daredevil (2025)")),
+        ],
+        issues=[],
+    )
+    db_session.add(
+        LibraryRoot(
+            name="Pullbox library",
+            path=str(managed_root),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+        )
+    )
+    await db_session.flush()
+
+    preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=True,
+        mappings=[],
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+    )
+
+    assert preview.resolution.outside_root == 2
+    assert len(preview.problem_groups) == 1
+    assert preview.problem_groups[0].root_path == str(source_root)
+    assert preview.problem_groups[0].series_count == 2
+    assert preview.problem_groups[0].can_register_reference_root is True
+
+
 async def test_incomplete_automatic_mapping_cannot_be_confirmed(
     db_session: AsyncSession,
     tmp_path: Path,
