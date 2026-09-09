@@ -3200,7 +3200,6 @@ function importSourceData(config) {
               : null;
         }
         if (this.sourceType === "mylar3") {
-          this.clearMylarPathPreview(false);
           this.scheduleMylarPathPreview();
         }
       } catch (err) {
@@ -3820,7 +3819,6 @@ function importSourceData(config) {
               throw new Error("This mapping changed. Review the current path details.");
             }
             this.mylarPathAutoDetect = false;
-            this.clearMylarPathPreview(false);
             this.mylarPathMappings.splice(mappingIndex, 1);
             await this.previewMylarPaths();
             break;
@@ -3967,7 +3965,7 @@ function importSourceData(config) {
       return this.layoutChoice !== "custom" || !!this.customSeriesPathTemplate.trim();
     },
 
-    clearMylarPathPreview: function (resetMappings) {
+    cancelMylarPathPreviewRefresh: function (preserveInitialLoading) {
       if (this.mylarPathPreviewTimer) {
         clearTimeout(this.mylarPathPreviewTimer);
         this.mylarPathPreviewTimer = null;
@@ -3977,8 +3975,12 @@ function importSourceData(config) {
         this.mylarPathPreviewController = null;
       }
       this.mylarPathPreviewRequestId += 1;
+      this.mylarPathPreviewLoading = !!preserveInitialLoading && !this.mylarPathPreview;
+    },
+
+    clearMylarPathPreview: function (resetMappings) {
+      this.cancelMylarPathPreviewRefresh(false);
       this.mylarPathPreview = null;
-      this.mylarPathPreviewLoading = false;
       this.mylarPathPreviewError = "";
       this.mylarPathConfirmed = false;
       this.mylarUnresolvedConfirmed = false;
@@ -3994,10 +3996,10 @@ function importSourceData(config) {
       if (this.sourceType !== "mylar3") {
         return;
       }
-      if (this.mylarPathPreviewTimer) {
-        clearTimeout(this.mylarPathPreviewTimer);
-      }
+      var preserveInitialLoading = this.mylarPathPreviewLoading && !this.mylarPathPreview;
+      this.cancelMylarPathPreviewRefresh(preserveInitialLoading);
       if (!this.canAnalyzeMylarPaths()) {
+        this.mylarPathPreviewLoading = false;
         return;
       }
       var self = this;
@@ -4009,13 +4011,12 @@ function importSourceData(config) {
 
     mylarPathMappingChanged: function () {
       this.mylarPathAutoDetect = false;
-      this.clearMylarPathPreview(false);
       this.scheduleMylarPathPreview();
     },
 
     addMylarPathMapping: function () {
       this.mylarPathAutoDetect = false;
-      this.clearMylarPathPreview(false);
+      this.cancelMylarPathPreviewRefresh(false);
       this.mylarPathMappings.push({
         id: ++this.mylarPathMappingId,
         stored_prefix: "",
@@ -4025,34 +4026,59 @@ function importSourceData(config) {
 
     removeMylarPathMapping: function (index) {
       this.mylarPathAutoDetect = false;
-      this.clearMylarPathPreview(false);
       this.mylarPathMappings.splice(index, 1);
       this.scheduleMylarPathPreview();
     },
 
     resetAutomaticMylarPaths: function () {
-      this.clearMylarPathPreview(true);
-      this.previewMylarPaths();
+      this.previewMylarPaths({ resetAutomatic: true });
     },
 
-    previewMylarPaths: async function () {
-      if (!this.canAnalyzeMylarPaths()) {
+    reconcileMylarPathMappings: function (mappings) {
+      var available = this.mylarPathMappings.slice();
+      return (mappings || []).map(
+        function (mapping) {
+          var existingIndex = available.findIndex(function (candidate) {
+            return !!(
+              candidate &&
+              candidate.stored_prefix === mapping.stored_prefix &&
+              candidate.pullbox_prefix === mapping.pullbox_prefix
+            );
+          });
+          var existing = existingIndex >= 0 ? available.splice(existingIndex, 1)[0] : null;
+          return {
+            id: existing ? existing.id : ++this.mylarPathMappingId,
+            stored_prefix: mapping.stored_prefix,
+            pullbox_prefix: mapping.pullbox_prefix,
+          };
+        }.bind(this),
+      );
+    },
+
+    previewMylarPaths: async function (options) {
+      var opts = options || {};
+      var resetAutomatic = opts.resetAutomatic === true;
+      if (
+        this.sourceType !== "mylar3" ||
+        !this.sourcePath.trim() ||
+        (!resetAutomatic && !this.canAnalyzeMylarPaths())
+      ) {
         return;
       }
-      if (this.mylarPathPreviewTimer) {
-        clearTimeout(this.mylarPathPreviewTimer);
-        this.mylarPathPreviewTimer = null;
-      }
-      if (this.mylarPathPreviewController) {
-        this.mylarPathPreviewController.abort();
-      }
-      var requestId = ++this.mylarPathPreviewRequestId;
+      this.cancelMylarPathPreviewRefresh(false);
+      var requestId = this.mylarPathPreviewRequestId;
       var controller = new AbortController();
+      var requestAutoDetect = resetAutomatic ? true : this.mylarPathAutoDetect;
+      var requestMappings = resetAutomatic
+        ? []
+        : this.mylarPathMappings.map(function (mapping) {
+            return {
+              stored_prefix: String(mapping.stored_prefix || "").trim(),
+              pullbox_prefix: String(mapping.pullbox_prefix || "").trim(),
+            };
+          });
       this.mylarPathPreviewController = controller;
       this.mylarPathPreviewLoading = true;
-      this.mylarPathPreviewError = "";
-      this.mylarPathConfirmed = false;
-      this.mylarUnresolvedConfirmed = false;
       try {
         var response = await fetch("/api/v1/import/mylar-path-preview", {
           method: "POST",
@@ -4065,13 +4091,8 @@ function importSourceData(config) {
             source_path: this.sourcePath.trim(),
             source_type: "mylar3",
             file_handling_mode: this.fileHandlingMode,
-            auto_detect: this.mylarPathAutoDetect,
-            mappings: this.mylarPathMappings.map(function (mapping) {
-              return {
-                stored_prefix: String(mapping.stored_prefix || "").trim(),
-                pullbox_prefix: String(mapping.pullbox_prefix || "").trim(),
-              };
-            }),
+            auto_detect: requestAutoDetect,
+            mappings: requestMappings,
           }),
         });
         var payload = await response.json().catch(function () {
@@ -4096,17 +4117,11 @@ function importSourceData(config) {
         if (requestId !== this.mylarPathPreviewRequestId) {
           return;
         }
+        this.mylarPathPreviewError = "";
+        this.mylarPathAutoDetect = requestAutoDetect;
         this.restoreSkippedAttentionActions(payload);
         this.mylarPathPreview = payload;
-        this.mylarPathMappings = (payload.mappings || []).map(
-          function (mapping) {
-            return {
-              id: ++this.mylarPathMappingId,
-              stored_prefix: mapping.stored_prefix,
-              pullbox_prefix: mapping.pullbox_prefix,
-            };
-          }.bind(this),
-        );
+        this.mylarPathMappings = this.reconcileMylarPathMappings(payload.mappings);
         this.mylarPathConfirmed = !!(
           payload.can_confirm || payload.can_continue_with_unresolved
         );

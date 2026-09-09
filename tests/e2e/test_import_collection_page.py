@@ -248,6 +248,172 @@ class TestImportCollectionTab:
             advanced.locator("article").filter(has_text="One stored Mylar location")
         ).to_be_visible()
 
+    def test_mylar_preflight_refreshes_without_flashing_existing_controls(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        from playwright.sync_api import expect
+
+        preview = self._identity_mylar_path_response(3)
+        preview.update(
+            can_confirm=False,
+            can_continue_with_unresolved=True,
+            attention_fingerprint="c" * 64,
+            attention_items=[
+                {
+                    "key": "missing",
+                    "code": "missing",
+                    "blocks_import": False,
+                    "reason": "One stored Mylar location is missing.",
+                    "suggested_action": "Skip this stale reference for this import.",
+                    "root_path": "/mnt/comics/missing",
+                    "action": {
+                        "kind": "acknowledge_unavailable",
+                        "fingerprint": "e" * 64,
+                    },
+                    "details": {"title": "Missing", "steps": []},
+                },
+                {
+                    "key": "unsafe",
+                    "code": "invalid",
+                    "blocks_import": True,
+                    "reason": "One stored Mylar path is unsafe.",
+                    "suggested_action": "Correct the stored path, then recheck it.",
+                    "root_path": "/mnt/comics/unsafe",
+                    "action": None,
+                    "details": {"title": "Unsafe", "steps": []},
+                },
+                {
+                    "key": "mapping",
+                    "code": "ineffective_mapping",
+                    "blocks_import": False,
+                    "reason": "One manual mapping no longer changes any paths.",
+                    "suggested_action": "Remove the unused mapping.",
+                    "root_path": "/mnt/comics",
+                    "action": {
+                        "kind": "remove_ineffective_mapping",
+                        "fingerprint": "9" * 64,
+                        "stored_prefix": "/old/comics",
+                        "pullbox_prefix": "/mnt/comics",
+                    },
+                    "details": {"title": "Mapping", "steps": []},
+                },
+            ],
+            mappings=[
+                {
+                    "stored_prefix": "/old/comics",
+                    "pullbox_prefix": "/mnt/comics",
+                }
+            ],
+        )
+        requests: list[dict[str, object]] = []
+
+        def analyze(route: Route) -> None:
+            requests.append(route.request.post_data_json)
+            route.fulfill(json=preview)
+
+        authed_page.route("**/api/v1/import/mylar-path-preview", analyze)
+        page = ImportPage(authed_page, seeded_server)
+        page.goto(tab="collection")
+        page.show_collection_source_step()
+        page.source_mylar3_card.click()
+        page.source_path_input.fill("/imports/mylar.db")
+
+        advanced = authed_page.get_by_test_id("import-advanced-options")
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("3")
+        advanced.locator("summary").first.click()
+        page.mylar_path_section.locator("summary").click()
+        expect(advanced.get_by_role("button", name="Restore automatic proposals")).to_be_visible()
+
+        authed_page.evaluate(
+            """() => {
+                const root = document.querySelector("[data-testid='import-advanced-options']");
+                const stableRegions = [
+                    root.querySelector("[data-testid='import-advanced-options-attention-list']"),
+                    root.querySelector("[data-testid='import-mylar-path-section']"),
+                ];
+                const controls = stableRegions.flatMap(region =>
+                    Array.from(region.querySelectorAll("button, input, summary, [role='button']"))
+                ).filter(control => control.getClientRects().length > 0);
+                const required = [
+                    "[data-testid='import-setup-recheck']",
+                    "[data-testid='import-attention-details']",
+                    "[data-testid='import-attention-skip']",
+                    "[data-testid='import-attention-resolve']",
+                ];
+                if (
+                    required.some(selector => !root.querySelector(selector)) ||
+                    !controls.some(
+                        control => control.textContent.trim() === "Restore automatic proposals"
+                    )
+                ) {
+                    throw new Error("Expected every Mylar preflight control before observing refreshes.");
+                }
+                controls.forEach((control, index) => {
+                    control.dataset.noFlashControl = String(index);
+                });
+                window.__importStableControls = controls;
+                window.__importControlMutations = [];
+                window.__importControlObserver = new MutationObserver(records => {
+                    const selectors = controls.map(
+                        (_control, index) => `[data-no-flash-control="${index}"]`
+                    );
+                    const touchesControl = node => {
+                        if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+                        return selectors.some(selector =>
+                            node.matches(selector) ||
+                            node.closest(selector) ||
+                            node.querySelector(selector)
+                        );
+                    };
+                    records.forEach(record => {
+                        const nodes = [record.target, ...record.addedNodes, ...record.removedNodes];
+                        if (nodes.some(touchesControl)) {
+                            window.__importControlMutations.push({
+                                type: record.type,
+                                attribute: record.attributeName || "",
+                            });
+                        }
+                    });
+                });
+                window.__importControlObserver.observe(root, {
+                    subtree: true,
+                    childList: true,
+                    characterData: true,
+                    attributes: true,
+                    attributeFilter: ["class", "disabled", "hidden", "style"],
+                });
+            }"""
+        )
+
+        page.file_handling_in_place.click()
+        authed_page.wait_for_timeout(750)
+        page.file_handling_managed.click()
+        authed_page.wait_for_timeout(750)
+        advanced.get_by_role("button", name="Recheck import setup").click()
+        expect(advanced.get_by_role("button", name="Recheck import setup")).to_be_visible()
+        advanced.get_by_role("button", name="Restore automatic proposals").click()
+        expect(advanced.get_by_role("button", name="Restore automatic proposals")).to_be_visible()
+        assert len(requests) >= 5
+        assert requests[-1]["auto_detect"] is True
+        assert requests[-1]["mappings"] == []
+
+        stability = authed_page.evaluate(
+            """() => {
+                window.__importControlObserver.disconnect();
+                return {
+                    mutations: window.__importControlMutations,
+                    sameNodes: window.__importStableControls.every(
+                        (control, index) =>
+                            control.isConnected &&
+                            document.querySelector(`[data-no-flash-control="${index}"]`) === control
+                    ),
+                };
+            }"""
+        )
+        assert stability == {"mutations": [], "sameNodes": True}
+
     @staticmethod
     def _identity_mylar_path_response(locations: int = 1) -> dict[str, object]:
         return {

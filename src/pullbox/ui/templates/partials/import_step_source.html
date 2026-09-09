@@ -175,15 +175,11 @@
                 x-show="sourceType === 'mylar3'"
                 type="button"
                 @click="previewMylarPaths()"
-                :disabled="!canAnalyzeMylarPaths() || mylarPathPreviewLoading"
+                :disabled="!canAnalyzeMylarPaths()"
                 class="btn-ghost btn-sm inline-flex shrink-0 items-center gap-2 disabled:opacity-40"
                 data-testid="import-setup-recheck"
               >
-                <svg x-show="mylarPathPreviewLoading" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                </svg>
-                <span x-text="mylarPathPreviewLoading ? 'Rechecking...' : 'Recheck import setup'"></span>
+                <span>Recheck import setup</span>
               </button>
             </div>
             <div
@@ -228,7 +224,6 @@
                       <button
                         type="button"
                         class="btn-ghost btn-sm shrink-0"
-                        :disabled="mylarPathPreviewLoading"
                         @click="openAdvancedAttentionDetails(item, $event.currentTarget)"
                         data-testid="import-attention-details"
                       >Details</button>
@@ -237,7 +232,7 @@
                       <button
                         type="button"
                         class="btn-ghost btn-sm inline-flex shrink-0 items-center gap-2 disabled:opacity-40"
-                        :disabled="!!attentionResolvingKey || mylarPathPreviewLoading"
+                        :disabled="!!attentionResolvingKey"
                         @click="skipAdvancedAttention(item)"
                         data-testid="import-attention-skip"
                       >
@@ -245,14 +240,14 @@
                           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                         </svg>
-                        <span x-text="attentionResolvingKey === item.key ? 'Skipping...' : 'Skip for this import'"></span>
+                        <span>Skip for this import</span>
                       </button>
                     </template>
                     <template x-if="item.action && item.action.kind !== 'acknowledge_unavailable'">
                       <button
                         type="button"
                         class="btn-primary btn-sm inline-flex shrink-0 items-center gap-2 disabled:opacity-40"
-                        :disabled="!!attentionResolvingKey || mylarPathPreviewLoading"
+                        :disabled="!!attentionResolvingKey"
                         @click="resolveAdvancedAttention(item)"
                         data-testid="import-attention-resolve"
                       >
@@ -260,7 +255,7 @@
                           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                         </svg>
-                        <span x-text="attentionResolvingKey === item.key ? 'Resolving...' : 'Resolve'"></span>
+                        <span>Resolve</span>
                       </button>
                     </template>
                   </div>
@@ -272,9 +267,7 @@
       <details
         x-show="sourceType === 'mylar3'"
         x-cloak
-        x-data="{ sectionOpen: false }"
-        @toggle="sectionOpen = $event.currentTarget.open"
-        class="rounded-xl border border-pb-border bg-pb-surface/40"
+        class="import-advanced-disclosure rounded-xl border border-pb-border bg-pb-surface/40"
         data-testid="import-mylar-path-section"
       >
         <summary
@@ -282,8 +275,7 @@
           data-testid="import-mylar-path-summary"
         >
           <svg
-            class="mt-0.5 h-4 w-4 shrink-0 transition-transform"
-            :class="sectionOpen && 'rotate-90'"
+            class="import-advanced-disclosure-chevron mt-0.5 h-4 w-4 shrink-0 transition-transform"
             fill="none"
             stroke="currentColor"
             stroke-width="2"
@@ -414,7 +406,7 @@
           <button
             type="button"
             @click="resetAutomaticMylarPaths()"
-            :disabled="!sourcePath.trim() || mylarPathPreviewLoading"
+            :disabled="!sourcePath.trim()"
             class="btn-ghost btn-sm disabled:opacity-40"
           >
             Restore automatic proposals
@@ -427,9 +419,7 @@
       <details
         x-show="(sourceType === 'filesystem' || sourceType === 'mylar3') && shouldShowFileDestinationControl()"
         x-cloak
-        x-data="{ sectionOpen: false }"
-        @toggle="sectionOpen = $event.currentTarget.open"
-        class="rounded-xl border border-pb-border bg-pb-surface/40"
+        class="import-advanced-disclosure rounded-xl border border-pb-border bg-pb-surface/40"
         data-testid="import-advanced-file-management"
       >
         <summary
@@ -437,8 +427,7 @@
           data-testid="import-advanced-file-management-summary"
         >
           <svg
-            class="mt-0.5 h-4 w-4 shrink-0 transition-transform"
-            :class="sectionOpen && 'rotate-90'"
+            class="import-advanced-disclosure-chevron mt-0.5 h-4 w-4 shrink-0 transition-transform"
             fill="none"
             stroke="currentColor"
             stroke-width="2"
@@ -575,9 +564,7 @@
       <details
         x-show="sourceType === 'filesystem' || sourceType === 'mylar3'"
         x-cloak
-        x-data="{ sectionOpen: false }"
-        @toggle="sectionOpen = $event.currentTarget.open"
-        class="rounded-xl border border-pb-border bg-pb-surface/40"
+        class="import-advanced-disclosure rounded-xl border border-pb-border bg-pb-surface/40"
         data-testid="import-layout-advanced"
       >
         <summary
@@ -585,8 +572,7 @@
           data-testid="import-layout-advanced-summary"
         >
           <svg
-            class="mt-0.5 h-4 w-4 shrink-0 transition-transform"
-            :class="sectionOpen && 'rotate-90'"
+            class="import-advanced-disclosure-chevron mt-0.5 h-4 w-4 shrink-0 transition-transform"
             fill="none"
             stroke="currentColor"
             stroke-width="2"

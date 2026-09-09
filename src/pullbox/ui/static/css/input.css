@@ -7175,6 +7175,9 @@
     width: var(--pb-control-icon-size);
     height: var(--pb-control-icon-size);
   }
+  .import-advanced-disclosure[open] > summary .import-advanced-disclosure-chevron {
+    @apply rotate-90;
+  }
   .dropdown-select-panel {
     @apply fixed left-0 top-0 z-[80] max-h-60 overflow-y-auto rounded-lg border border-pb-border-hover bg-pb-card py-1 shadow-2xl shadow-black/20;
     max-height: var(--pb-dropdown-panel-max-height, 15rem);
