@@ -6,8 +6,10 @@ Collection imports use the same five stages for Mylar and folder sources:
 Source, Analyze, Review, Import, and Finish. The normal path is intentionally
 task-oriented:
 
-- Step 1 asks for the source, copy versus keep-in-place behavior, and a managed
-  destination only when one is needed. Layout overrides and manual path
+- Step 1 asks for the source and copy versus keep-in-place behavior. Pullbox
+  automatically uses the sole or default writable managed root for copied
+  imports. **Where new files go** appears only when there is a real choice or
+  no writable destination is available; layout overrides and manual path
   mappings remain under progressive disclosure.
 - Mylar path analysis groups a shared root problem into one actionable card.
   When at least one source is available, missing or stale Mylar references are
@@ -21,6 +23,9 @@ task-oriented:
   later review and never blocks canonical comic import.
 - Source-mutating actions are not presented during Review. Completed Results
   owns optional cleanup, clean-library organization, and future-policy links.
+- In-place imports keep existing files associated with their current roots. If
+  a selected series spans multiple roots, Step 3 requires one writable root for
+  future downloads and replacements without relocating the existing files.
 
 Use this maintenance procedure when a review was generated before the Mylar
 sidecar parser and comic-content checks were corrected. Normal completed-job

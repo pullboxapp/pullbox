@@ -2918,17 +2918,21 @@ function importCollectionFooterData(config) {
 function importSourceData(config) {
   var cfg = config || {};
   var libraryRoots = Array.isArray(cfg.libraryRoots) ? cfg.libraryRoots : [];
-  var defaultManagedRoot = libraryRoots.find(function (root) {
+  var initialManagedRoots = libraryRoots.filter(function (root) {
     return !!(
       root &&
       root.enabled !== false &&
       root.allow_managed_writes !== false &&
       root.available !== false &&
-      root.writable !== false &&
-      root.is_default_managed_destination
+      root.writable !== false
     );
   });
-  var initialTargetRootId = defaultManagedRoot ? Number(defaultManagedRoot.id) : null;
+  var defaultManagedRoot = initialManagedRoots.find(function (root) {
+    return !!root.is_default_managed_destination;
+  });
+  var initialTargetRoot =
+    defaultManagedRoot || (initialManagedRoots.length === 1 ? initialManagedRoots[0] : null);
+  var initialTargetRootId = initialTargetRoot ? Number(initialTargetRoot.id) : null;
   var emptyStoryArcPreview = function () {
     return {
       evidence_detected: false,
@@ -3079,7 +3083,9 @@ function importSourceData(config) {
         var defaultRoot = this.managedLibraryRoots().find(function (root) {
           return !!root.is_default_managed_destination;
         });
-        this.targetLibraryRootId = defaultRoot ? Number(defaultRoot.id) : null;
+        var managedRoots = this.managedLibraryRoots();
+        var automaticRoot = defaultRoot || (managedRoots.length === 1 ? managedRoots[0] : null);
+        this.targetLibraryRootId = automaticRoot ? Number(automaticRoot.id) : null;
       }
       if (this.fileHandlingMode === "in_place") {
         this.scheduleLayoutPreview();
@@ -3118,6 +3124,43 @@ function importSourceData(config) {
       return options;
     },
 
+    selectedManagedLibraryRoot: function () {
+      var selectedRootId = Number(this.targetLibraryRootId);
+      return (
+        this.managedLibraryRoots().find(function (root) {
+          return Number(root.id) === selectedRootId && selectedRootId > 0;
+        }) || null
+      );
+    },
+
+    shouldShowFileDestinationControl: function () {
+      var managedRoots = this.managedLibraryRoots();
+      if (this.fileHandlingMode === "managed_copy") {
+        return managedRoots.length > 1 || !this.hasSelectedManagedDestination();
+      }
+      return managedRoots.length !== 1;
+    },
+
+    fileDestinationSummary: function () {
+      var managedRoots = this.managedLibraryRoots();
+      var selectedRoot = this.selectedManagedLibraryRoot();
+      if (this.fileHandlingMode === "managed_copy") {
+        if (selectedRoot) {
+          return (
+            String(selectedRoot.name || "Library") +
+            " will receive the managed copies from this import."
+          );
+        }
+        return managedRoots.length
+          ? "Choose the writable library that should receive this import."
+          : "Set up a writable library before importing copies.";
+      }
+      if (!managedRoots.length) {
+        return "Existing files can stay where they are, but future downloads need a writable library.";
+      }
+      return "Existing files stay where they are. You can override where Pullbox manages future files.";
+    },
+
     refreshImportLibraryRoots: async function () {
       if (this.libraryRootsRefreshing) {
         return;
@@ -3145,12 +3188,15 @@ function importSourceData(config) {
             return String(left.name || "").localeCompare(String(right.name || ""));
           });
         if (!this.hasSelectedManagedDestination()) {
-          var defaultRoot = this.managedLibraryRoots().find(function (root) {
+          var managedRoots = this.managedLibraryRoots();
+          var defaultRoot = managedRoots.find(function (root) {
             return !!root.is_default_managed_destination;
           });
+          var automaticRoot =
+            defaultRoot || (managedRoots.length === 1 ? managedRoots[0] : null);
           this.targetLibraryRootId =
-            this.fileHandlingMode === "managed_copy" && defaultRoot
-              ? Number(defaultRoot.id)
+            this.fileHandlingMode === "managed_copy" && automaticRoot
+              ? Number(automaticRoot.id)
               : null;
         }
         if (this.sourceType === "mylar3") {
@@ -3539,7 +3585,7 @@ function importSourceData(config) {
           blocks_import: true,
           reason: "Choose a managed destination",
           suggested_action:
-            "Open Advanced file management and select an available, writable Pullbox library.",
+            "Open Where new files go and select an available, writable Pullbox library.",
           root_path: "",
           action: preferredRoot
             ? { kind: "select_managed_destination", library_root_id: Number(preferredRoot.id) }
@@ -3552,7 +3598,7 @@ function importSourceData(config) {
               return String(root.path || "");
             }),
             steps: [
-              "Open Advanced file management.",
+              "Open Where new files go.",
               "Choose an available, writable Pullbox library.",
               "Recheck the import issues before starting the scan.",
             ],

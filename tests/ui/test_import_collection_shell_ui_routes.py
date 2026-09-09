@@ -946,7 +946,8 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-mylar-path-summary-copy"' in response.text
         assert 'data-testid="import-advanced-scan-options"' in response.text
         assert "Advanced Options" in response.text
-        assert "Advanced file management" in response.text
+        assert "Where new files go" in response.text
+        assert "Advanced file management" not in response.text
         assert "Advanced scan options" not in response.text
         assert "Check existing Mylar library access" not in response.text
         assert "Manual path mapping" in response.text
@@ -965,11 +966,12 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-library-roots-manage"' in response.text
         assert 'data-testid="import-library-roots-refresh"' in response.text
         assert 'href="/settings?tab=media"' in response.text
-        assert "Managed destination" in response.text
-        assert "Preferred destination for future files" in response.text
-        assert (
-            "Each existing file remains associated with its containing library root"
-            in response.text
+        assert "Library for this import" in response.text
+        assert "Preferred library for future files" in response.text
+        assert "Only writable managed roots appear here" in response.text
+        assert "Existing comics stay in their current roots" in response.text
+        assert "Step 3 asks where its future downloads and replacements should go" in (
+            response.text
         )
         assert response.text.index('data-testid="import-file-handling-choice-section"') < (
             response.text.index('data-testid="import-advanced-options"')
@@ -1040,6 +1042,13 @@ class TestImportShellRouteContracts:
         assert "allow_referenced_registrations: true" in source_controller
         assert "allow_managed_writes: false" in source_controller
         assert "managedLibraryRootOptions: function" in source_controller
+        assert "initialManagedRoots.length === 1 ? initialManagedRoots[0] : null" in (
+            source_controller
+        )
+        assert "shouldShowFileDestinationControl: function" in source_controller
+        assert "managedRoots.length > 1 || !this.hasSelectedManagedDestination()" in (
+            source_controller
+        )
         assert 'fetch("/api/v1/import/story-arc-preview"' in source_controller
         assert 'fetch("/api/v1/import/mylar-path-preview"' in source_controller
         assert "mylarPathPreviewRequestId" in source_controller

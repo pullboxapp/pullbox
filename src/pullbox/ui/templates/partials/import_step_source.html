@@ -425,7 +425,7 @@
       </details>
 
       <details
-        x-show="sourceType === 'filesystem' || sourceType === 'mylar3'"
+        x-show="(sourceType === 'filesystem' || sourceType === 'mylar3') && shouldShowFileDestinationControl()"
         x-cloak
         x-data="{ sectionOpen: false }"
         @toggle="sectionOpen = $event.currentTarget.open"
@@ -450,10 +450,11 @@
             <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/>
           </svg>
           <span class="min-w-0" data-testid="import-advanced-file-management-copy">
-            <span class="block text-sm font-semibold text-pb-text">Advanced file management</span>
-            <span class="mt-1 block text-xs leading-5 text-pb-text-sec">
-              Choose managed destinations and maintain library roots.
-            </span>
+            <span class="block text-sm font-semibold text-pb-text">Where new files go</span>
+            <span
+              class="mt-1 block text-xs leading-5 text-pb-text-sec"
+              x-text="fileDestinationSummary()"
+            ></span>
           </span>
         </summary>
         <section
@@ -461,10 +462,10 @@
           data-testid="import-file-handling-section"
         >
         <div>
-          <p class="downloads-section-label">Where should Pullbox manage files?</p>
+          <p class="downloads-section-label" x-text="fileHandlingMode === 'managed_copy' ? 'Library for this import' : 'Preferred library for future files'"></p>
           <p class="mt-2 text-xs leading-5 text-pb-text-sec">
-            Choose the managed destination for library copies or, when keeping files in place,
-            the optional destination for future downloads.
+            Only writable managed roots appear here. Reference-only roots can hold existing comics,
+            but Pullbox will not create or change files in them.
           </p>
         </div>
 
@@ -493,7 +494,7 @@
         <div x-show="fileHandlingMode === 'managed_copy'" x-cloak class="space-y-3">
           <div class="space-y-2">
             <label for="import-managed-library-root" class="block text-xs font-medium text-pb-text-sec">
-              Managed destination
+              Library for this import
             </label>
             {{ dropdown_select(
               name="managed_library_root_id",
@@ -521,7 +522,7 @@
         <div x-show="fileHandlingMode === 'in_place'" class="space-y-3">
           <div class="space-y-2">
             <label for="import-in-place-library-root" class="block text-xs font-medium text-pb-text-sec">
-              Preferred destination for future files — optional
+              Preferred library for future files — optional
             </label>
             {{ dropdown_select(
               name="in_place_library_root_id",
@@ -542,7 +543,7 @@
             class="inline-alert inline-alert-info"
             data-testid="import-mylar-in-place-review"
           >
-            <span x-show="sourceType === 'mylar3'">Pullbox checks each comic after path mapping. </span>Each existing file remains associated with its containing library root; this selection controls only where Pullbox manages future files for imported series. Existing comics stay unchanged.
+            <span x-show="sourceType === 'mylar3'">Pullbox checks each comic after path mapping. </span>Existing comics stay in their current roots. If a selected series spans multiple roots, Step 3 asks where its future downloads and replacements should go.
           </div>
           <div x-show="!managedLibraryRoots().length" class="inline-alert inline-alert-warning">
             Existing files can still be imported in place. Future managed downloads remain blocked

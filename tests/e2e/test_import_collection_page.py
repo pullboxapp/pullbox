@@ -33,13 +33,50 @@ class TestImportCollectionTab:
         page.show_collection_source_step()
         page.source_filesystem_card.click()
 
+        advanced_options = authed_page.get_by_test_id("import-advanced-options")
+        advanced_options.locator("summary").first.click()
+        destination_section = authed_page.get_by_test_id("import-advanced-file-management")
+        authed_page.evaluate(
+            """() => {
+                const root = document.querySelector("[data-testid='import-collection-source']");
+                const data = window.Alpine.$data(root);
+                const selectedRootId = Number(data.targetLibraryRootId);
+                data.libraryRoots = data.libraryRoots.filter(
+                    item => Number(item.id) === selectedRootId
+                );
+            }"""
+        )
+        expect(destination_section).to_be_hidden()
+
+        authed_page.evaluate(
+            """() => {
+                const root = document.querySelector("[data-testid='import-collection-source']");
+                const data = window.Alpine.$data(root);
+                data.libraryRoots = data.libraryRoots.concat([{
+                    id: 987654,
+                    name: "Overflow Library",
+                    path: "/tmp/pullbox-e2e-overflow",
+                    enabled: true,
+                    allow_referenced_registrations: true,
+                    allow_managed_writes: true,
+                    available: true,
+                    readable: true,
+                    writable: true,
+                    is_default_managed_destination: false,
+                }]);
+            }"""
+        )
+        expect(destination_section).to_be_visible()
+        expect(destination_section).to_contain_text("Where new files go")
+        destination_section.locator("summary").click()
+
         managed_root = page.dropdown("import-managed-library-root")
         expect(managed_root).to_be_visible()
         expect(managed_root).to_have_attribute("data-dropdown-select-contract", "v1")
         expect(managed_root.locator("select")).to_have_count(0)
         managed_root.locator("[data-dropdown-select-trigger]").click()
         panel = authed_page.locator("[data-dropdown-select-panel]:visible").first
-        expect(panel).to_contain_text("E2E Library")
+        expect(panel).to_contain_text("Overflow Library")
         panel.locator("[data-dropdown-option][data-value]:not([data-value=''])").first.click()
         expect(managed_root.locator("[data-dropdown-select-input]")).not_to_have_value("")
 
