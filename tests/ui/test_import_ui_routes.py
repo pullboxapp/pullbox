@@ -862,6 +862,121 @@ class TestImportResultsPartial:
         assert "Move source to Trash" in html
         assert "return_to=results" in html
 
+    def test_results_template_offers_optional_misplaced_mylar_cleanup(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        html = templates.env.get_template("partials/import_results.html").render(
+            job=SimpleNamespace(
+                id=35,
+                status=SimpleNamespace(value="completed"),
+                archived_at=None,
+            ),
+            can_rollback=False,
+            imported_count=1,
+            failed_count=0,
+            duplicate_count=1,
+            no_match_count=0,
+            unmatched_queue_count=0,
+            failed_series=[],
+            files_total=2,
+            files_imported=1,
+            files_matched=0,
+            files_duplicate=1,
+            files_already_owned=0,
+            files_conflict=0,
+            files_no_match=0,
+            orphaned_file_no_match_count=0,
+            identified_series_file_no_match_count=0,
+            catalog_sync_pending_count=0,
+            catalog_sync_failed_count=0,
+            catalog_sync_attention_count=0,
+            catalog_sync_series=[],
+            files_failed=0,
+            failed_files=[],
+            files_safety_blocked=0,
+            safety_category_summaries=[],
+            cleanup_action_summaries=[],
+            cleanup_no_action_count=1,
+            cleanup_safe_action_count=0,
+            cleanup_needs_review_count=0,
+            misplaced_source_restore_count=1,
+            misplaced_source_duplicate_count=1,
+            resume_step=5,
+            resume_job_id=35,
+            resume_progress_snapshot={},
+        )
+
+        assert 'data-testid="import-results-misplaced-source-cleanup"' in html
+        assert "Restore misplaced files" in html
+        assert "Remove identical duplicates" in html
+        assert "Pullbox does not edit the Mylar database" in html
+        assert 'data-testid="review-misplaced-source-restore_recorded_path"' in html
+        assert 'data-testid="review-misplaced-source-trash_identical_duplicate"' in html
+
+    def test_misplaced_cleanup_file_list_uses_explicit_per_file_actions(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        canonical_html = templates.env.get_template(
+            "partials/import_misplaced_source_cleanup_files.html"
+        ).render(
+            job_id=35,
+            cleanup_action="restore_recorded_path",
+            cleanup_page=SimpleNamespace(
+                total=1,
+                page=1,
+                total_pages=1,
+                items=[SimpleNamespace(id=91, file_name="Absolute Batman #001.cbz")],
+            ),
+        )
+        duplicate_html = templates.env.get_template(
+            "partials/import_misplaced_source_cleanup_files.html"
+        ).render(
+            job_id=35,
+            cleanup_action="trash_identical_duplicate",
+            cleanup_page=SimpleNamespace(
+                total=1,
+                page=1,
+                total_pages=1,
+                items=[SimpleNamespace(id=92, file_name="Absolute Batman #001 variant.cbz")],
+            ),
+        )
+
+        assert "Restore misplaced file" in canonical_html
+        assert 'class="btn-ghost btn-sm"' in canonical_html
+        assert "Move duplicate to Trash" in duplicate_html
+        assert 'class="btn-ghost btn-sm"' in duplicate_html
+
+    def test_misplaced_cleanup_modal_explains_exact_source_change(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        preview = SimpleNamespace(
+            job_id=35,
+            file_id=91,
+            action=SimpleNamespace(value="restore_recorded_path"),
+            file_name="Absolute Batman #001.cbz",
+            source_path="/comics/Crossed/Absolute Batman #001.cbz",
+            destination_path="/comics/Absolute Batman/Absolute Batman #001.cbz",
+            can_apply=True,
+            unavailable_reason="",
+            preview_token="signed-preview",
+        )
+        html = templates.env.get_template(
+            "partials/import_misplaced_source_cleanup_modal.html"
+        ).render(preview=preview, error="")
+
+        assert "This changes the source library" in html
+        assert "Pullbox does not edit the Mylar database" in html
+        assert "/comics/Crossed/Absolute Batman #001.cbz" in html
+        assert "/comics/Absolute Batman/Absolute Batman #001.cbz" in html
+        assert 'value="signed-preview"' in html
+        assert "Restore misplaced file" in html
+
     def test_failed_results_template_preserves_bounded_safety_actions(self) -> None:
         from types import SimpleNamespace
 

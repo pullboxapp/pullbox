@@ -15,6 +15,7 @@ from pullbox.models.import_job import (
     ImportJobActionStatus,
     ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
@@ -34,6 +35,10 @@ from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkStat
 from pullbox.services.import_completed_cleanup import (
     CompletedImportCleanupAction,
     summarize_completed_import_cleanup_scope,
+)
+from pullbox.services.import_misplaced_source_cleanup import (
+    MisplacedSourceCleanupAction,
+    count_misplaced_source_cleanup_files,
 )
 from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
@@ -929,6 +934,23 @@ async def load_import_results_context(
         if job.status is ImportJobStatus.COMPLETED and job.archived_at is None
         else []
     )
+    misplaced_source_restore_count = 0
+    misplaced_source_duplicate_count = 0
+    if (
+        job.status is ImportJobStatus.COMPLETED
+        and job.archived_at is None
+        and job.source_type is ImportSourceType.MYLAR3
+    ):
+        misplaced_source_restore_count = await count_misplaced_source_cleanup_files(
+            session,
+            job_id,
+            MisplacedSourceCleanupAction.RESTORE_RECORDED_PATH,
+        )
+        misplaced_source_duplicate_count = await count_misplaced_source_cleanup_files(
+            session,
+            job_id,
+            MisplacedSourceCleanupAction.TRASH_IDENTICAL_DUPLICATE,
+        )
     clean_library_summary = (
         await _load_clean_library_summary(session, job_id)
         if job.status is ImportJobStatus.COMPLETED and job.archived_at is None
@@ -1039,6 +1061,8 @@ async def load_import_results_context(
         "cleanup_no_action_count": files_duplicate + files_already_owned + files_skipped,
         "cleanup_safe_action_count": cleanup_safe_action_count,
         "cleanup_needs_review_count": cleanup_needs_review_count,
+        "misplaced_source_restore_count": misplaced_source_restore_count,
+        "misplaced_source_duplicate_count": misplaced_source_duplicate_count,
         **clean_library_summary,
         **rollback_journal_summary,
         **story_arc_results_summary,

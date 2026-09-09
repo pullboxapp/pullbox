@@ -444,6 +444,69 @@
   </section>
   {% endif %}
 
+  {% set misplaced_source_restore_count = misplaced_source_restore_count|default(0) %}
+  {% set misplaced_source_duplicate_count = misplaced_source_duplicate_count|default(0) %}
+  {% if job.status.value == 'completed' and not job.archived_at and (misplaced_source_restore_count > 0 or misplaced_source_duplicate_count > 0) %}
+  <section data-testid="import-results-misplaced-source-cleanup" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Optional source cleanup</p>
+        <h3 class="section-title-plain">Correct misplaced Mylar files</h3>
+        <p class="section-copy">
+          Pullbox imported these issues using exact embedded identity even though Mylar expected them in another folder. Review each source change separately. Pullbox does not edit the Mylar database.
+        </p>
+      </div>
+    </div>
+    <div class="section-body space-y-3">
+      <div class="inline-alert inline-alert-warning">
+        These actions change the existing source library. Nothing moves until you preview and confirm one file.
+      </div>
+      <div class="grid gap-3 xl:grid-cols-2">
+        {% if misplaced_source_restore_count > 0 %}
+        <article class="rounded-xl border border-pb-border bg-pb-card-hover/35 p-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <h4 class="text-sm font-semibold text-pb-text">Restore misplaced files</h4>
+            <span class="pill pill-neutral">{{ "{:,}".format(misplaced_source_restore_count) }}</span>
+          </div>
+          <p class="mt-1 text-xs leading-5 text-pb-text-dim">
+            Move one verified issue back to the exact missing path recorded by Mylar and keep Pullbox linked to it there.
+          </p>
+          <button
+            type="button"
+            class="btn-ghost btn-sm mt-4"
+            data-testid="review-misplaced-source-restore_recorded_path"
+            hx-get="/import/{{ job.id }}/misplaced-source-cleanup/restore_recorded_path/files?page=1"
+            hx-target="#misplaced-source-cleanup-detail-restore_recorded_path"
+            hx-swap="innerHTML"
+          >Review files</button>
+          <div id="misplaced-source-cleanup-detail-restore_recorded_path"></div>
+        </article>
+        {% endif %}
+        {% if misplaced_source_duplicate_count > 0 %}
+        <article class="rounded-xl border border-pb-border bg-pb-card-hover/35 p-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <h4 class="text-sm font-semibold text-pb-text">Remove identical duplicates</h4>
+            <span class="pill pill-neutral">{{ "{:,}".format(misplaced_source_duplicate_count) }}</span>
+          </div>
+          <p class="mt-1 text-xs leading-5 text-pb-text-dim">
+            Move one byte-identical extra copy to the configured Trash folder. The canonical issue remains in place.
+          </p>
+          <button
+            type="button"
+            class="btn-ghost btn-sm mt-4"
+            data-testid="review-misplaced-source-trash_identical_duplicate"
+            hx-get="/import/{{ job.id }}/misplaced-source-cleanup/trash_identical_duplicate/files?page=1"
+            hx-target="#misplaced-source-cleanup-detail-trash_identical_duplicate"
+            hx-swap="innerHTML"
+          >Review files</button>
+          <div id="misplaced-source-cleanup-detail-trash_identical_duplicate"></div>
+        </article>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
   {% set clean_library_reference_count = clean_library_reference_count|default(0) %}
   {% set clean_library_target_roots = clean_library_target_roots|default([]) %}
   {% set clean_library_mixed_folder_repair_count = clean_library_mixed_folder_repair_count|default(0) %}

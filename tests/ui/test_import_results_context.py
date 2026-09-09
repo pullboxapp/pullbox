@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -43,6 +44,29 @@ from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
     build_import_safety_diagnostics,
 )
+
+
+@pytest.mark.asyncio
+async def test_results_context_counts_optional_mylar_source_cleanup(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/tmp/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    counter = AsyncMock(side_effect=[2, 3])
+    with patch(
+        "pullbox.ui.import_results_context.count_misplaced_source_cleanup_files",
+        counter,
+    ):
+        context = await load_import_results_context(db_session, job)
+
+    assert context["misplaced_source_restore_count"] == 2
+    assert context["misplaced_source_duplicate_count"] == 3
 
 
 @pytest.mark.asyncio

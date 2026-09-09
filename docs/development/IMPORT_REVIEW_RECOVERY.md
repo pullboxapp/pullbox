@@ -70,6 +70,31 @@ Available recovery actions are intentionally narrow:
   stale references, and managed files remain review-only. The source path and
   source artifact are never changed.
 
+During a Mylar scan, Pullbox can also reconcile one stale recorded path with a
+file found in another series folder when the embedded ComicInfo issue ID is an
+exact match. It links one canonical file in place for import and classifies
+only byte-identical extra copies as duplicates. Filename guesses, ambiguous
+records, conflicting embedded identity, and non-identical candidates remain
+untouched for review.
+
+Completed Results keeps the optional physical cleanup separate from the safe
+recovery actions above:
+
+- **Restore misplaced file** moves one canonical file to the exact missing path
+  already recorded by Mylar. It requires an empty destination and managed-write
+  permission on both paths, revalidates the source fingerprint, and updates the
+  Pullbox reference and rollback journal together. It does not edit Mylar's
+  database.
+- **Move duplicate to Trash** is a separate per-file choice available only for
+  an extra copy that remains byte-identical to its canonical issue. It requires
+  a configured Trash folder and managed-write permission. Pullbox never removes
+  these copies automatically.
+
+Both actions use an actor-bound signed preview and restore the physical source
+if their database update cannot commit. Reference-only Mylar roots continue to
+receive the non-destructive import behavior; their source-cleanup previews
+explain that managed writes must be enabled before Pullbox can move a file.
+
 Every mutation requires a fresh, actor-bound signed preview. Pullbox rejects an
 expired preview or any action whose row set changed after preview. Bounded,
 recoverable actions use a normal confirmation; typed confirmation remains

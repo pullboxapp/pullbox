@@ -24,6 +24,12 @@ from pullbox.services.import_completed_cleanup import (
     CompletedImportCleanupAction,
     list_completed_import_cleanup_files,
 )
+from pullbox.services.import_misplaced_source_cleanup import (
+    MisplacedSourceCleanupAction,
+    apply_misplaced_source_cleanup,
+    list_misplaced_source_cleanup_files,
+    preview_misplaced_source_cleanup,
+)
 from pullbox.services.import_safety_bulk_review import (
     ImportSafetyBulkInterruptedError,
     ImportSafetyBulkPreview,
@@ -1101,6 +1107,105 @@ async def import_completed_cleanup_files_partial(
             cleanup_action=action.value,
             cleanup_page=cleanup_page,
         ),
+    )
+
+
+@router.get(
+    "/import/{job_id}/misplaced-source-cleanup/{action}/files",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_files_partial(
+    job_id: int,
+    action: MisplacedSourceCleanupAction,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    page: int = Query(1, ge=1),
+) -> Response:
+    """Render one bounded page of optional source cleanup candidates."""
+    cleanup_page = await list_misplaced_source_cleanup_files(
+        session,
+        job_id,
+        action,
+        page=page,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_misplaced_source_cleanup_files.html",
+        _ctx(
+            request,
+            user,
+            job_id=job_id,
+            cleanup_action=action.value,
+            cleanup_page=cleanup_page,
+        ),
+    )
+
+
+@router.get(
+    "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}/preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_preview(
+    job_id: int,
+    file_id: int,
+    action: MisplacedSourceCleanupAction,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    """Preview one physical source cleanup without changing the library."""
+    try:
+        preview = await preview_misplaced_source_cleanup(
+            session,
+            job_id,
+            file_id,
+            action,
+            actor_id=user.id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_misplaced_source_cleanup_modal.html",
+        _ctx(request, user, preview=preview, error=""),
+    )
+
+
+@router.post(
+    "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_apply(
+    job_id: int,
+    file_id: int,
+    action: MisplacedSourceCleanupAction,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+) -> Response:
+    """Apply one signed source cleanup and return to the completed results."""
+    try:
+        await apply_misplaced_source_cleanup(
+            session,
+            job_id,
+            file_id,
+            action,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return Response(
+        status_code=204,
+        headers={"HX-Redirect": f"/import?tab=collection&resume_job_id={job_id}&resume_step=5"},
     )
 
 

@@ -30,7 +30,7 @@ class ImportEventLogger(Protocol):
 ContentHashFunc = Callable[[str], str | None]
 DuplicateSeriesPredicate = Callable[[ImportedSeries | None], bool]
 DuplicateTargetKeyFunc = Callable[[ImportedFile], tuple[str, int | float] | None]
-FileSortKeyFunc = Callable[[ImportedFile], tuple[int, int, int, int]]
+FileSortKeyFunc = Callable[[ImportedFile], tuple[int, int, int, int, int]]
 NormalizedReleaseNameFunc = Callable[[str], str]
 
 

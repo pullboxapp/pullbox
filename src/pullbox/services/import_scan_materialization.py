@@ -129,6 +129,13 @@ async def materialize_discovered_scan_results(
                 "metadata_signals": dict(df.metadata_signals),
                 "source_metadata": metadata_diagnostics,
             }
+            cross_folder_reconciliation = metadata_diagnostics.get(
+                "mylar3_cross_folder_reconciliation"
+            )
+            if isinstance(cross_folder_reconciliation, dict):
+                diagnostics["mylar3_cross_folder_reconciliation"] = dict(
+                    cross_folder_reconciliation
+                )
             if isinstance(safety_block, dict):
                 diagnostics["safety_block"] = safety_block
             elif source_layout_review:

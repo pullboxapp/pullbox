@@ -185,6 +185,24 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_completed_cleanup_files_partial",
         ),
         (
+            "/import/{job_id}/misplaced-source-cleanup/{action}/files",
+            ("GET",),
+            "import_misplaced_source_cleanup_files_partial",
+            "import_misplaced_source_cleanup_files_partial",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}/preview",
+            ("GET",),
+            "import_misplaced_source_cleanup_preview",
+            "import_misplaced_source_cleanup_preview",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}",
+            ("POST",),
+            "import_misplaced_source_cleanup_apply",
+            "import_misplaced_source_cleanup_apply",
+        ),
+        (
             "/import/{job_id}/series/{series_id}/details-partial",
             ("GET",),
             "import_series_details_partial",
