@@ -568,6 +568,9 @@ def _corroborated_comicinfo_issue_reconciliation(
     """Prefer an embedded issue ID when independent local evidence proves a stale Mylar ID."""
     recorded_issue_id = base_metadata.comicvine_issue_id
     embedded_issue_id = loaded_metadata.comicvine_issue_id
+    base_issue_type_is_unqualified = (
+        base_metadata.issue_type == IssueType.ISSUE and "issue_type" not in base_metadata.signals
+    )
     if (
         recorded_issue_id is None
         or embedded_issue_id is None
@@ -581,8 +584,11 @@ def _corroborated_comicinfo_issue_reconciliation(
         or base_metadata.issue_number is None
         or loaded_metadata.issue_number is None
         or not _issue_numbers_equal(base_metadata.issue_number, loaded_metadata.issue_number)
-        or issue_type_family(base_metadata.issue_type)
-        != issue_type_family(loaded_metadata.issue_type)
+        or (
+            not base_issue_type_is_unqualified
+            and issue_type_family(base_metadata.issue_type)
+            != issue_type_family(loaded_metadata.issue_type)
+        )
         or loaded_metadata.diagnostics.get("has_comicinfo") is not True
     ):
         return None
