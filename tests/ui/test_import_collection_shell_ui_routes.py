@@ -1175,15 +1175,11 @@ class TestImportShellRouteContracts:
         assert "this.mylarPathPreview.requires_confirmation" not in source_controller
         assert 'mylar3_path_map: this.sourceType === "mylar3"' in source_controller
         assert 'mylar3_path_map_confirmed: this.sourceType === "mylar3"' in source_controller
-        assert "storyArcImportRequested: true" in source_controller
+        assert "storyArcImportRequested: false" in source_controller
         assert "storyArcMaterializationRequested: false" in source_controller
         assert source_controller.count("this.scheduleStoryArcPreview();") == 0
-        assert "this.storyArcImportRequested = false;" not in source_controller
-        assert "story_arc_import_requested: this.storyArcImportRequested" in source_controller
-        assert (
-            "story_arc_materialization_requested: this.storyArcMaterializationRequested"
-            in source_controller
-        )
+        assert "story_arc_import_requested: false" in source_controller
+        assert "story_arc_materialization_requested: false" in source_controller
 
     async def test_import_source_switch_and_recheck_preserve_ui_contract(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()

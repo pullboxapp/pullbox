@@ -1186,6 +1186,9 @@ class TestImportCollectionTab:
         import_page.wait_for_htmx()
         import_page.results_panel.wait_for(state="visible", timeout=5000)
 
+        assert import_page.retry_failed_button.count() == 0
+        import_page.review_follow_up_button.click()
+        import_page.wait_for_htmx()
         assert import_page.retry_failed_button.is_visible()
 
         original_job = authed_page.request.get(
@@ -1304,13 +1307,17 @@ class TestImportCollectionTab:
             """() => {
                 const results = document.querySelector("[data-testid='import-collection-results']");
                 const children = Array.from(results.children).filter((el) => el.nodeType === Node.ELEMENT_NODE);
-                const sectionCardIndices = children
-                    .map((el, index) => el.classList.contains("section-card") ? index : -1)
+                const detailCardIndices = children
+                    .map((el, index) => (
+                        el.classList.contains("section-card") &&
+                        el.dataset.testid !== "import-results-follow-up-action"
+                    ) ? index : -1)
                     .filter((index) => index >= 0);
                 return {
+                    followUpIndex: children.findIndex((el) => el.dataset.testid === "import-results-follow-up-action"),
                     actionIndex: children.findIndex((el) => el.dataset.testid === "import-results-action-bar"),
                     notesIndex: children.findIndex((el) => el.dataset.testid === "import-results-follow-up-notes"),
-                    sectionCardIndices,
+                    detailCardIndices,
                     leftActions: Array.from(
                         results.querySelectorAll("[data-testid='import-results-action-bar-left'] > *"),
                     ).map((el) => (el.textContent || "").trim()),
@@ -1329,12 +1336,13 @@ class TestImportCollectionTab:
             }"""
         )
 
-        assert state["actionIndex"] == 0
+        assert state["followUpIndex"] == 0
+        assert state["actionIndex"] == 1
         if state["notesIndex"] >= 0:
-            assert state["notesIndex"] == 1
-            assert state["sectionCardIndices"][0] > state["notesIndex"]
+            assert state["notesIndex"] == 2
+            assert state["detailCardIndices"][0] > state["notesIndex"]
         else:
-            assert state["sectionCardIndices"][0] > state["actionIndex"]
+            assert state["detailCardIndices"][0] > state["actionIndex"]
         assert "Rollback import" in state["leftActions"][0]
         assert "View import history" in state["leftActions"]
         assert state["rightActions"] == ["Archive results", "View series library"]
@@ -3086,6 +3094,7 @@ class TestImportCollectionTab:
 
         import_page.source_filesystem_card.click()
         import_page.source_path_input.fill("/imports")
+        import_page.open_layout_options()
         import_page.source_layout_publisher_series.click()
         import_page.source_layout_analyze_button.click()
         import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
@@ -3164,6 +3173,7 @@ class TestImportCollectionTab:
 
         import_page.source_mylar3_card.click()
         import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.open_layout_options()
         import_page.source_layout_section.wait_for(state="visible", timeout=5000)
         import_page.source_layout_publisher_series.click()
         import_page.source_layout_fallback_checkbox.uncheck()
@@ -3174,7 +3184,7 @@ class TestImportCollectionTab:
         assert_no_axe_violations(
             authed_page,
             name="Mylar source layout controls",
-            include=["[data-testid='import-collection-layout-section']"],
+            include=["[data-testid='import-layout-advanced']"],
         )
         import_page.start_scan_button.click()
         authed_page.wait_for_timeout(100)
@@ -3236,6 +3246,7 @@ class TestImportCollectionTab:
         import_page.file_handling_in_place.click()
         expect(import_page.start_scan_button).to_be_enabled(timeout=5000)
 
+        import_page.open_file_management_options()
         root_selector = import_page.dropdown("import-in-place-library-root")
         root_selector.wait_for(state="visible", timeout=5000)
         root_selector.locator("[data-dropdown-select-trigger]").click()
@@ -3270,7 +3281,7 @@ class TestImportCollectionTab:
         assert created_requests[-1]["mylar3_path_map"] == {}
         assert created_requests[-1]["mylar3_path_map_confirmed"] is True
 
-    def test_mylar_mapping_preview_requires_confirmation_and_submits_frozen_map(
+    def test_mylar_mapping_preview_submits_validated_frozen_map_without_extra_confirmation(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
@@ -3355,10 +3366,9 @@ class TestImportCollectionTab:
         import_page.source_mylar3_card.click()
         import_page.source_path_input.fill("/imports/mylar.db")
 
+        import_page.open_mylar_path_options()
         import_page.mylar_path_mapping_rows.first.wait_for(state="visible", timeout=5000)
         assert import_page.mylar_path_mapping_rows.count() == 2
-        assert import_page.start_scan_button.is_disabled()
-        import_page.mylar_path_confirm.check()
         assert import_page.start_scan_button.is_enabled()
         assert_no_axe_violations(
             authed_page,
@@ -3371,8 +3381,6 @@ class TestImportCollectionTab:
         )
         first_visible_path.fill("/comics/edited")
         authed_page.wait_for_timeout(750)
-        assert import_page.start_scan_button.is_disabled()
-        import_page.mylar_path_confirm.check()
         assert import_page.start_scan_button.is_enabled()
         import_page.start_scan_button.click()
         authed_page.wait_for_timeout(100)
@@ -3381,7 +3389,7 @@ class TestImportCollectionTab:
         assert created_requests[-1]["mylar3_path_map"] == frozen_map
         assert created_requests[-1]["mylar3_path_map_confirmed"] is True
 
-    def test_import_collection_shows_story_arc_evidence_and_submits_independent_choices(
+    def test_import_collection_defers_story_arc_choices_from_collection_import(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
@@ -3483,32 +3491,14 @@ class TestImportCollectionTab:
         import_page.source_mylar3_card.click()
         import_page.source_path_input.fill("/imports/mylar.db")
         expect(import_page.start_scan_button).to_be_enabled(timeout=5000)
-        import_page.story_arc_section.wait_for(state="visible", timeout=5000)
-
-        preview_text = import_page.story_arc_preview.text_content() or ""
-        assert "2 arcs" in preview_text
-        assert "3 entries" in preview_text
-        assert "Knightfall" in preview_text
-        assert "No provider calls" in preview_text
-        assert "/private" not in preview_text
-        assert import_page.story_arc_import_toggle.is_checked() is False
-        assert import_page.story_arc_materialize_toggle.is_disabled()
-
-        import_page.story_arc_import_toggle.check()
-        assert import_page.story_arc_materialize_toggle.is_enabled()
-        import_page.story_arc_materialize_toggle.check()
-        assert_no_axe_violations(
-            authed_page,
-            name="Story Arc Step 1 controls",
-            include=["[data-testid='import-story-arc-section']"],
-        )
+        assert import_page.story_arc_section.count() == 0
 
         import_page.start_scan_button.click()
         authed_page.wait_for_timeout(100)
 
         assert created_requests
-        assert created_requests[-1]["story_arc_import_requested"] is True
-        assert created_requests[-1]["story_arc_materialization_requested"] is True
+        assert created_requests[-1]["story_arc_import_requested"] is False
+        assert created_requests[-1]["story_arc_materialization_requested"] is False
 
     def test_import_collection_submits_validated_in_place_mode(
         self,
@@ -3565,6 +3555,8 @@ class TestImportCollectionTab:
         import_page.source_filesystem_card.click()
         import_page.source_path_input.fill("/comics/Existing Layout")
         import_page.file_handling_in_place.click()
+        import_page.open_file_management_options()
+        import_page.open_layout_options()
         import_page.source_layout_analyze_button.click()
         import_page.file_handling_in_place_ready.wait_for(state="visible", timeout=5000)
 
@@ -3576,7 +3568,7 @@ class TestImportCollectionTab:
         assert created_requests[-1]["file_handling_mode"] == "in_place"
         assert created_requests[-1]["source_path"] == "/comics/Existing Layout"
 
-    def test_import_collection_submits_confirmed_future_root_policy(
+    def test_import_collection_defers_future_root_policy_from_collection_import(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
@@ -3706,39 +3698,18 @@ class TestImportCollectionTab:
 
         import_page.source_filesystem_card.click()
         import_page.source_path_input.fill("/imports")
+        import_page.open_layout_options()
         import_page.source_layout_publisher_series.click()
         import_page.source_layout_analyze_button.click()
         import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
-        assert import_page.future_layout_toggle.is_enabled()
-
-        import_page.future_layout_toggle.check()
-        import_page.future_layout_preview.wait_for(state="visible", timeout=5000)
-        assert "Batman (2024)" in (import_page.future_layout_preview.text_content() or "")
-        assert "DC Comics/Batman" in (import_page.future_layout_preview.text_content() or "")
-        assert policy_preview_requests
-        assert policy_preview_requests[-1]["examples"][0] == {  # type: ignore[index]
-            "publisher": "DC Comics",
-            "series": "Batman",
-            "year": 2024,
-            "issue_number": 17,
-            "issue_title": "The Brave and the Bold",
-        }
-        assert_no_axe_violations(
-            authed_page,
-            name="import future layout controls",
-            include=["[data-testid='import-future-layout-section']"],
-        )
+        assert import_page.future_layout_toggle.count() == 0
+        assert policy_preview_requests == []
 
         import_page.start_scan_button.click()
         authed_page.wait_for_timeout(100)
 
         assert created_requests
         payload = created_requests[-1]
-        assert payload["future_layout_requested"] is True
+        assert payload["future_layout_requested"] is False
         assert isinstance(payload["target_library_root_id"], int)
-        assert payload["future_root_policy"]["series_path_template"] == (  # type: ignore[index]
-            "{Publisher}/{Series}"
-        )
-        assert payload["future_root_policy"]["comic_file_template"] == (  # type: ignore[index]
-            "{Series} {IssueTitle} Issue {Issue:03d}"
-        )
+        assert payload["future_root_policy"] is None

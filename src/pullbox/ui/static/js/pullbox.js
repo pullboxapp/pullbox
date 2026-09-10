@@ -1957,7 +1957,40 @@ function fileBrowserMixin(config) {
 }
 
 function dispatchImportWizardAdvance(detail) {
-  window.dispatchEvent(new CustomEvent("wizard:advance", { detail: detail || {} }));
+  var payload = detail || {};
+  var collectionPage = document.querySelector("[data-testid='import-collection-page']");
+  if (collectionPage && collectionPage.isConnected) {
+    window.dispatchEvent(new CustomEvent("wizard:advance", { detail: payload }));
+    return;
+  }
+
+  var jobId = payload.jobId;
+  var step = Number(payload.step);
+  if (jobId == null || !Number.isFinite(step) || step < 2) {
+    window.dispatchEvent(new CustomEvent("wizard:advance", { detail: payload }));
+    return;
+  }
+
+  var path =
+    "/import?tab=collection&resume_job_id=" +
+    encodeURIComponent(jobId) +
+    "&resume_step=" +
+    encodeURIComponent(step);
+  var importContent = document.getElementById("import-content");
+  if (!importContent || typeof htmx === "undefined") {
+    window.location.assign(path);
+    return;
+  }
+
+  if (window.history && typeof window.history.pushState === "function") {
+    window.history.pushState({}, "", path);
+  }
+  performHtmxSwap("GET", path, {
+    target: "#import-content",
+    swap: "outerHTML",
+  }).catch(function () {
+    window.location.assign(path);
+  });
 }
 
 function importReviewAdvanceStorageKey(jobId) {
@@ -3122,7 +3155,7 @@ function importSourceData(config) {
     storyArcPreviewTimer: null,
     storyArcPreviewController: null,
     storyArcPreviewRequestId: 0,
-    storyArcImportRequested: true,
+    storyArcImportRequested: false,
     storyArcMaterializationRequested: false,
     libraryRoots: libraryRoots,
     targetLibraryRootId: initialTargetRootId,
@@ -4539,8 +4572,8 @@ function importSourceData(config) {
               : null,
             future_layout_requested: this.futureLayoutRequested,
             future_root_policy: this.futureLayoutRequested ? this.futureRootPolicy : null,
-            story_arc_import_requested: this.storyArcImportRequested,
-            story_arc_materialization_requested: this.storyArcMaterializationRequested,
+            story_arc_import_requested: false,
+            story_arc_materialization_requested: false,
             mylar3_path_map: this.sourceType === "mylar3"
               ? Object.assign({}, this.mylarPathPreview.path_map || {})
               : {},
@@ -12611,13 +12644,15 @@ function utilitiesPermissionsPage(config) {
     },
 
     syncFooterDock: function () {
+      var detail = {
+        mode: this.runModeLabel(),
+        scope: this.scopeLabel(),
+        targets: this.targetsLabel(),
+      };
+      window.pullboxUtilitiesPermissionsFooterState = detail;
       window.dispatchEvent(
         new CustomEvent("utilities:permissions-footer", {
-          detail: {
-            mode: this.runModeLabel(),
-            scope: this.scopeLabel(),
-            targets: this.targetsLabel(),
-          },
+          detail: detail,
         })
       );
     },

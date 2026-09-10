@@ -1,4 +1,4 @@
-"""Focused browser coverage for the Import workspace unmatched tab."""
+"""Focused browser coverage for the Import workspace Follow-up tab."""
 
 from __future__ import annotations
 
@@ -10,7 +10,13 @@ pytestmark = pytest.mark.e2e
 
 
 class TestImportUnmatchedTab:
-    """Behavior-first E2E checks for the Import workspace unmatched tab."""
+    """Behavior-first E2E checks for completed-import follow-up."""
+
+    @staticmethod
+    def _open_batman_follow_up(import_page: ImportPage) -> None:
+        import_page.goto(tab="follow-up")
+        import_page.follow_up_jobs_table.wait_for(state="visible", timeout=5000)
+        import_page.open_follow_up_job("/tmp/imports/batman-batch")
 
     def test_import_orphaned_renders_stable_shell(
         self,
@@ -18,11 +24,14 @@ class TestImportUnmatchedTab:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
-        import_page.goto(tab="unmatched")
+        import_page.goto(tab="follow-up")
 
         assert import_page.workspace_root.is_visible()
         assert import_page.unmatched_panel.is_visible()
         assert import_page.header.is_visible()
+        assert import_page.follow_up_job_list.is_visible()
+        assert import_page.follow_up_jobs_table.is_visible()
+        import_page.open_follow_up_job("/tmp/imports/batman-batch")
         assert import_page.unmatched_view_tabs.is_visible()
         assert import_page.unmatched_results.is_visible()
         assert import_page.unmatched_table.is_visible()
@@ -34,12 +43,12 @@ class TestImportUnmatchedTab:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
-        import_page.goto(tab="unmatched")
+        import_page.goto(tab="follow-up")
 
         import_page.select_unmatched_view("dismissed")
         import_page.wait_for_htmx()
 
-        assert authed_page.locator("[data-testid='import-orphaned-page']").count() == 1
+        assert authed_page.locator("[data-testid='import-follow-up-page']").count() == 1
         assert authed_page.locator("[data-testid='import-orphaned-tabs']").count() == 1
         assert authed_page.locator("[data-testid='import-orphaned-results']").count() == 1
         assert import_page.workspace_root.is_visible()
@@ -53,7 +62,7 @@ class TestImportUnmatchedTab:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
-        import_page.goto(tab="unmatched")
+        self._open_batman_follow_up(import_page)
 
         import_page.search_button_for_row("Batman and Robin Eternal").click()
         import_page.wait_for_htmx()
@@ -71,7 +80,7 @@ class TestImportUnmatchedTab:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
-        import_page.goto(tab="unmatched")
+        self._open_batman_follow_up(import_page)
 
         action_state = authed_page.evaluate(
             """() => {
@@ -109,7 +118,7 @@ class TestImportUnmatchedTab:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
-        import_page.goto(tab="unmatched")
+        self._open_batman_follow_up(import_page)
 
         state = authed_page.evaluate(
             """() => {
@@ -161,7 +170,7 @@ class TestImportUnmatchedTab:
         authed_page.on("dialog", lambda dialog: browser_dialogs.append(dialog.message))
 
         import_page = ImportPage(authed_page, seeded_server)
-        import_page.goto(tab="unmatched")
+        self._open_batman_follow_up(import_page)
 
         dismiss_button = (
             import_page.unmatched_row("Batman and Robin Eternal")
