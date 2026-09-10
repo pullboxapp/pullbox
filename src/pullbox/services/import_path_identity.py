@@ -35,11 +35,18 @@ def same_trusted_issue(recorded: SourceMetadata, actual: SourceMetadata) -> bool
         and recorded.comicvine_series_id != actual.comicvine_series_id
     ):
         return False
-    if (
-        not recorded.series_name
-        or not actual.series_name
-        or NameMatcher.normalize(recorded.series_name) != NameMatcher.normalize(actual.series_name)
-        or recorded.issue_number != actual.issue_number
+    exact_series_identity = (
+        recorded.comicvine_series_id is not None
+        and actual.comicvine_series_id is not None
+        and recorded.comicvine_series_id == actual.comicvine_series_id
+    )
+    series_names_match = bool(
+        recorded.series_name
+        and actual.series_name
+        and NameMatcher.normalize(recorded.series_name) == NameMatcher.normalize(actual.series_name)
+    )
+    if (not exact_series_identity and not series_names_match) or (
+        recorded.issue_number != actual.issue_number
     ):
         return False
     recorded_issue = recorded.diagnostics.get("mylar3_issue")
@@ -79,10 +86,28 @@ def unchanged_same_folder_pair(recorded: Path, actual: Path, signature: dict[str
         return False
 
 
-def reconciliation_evidence(recorded: str, actual: str, issue_id: int) -> dict[str, Any]:
-    return {
+def reconciliation_evidence(
+    recorded: str,
+    actual: str,
+    issue_id: int,
+    *,
+    recorded_series_name: str | None = None,
+    actual_series_name: str | None = None,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
         "recorded_path": recorded,
         "actual_path": actual,
         "comicvine_issue_id": issue_id,
         "method": "verified_same_folder_issue_identity",
     }
+    if (
+        recorded_series_name
+        and actual_series_name
+        and NameMatcher.normalize(recorded_series_name) != NameMatcher.normalize(actual_series_name)
+    ):
+        evidence["series_name_alias"] = {
+            "recorded": recorded_series_name,
+            "actual": actual_series_name,
+            "accepted_by": "exact_comicvine_series_and_issue_identity",
+        }
+    return evidence

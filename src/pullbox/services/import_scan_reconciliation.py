@@ -79,18 +79,37 @@ def reconcile_discovered_mylar_paths(discovered_list: list[DiscoveredSeries]) ->
                 Path(record.file_path), Path(actual.file_path), dict(actual.source_signature)
             ):
                 continue
-            actual.metadata_diagnostics = {
-                **actual.metadata_diagnostics,
-                "mylar3_path_reconciliation": reconciliation_evidence(
-                    record.file_path, actual.file_path, key[1]
-                ),
-            }
+            diagnostics = dict(actual.metadata_diagnostics)
+            diagnostics.pop("mylar3_folder_scope_conflict", None)
+            diagnostics.pop("mylar3_unrecorded_file", None)
+            recorded_issue = record.metadata_diagnostics.get("mylar3_issue")
+            if isinstance(recorded_issue, dict):
+                diagnostics["mylar3_issue"] = dict(recorded_issue)
+            diagnostics["mylar3_path_reconciliation"] = reconciliation_evidence(
+                record.file_path,
+                actual.file_path,
+                key[1],
+                recorded_series_name=base.series_name,
+                actual_series_name=metadata.series_name,
+            )
+            actual.metadata_diagnostics = diagnostics
+            actual.parsed_series = record.parsed_series
+            actual.parsed_issue_number = record.parsed_issue_number
+            actual.issue_number_raw = record.issue_number_raw
+            actual.issue_type = record.issue_type
+            actual.comicvine_issue_id = metadata.comicvine_issue_id
+            actual.comicvine_series_id = record.comicvine_series_id
+            actual.has_comicinfo = True
+            signals = dict(actual.metadata_signals)
+            signals["comicvine_issue_id"] = MetadataSignal.COMICINFO.value
+            signals["comicvine_series_id"] = MetadataSignal.COMICINFO.value
+            signals["issue_number"] = MetadataSignal.COMICINFO.value
+            signals["series_name"] = MetadataSignal.MYLAR3.value
+            actual.metadata_signals = signals
             removed.add(record.file_path)
         if removed:
             series.files = [file for file in series.files if file.file_path not in removed]
-            series.file_count = len(series.files)
-            series.sample_paths = [file.file_path for file in series.files[:5]]
-            series.has_files = bool(series.files)
+            _refresh_series_shape(series)
     _reconcile_cross_folder_mylar_paths(discovered_list, extractor)
 
 
@@ -236,6 +255,17 @@ def _apply_cross_folder_identity(
     }
     if recorded_issue_id != actual_issue_id:
         evidence["recorded_comicvine_issue_id"] = recorded_issue_id
+    if (
+        recorded.parsed_series
+        and metadata.series_name
+        and NameMatcher.normalize(recorded.parsed_series)
+        != NameMatcher.normalize(metadata.series_name)
+    ):
+        evidence["series_name_alias"] = {
+            "recorded": recorded.parsed_series,
+            "actual": metadata.series_name,
+            "accepted_by": "exact_comicvine_series_and_issue_identity",
+        }
     if canonical_path is not None:
         evidence["canonical_path"] = canonical_path
     diagnostics["mylar3_cross_folder_reconciliation"] = evidence

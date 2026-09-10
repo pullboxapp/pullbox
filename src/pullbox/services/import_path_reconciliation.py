@@ -239,7 +239,11 @@ async def reconcile_saved_mylar_paths(
                     continue
                 evidence = {
                     **reconciliation_evidence(
-                        record.file_path, actual.file_path, record.comicvine_issue_id
+                        record.file_path,
+                        actual.file_path,
+                        record.comicvine_issue_id,
+                        recorded_series_name=base.series_name,
+                        actual_series_name=metadata.series_name,
                     ),
                     "recorded_file_id": record.id,
                 }

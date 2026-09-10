@@ -154,6 +154,80 @@ async def test_scan_reconciles_unique_trusted_comicinfo_without_mylar_sidecar(db
     )
 
 
+async def test_scan_reconciles_renamed_collection_with_exact_comicvine_identity(
+    db_session,
+    tmp_path,
+):
+    folder = tmp_path / "Revival 01 (2013) [68730]"
+    actual = folder / ("Revival: Deluxe Collection - Revival 01 (2013) Deluxe 01 - Volume One.cbz")
+    _archive(
+        actual,
+        issue_id=431478,
+        series_id=68730,
+        number="1",
+        pages=298,
+        series="Revival Deluxe Edition",
+    )
+    recorded_name = "Revival 01 (2013) Deluxe 01 - Volume One.cbz"
+    db = tmp_path / "mylar.db"
+    create_mylar3_db(
+        db,
+        series=[
+            {
+                "ComicID": "68730",
+                "ComicName": "Revival 01",
+                "ComicYear": "2013",
+                "ComicLocation": str(folder),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "431478",
+                "ComicID": "68730",
+                "ComicName": "Revival 01",
+                "IssueName": "Volume One",
+                "Issue_Number": "1",
+                "Location": recorded_name,
+                "IssueDate": "2013-01-01",
+            }
+        ],
+    )
+
+    discovered = await Mylar3Reader(db, include_missing_files=True).read_series()
+    before = actual.read_bytes()
+    stat = tmp_path.stat()
+    validate_mylar_in_place_files(
+        discovered,
+        [MylarReferenceRootBoundary(1, tmp_path, tmp_path, stat.st_dev, stat.st_ino)],
+    )
+
+    await validate_discovered_files_safety(db_session, discovered)
+
+    assert discovered[0].file_count == 1
+    assert [file.file_path for file in discovered[0].files] == [str(actual)]
+    recovered = discovered[0].files[0]
+    assert recovered.parsed_series == "Revival 01"
+    assert recovered.parsed_issue_number == 1
+    assert recovered.comicvine_series_id == 68730
+    assert recovered.comicvine_issue_id == 431478
+    assert "mylar3_folder_scope_conflict" not in recovered.metadata_diagnostics
+    assert "mylar3_folder_scope" not in discovered[0].diagnostics
+    evidence = recovered.metadata_diagnostics["mylar3_path_reconciliation"]
+    assert evidence == {
+        "recorded_path": str(folder / recorded_name),
+        "actual_path": str(actual),
+        "comicvine_issue_id": 431478,
+        "method": "verified_same_folder_issue_identity",
+        "series_name_alias": {
+            "recorded": "Revival 01",
+            "actual": "Revival Deluxe Edition",
+            "accepted_by": "exact_comicvine_series_and_issue_identity",
+        },
+    }
+    assert actual.read_bytes() == before
+
+
 async def test_scan_reconciles_identical_cross_folder_copies_to_missing_mylar_issue(
     db_session,
     tmp_path,
@@ -761,6 +835,7 @@ async def test_saved_reconciliation_never_guesses_or_changes_review_decisions(
     [
         "no_archive_id",
         "different_series",
+        "alias_without_exact_series_identity",
         "different_number",
         "annual",
         "conflict",
@@ -777,6 +852,12 @@ async def test_shared_identity_rule_rejects_conflicting_evidence(db_session, tmp
         fresh = replace(fresh, signals={"comicvine_issue_id": MetadataSignal.RELEASE_TITLE})
     elif case == "different_series":
         fresh = replace(fresh, comicvine_series_id=42)
+    elif case == "alias_without_exact_series_identity":
+        fresh = replace(
+            fresh,
+            series_name="Firefly Deluxe Edition",
+            comicvine_series_id=None,
+        )
     elif case == "different_number":
         fresh = replace(fresh, issue_number=2)
     elif case == "annual":

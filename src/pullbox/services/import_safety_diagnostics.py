@@ -82,9 +82,9 @@ _SANITIZED_REASONS: dict[ImportSafetyCategory, str] = {
         "The source changed or became unavailable after scanning. Rescan before retrying."
     ),
     ImportSafetyCategory.SOURCE_MISSING: (
-        "No file was found at the recorded path. The saved filename may be outdated, "
-        "or the file may have been moved or removed. Verify the source location; "
-        "reconcile a proven replacement or skip this missing reference."
+        "No file was found at the recorded path, and Pullbox could not find a safe, verified "
+        "replacement. The saved filename may be outdated, or the file may have been moved or "
+        "removed. Verify the source location or skip this missing reference."
     ),
     ImportSafetyCategory.UNKNOWN: (
         "Pullbox blocked this file because its safety inspection did not complete safely."
