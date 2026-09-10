@@ -87,21 +87,28 @@
                   >
                   <span class="toggle-switch"></span>
                 </label>
-                <button
-                  type="button"
-                  class="btn-secondary"
-                  :disabled="libraryRootSaving || root.is_default_managed_destination || !root.enabled || !root.allow_managed_writes || !root.writable"
-                  @click="updateLibraryRoot(root, { is_default_managed_destination: true })"
-                  :aria-label="'Make ' + root.name + ' the default managed destination'"
-                >Make default</button>
-                <button
-                  type="button"
-                  class="btn-secondary"
-                  :disabled="libraryRootSaving || (root.enabled && !root.can_disable)"
-                  @click="updateLibraryRoot(root, { enabled: !root.enabled })"
-                  :aria-label="(root.enabled ? 'Disable ' : 'Enable ') + root.name"
-                  x-text="root.enabled ? 'Disable' : 'Enable'"
-                ></button>
+                <div
+                  data-testid="settings-media-library-root-actions"
+                  class="flex flex-wrap justify-end gap-2 sm:col-span-2"
+                >
+                  <button
+                    type="button"
+                    data-testid="settings-media-library-root-make-default"
+                    class="btn-ghost btn-sm"
+                    :disabled="libraryRootSaving || root.is_default_managed_destination || !root.enabled || !root.allow_managed_writes || !root.writable"
+                    @click="updateLibraryRoot(root, { is_default_managed_destination: true })"
+                    :aria-label="'Make ' + root.name + ' the default managed destination'"
+                  >Make default</button>
+                  <button
+                    type="button"
+                    data-testid="settings-media-library-root-toggle-enabled"
+                    class="btn-ghost btn-sm"
+                    :disabled="libraryRootSaving || (root.enabled && !root.can_disable)"
+                    @click="updateLibraryRoot(root, { enabled: !root.enabled })"
+                    :aria-label="(root.enabled ? 'Disable ' : 'Enable ') + root.name"
+                    x-text="root.enabled ? 'Disable' : 'Enable'"
+                  ></button>
+                </div>
               </div>
             </div>
 
