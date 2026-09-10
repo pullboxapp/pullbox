@@ -9,6 +9,7 @@ import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
@@ -74,6 +75,25 @@ class MisplacedSourceCleanupResult:
     """Result of one explicit source cleanup."""
 
     final_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class MisplacedSourceCleanupBulkPreview:
+    """Signed preview for every currently eligible verified misplaced file."""
+
+    job_id: int
+    affected_count: int
+    unavailable_count: int
+    examples: tuple[str, ...]
+    preview_token: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MisplacedSourceCleanupBulkResult:
+    """Outcome of one verified bulk source-organization operation."""
+
+    moved_count: int
+    skipped_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,11 +254,12 @@ def _safe_absolute_path(value: object, *, label: str) -> Path:
     return path.absolute()
 
 
-async def _writable_root_for_path(
+async def _reference_root_for_path(
     session: AsyncSession,
     *,
     lexical_path: Path,
     resolved_path: Path,
+    require_managed_writes: bool,
 ) -> tuple[LibraryRoot | None, str]:
     roots = list(
         await session.scalars(
@@ -259,7 +280,7 @@ async def _writable_root_for_path(
             matches.append(root)
     if len(matches) != 1:
         return None, "The file does not belong to one unambiguous enabled library root."
-    if not matches[0].allow_managed_writes:
+    if require_managed_writes and not matches[0].allow_managed_writes:
         return None, (
             "This library root does not allow managed writes. Enable managed writes only when "
             "you are ready for Pullbox to change the Mylar source library."
@@ -324,20 +345,22 @@ async def _load_restore_context(
     if source == destination:
         return _CleanupContext(job, imported_file, library_file, source, None, signature, "")
 
-    _source_root, source_reason = await _writable_root_for_path(
+    _source_root, source_reason = await _reference_root_for_path(
         session,
         lexical_path=source_lexical,
         resolved_path=source,
+        require_managed_writes=False,
     )
     destination_parent = destination.parent
     try:
         resolved_parent = destination_parent.resolve(strict=True)
     except (OSError, RuntimeError, ValueError):
         resolved_parent = destination_parent
-    _destination_root, destination_reason = await _writable_root_for_path(
+    _destination_root, destination_reason = await _reference_root_for_path(
         session,
         lexical_path=destination_lexical,
         resolved_path=resolved_parent / destination.name,
+        require_managed_writes=False,
     )
     unavailable_reason = source_reason or destination_reason
     if not unavailable_reason and os.path.lexists(destination):
@@ -348,6 +371,8 @@ async def _load_restore_context(
         not destination_parent.is_dir() or not os.access(destination_parent, os.W_OK)
     ):
         unavailable_reason = "The Mylar-recorded destination folder is not writable."
+    if not unavailable_reason and not os.access(source.parent, os.W_OK):
+        unavailable_reason = "The current source folder is not writable."
     return _CleanupContext(
         job,
         imported_file,
@@ -417,10 +442,11 @@ async def _load_duplicate_context(
             "The duplicate or canonical source changed after import. Leave both files unchanged."
         ) from exc
     unavailable_reason = ""
-    _root, root_reason = await _writable_root_for_path(
+    _root, root_reason = await _reference_root_for_path(
         session,
         lexical_path=source_lexical,
         resolved_path=source,
+        require_managed_writes=True,
     )
     unavailable_reason = root_reason
     actual_hash = await asyncio.to_thread(compute_content_hash, str(source))
@@ -530,6 +556,196 @@ async def preview_misplaced_source_cleanup(
             preview_token=token,
         )
     raise ValidationError("This misplaced source cleanup action is not supported.")
+
+
+async def _load_verified_restore_contexts(
+    session: AsyncSession,
+    job_id: int,
+) -> tuple[list[_CleanupContext], int]:
+    file_ids = list(
+        await session.scalars(
+            select(ImportedFile.id)
+            .where(
+                *_cleanup_scope_filters(
+                    job_id,
+                    MisplacedSourceCleanupAction.RESTORE_RECORDED_PATH,
+                )
+            )
+            .order_by(ImportedFile.id)
+        )
+    )
+    contexts: list[_CleanupContext] = []
+    unavailable_count = 0
+    for file_id in file_ids:
+        try:
+            context = await _load_restore_context(session, job_id, int(file_id))
+        except ValidationError:
+            unavailable_count += 1
+            continue
+        if context.unavailable_reason or context.destination is None:
+            unavailable_count += 1
+            continue
+        contexts.append(context)
+    return contexts, unavailable_count
+
+
+def _restore_scope_digest(contexts: list[_CleanupContext]) -> str:
+    digest = sha256()
+    for context in contexts:
+        destination = context.destination
+        if destination is None:
+            continue
+        digest.update(
+            (
+                f"{context.imported_file.id}\0{context.source}\0{destination}\0"
+                f"{sorted(context.signature.items())}\n"
+            ).encode()
+        )
+    return digest.hexdigest()
+
+
+async def _move_restore_source(context: _CleanupContext) -> Path:
+    if context.destination is None:
+        raise ValidationError("This file is already at the Mylar-recorded path.")
+    await asyncio.to_thread(shutil.move, str(context.source), str(context.destination))
+    return context.destination.resolve(strict=True)
+
+
+async def _update_restore_registration(
+    session: AsyncSession,
+    context: _CleanupContext,
+    final_path: Path,
+) -> None:
+    final_signature = build_file_identity_signature(final_path)
+    stat_result = final_path.stat()
+    context.imported_file.file_path = str(final_path)
+    context.imported_file.file_name = final_path.name
+    context.imported_file.source_signature = final_signature
+    context.library_file.file_path = str(final_path)
+    context.library_file.file_name = final_path.name
+    context.library_file.file_size = stat_result.st_size
+    context.library_file.file_modified_at = datetime.fromtimestamp(stat_result.st_mtime, UTC)
+    context.library_file.source_signature = final_signature
+    diagnostics = dict(context.imported_file.diagnostics or {})
+    evidence = dict(diagnostics.get("mylar3_cross_folder_reconciliation") or {})
+    evidence.update(
+        {
+            "restored_at": datetime.now(UTC).isoformat(),
+            "restored_path": str(final_path),
+        }
+    )
+    diagnostics["mylar3_cross_folder_reconciliation"] = evidence
+    context.imported_file.diagnostics = diagnostics
+    registration_action = await _load_registration_action(
+        session,
+        job_id=context.job.id,
+        imported_file_id=context.imported_file.id,
+    )
+    if registration_action is not None:
+        registration_payload = dict(registration_action.payload or {})
+        registration_payload.update(
+            {
+                "destination_path": str(final_path),
+                "destination_signature": final_signature,
+                "original_source_path": str(final_path),
+            }
+        )
+        registration_action.payload = registration_payload
+
+
+async def _restore_source_moves(moved: list[tuple[Path, Path]]) -> None:
+    for source, destination in reversed(moved):
+        if os.path.lexists(destination) and not os.path.lexists(source):
+            await asyncio.to_thread(shutil.move, str(destination), str(source))
+
+
+async def preview_verified_misplaced_source_cleanup(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    actor_id: int,
+) -> MisplacedSourceCleanupBulkPreview:
+    """Preview every currently eligible exact misplaced-file restoration."""
+    await _load_completed_mylar_job(session, job_id)
+    contexts, unavailable_count = await _load_verified_restore_contexts(session, job_id)
+    token = None
+    if contexts:
+        token = str(
+            _serializer().dumps(
+                {
+                    "job_id": job_id,
+                    "actor_id": actor_id,
+                    "action": "restore_all_verified",
+                    "affected_count": len(contexts),
+                    "unavailable_count": unavailable_count,
+                    "scope_digest": _restore_scope_digest(contexts),
+                }
+            )
+        )
+    return MisplacedSourceCleanupBulkPreview(
+        job_id=job_id,
+        affected_count=len(contexts),
+        unavailable_count=unavailable_count,
+        examples=tuple(context.imported_file.file_name for context in contexts[:3]),
+        preview_token=token,
+    )
+
+
+async def apply_verified_misplaced_source_cleanup(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    actor_id: int,
+    preview_token: str,
+    actor_username: str | None = None,
+    source_ip: str | None = None,
+) -> MisplacedSourceCleanupBulkResult:
+    """Move every file covered by a signed exact-scope preview."""
+    payload = _load_token(preview_token)
+    contexts, unavailable_count = await _load_verified_restore_contexts(session, job_id)
+    if (
+        payload.get("job_id") != job_id
+        or payload.get("actor_id") != actor_id
+        or payload.get("action") != "restore_all_verified"
+        or payload.get("affected_count") != len(contexts)
+        or payload.get("unavailable_count") != unavailable_count
+        or payload.get("scope_digest") != _restore_scope_digest(contexts)
+    ):
+        raise ValidationError("The verified-file cleanup scope changed. Preview it again.")
+    if not contexts:
+        raise ValidationError("No verified misplaced files are currently available to move.")
+
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for context in contexts:
+            destination = context.destination
+            if destination is None:
+                raise ValidationError("A verified misplaced file is already at its proposed path.")
+            final_path = await _move_restore_source(context)
+            moved.append((context.source, final_path))
+            await _update_restore_registration(session, context, final_path)
+        await AuditService.log_event(
+            session,
+            AuditEventType.IMPORT_MISPLACED_SOURCE_CLEANUP,
+            source_ip=source_ip,
+            user_id=actor_id,
+            username=actor_username,
+            detail=f"{len(moved)} verified misplaced Mylar sources were organized.",
+            metadata={
+                "job_id": job_id,
+                "moved_count": len(moved),
+                "skipped_count": unavailable_count,
+            },
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        await _restore_source_moves(moved)
+        raise
+    return MisplacedSourceCleanupBulkResult(
+        moved_count=len(moved),
+        skipped_count=unavailable_count,
+    )
 
 
 def _load_token(token: str) -> Mapping[str, object]:
@@ -656,45 +872,11 @@ async def apply_misplaced_source_cleanup(
     validate_file_identity_signature(dict(expected_signature), context.signature)
 
     source = context.source
-    destination = context.destination
-    await asyncio.to_thread(shutil.move, str(source), str(destination))
+    moved: list[tuple[Path, Path]] = []
     try:
-        final_path = destination.resolve(strict=True)
-        final_signature = build_file_identity_signature(final_path)
-        stat_result = final_path.stat()
-        context.imported_file.file_path = str(final_path)
-        context.imported_file.file_name = final_path.name
-        context.imported_file.source_signature = final_signature
-        context.library_file.file_path = str(final_path)
-        context.library_file.file_name = final_path.name
-        context.library_file.file_size = stat_result.st_size
-        context.library_file.file_modified_at = datetime.fromtimestamp(stat_result.st_mtime, UTC)
-        context.library_file.source_signature = final_signature
-        diagnostics = dict(context.imported_file.diagnostics or {})
-        evidence = dict(diagnostics.get("mylar3_cross_folder_reconciliation") or {})
-        evidence.update(
-            {
-                "restored_at": datetime.now(UTC).isoformat(),
-                "restored_path": str(final_path),
-            }
-        )
-        diagnostics["mylar3_cross_folder_reconciliation"] = evidence
-        context.imported_file.diagnostics = diagnostics
-        registration_action = await _load_registration_action(
-            session,
-            job_id=job_id,
-            imported_file_id=file_id,
-        )
-        if registration_action is not None:
-            registration_payload = dict(registration_action.payload or {})
-            registration_payload.update(
-                {
-                    "destination_path": str(final_path),
-                    "destination_signature": final_signature,
-                    "original_source_path": str(final_path),
-                }
-            )
-            registration_action.payload = registration_payload
+        final_path = await _move_restore_source(context)
+        moved.append((source, final_path))
+        await _update_restore_registration(session, context, final_path)
         await AuditService.log_event(
             session,
             AuditEventType.IMPORT_MISPLACED_SOURCE_CLEANUP,
@@ -707,7 +889,6 @@ async def apply_misplaced_source_cleanup(
         await session.commit()
     except Exception:
         await session.rollback()
-        if os.path.lexists(destination) and not os.path.lexists(source):
-            await asyncio.to_thread(shutil.move, str(destination), str(source))
+        await _restore_source_moves(moved)
         raise
     return MisplacedSourceCleanupResult(final_path=final_path)

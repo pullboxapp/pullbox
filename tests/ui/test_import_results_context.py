@@ -133,7 +133,8 @@ async def test_load_import_results_context_splits_unmatched_queue_counts(db_sess
     assert context["identified_series_file_no_match_count"] == 1
     assert context["no_match_count"] == 1
     assert context["unmatched_queue_count"] == 2
-    assert context["cleanup_needs_review_count"] == 2
+    assert context["cleanup_needs_review_count"] == 0
+    assert context["follow_up_group_count"] == 1
 
 
 @pytest.mark.asyncio

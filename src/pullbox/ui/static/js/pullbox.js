@@ -2865,7 +2865,7 @@ function importCollectionFooterData(config) {
       Number(snapshot.series_found) || 0,
     ),
     recentJobs: Number(cfg.recentJobs) || 0,
-    unmatched: Number(cfg.unmatched) || 0,
+    followUp: Number(cfg.followUp) || 0,
     libraryRoots: Number(cfg.libraryRoots) || 0,
 
     footerPhaseLabel: function () {
@@ -2925,7 +2925,7 @@ function importCollectionFooterData(config) {
       return [
         { label: "active import", value: this.resumeJobId ? "ready" : "idle" },
         { label: "recent jobs", value: String(this.recentJobs) },
-        { label: "unmatched", value: String(this.unmatched) },
+        { label: "follow-up", value: String(this.followUp) },
         { label: "library roots", value: String(this.libraryRoots) },
       ];
     },
@@ -8180,6 +8180,8 @@ function importResultsData(config) {
     cleanLibraryRunning: false,
     cleanLibraryError: "",
     retryError: "",
+    refreshUrl: cfg.refreshUrl || "/import/" + (cfg.jobId || "") + "/results-partial",
+    refreshTarget: cfg.refreshTarget || "[data-testid='import-collection-results']",
 
     toggleFailedSeries: function () {
       this.showFailedSeries = !this.showFailedSeries;
@@ -8288,8 +8290,8 @@ function importResultsData(config) {
     },
 
     refreshResults: function () {
-      var url = "/import/" + this.jobId + "/results-partial";
-      var target = "[data-testid='import-collection-results']";
+      var url = this.refreshUrl;
+      var target = this.refreshTarget;
       if (window.htmx && document.querySelector(target)) {
         window.htmx.ajax("GET", url, { target: target, swap: "outerHTML" });
         return;
@@ -16704,7 +16706,7 @@ function orphanedSeriesPage(config) {
 
     searchCv: function (importedSeriesId, query) {
       if (typeof htmx === "undefined") {
-        window.location.assign("/import?tab=unmatched");
+        window.location.assign("/import?tab=follow-up");
         return;
       }
 
@@ -16717,7 +16719,7 @@ function orphanedSeriesPage(config) {
 
     openRecovery: function (importedSeriesId) {
       if (typeof htmx === "undefined") {
-        window.location.assign("/import?tab=unmatched");
+        window.location.assign("/import?tab=follow-up");
         return;
       }
 
@@ -16817,7 +16819,7 @@ function orphanedSeriesPage(config) {
           self.dispatchToast(
             "Identified " +
               ((data && data.cv_title) || "series") +
-              ". Finish the file recovery to remove it from Unmatched.",
+              ". Finish the file recovery to remove it from Follow-up.",
             "success"
           );
           self.refreshResults();
@@ -17357,7 +17359,7 @@ function orphanedRecoveryModal(config) {
 
     reload: function () {
       if (typeof htmx === "undefined") {
-        window.location.assign("/import?tab=unmatched");
+        window.location.assign("/import?tab=follow-up");
         return;
       }
       htmx.ajax("GET", "/import/orphaned/" + cfg.importedSeriesId + "/recovery", {

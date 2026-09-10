@@ -34,9 +34,11 @@ from pullbox.models.user import User
 from pullbox.services.import_misplaced_source_cleanup import (
     MisplacedSourceCleanupAction,
     apply_misplaced_source_cleanup,
+    apply_verified_misplaced_source_cleanup,
     count_misplaced_source_cleanup_files,
     list_misplaced_source_cleanup_files,
     preview_misplaced_source_cleanup,
+    preview_verified_misplaced_source_cleanup,
 )
 
 if TYPE_CHECKING:
@@ -203,7 +205,7 @@ async def test_restore_preview_and_apply_move_to_exact_missing_mylar_path(
 
 
 @pytest.mark.asyncio
-async def test_restore_is_unavailable_when_mylar_root_is_reference_only(
+async def test_restore_uses_explicit_preview_as_one_time_reference_root_authorization(
     db_session,
     tmp_path: Path,
 ) -> None:
@@ -225,10 +227,207 @@ async def test_restore_is_unavailable_when_mylar_root_is_reference_only(
         actor_id=42,
     )
 
-    assert preview.can_apply is False
-    assert "managed writes" in preview.unavailable_reason
+    assert preview.can_apply is True
+    assert preview.preview_token is not None
+
+    await apply_misplaced_source_cleanup(
+        db_session,
+        job.id,
+        imported_file.id,
+        MisplacedSourceCleanupAction.RESTORE_RECORDED_PATH,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+
+    assert not source.exists()
+    assert expected.exists()
+    root = await db_session.get(LibraryRoot, 1)
+    assert root is not None
+    await db_session.refresh(root)
+    assert root.allow_managed_writes is False
+
+
+@pytest.mark.asyncio
+async def test_bulk_restore_is_actor_bound_and_restores_source_on_commit_failure(
+    db_session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, _file, _library_file, _action, source, expected, _trash = await _seed_recovered_file(
+        db_session, tmp_path, writable=False
+    )
+    preview = await preview_verified_misplaced_source_cleanup(
+        db_session,
+        job.id,
+        actor_id=42,
+    )
+    assert preview.preview_token is not None
+
+    with pytest.raises(ValidationError, match="scope changed"):
+        await apply_verified_misplaced_source_cleanup(
+            db_session,
+            job.id,
+            actor_id=43,
+            preview_token=preview.preview_token,
+        )
     assert source.exists()
     assert not expected.exists()
+
+    async def fail_commit() -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(db_session, "commit", fail_commit)
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await apply_verified_misplaced_source_cleanup(
+            db_session,
+            job.id,
+            actor_id=42,
+            preview_token=preview.preview_token,
+        )
+
+    assert source.exists()
+    assert not expected.exists()
+
+
+@pytest.mark.asyncio
+async def test_bulk_restore_moves_all_verified_files_and_excludes_unavailable_candidates(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    (
+        job,
+        first,
+        _library_file,
+        _action,
+        first_source,
+        first_expected,
+        _trash,
+    ) = await _seed_recovered_file(db_session, tmp_path, writable=False)
+    root = await db_session.get(LibraryRoot, 1)
+    assert root is not None
+    first_issue = await db_session.get(Issue, first.matched_issue_id)
+    assert first_issue is not None
+
+    second_source = first_source.with_name("Absolute Batman (2024) #002.cbz")
+    second_expected = first_expected.with_name("Absolute Batman (2024) #002.cbz")
+    second_source.write_bytes(b"absolute batman issue two")
+    issue = Issue(
+        series_id=first_issue.series_id,
+        issue_number=2,
+        issue_number_text="2",
+        comicvine_id=1073109,
+    )
+    db_session.add(issue)
+    await db_session.flush()
+    signature = build_file_identity_signature(second_source)
+    library_file = LibraryFile(
+        issue_id=issue.id,
+        library_root_id=root.id,
+        file_path=str(second_source),
+        file_name=second_source.name,
+        file_size=second_source.stat().st_size,
+        file_format=FileFormat.CBZ,
+        file_modified_at=datetime.now(UTC),
+        match_confidence=MatchConfidence.HIGH,
+        storage_mode=LibraryFileStorageMode.REFERENCED,
+        source_signature=signature,
+    )
+    db_session.add(library_file)
+    await db_session.flush()
+    second = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=first.import_series_id,
+        file_path=str(second_source),
+        file_name=second_source.name,
+        file_size=second_source.stat().st_size,
+        file_format="cbz",
+        source_signature=signature,
+        status=ImportedFileStatus.IMPORTED,
+        matched_issue_id=issue.id,
+        matched_issue_cv_id=issue.comicvine_id,
+        library_file_id=library_file.id,
+        diagnostics={
+            "mylar3_cross_folder_reconciliation": {
+                "recorded_path": str(second_expected),
+                "actual_path": str(second_source),
+                "comicvine_issue_id": issue.comicvine_id,
+                "comicvine_series_id": 160294,
+                "method": "verified_cross_folder_issue_identity",
+                "role": "canonical",
+                "source_series": "Crossed Badlands",
+            }
+        },
+    )
+    db_session.add(second)
+    await db_session.flush()
+    db_session.add(
+        ImportJobAction(
+            import_job_id=job.id,
+            sequence_no=2,
+            phase="import",
+            action_type="library_file_registered",
+            payload={
+                "imported_file_id": second.id,
+                "library_file_id": library_file.id,
+                "destination_path": str(second_source),
+                "destination_signature": signature,
+                "original_source_path": str(second_source),
+                "transfer_method": "leave_in_place",
+                "storage_mode": "referenced",
+            },
+        )
+    )
+    blocked_source = first_source.with_name("Absolute Batman (2024) #003.cbz")
+    blocked_expected = first_expected.with_name("Absolute Batman (2024) #003.cbz")
+    blocked_source.write_bytes(b"source")
+    blocked_expected.write_bytes(b"occupied")
+    blocked = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=first.import_series_id,
+        file_path=str(blocked_source),
+        file_name=blocked_source.name,
+        file_size=blocked_source.stat().st_size,
+        file_format="cbz",
+        source_signature=build_file_identity_signature(blocked_source),
+        status=ImportedFileStatus.IMPORTED,
+        matched_issue_id=issue.id,
+        matched_issue_cv_id=issue.comicvine_id,
+        library_file_id=library_file.id,
+        diagnostics={
+            "mylar3_cross_folder_reconciliation": {
+                "recorded_path": str(blocked_expected),
+                "actual_path": str(blocked_source),
+                "method": "verified_cross_folder_issue_identity",
+                "role": "canonical",
+            }
+        },
+    )
+    db_session.add(blocked)
+    await db_session.commit()
+
+    preview = await preview_verified_misplaced_source_cleanup(
+        db_session,
+        job.id,
+        actor_id=42,
+    )
+
+    assert preview.affected_count == 2
+    assert preview.unavailable_count == 1
+    assert preview.preview_token is not None
+
+    result = await apply_verified_misplaced_source_cleanup(
+        db_session,
+        job.id,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+
+    assert result.moved_count == 2
+    assert result.skipped_count == 1
+    assert first_expected.exists()
+    assert second_expected.exists()
+    assert blocked_source.exists()
+    assert blocked_expected.read_bytes() == b"occupied"
 
 
 @pytest.mark.asyncio

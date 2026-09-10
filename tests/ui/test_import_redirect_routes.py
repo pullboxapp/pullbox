@@ -26,4 +26,4 @@ async def test_import_orphaned_redirect_preserves_legacy_filters() -> None:
     )
 
     assert response.status_code == 307
-    assert response.headers["location"] == "/import?tab=unmatched&view=dismissed&page=3"
+    assert response.headers["location"] == "/import?tab=follow-up&view=dismissed&page=3"

@@ -1,0 +1,84 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+
+<div
+  data-testid="import-clean-library-modal"
+  class="modal-root"
+  x-data="Object.assign({ open: true }, importResultsData({
+    jobId: {{ job.id }},
+    defaultCleanLibraryRootId: {{ (clean_library_target_roots|default([])|first|default({})).get('id', '')|tojson|forceescape }},
+  }))"
+  x-show="open"
+  x-cloak
+  @keydown.escape.window="open = false; closeImportCvSearchModal()"
+>
+  <div class="modal-backdrop" @click="open = false; closeImportCvSearchModal()"></div>
+  <div class="modal-panel max-w-2xl" @click.outside="open = false; closeImportCvSearchModal()">
+    <div class="modal-header">
+      <div>
+        <p class="section-eyebrow">Library organizer</p>
+        <h2 class="modal-title">Build a clean Pullbox library</h2>
+      </div>
+      <button type="button" class="icon-btn icon-btn-sm" @click="open = false; closeImportCvSearchModal()" aria-label="Close library organizer">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body space-y-4">
+      <p class="text-sm leading-6 text-pb-text-dim">
+        Copy {{ "{:,}".format(clean_library_reference_count) }} referenced file{{ '' if clean_library_reference_count == 1 else 's' }} across
+        {{ "{:,}".format(clean_library_reference_series_count|default(0)) }} series into a separate Pullbox-managed root. Pullbox applies current naming, conversion, and ComicInfo rules while leaving every Mylar source file unchanged.
+      </p>
+      <span class="pill pill-neutral">{{ clean_library_reference_bytes|default(0)|filesizeformat }}</span>
+      {% if clean_library_mixed_folder_repair_count|default(0) > 0 %}
+      <div data-testid="clean-library-mixed-folder-blocked" class="inline-alert inline-alert-warning">
+        Resolve {{ "{:,}".format(clean_library_mixed_folder_repair_count) }} exact mixed-folder assignment{{ '' if clean_library_mixed_folder_repair_count == 1 else 's' }} in Follow-up before organizing this import.
+      </div>
+      {% elif clean_library_target_roots %}
+      <div>
+        <label for="clean-library-target-root" class="field-label">Clean managed destination</label>
+        {% set clean_library_root_options = [] %}
+        {% for root in clean_library_target_roots %}
+          {% set _ = clean_library_root_options.append((root.id|string, root.name ~ " - " ~ root.path)) %}
+        {% endfor %}
+        {{ dropdown_select(
+          name="clean_library_target_root_id",
+          value=(clean_library_target_roots|first).id,
+          options=clean_library_root_options,
+          local_model="cleanLibraryTargetRootId",
+          local_on_change="cleanLibraryTargetRootId = $event.detail.value ? Number($event.detail.value) : null",
+          trigger_id="clean-library-target-root",
+          root_testid="clean-library-target-root",
+          wrap_options=true,
+          class_name="mt-2 w-full"
+        ) }}
+        <p class="mt-2 text-xs leading-5 text-pb-text-dim">The destination must not overlap the Mylar source. Validate the clean library before retiring the legacy folders.</p>
+      </div>
+      {% else %}
+      <div class="inline-alert inline-alert-warning">
+        Add a separate writable managed library root before organizing these referenced files.
+        <a href="/settings?tab=media" class="font-medium text-pb-interactive hover:underline">Configure library roots</a>
+      </div>
+      {% endif %}
+      <p x-show="cleanLibraryError" x-cloak x-text="cleanLibraryError" class="text-xs text-pb-error"></p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn-ghost btn-sm" @click="open = false; closeImportCvSearchModal()">Cancel</button>
+      {% if clean_library_mixed_folder_repair_count|default(0) == 0 and clean_library_target_roots %}
+      <button
+        type="button"
+        data-testid="clean-library-preview-action"
+        class="btn-primary btn-sm inline-flex items-center gap-2"
+        :disabled="cleanLibraryRunning || !cleanLibraryTargetRootId"
+        @click="buildCleanLibrary()"
+      >
+        <svg x-show="cleanLibraryRunning" x-cloak class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+        </svg>
+        <span x-text="cleanLibraryRunning ? 'Starting...' : 'Preview clean library'"></span>
+      </button>
+      {% endif %}
+    </div>
+  </div>
+</div>

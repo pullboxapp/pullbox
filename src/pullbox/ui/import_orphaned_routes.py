@@ -63,6 +63,7 @@ async def load_import_orphaned_context(
     *,
     view: str,
     requested_page: int,
+    job_id: int | None = None,
 ) -> dict[str, object]:
     """Load unmatched-series page data for the requested view and page."""
     from pullbox.composition.services import build_import_control_service
@@ -103,6 +104,7 @@ async def load_import_orphaned_context(
             session,
             page=requested_page,
             page_size=_IMPORT_ORPHANED_PAGE_SIZE,
+            job_id=job_id,
         )
         total_pages = max(1, (total + _IMPORT_ORPHANED_PAGE_SIZE - 1) // _IMPORT_ORPHANED_PAGE_SIZE)
         page = min(requested_page, total_pages)
@@ -111,9 +113,10 @@ async def load_import_orphaned_context(
                 session,
                 page=page,
                 page_size=_IMPORT_ORPHANED_PAGE_SIZE,
+                job_id=job_id,
             )
 
-    orphaned_count = await svc.get_orphaned_count(session)
+    orphaned_count = await svc.get_orphaned_count(session, job_id=job_id)
 
     dismissed_q = (
         select(func.count())

@@ -27,18 +27,18 @@
       "stroke_offset": (gauge_circumference * (1 - (history_stats['results_ready'] / gauge_total)))|round(1)
     },
   ] %}
-{% elif tab == "unmatched" %}
-  {% set unmatched_total = orphaned_count|default(0) %}
+{% elif tab == "follow-up" %}
+  {% set follow_up_total = follow_up_job_count|default(0) %}
   {% set dismissed_total = dismissed_count|default(0) %}
-  {% set visible_total = items|default([])|length %}
-  {% set gauge_total = unmatched_total + dismissed_total + visible_total if (unmatched_total + dismissed_total + visible_total) > 0 else 1 %}
+  {% set visible_total = items|default([])|length if selected_follow_up_job else follow_up_jobs|default([])|length %}
+  {% set gauge_total = follow_up_total + dismissed_total if (follow_up_total + dismissed_total) > 0 else 1 %}
   {% set header_gauges = [
     {
-      "key": "unmatched",
-      "label": "Unmatched",
-      "value": unmatched_total,
+      "key": "imports",
+      "label": "Imports",
+      "value": follow_up_job_count|default(0),
       "tone": "warning",
-      "stroke_offset": (gauge_circumference * (1 - (unmatched_total / gauge_total)))|round(1)
+      "stroke_offset": (gauge_circumference * (1 - (follow_up_total / gauge_total)))|round(1)
     },
     {
       "key": "dismissed",
@@ -58,8 +58,8 @@
 {% else %}
   {% set active_total = 1 if resume_job_id else 0 %}
   {% set recent_total = recent_jobs|default([])|length %}
-  {% set unmatched_total = unmatched_count|default(0) %}
-  {% set gauge_total = active_total + recent_total + unmatched_total if (active_total + recent_total + unmatched_total) > 0 else 1 %}
+  {% set follow_up_total = follow_up_count|default(0) %}
+  {% set gauge_total = active_total + recent_total + follow_up_total if (active_total + recent_total + follow_up_total) > 0 else 1 %}
   {% set header_gauges = [
     {
       "key": "active",
@@ -76,11 +76,11 @@
       "stroke_offset": (gauge_circumference * (1 - (recent_total / gauge_total)))|round(1)
     },
     {
-      "key": "unmatched",
-      "label": "Unmatched",
-      "value": unmatched_total,
+      "key": "follow-up",
+      "label": "Follow-up",
+      "value": follow_up_total,
       "tone": "warning",
-      "stroke_offset": (gauge_circumference * (1 - (unmatched_total / gauge_total)))|round(1)
+      "stroke_offset": (gauge_circumference * (1 - (follow_up_total / gauge_total)))|round(1)
     },
   ] %}
 {% endif %}
@@ -92,8 +92,8 @@
         <h1 class="dashboard-mission-control__title" data-testid="import-header-title">
           {% if tab == "history" %}
             IMPORT <span>HISTORY</span>
-          {% elif tab == "unmatched" %}
-            UNMATCHED <span>SERIES</span>
+          {% elif tab == "follow-up" %}
+            IMPORT <span>FOLLOW-UP</span>
           {% else %}
             COLLECTION <span>IMPORT</span>
           {% endif %}
@@ -101,8 +101,12 @@
         <p class="dashboard-mission-control__subtitle" data-testid="import-header-subtitle">
           {% if tab == "history" %}
             {{ total_jobs|default(0) }} jobs · {{ history_stats['active'] }} active · {{ history_stats['resumable'] }} resumable · {{ history_stats['results_ready'] }} results ready
-          {% elif tab == "unmatched" %}
-            {{ orphaned_count|default(0) }} unmatched · {{ dismissed_count|default(0) }} dismissed
+          {% elif tab == "follow-up" %}
+            {% if selected_follow_up_job %}
+              Import #{{ selected_follow_up_job.id }} · {{ follow_up_group_count|default(0) }} actionable group{{ '' if follow_up_group_count|default(0) == 1 else 's' }}
+            {% else %}
+              {{ follow_up_job_count|default(0) }} import{{ '' if follow_up_job_count|default(0) == 1 else 's' }} need attention · {{ dismissed_count|default(0) }} dismissed
+            {% endif %}
           {% else %}
             Scan · match · review · import
           {% endif %}

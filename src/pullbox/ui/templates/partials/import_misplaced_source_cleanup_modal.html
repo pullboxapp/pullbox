@@ -11,7 +11,7 @@
     <div class="modal-header">
       <div class="space-y-1">
         <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-warning">Optional source cleanup</p>
-        <h3 class="text-base font-semibold text-pb-text">{{ 'Restore misplaced file' if is_restore else 'Move duplicate to Trash' }}</h3>
+        <h3 class="text-base font-semibold text-pb-text">{{ 'Move misplaced file' if is_restore else 'Move duplicate to Trash' }}</h3>
         <p class="text-xs leading-5 text-pb-text-dim">{{ preview.file_name }}</p>
       </div>
       <button type="button" class="icon-btn icon-btn-sm" @click="open = false; closeImportCvSearchModal()" aria-label="Close source cleanup dialog">
@@ -27,7 +27,7 @@
             <p class="font-semibold text-pb-text">This changes the source library.</p>
             <p class="mt-1 text-xs leading-5 text-pb-text-sec">
               {% if is_restore %}
-              Pullbox will move this verified issue to the exact missing path recorded by Mylar and update its own file reference. Pullbox does not edit the Mylar database.
+              Pullbox will move this verified issue to the exact missing path recorded by Mylar and update its own file reference. This confirmation authorizes this move even when the source root is otherwise reference-only. Pullbox does not edit the Mylar database.
               {% else %}
               Pullbox will move this byte-identical extra copy to the configured Trash folder. The canonical imported issue will not move. Pullbox does not edit the Mylar database.
               {% endif %}
@@ -52,12 +52,15 @@
           method="post"
           action="/import/{{ preview.job_id }}/files/{{ preview.file_id }}/misplaced-source-cleanup/{{ preview.action.value }}"
           hx-post="/import/{{ preview.job_id }}/files/{{ preview.file_id }}/misplaced-source-cleanup/{{ preview.action.value }}"
-          hx-swap="none"
+          hx-target="#import-orphaned-results"
+          hx-swap="outerHTML"
+          hx-sync="#import-orphaned-results:replace"
+          hx-on::after-request="if(event.detail.successful){ open = false; closeImportCvSearchModal(); }"
         >
           <input type="hidden" name="preview_token" value="{{ preview.preview_token }}">
           <div class="flex flex-wrap justify-end gap-2">
             <button type="button" class="btn-ghost btn-sm" @click="open = false; closeImportCvSearchModal()">Cancel</button>
-            <button type="submit" class="{{ 'btn-warning' if is_restore else 'btn-danger' }} btn-sm">{{ 'Restore misplaced file' if is_restore else 'Move duplicate to Trash' }}</button>
+            <button type="submit" class="{{ 'btn-warning' if is_restore else 'btn-danger' }} btn-sm">{{ 'Move file' if is_restore else 'Move duplicate to Trash' }}</button>
           </div>
         </form>
         {% else %}

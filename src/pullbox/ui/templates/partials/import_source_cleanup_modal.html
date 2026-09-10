@@ -51,6 +51,10 @@
           hx-target="#import-step-review-shell"
           hx-swap="morph:outerHTML"
           hx-sync="#import-step-review-shell:replace"
+          {% elif return_to|default('review') == 'follow-up' %}
+          hx-target="#import-orphaned-results"
+          hx-swap="outerHTML"
+          hx-sync="#import-orphaned-results:replace"
           {% else %}
           hx-swap="none"
           {% endif %}

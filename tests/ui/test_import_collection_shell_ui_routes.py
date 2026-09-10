@@ -768,9 +768,11 @@ class TestImportShellRouteContracts:
             Path(
                 "src/pullbox/ui/templates/partials/import_story_arc_review_table.html"
             ).read_text(),
-            Path("src/pullbox/ui/templates/partials/import_source_cleanup_modal.html").read_text(),
             Path("src/pullbox/ui/templates/partials/import_review_footer_dock.html").read_text(),
         ]
+        source_cleanup_template = Path(
+            "src/pullbox/ui/templates/partials/import_source_cleanup_modal.html"
+        ).read_text()
 
         assert 'settledTarget.id === "import-step-review"' in script
         assert 'settledTarget.id === "conflicts-content"' in script
@@ -794,6 +796,8 @@ class TestImportShellRouteContracts:
         assert "currentShell.replaceWith(nextShell)" not in loader
         for template in related_templates:
             assert 'hx-swap="outerHTML"' not in template
+        assert 'hx-target="#import-step-review-shell"' in source_cleanup_template
+        assert 'hx-swap="morph:outerHTML"' in source_cleanup_template
 
     async def test_htmx_swaps_initialize_alpine_once_before_settle(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
@@ -941,7 +945,8 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-collection-footer-dock"' in response.text
         assert "importCollectionFooterData({" in response.text
         assert 'data-testid="import-tab-collection"' in response.text
-        assert 'data-testid="import-tab-unmatched"' in response.text
+        assert 'data-testid="import-tab-follow-up"' in response.text
+        assert 'href="/import?tab=follow-up"' in response.text
         assert 'data-testid="import-tab-history"' in response.text
         assert 'data-testid="import-collection-page"' in response.text
         assert 'data-testid="import-collection-stepper"' in response.text

@@ -27,8 +27,10 @@ from pullbox.services.import_completed_cleanup import (
 from pullbox.services.import_misplaced_source_cleanup import (
     MisplacedSourceCleanupAction,
     apply_misplaced_source_cleanup,
+    apply_verified_misplaced_source_cleanup,
     list_misplaced_source_cleanup_files,
     preview_misplaced_source_cleanup,
+    preview_verified_misplaced_source_cleanup,
 )
 from pullbox.services.import_safety_bulk_review import (
     ImportSafetyBulkInterruptedError,
@@ -59,6 +61,10 @@ from pullbox.ui.comicvine_series_search import (
     wrap_comicvine_provider_for_ui_cache,
 )
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
+from pullbox.ui.import_follow_up import (
+    count_import_follow_up_jobs,
+    load_import_follow_up_context,
+)
 from pullbox.ui.import_history import (
     _history_resume_step_for_job,
     _load_import_history_context,
@@ -337,12 +343,8 @@ async def _load_import_progress_snapshot(
 
 async def _load_import_workspace_counts(session: AsyncSession) -> dict[str, object]:
     """Load shared counts used by the unified Import workspace tabs."""
-    from pullbox.composition.services import build_import_control_service
-
-    svc = build_import_control_service()
-
     return {
-        "unmatched_count": await svc.get_orphaned_count(session),
+        "follow_up_count": await count_import_follow_up_jobs(session),
     }
 
 
@@ -357,11 +359,15 @@ async def import_page(
     sort: str = Query(""),
     page: int = Query(1, ge=1),
     show_archived: bool = Query(False),
+    job_id: int | None = Query(None),
     resume_job_id: int | None = Query(None),
     resume_step: int | None = Query(None),
 ) -> Response:
     """Render the unified Import workspace and its tab-scoped partials."""
-    normalized_tab = tab if tab in {"collection", "unmatched", "history"} else "collection"
+    normalized_tab = "follow-up" if tab in {"follow-up", "unmatched"} else tab
+    if normalized_tab not in {"collection", "follow-up", "history"}:
+        normalized_tab = "collection"
+    selected_follow_up_job_id = job_id if isinstance(job_id, int) else None
 
     workspace_ctx: dict[str, object]
     if normalized_tab == "history":
@@ -372,11 +378,12 @@ async def import_page(
             requested_page=page,
             show_archived=show_archived,
         )
-    elif normalized_tab == "unmatched":
-        workspace_ctx = await _load_import_orphaned_context(
+    elif normalized_tab == "follow-up":
+        workspace_ctx = await load_import_follow_up_context(
             session,
             view=view,
             requested_page=page,
+            job_id=selected_follow_up_job_id,
         )
     else:
         workspace_ctx = await _load_import_collection_context(session)
@@ -436,7 +443,7 @@ async def import_page(
                 "partials/import_history_panel_bundle.html",
                 ctx,
             )
-        if hx_target == "import-orphaned-results" and normalized_tab == "unmatched":
+        if hx_target == "import-orphaned-results" and normalized_tab == "follow-up":
             return _templates().TemplateResponse(
                 request,
                 "partials/import_orphaned_content_bundle.html",
@@ -897,7 +904,7 @@ async def import_review_source_cleanup_preview(
             status=status or "safety_blocked",
             page=page,
             sort=sort or "confidence",
-            return_to="results" if return_to == "results" else "review",
+            return_to=(return_to if return_to in {"results", "follow-up"} else "review"),
             error="",
         ),
     )
@@ -941,6 +948,8 @@ async def import_review_source_cleanup(
                 "HX-Redirect": (f"/import?tab=collection&resume_job_id={job_id}&resume_step=5")
             },
         )
+    if return_to == "follow-up":
+        return await import_follow_up_job_partial(job_id, request, user, session)
     return await import_review_partial(
         job_id,
         request,
@@ -1092,7 +1101,11 @@ async def import_results_partial(
     if job.status not in {ImportJobStatus.COMPLETED, ImportJobStatus.FAILED}:
         raise ValidationError("Results are only available for completed or failed imports.")
     progress_snapshot = await _load_import_progress_snapshot(session, job)
-    results_context = await load_import_results_context(session, job)
+    results_context = await load_import_results_context(
+        session,
+        job,
+        include_clean_library=False,
+    )
 
     return _templates().TemplateResponse(
         request,
@@ -1106,6 +1119,55 @@ async def import_results_partial(
             resume_job_id=job.id,
             resume_progress_snapshot=progress_snapshot,
         ),
+    )
+
+
+async def import_follow_up_job_partial(
+    job_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Refresh one job-scoped Follow-up surface after a mutation."""
+    follow_up_context = await load_import_follow_up_context(
+        session,
+        view="all",
+        requested_page=1,
+        job_id=job_id,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_orphaned_results.html",
+        _ctx(request, user, tab="follow-up", **follow_up_context),
+    )
+
+
+@router.get(
+    "/import/{job_id}/clean-library-panel",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_clean_library_panel(
+    job_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Render optional clean-library organization from Import History."""
+    job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+    if job.status is not ImportJobStatus.COMPLETED or job.archived_at is not None:
+        raise ValidationError("Library organization is available for current completed imports.")
+    results_context = await load_import_results_context(
+        session,
+        job,
+        include_clean_library=True,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_clean_library_modal.html",
+        _ctx(request, user, job=job, **results_context),
     )
 
 
@@ -1176,6 +1238,61 @@ async def import_misplaced_source_cleanup_files_partial(
 
 
 @router.get(
+    "/import/{job_id}/misplaced-source-cleanup/restore-recorded-path/preview-all",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_preview_all(
+    job_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    """Preview moving every currently eligible verified misplaced source."""
+    try:
+        preview = await preview_verified_misplaced_source_cleanup(
+            session,
+            job_id,
+            actor_id=user.id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_misplaced_source_cleanup_bulk_modal.html",
+        _ctx(request, user, preview=preview),
+    )
+
+
+@router.post(
+    "/import/{job_id}/misplaced-source-cleanup/restore-recorded-path/apply-all",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_apply_all(
+    job_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+) -> Response:
+    """Apply a signed exact-scope move and refresh Step 5 without navigation."""
+    try:
+        await apply_verified_misplaced_source_cleanup(
+            session,
+            job_id,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return await import_follow_up_job_partial(job_id, request, user, session)
+
+
+@router.get(
     "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}/preview",
     response_class=HTMLResponse,
     include_in_schema=False,
@@ -1235,10 +1352,7 @@ async def import_misplaced_source_cleanup_apply(
     except ValidationError as exc:
         await session.rollback()
         raise HTTPException(status_code=409, detail=exc.message) from exc
-    return Response(
-        status_code=204,
-        headers={"HX-Redirect": f"/import?tab=collection&resume_job_id={job_id}&resume_step=5"},
-    )
+    return await import_follow_up_job_partial(job_id, request, user, session)
 
 
 @router.get(

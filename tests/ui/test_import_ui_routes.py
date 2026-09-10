@@ -40,7 +40,7 @@ from pullbox.models.import_job import (
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryRoot
 from pullbox.models.publisher import Publisher
-from pullbox.models.series import Series, SeriesStatus
+from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
 from pullbox.models.user import APIKey, User
 from pullbox.services.auth_service import AuthService
 
@@ -250,7 +250,7 @@ class TestImportPage:
                 assert ctx["tab"] == "collection"
                 assert "library_roots" in ctx
                 assert "recent_jobs" in ctx
-                assert "unmatched_count" in ctx
+                assert "follow_up_count" in ctx
 
     @pytest.mark.asyncio
     async def test_import_page_empty_state(
@@ -697,7 +697,7 @@ class TestImportResultsPartial:
                 assert "failed_count" in ctx
                 assert "duplicate_count" in ctx
 
-    def test_results_template_shows_retry_for_file_only_failures(self) -> None:
+    def test_follow_up_template_shows_retry_for_file_only_failures(self) -> None:
         from types import SimpleNamespace
 
         from pullbox.ui.routes import templates
@@ -734,13 +734,14 @@ class TestImportResultsPartial:
             resume_step=5,
             resume_job_id=26,
             resume_progress_snapshot={},
+            follow_up_workspace=True,
         )
 
         assert 'data-testid="import-results-retry-action"' in html
         assert "Retry failed" in html
         assert "2000AD prog 2481.cbz" in html
 
-    def test_results_template_presents_bounded_completed_cleanup_actions(self) -> None:
+    def test_results_template_links_to_bounded_follow_up_workspace(self) -> None:
         from types import SimpleNamespace
 
         from pullbox.ui.routes import templates
@@ -807,31 +808,86 @@ class TestImportResultsPartial:
             remaining_conflict_files=100,
             story_arcs_created_count=2,
             story_arcs_follow_up_count=3,
+            follow_up_group_count=4,
             resume_step=5,
             resume_job_id=35,
             resume_progress_snapshot={},
         )
 
-        assert 'data-testid="import-results-recovery-dashboard"' in html
-        assert "38,383" in html
-        assert "Dismiss stale Mylar references" in html
-        assert 'data-testid="import-cleanup-apply-dismiss_missing_references"' in html
-        assert 'data-testid="import-cleanup-review-dismiss_missing_references"' in html
+        assert 'data-testid="import-results-follow-up-action"' in html
+        assert 'href="/import?tab=follow-up&amp;job_id=35"' in html
+        assert "4 follow-up groups" in html
+        assert "The import finished with follow-up still worth checking." in html
+        assert "The import finished cleanly" not in html
+        assert 'data-testid="import-results-recovery-dashboard"' not in html
+        assert "Dismiss stale Mylar references" not in html
         assert 'data-testid="import-results-archive-action"' in html
-        assert 'data-testid="import-results-clean-library"' in html
+        assert 'data-testid="import-results-clean-library"' not in html
+        assert 'data-testid="import-results-story-arcs"' not in html
+
+    def test_history_owns_optional_clean_library_organization(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        job = SimpleNamespace(
+            id=35,
+            source_path="/imports/mylar.db",
+            source_type=SimpleNamespace(value="mylar3"),
+            status=SimpleNamespace(value="completed"),
+            progress_snapshot={},
+            removed_library_root_snapshot=None,
+            series_found=4,
+            series_imported=4,
+            series_failed=0,
+            series_no_match=0,
+            created_at=datetime.now(UTC),
+            import_completed_at=datetime.now(UTC),
+            archived_at=None,
+        )
+        html = templates.env.get_template("partials/import_history_results.html").render(
+            jobs=[job],
+            sort="-created_at",
+            page=1,
+            search_query="",
+            show_archived=False,
+            history_has_live_jobs=False,
+            job_control_states={35: {"can_view_results": True}},
+            job_history_metrics={
+                35: {
+                    "series_found": 4,
+                    "series_imported": 4,
+                    "series_failed": 0,
+                    "series_no_match": 0,
+                }
+            },
+            job_resume_steps={35: None},
+            clean_library_job_ids={35},
+        )
+
+        assert 'data-testid="import-history-organize-35"' in html
+        assert 'hx-get="/import/35/clean-library-panel"' in html
+
+    def test_clean_library_modal_preserves_the_organization_contract(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        html = templates.env.get_template("partials/import_clean_library_modal.html").render(
+            job=SimpleNamespace(id=35),
+            clean_library_reference_count=10,
+            clean_library_reference_series_count=3,
+            clean_library_reference_bytes=2048,
+            clean_library_mixed_folder_repair_count=0,
+            clean_library_target_roots=[
+                {"id": 9, "name": "Clean library", "path": "/library-clean"}
+            ],
+        )
+
+        assert 'data-testid="import-clean-library-modal"' in html
         assert 'data-testid="clean-library-target-root"' in html
         assert 'data-dropdown-select-contract="v1"' in html
-        assert "<select" not in html
         assert 'data-testid="clean-library-preview-action"' in html
-        assert "Build a clean Pullbox library" in html
-        assert "leaving every Mylar source file unchanged" in html
-        assert 'data-testid="clean-library-mixed-folder-blocked"' not in html
-        assert 'data-testid="import-results-future-organization"' in html
-        assert 'href="/settings?tab=media"' in html
-        assert "Set future library organization" in html
-        assert 'data-testid="import-results-story-arcs"' in html
-        assert "2 created automatically" in html
-        assert "3 saved for later review" in html
 
     def test_completed_cover_details_offer_explicit_post_import_source_cleanup(self) -> None:
         from types import SimpleNamespace
@@ -860,7 +916,7 @@ class TestImportResultsPartial:
 
         assert 'data-testid="import-results-source-cleanup-preview-91"' in html
         assert "Move source to Trash" in html
-        assert "return_to=results" in html
+        assert "return_to=follow-up" in html
 
     def test_results_template_offers_optional_misplaced_mylar_cleanup(self) -> None:
         from types import SimpleNamespace
@@ -906,10 +962,14 @@ class TestImportResultsPartial:
             resume_step=5,
             resume_job_id=35,
             resume_progress_snapshot={},
+            follow_up_workspace=True,
         )
 
         assert 'data-testid="import-results-misplaced-source-cleanup"' in html
-        assert "Restore misplaced files" in html
+        assert 'data-testid="import-results-recovery-dashboard"' not in html
+        assert "Already handled" not in html
+        assert "Organize misplaced files" in html
+        assert "Move all verified files" in html
         assert "Remove identical duplicates" in html
         assert "Pullbox does not edit the Mylar database" in html
         assert 'data-testid="review-misplaced-source-restore_recorded_path"' in html
@@ -945,8 +1005,10 @@ class TestImportResultsPartial:
             ),
         )
 
-        assert "Restore misplaced file" in canonical_html
+        assert "Move file" in canonical_html
         assert 'class="btn-ghost btn-sm"' in canonical_html
+        assert "Current path" in canonical_html
+        assert "Proposed path" in canonical_html
         assert "Move duplicate to Trash" in duplicate_html
         assert 'class="btn-ghost btn-sm"' in duplicate_html
 
@@ -975,7 +1037,30 @@ class TestImportResultsPartial:
         assert "/comics/Crossed/Absolute Batman #001.cbz" in html
         assert "/comics/Absolute Batman/Absolute Batman #001.cbz" in html
         assert 'value="signed-preview"' in html
-        assert "Restore misplaced file" in html
+        assert "Move misplaced file" in html
+        assert "reference-only" in html
+
+    def test_misplaced_cleanup_bulk_modal_requires_one_time_confirmation(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        preview = SimpleNamespace(
+            job_id=35,
+            affected_count=2,
+            unavailable_count=1,
+            examples=("Absolute Batman #001.cbz", "Babyteeth Vol 01.cbz"),
+            preview_token="signed-bulk-preview",
+        )
+        html = templates.env.get_template(
+            "partials/import_misplaced_source_cleanup_bulk_modal.html"
+        ).render(preview=preview)
+
+        assert "Move all verified files" in html
+        assert "one-time confirmation" in html
+        assert "does not enable managed writes" in html
+        assert "1 additional candidate" in html
+        assert 'value="signed-bulk-preview"' in html
 
     def test_failed_results_template_preserves_bounded_safety_actions(self) -> None:
         from types import SimpleNamespace
@@ -1018,6 +1103,7 @@ class TestImportResultsPartial:
             resume_step=5,
             resume_job_id=35,
             resume_progress_snapshot={},
+            follow_up_workspace=True,
         )
 
         assert 'data-testid="import-results-safety-exceptions"' in html
@@ -1063,13 +1149,14 @@ class TestImportResultsPartial:
             resume_step=5,
             resume_job_id=27,
             resume_progress_snapshot={},
+            follow_up_workspace=True,
         )
 
         assert 'data-testid="import-results-source-changed-note"' in html
         assert "4 source files changed after discovery" in html
         assert "Recheck only those files" in html
 
-    def test_results_template_surfaces_background_catalog_sync(self) -> None:
+    def test_results_template_surfaces_pending_background_catalog_sync(self) -> None:
         from types import SimpleNamespace
 
         from pullbox.ui.routes import templates
@@ -1119,13 +1206,77 @@ class TestImportResultsPartial:
         )
 
         assert 'data-testid="import-results-catalog-sync-note"' in html
-        assert "3 series still need ComicVine catalog sync follow-up" in html
-        assert "2 syncing in the background" in html
-        assert "1 needs metadata retry" in html
-        assert "Batman" in html
-        assert "Daredevil" in html
+        assert "2 series are still syncing metadata in the background" in html
+        assert "metadata retry" not in html
+        assert "Batman" not in html
+        assert "Daredevil" not in html
 
-    def test_results_template_distinguishes_owned_artifacts_and_rollback_candidates(
+    def test_follow_up_template_surfaces_exhausted_catalog_sync(self) -> None:
+        from types import SimpleNamespace
+
+        from pullbox.ui.routes import templates
+
+        html = templates.env.get_template("partials/import_results.html").render(
+            job=SimpleNamespace(
+                id=32,
+                status=SimpleNamespace(value="completed"),
+                archived_at=None,
+                removed_library_root_snapshot=None,
+            ),
+            can_rollback=False,
+            imported_count=3,
+            failed_count=0,
+            duplicate_count=0,
+            no_match_count=0,
+            unmatched_queue_count=0,
+            failed_series=[],
+            files_total=3,
+            files_imported=3,
+            files_matched=3,
+            files_duplicate=0,
+            files_already_owned=0,
+            files_conflict=0,
+            files_no_match=0,
+            orphaned_file_no_match_count=0,
+            identified_series_file_no_match_count=0,
+            catalog_sync_pending_count=1,
+            catalog_sync_failed_count=1,
+            catalog_sync_attention_count=2,
+            catalog_sync_series=[
+                SimpleNamespace(
+                    id=10,
+                    title="Batman",
+                    issue_catalog_state=SimpleNamespace(value="hydrating"),
+                    issue_catalog_error=None,
+                ),
+                SimpleNamespace(
+                    id=11,
+                    title="Daredevil",
+                    issue_catalog_state=SimpleNamespace(value="failed"),
+                    issue_catalog_error="ComicVine timed out",
+                ),
+            ],
+            files_failed=0,
+            failed_files=[],
+            files_safety_blocked=0,
+            safety_blocked_files=[],
+            cleanup_action_summaries=[],
+            cleanup_no_action_count=0,
+            cleanup_safe_action_count=0,
+            cleanup_needs_review_count=0,
+            misplaced_source_restore_count=0,
+            misplaced_source_duplicate_count=0,
+            story_arcs_follow_up_count=0,
+            follow_up_workspace=True,
+        )
+
+        assert 'data-testid="import-results-catalog-sync-note"' not in html
+        assert 'data-testid="import-follow-up-metadata"' in html
+        assert "1 series need metadata retry" in html
+        assert "Daredevil" in html
+        assert "Batman" not in html
+
+    def test_results_template_hides_internal_ownership_and_optional_follow_up(
         self,
     ) -> None:
         from types import SimpleNamespace
@@ -1168,12 +1319,10 @@ class TestImportResultsPartial:
             resume_progress_snapshot={},
         )
 
-        assert 'data-testid="import-results-ownership-summary"' in html
-        assert "Managed artifacts" in html
-        assert "In-place references" in html
-        assert 'data-testid="import-results-rollback-summary"' in html
-        assert "2 managed artifacts will be fingerprint-checked" in html
-        assert "1 reference will be detached" in html
+        assert "File outcomes" in html
+        assert 'data-testid="import-results-ownership-summary"' not in html
+        assert 'data-testid="import-results-rollback-summary"' not in html
+        assert 'data-testid="import-results-future-organization"' not in html
 
     def test_results_template_identifies_incomplete_rollback(self) -> None:
         from types import SimpleNamespace
@@ -2320,12 +2469,123 @@ class TestImportUnmatchedTab:
                 call_args = mock_templates.TemplateResponse.call_args
                 assert call_args[0][1] == "pages/import.html"
                 ctx = call_args[0][2]
-                assert ctx["tab"] == "unmatched"
-                assert ctx["total"] == 5
-                assert len(ctx["items"]) == 5
-                assert ctx["orphaned_count"] == 5
-                assert ctx["dismissed_count"] == 1
+                assert ctx["tab"] == "follow-up"
+                assert ctx["total"] == 1
+                assert ctx["items"] == []
+                assert len(ctx["follow_up_jobs"]) == 1
+                assert ctx["follow_up_job_count"] == 1
                 assert ctx["view"] == "all"
+
+    @pytest.mark.asyncio
+    async def test_follow_up_page_scopes_matching_and_cleanup_to_one_import(
+        self,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from pullbox.ui.routes import import_page
+
+        job_id = await _seed_orphan_data(
+            _db_factory,
+            no_match_count=3,
+            recovery_pending_count=1,
+            skipped_count=1,
+            imported_issue_recovery_count=1,
+        )
+        request = MagicMock()
+        request.url.path = "/import"
+        request.state.csrf_token = "test"
+        request.headers = {}
+
+        async with _db_factory() as session:
+            with patch("pullbox.ui.routes.templates") as mock_templates:
+                mock_templates.TemplateResponse.return_value = MagicMock()
+                await import_page(
+                    request,
+                    MagicMock(),
+                    session,
+                    tab="follow-up",
+                    view="all",
+                    page=1,
+                    job_id=job_id,
+                )
+
+                ctx = mock_templates.TemplateResponse.call_args[0][2]
+                assert ctx["tab"] == "follow-up"
+                assert ctx["selected_follow_up_job"].id == job_id
+                assert ctx["orphaned_count"] == 5
+                assert len(ctx["items"]) == 5
+                assert ctx["follow_up_group_count"] > 0
+
+    @pytest.mark.asyncio
+    async def test_follow_up_jobs_exclude_no_action_and_pending_hydration(
+        self,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from pullbox.ui.import_follow_up import load_import_follow_up_context
+
+        async with _db_factory() as session:
+            resolved_job = ImportJob(
+                source_path="/tmp/resolved",
+                source_type=ImportSourceType.FILESYSTEM,
+                status=ImportJobStatus.COMPLETED,
+            )
+            actionable_job = ImportJob(
+                source_path="/tmp/actionable",
+                source_type=ImportSourceType.FILESYSTEM,
+                status=ImportJobStatus.COMPLETED,
+            )
+            session.add_all([resolved_job, actionable_job])
+            await session.flush()
+
+            hydrating = Series(
+                title="Still Syncing",
+                sort_title="Still Syncing",
+                issue_catalog_state=IssueCatalogState.HYDRATING,
+            )
+            failed = Series(
+                title="Needs Retry",
+                sort_title="Needs Retry",
+                issue_catalog_state=IssueCatalogState.FAILED,
+            )
+            session.add_all([hydrating, failed])
+            await session.flush()
+
+            resolved_series = ImportedSeries(
+                import_job_id=resolved_job.id,
+                raw_series_name="Still Syncing",
+                status=ImportSeriesStatus.IMPORTED,
+                series_id=hydrating.id,
+            )
+            actionable_series = ImportedSeries(
+                import_job_id=actionable_job.id,
+                raw_series_name="Needs Retry",
+                status=ImportSeriesStatus.IMPORTED,
+                series_id=failed.id,
+            )
+            session.add_all([resolved_series, actionable_series])
+            await session.flush()
+            session.add(
+                ImportedFile(
+                    import_job_id=resolved_job.id,
+                    import_series_id=resolved_series.id,
+                    file_path="/tmp/resolved/duplicate.cbz",
+                    file_name="duplicate.cbz",
+                    file_format="cbz",
+                    status=ImportedFileStatus.DUPLICATE_FILE,
+                )
+            )
+            await session.commit()
+
+            context = await load_import_follow_up_context(
+                session,
+                view="all",
+                requested_page=1,
+                job_id=None,
+            )
+
+        assert context["follow_up_job_count"] == 1
+        assert [job.id for job in context["follow_up_jobs"]] == [actionable_job.id]
 
     def test_orphaned_table_marks_recovery_pending_rows_as_identified(self) -> None:
         """Recovery-pending rows stay in the active queue with guided actions."""
@@ -2642,7 +2902,7 @@ class TestImportUnmatchedTab:
         assert 'data-tip="Search ComicVine"' in html
         assert 'data-tip="Dismiss"' in html
         assert 'aria-label="Search ComicVine for Persephone"' in html
-        assert 'aria-label="Dismiss unmatched series Persephone"' in html
+        assert 'aria-label="Dismiss Persephone from import follow-up"' in html
         assert "Search CV" not in html
 
     def test_orphaned_table_uses_app_confirm_modal_for_dismiss(self) -> None:
@@ -2772,7 +3032,7 @@ class TestImportUnmatchedTab:
                 )
 
                 ctx = mock_templates.TemplateResponse.call_args[0][2]
-                assert ctx["tab"] == "unmatched"
+                assert ctx["tab"] == "follow-up"
                 assert ctx["total"] == 3
                 assert ctx["orphaned_count"] == 2
                 assert ctx["dismissed_count"] == 3
@@ -2838,7 +3098,7 @@ class TestImportUnmatchedTab:
                 )
 
                 ctx = mock_templates.TemplateResponse.call_args[0][2]
-                assert ctx["tab"] == "unmatched"
+                assert ctx["tab"] == "follow-up"
                 assert ctx["total"] == 0
                 assert ctx["items"] == []
                 assert ctx["orphaned_count"] == 0

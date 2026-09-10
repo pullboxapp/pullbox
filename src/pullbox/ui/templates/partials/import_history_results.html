@@ -176,6 +176,24 @@
                   </a>
                 {% endif %}
 
+                {% if job.id in clean_library_job_ids|default([]) and not job.archived_at %}
+                  <button
+                    type="button"
+                    data-testid="import-history-organize-{{ job.id }}"
+                    class="downloads-action-btn import-history-action-btn"
+                    hx-get="/import/{{ job.id }}/clean-library-panel"
+                    hx-target="#cv-search-modal"
+                    hx-swap="innerHTML"
+                    data-tip="Organize library"
+                    data-tip-pos="left"
+                    aria-label="Build a clean Pullbox library from import {{ job.id }}"
+                  >
+                    <svg class="import-history-action-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 5.25h16.5M6.75 9.75h10.5m-7.5 4.5h4.5m-2.25 4.5h.008v.008H12v-.008z"/>
+                    </svg>
+                  </button>
+                {% endif %}
+
                 {% if control_state.get('can_rollback') %}
                   <button
                     type="button"

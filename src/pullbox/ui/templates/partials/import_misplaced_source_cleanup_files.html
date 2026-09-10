@@ -14,9 +14,16 @@
           <div class="min-w-0">
             <p class="break-words font-mono text-xs font-medium text-pb-text">{{ item.file_name }}</p>
             {% if cleanup_action == 'restore_recorded_path' %}
-            <p class="mt-1 break-words text-xs leading-5 text-pb-text-dim">
-              Currently in {{ evidence.get('source_series') or 'another series folder' }}. Mylar recorded this issue at <span class="font-mono text-pb-text">{{ evidence.get('recorded_path') }}</span>.
-            </p>
+            <dl class="mt-2 space-y-2 text-xs leading-5">
+              <div>
+                <dt class="font-medium text-pb-text-muted">Current path</dt>
+                <dd class="break-all font-mono text-pb-text">{{ item.file_path }}</dd>
+              </div>
+              <div>
+                <dt class="font-medium text-pb-text-muted">Proposed path</dt>
+                <dd class="break-all font-mono text-pb-text">{{ evidence.get('recorded_path') }}</dd>
+              </div>
+            </dl>
             {% else %}
             <p class="mt-1 break-words text-xs leading-5 text-pb-text-dim">
               Pullbox verified this is byte-identical to the imported copy. It remains untouched until you confirm moving it to Trash.
@@ -30,7 +37,7 @@
             hx-get="/import/{{ job_id }}/files/{{ item.id }}/misplaced-source-cleanup/{{ cleanup_action }}/preview"
             hx-target="#cv-search-modal"
             hx-swap="innerHTML"
-          >{{ 'Restore misplaced file' if cleanup_action == 'restore_recorded_path' else 'Move duplicate to Trash' }}</button>
+          >{{ 'Move file' if cleanup_action == 'restore_recorded_path' else 'Move duplicate to Trash' }}</button>
         </div>
       </div>
     {% endfor %}

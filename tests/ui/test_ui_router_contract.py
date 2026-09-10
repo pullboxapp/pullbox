@@ -185,6 +185,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_results_partial",
         ),
         (
+            "/import/{job_id}/clean-library-panel",
+            ("GET",),
+            "import_clean_library_panel",
+            "import_clean_library_panel",
+        ),
+        (
             "/import/{job_id}/cleanup/{action}/files",
             ("GET",),
             "import_completed_cleanup_files_partial",
@@ -195,6 +201,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             ("GET",),
             "import_misplaced_source_cleanup_files_partial",
             "import_misplaced_source_cleanup_files_partial",
+        ),
+        (
+            "/import/{job_id}/misplaced-source-cleanup/restore-recorded-path/preview-all",
+            ("GET",),
+            "import_misplaced_source_cleanup_preview_all",
+            "import_misplaced_source_cleanup_preview_all",
+        ),
+        (
+            "/import/{job_id}/misplaced-source-cleanup/restore-recorded-path/apply-all",
+            ("POST",),
+            "import_misplaced_source_cleanup_apply_all",
+            "import_misplaced_source_cleanup_apply_all",
         ),
         (
             "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}/preview",

@@ -215,7 +215,7 @@
     hx-get="/import/{{ job.id }}/review-rematch-status"
     hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]"
     hx-target="this"
-    hx-swap="outerHTML"
+    hx-swap="morph:outerHTML"
   ></div>
   {% endif %}
   <input type="hidden" name="review_status_filter" value="{{ active_review_view if active_review_view != 'series' else '' }}">

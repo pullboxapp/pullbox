@@ -71,6 +71,8 @@ class ImportServiceRecoveryMixin:
         page: int = 1,
         page_size: int = 25,
         sort: str = "file_count_desc",
+        *,
+        job_id: int | None = None,
     ) -> tuple[list[ImportedSeries], int]:
         """Return paginated ImportedSeries with status=NO_MATCH from COMPLETED jobs."""
         return await get_import_orphaned_series(
@@ -78,14 +80,17 @@ class ImportServiceRecoveryMixin:
             page=page,
             page_size=page_size,
             sort=sort,
+            job_id=job_id,
         )
 
     async def get_orphaned_count(
         self,
         session: AsyncSession,
+        *,
+        job_id: int | None = None,
     ) -> int:
         """Return total count of active unmatched series from COMPLETED jobs."""
-        return await get_import_orphaned_count(session)
+        return await get_import_orphaned_count(session, job_id=job_id)
 
     async def _load_orphan_recovery_item(
         self,

@@ -5,16 +5,18 @@
 {% endif %}
 
 <div data-testid="import-footer-dock">
-  {% if tab == "unmatched" %}
-    {% set _base_url = "/import?tab=unmatched&view=" ~ (view|default("all")) %}
+  {% if tab == "follow-up" %}
+    {% set _base_url = "/import?tab=follow-up&view=" ~ (view|default("all")) %}
+    {% if selected_follow_up_job %}{% set _base_url = _base_url ~ "&job_id=" ~ selected_follow_up_job.id %}{% endif %}
+    {% set _visible_count = items|default([])|length if selected_follow_up_job or view|default("all") == "dismissed" else follow_up_jobs|default([])|length %}
     {{ page_dock(
       page=page,
       total_pages=total_pages,
       base_url=_base_url,
       status_items=[
-        {"led": "amber" if orphaned_count|default(0) > 0 else "off", "label": "unmatched", "value": orphaned_count|default(0)|string},
+        {"led": "amber" if follow_up_job_count|default(0) > 0 else "off", "label": "imports", "value": follow_up_job_count|default(0)|string},
         {"label": "dismissed", "value": dismissed_count|default(0)|string},
-        {"label": "visible", "value": (items|default([])|length)|string},
+        {"label": "visible", "value": _visible_count|string},
       ],
       hx_target="#import-orphaned-results",
       hx_swap="outerHTML",

@@ -21,24 +21,31 @@ task-oriented:
 - Trusted, complete Mylar or ComicInfo Story Arc evidence may create a logical
   Story Arc automatically. Inferred or incomplete arc evidence is retained for
   later review and never blocks canonical comic import.
-- Source-mutating actions are not presented during Review. Completed Results
-  owns optional cleanup, clean-library organization, and future-policy links.
+- Source-mutating actions are not presented during Review. Import Follow-up
+  owns unresolved matching and cleanup actions. Import History owns the
+  optional clean-library organizer.
 - In-place imports keep existing files associated with their current roots. If
   a selected series spans multiple roots, Step 3 requires one writable root for
   future downloads and replacements without relocating the existing files.
 
 Use this maintenance procedure when a review was generated before the Mylar
 sidecar parser and comic-content checks were corrected. Normal completed-job
-recovery is available in the import results screen and does not require an
+recovery is available in Import Follow-up and does not require an
 offline command. It works for Mylar and folder imports. This is not a full
 rescan, a database restore, or an import.
 
-## Completed Import Recovery
+## Import Follow-up
 
-The completed results screen groups large backlogs into bounded recovery
-categories instead of rendering every row. Each action has an exact count,
-three representative filenames, and an on-demand detail view limited to 25
-files per page. This keeps even six-figure imports responsive.
+The Follow-up tab groups actionable work by import job rather than rendering
+one flat, cross-import backlog. Selecting an import opens its matching,
+recovery, cleanup, Story Arc, failed-file, and exhausted metadata work in one
+bounded workspace. Each bulk action has an exact count, three representative
+filenames, and an on-demand detail view limited to 25 files per page. Imports
+with only successful, duplicate, skipped, or still-hydrating metadata outcomes
+do not appear.
+
+Step 5 remains a concise completion receipt. When follow-up exists, it shows an
+above-fold count and a direct link to that import's Follow-up workspace.
 
 Available recovery actions are intentionally narrow:
 
@@ -48,8 +55,8 @@ Available recovery actions are intentionally narrow:
   source files intact. A one-page archive may be cover art, a damaged archive,
   or an intentional one-page comic, so Pullbox does not delete it automatically.
 - **Move a reviewed source to Trash** is an individual post-import option for a
-  confirmed cover or unwanted one-page source. It appears only in completed
-  Results, uses a red warning modal and an actor-bound signed preview, and
+  confirmed cover or unwanted one-page source. It appears only in Follow-up,
+  uses a red warning modal and an actor-bound signed preview, and
   requires configured Trash plus source write permission. Reference-only Mylar
   roots cannot use it; the non-destructive skip remains available instead.
 - **Skip unusable files** excludes empty, unsupported, and page-less files.
@@ -81,23 +88,27 @@ extra copies from the exact-ID path as duplicates. Filename guesses, ambiguous
 records, conflicting embedded identity, and non-identical candidates remain
 untouched for review.
 
-Completed Results keeps the optional physical cleanup separate from the safe
+Follow-up keeps the optional physical cleanup separate from the safe
 recovery actions above:
 
-- **Restore misplaced file** moves one canonical file to the exact missing path
-  already recorded by Mylar. It requires an empty destination and managed-write
-  permission on both paths, revalidates the source fingerprint, and updates the
-  Pullbox reference and rollback journal together. It does not edit Mylar's
-  database.
+- **Move misplaced file** moves one canonical file to the exact missing path
+  already recorded by Mylar. It requires an empty destination, revalidates the
+  source fingerprint, and updates the Pullbox reference and rollback journal
+  together. Its signed confirmation is a one-time authorization for that exact
+  move even when the root is otherwise reference-only; the root's permanent
+  managed-write policy and Mylar's database remain unchanged.
+- **Move all verified files** applies the same checks to the complete current
+  exact-identity scope. The signed preview covers the scope digest and actor;
+  changed, ambiguous, occupied, or inaccessible candidates remain untouched.
 - **Move duplicate to Trash** is a separate per-file choice available only for
   an extra copy that remains byte-identical to its canonical issue. It requires
   a configured Trash folder and managed-write permission. Pullbox never removes
   these copies automatically.
 
-Both actions use an actor-bound signed preview and restore the physical source
-if their database update cannot commit. Reference-only Mylar roots continue to
-receive the non-destructive import behavior; their source-cleanup previews
-explain that managed writes must be enabled before Pullbox can move a file.
+All actions use an actor-bound signed preview and restore the physical source
+if their database update cannot commit. A reference-only Mylar root remains
+non-destructive during import and does not become managed after an explicitly
+confirmed cleanup move.
 
 Every mutation requires a fresh, actor-bound signed preview. Pullbox rejects an
 expired preview or any action whose row set changed after preview. Bounded,
@@ -115,9 +126,10 @@ archived jobs.
 ## Building A Clean Pullbox Library
 
 A completed reference-only import can be used as the reviewed source for a
-separate clean managed library. The results screen shows the exact file count,
-series count, and source size, then requires the operator to choose an enabled
-writable library root that does not overlap any source root.
+separate clean managed library. Import History exposes this optional organizer
+for eligible jobs. Its modal shows the exact file count, series count, and
+source size, then requires the operator to choose an enabled writable library
+root that does not overlap any source root.
 
 The clean-library build creates a normal background Step 4 import. It copies
 only files with an exact, current imported-file to library-file to issue
@@ -211,8 +223,8 @@ startup recovery resumes from `MATCHING`, preserving the directory inventory
 and unaffected review decisions, and returns to Step 3. It does not select
 files or start Step 4. Genuine source-identity conflicts remain in review.
 
-For a completed import, restart Pullbox, open that import's results, and choose
-the relevant recovery action. Only the previewed scope is prepared; successful
+For a completed import, restart Pullbox, open that import in Follow-up, and
+choose the relevant recovery action. Only the previewed scope is prepared; successful
 files and series remain untouched. A file that is still missing, outside an
 approved root, unreadable, or unsafe remains excluded with refreshed
 diagnostics.

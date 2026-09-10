@@ -109,7 +109,7 @@ def _active_orphan_clause() -> ColumnElement[bool]:
 
 
 def is_active_orphan_row(item: ImportedSeries | None) -> bool:
-    """Return True when a row should appear in the active Unmatched queue."""
+    """Return True when a row should appear in active import Follow-up."""
     return bool(
         item is not None
         and (
@@ -331,9 +331,9 @@ async def recover_orphan(
     return recovery_summary
 
 
-def _orphaned_series_query() -> Select[tuple[ImportedSeries]]:
+def _orphaned_series_query(*, job_id: int | None = None) -> Select[tuple[ImportedSeries]]:
     """Build the shared unresolved-orphan filter used by list and count queries."""
-    return (
+    query = (
         sa_select(ImportedSeries)
         .join(ImportJob, ImportedSeries.import_job_id == ImportJob.id)
         .where(
@@ -341,6 +341,9 @@ def _orphaned_series_query() -> Select[tuple[ImportedSeries]]:
             ImportJob.status == ImportJobStatus.COMPLETED,
         )
     )
+    if job_id is not None:
+        query = query.where(ImportedSeries.import_job_id == job_id)
+    return query
 
 
 async def get_orphaned_series(
@@ -349,21 +352,16 @@ async def get_orphaned_series(
     page: int = 1,
     page_size: int = 25,
     sort: str = "file_count_desc",
+    job_id: int | None = None,
 ) -> tuple[list[ImportedSeries], int]:
     """Return paginated active orphaned import series from completed jobs."""
-    count_q = (
-        sa_select(sa_func.count())
-        .select_from(ImportedSeries)
-        .join(ImportJob, ImportedSeries.import_job_id == ImportJob.id)
-        .where(
-            _active_orphan_clause(),
-            ImportJob.status == ImportJobStatus.COMPLETED,
-        )
+    count_q = sa_select(sa_func.count()).select_from(
+        _orphaned_series_query(job_id=job_id).subquery()
     )
     total_result = await session.execute(count_q)
     total = total_result.scalar() or 0
 
-    query = _orphaned_series_query()
+    query = _orphaned_series_query(job_id=job_id)
     if sort == "series_name_asc":
         query = query.order_by(ImportedSeries.raw_series_name.asc())
     elif sort == "date_found_desc":
@@ -379,16 +377,10 @@ async def get_orphaned_series(
     return list(result.scalars().all()), total
 
 
-async def get_orphaned_count(session: AsyncSession) -> int:
+async def get_orphaned_count(session: AsyncSession, *, job_id: int | None = None) -> int:
     """Return total count of active orphaned series from completed jobs."""
-    count_q = (
-        sa_select(sa_func.count())
-        .select_from(ImportedSeries)
-        .join(ImportJob, ImportedSeries.import_job_id == ImportJob.id)
-        .where(
-            _active_orphan_clause(),
-            ImportJob.status == ImportJobStatus.COMPLETED,
-        )
+    count_q = sa_select(sa_func.count()).select_from(
+        _orphaned_series_query(job_id=job_id).subquery()
     )
     result = await session.execute(count_q)
     return result.scalar() or 0

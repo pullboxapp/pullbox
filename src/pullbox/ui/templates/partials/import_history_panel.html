@@ -6,6 +6,7 @@
   x-data="importHistoryPage({ csrfToken: '{{ csrf_token }}' })"
 >
   {% include "partials/import_history_delete_modal.html" %}
+  <div id="cv-search-modal" data-testid="import-history-modal-host"></div>
   <div class="downloads-table-wrap" data-testid="import-history-table-shell">
     <form
       id="import-history-filter-form"

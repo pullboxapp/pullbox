@@ -99,7 +99,7 @@ def _library_paths_overlap(first: str, second: str) -> bool:
     )
 
 
-async def _load_clean_library_summary(
+async def load_clean_library_summary(
     session: AsyncSession,
     job_id: int,
 ) -> dict[str, object]:
@@ -830,8 +830,10 @@ async def _load_story_arc_results_summary(
 async def load_import_results_context(
     session: AsyncSession,
     job: ImportJob,
+    *,
+    include_clean_library: bool = True,
 ) -> dict[str, object]:
-    """Load aggregate counts and detail rows for the Step 5 results template."""
+    """Load import results, optionally including History-only organizer data."""
     job_id = int(job.id)
     imported_count = await _count_series_status(session, job_id, ImportSeriesStatus.IMPORTED)
     failed_count = await _count_series_status(session, job_id, ImportSeriesStatus.FAILED)
@@ -952,8 +954,10 @@ async def load_import_results_context(
             MisplacedSourceCleanupAction.TRASH_IDENTICAL_DUPLICATE,
         )
     clean_library_summary = (
-        await _load_clean_library_summary(session, job_id)
-        if job.status is ImportJobStatus.COMPLETED and job.archived_at is None
+        await load_clean_library_summary(session, job_id)
+        if include_clean_library
+        and job.status is ImportJobStatus.COMPLETED
+        and job.archived_at is None
         else {
             "clean_library_reference_count": 0,
             "clean_library_reference_series_count": 0,
@@ -989,11 +993,12 @@ async def load_import_results_context(
     cleanup_safe_action_count = sum(
         _positive_int(item["affected_file_count"]) or 0 for item in cleanup_action_summaries
     )
-    unresolved_file_count = files_failed + files_no_match + files_safety_blocked + files_conflict
-    cleanup_needs_review_count = max(
-        unresolved_file_count - cleanup_safe_action_count,
-        0,
+    manual_safety_count = sum(
+        _positive_int(item["count"]) or 0
+        for item in safety_category_summaries
+        if item.get("bucket") == "needs_review"
     )
+    cleanup_needs_review_count = manual_safety_count + remaining_conflict_files
     files_total = sum(file_status_counts.values())
     orphaned_file_no_match_count = await _orphaned_file_no_match_count(session, job_id)
     identified_series_file_no_match_count = max(
@@ -1009,6 +1014,18 @@ async def load_import_results_context(
     catalog_sync_pending_count = len(catalog_sync_series) - catalog_sync_failed_count
     rollback_journal_summary = await _load_rollback_journal_summary(session, job_id)
     story_arc_results_summary = await _load_story_arc_results_summary(session, job_id)
+    follow_up_group_count = (
+        int(unmatched_queue_count > 0)
+        + len(cleanup_action_summaries)
+        + int(cleanup_needs_review_count > 0)
+        + int(misplaced_source_restore_count > 0)
+        + int(misplaced_source_duplicate_count > 0)
+        + int(failed_count > 0)
+        + int(files_failed > 0)
+        + int(job.status is ImportJobStatus.FAILED and files_safety_blocked > 0)
+        + int(story_arc_results_summary["story_arcs_follow_up_count"] > 0)
+        + int(catalog_sync_failed_count > 0)
+    )
     rollback_incomplete = bool(
         rollback_journal_summary["rollback_manual_recovery_count"]
         and job.status == ImportJobStatus.FAILED
@@ -1026,6 +1043,7 @@ async def load_import_results_context(
         "duplicate_count": duplicate_count,
         "no_match_count": no_match_count,
         "unmatched_queue_count": unmatched_queue_count,
+        "follow_up_group_count": follow_up_group_count,
         "failed_series": failed_series,
         "files_total": files_total,
         "files_imported": files_imported,
