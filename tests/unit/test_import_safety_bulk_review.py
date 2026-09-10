@@ -192,7 +192,7 @@ async def test_skip_one_page_archives_uses_preview_and_preserves_sources(
     tmp_path: Path,
 ) -> None:
     job_id = await _seed_one_page_blocks(db_session, tmp_path, count=3)
-    arc, entries = await _link_job_files_to_story_arc(db_session, job_id)
+    arc, _entries = await _link_job_files_to_story_arc(db_session, job_id)
     category = ImportSafetyCategory.SINGLE_PAGE_COMIC
 
     preview = await bulk_review_service.preview_import_safety_category_skip(
@@ -250,7 +250,7 @@ async def test_skip_one_page_archives_uses_preview_and_preserves_sources(
 @pytest.mark.asyncio
 async def test_allow_once_processes_only_bounded_pages(db_session: AsyncSession) -> None:
     job_id = await _seed_size_blocks(db_session, count=5)
-    arc, entries = await _link_job_files_to_story_arc(db_session, job_id)
+    arc, _entries = await _link_job_files_to_story_arc(db_session, job_id)
     category = ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT
     preview = await preview_import_safety_category(
         db_session,

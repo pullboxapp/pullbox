@@ -326,7 +326,9 @@ async def confirm_import_story_arcs(
                 ImportedStoryArc.import_job_id == job_id,
                 ImportedStoryArc.id.in_(page_ids),
             )
-            .options(selectinload(ImportedStoryArc.entries))
+            .options(
+                selectinload(ImportedStoryArc.entries).joinedload(ImportedStoryArcEntry.import_file)
+            )
             .order_by(ImportedStoryArc.id)
         )
         arcs_by_id.update(
@@ -348,10 +350,11 @@ async def confirm_import_story_arcs(
     )
     merge_targets: dict[int, StoryArc] = {}
     await _load_merge_targets_by_id(session, target_ids, merge_targets)
-    safety_blocked_arc_ids = await _load_arc_ids_with_current_safety(
-        session,
-        requested_id_list,
-    )
+    safety_blocked_arc_ids = {
+        arc_id
+        for arc_id, staged_arc in arcs_by_id.items()
+        if _loaded_arc_has_current_safety(staged_arc)
+    }
 
     for arc_id, action, proposed_story_arc_id in normalized_decisions:
         _apply_loaded_story_arc_decision(
@@ -384,7 +387,9 @@ async def confirm_import_story_arcs(
                 ImportedStoryArc.selected_for_import.is_(True),
                 ImportedStoryArc.id > last_id,
             )
-            .options(selectinload(ImportedStoryArc.entries))
+            .options(
+                selectinload(ImportedStoryArc.entries).joinedload(ImportedStoryArcEntry.import_file)
+            )
             .order_by(ImportedStoryArc.id)
             .limit(batch_size)
         )
@@ -397,10 +402,6 @@ async def confirm_import_story_arcs(
             if staged_arc.proposed_story_arc_id is not None
         }
         await _load_merge_targets_by_id(session, page_target_ids, merge_targets)
-        page_safety_blocked_arc_ids = await _load_arc_ids_with_current_safety(
-            session,
-            [int(staged_arc.id) for staged_arc in selected_arcs],
-        )
         for staged_arc in selected_arcs:
             _validate_loaded_merge_target(
                 staged_arc.proposed_story_arc_id,
@@ -408,7 +409,7 @@ async def confirm_import_story_arcs(
             )
             _assert_story_arc_selectable(
                 staged_arc.entries,
-                has_current_safety_block=(int(staged_arc.id) in page_safety_blocked_arc_ids),
+                has_current_safety_block=_loaded_arc_has_current_safety(staged_arc),
             )
             if staged_arc.status != ImportedStoryArcStatus.READY:
                 raise ValidationError(
@@ -579,6 +580,15 @@ def _assert_story_arc_selectable(
         raise ValidationError(
             "Resolve or skip story arc conflict entries before confirming this arc"
         )
+
+
+def _loaded_arc_has_current_safety(staged_arc: ImportedStoryArc) -> bool:
+    """Return whether an eagerly loaded arc still links to a safety-blocked file."""
+    return any(
+        entry.import_file is not None
+        and entry.import_file.status == ImportedFileStatus.SAFETY_BLOCKED
+        for entry in staged_arc.entries
+    )
 
 
 async def _load_arc_ids_with_current_safety(

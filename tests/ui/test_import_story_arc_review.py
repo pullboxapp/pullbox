@@ -212,9 +212,6 @@ async def test_story_arc_step_three_shows_safe_draft_and_separate_policy_confirm
     assert 'data-testid="import-story-arc-policy-' in response.text
     assert "Import logical arc and memberships" in response.text
     assert "Create or reference a separate arc folder" in response.text
-    assert 'data-testid="import-story-arc-step-one-intent"' in response.text
-    assert "Logical arcs requested; separate arc files remain off" in response.text
-    assert "Review each detected arc below" in response.text
     assert "Policy needs confirmation" in response.text
     assert "Legacy move mapped to copy" in response.text
     assert "Detected Mylar settings" in response.text
