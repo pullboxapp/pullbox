@@ -206,15 +206,18 @@
   x-on:import:conflicts-reset.window="handleConflictsReset($event.detail)"
   data-testid="import-collection-review"
   data-import-review-status-counts='{{ status_counts|tojson|forceescape }}'
-  {% if safety_rematch_pending %}
-  hx-get="/import/{{ job.id }}/review-partial?status=safety_blocked&sort={{ sort }}&page={{ page }}"
-  hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]"
-  hx-target="#import-step-review-shell"
-  hx-swap="morph:outerHTML"
-  hx-sync="#import-step-review-shell:replace"
-  {% endif %}
   class="space-y-6"
 >
+  {% if safety_rematch_pending %}
+  <div
+    id="import-safety-rematch-poll"
+    hidden
+    hx-get="/import/{{ job.id }}/review-rematch-status"
+    hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]"
+    hx-target="this"
+    hx-swap="outerHTML"
+  ></div>
+  {% endif %}
   <input type="hidden" name="review_status_filter" value="{{ active_review_view if active_review_view != 'series' else '' }}">
   <input type="hidden" name="review_sort" value="{{ sort }}">
   <input type="hidden" name="review_page" value="{{ page }}">

@@ -21,7 +21,6 @@ from pullbox.models.import_job import (
     ImportedSeries,
     ImportJob,
     ImportJobStatus,
-    ImportSeriesStatus,
     ImportSourceType,
 )
 from pullbox.services.audit_service import AuditService
@@ -29,6 +28,7 @@ from pullbox.services.import_counters import recompute_file_counters, recompute_
 from pullbox.services.import_review_actions import (
     apply_safety_allow_once_to_file,
     apply_safety_skip_to_file,
+    prepare_series_for_safety_rematch,
 )
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
 from pullbox.services.import_story_arc_resolution import (
@@ -699,11 +699,7 @@ async def allow_import_safety_category_once(
                 .all()
             )
             for series in imported_series:
-                series.selected_for_import = False
-                if series.status in {ImportSeriesStatus.MATCHED, ImportSeriesStatus.DUPLICATE}:
-                    diagnostics = dict(series.diagnostics or {})
-                    diagnostics["rematch_pending"] = True
-                    series.diagnostics = diagnostics
+                prepare_series_for_safety_rematch(series)
 
         await refresh_story_arc_entries_for_import_files(
             session,

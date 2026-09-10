@@ -119,6 +119,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_review_partial",
         ),
         (
+            "/import/{job_id}/review-rematch-status",
+            ("GET",),
+            "import_review_rematch_status",
+            "import_review_rematch_status",
+        ),
+        (
             "/import/{job_id}/safety/categories/{category}/preview",
             ("GET",),
             "import_review_preview_safety_category",

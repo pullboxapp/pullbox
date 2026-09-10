@@ -29,6 +29,27 @@ RecomputeFileCounters = Callable[[AsyncSession, ImportJob, list[int]], Awaitable
 RecomputeSeriesCounters = Callable[[AsyncSession, ImportJob], Awaitable[None]]
 
 
+def prepare_series_for_safety_rematch(imported_series: ImportedSeries) -> bool:
+    """Restore a proven series target and mark it for safety-file rematching."""
+    if imported_series.status == ImportSeriesStatus.SKIPPED:
+        if imported_series.series_id is not None:
+            imported_series.status = ImportSeriesStatus.DUPLICATE
+        elif imported_series.user_selected_cv_id is not None or imported_series.cv_id is not None:
+            imported_series.status = ImportSeriesStatus.MATCHED
+
+    if imported_series.status not in {
+        ImportSeriesStatus.MATCHED,
+        ImportSeriesStatus.DUPLICATE,
+    }:
+        return False
+
+    diagnostics = dict(imported_series.diagnostics or {})
+    diagnostics["rematch_pending"] = True
+    imported_series.diagnostics = diagnostics
+    imported_series.selected_for_import = False
+    return True
+
+
 def apply_safety_allow_once_to_file(
     imp_file: ImportedFile,
     *,
@@ -336,6 +357,8 @@ async def allow_safety_blocked_file_once(
     )
 
     apply_safety_allow_once_to_file(imp_file, retry_import=retry_import)
+    if not retry_import:
+        prepare_series_for_safety_rematch(imported_series)
     await refresh_story_arc_entries_for_import_files(
         session,
         import_job_id=job_id,

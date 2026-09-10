@@ -65,7 +65,10 @@ from pullbox.ui.import_history import (
 )
 from pullbox.ui.import_progress_snapshot import build_import_progress_snapshot
 from pullbox.ui.import_results_context import load_import_results_context
-from pullbox.ui.import_review_context import load_import_review_context
+from pullbox.ui.import_review_context import (
+    has_pending_import_safety_rematch,
+    load_import_review_context,
+)
 from pullbox.ui.import_review_summary import load_import_review_summary
 from pullbox.ui.import_series_details_context import load_import_series_details_context
 from pullbox.ui.import_story_arc_entry_review import StoryArcEntryResolutionFilter
@@ -535,6 +538,35 @@ async def import_review_partial(
         arc_entry_state=arc_entry_state,
         arc_entry_page=arc_entry_page,
     )
+
+
+@router.get(
+    "/import/{job_id}/review-rematch-status",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_rematch_status(
+    job_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Poll safety rematch completion without replacing the review surface."""
+    job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+
+    pending = await has_pending_import_safety_rematch(session, job_id)
+    if pending:
+        return HTMLResponse(
+            f'<div id="import-safety-rematch-poll" hidden '
+            f'hx-get="/import/{job_id}/review-rematch-status" '
+            'hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]" '
+            'hx-target="this" hx-swap="outerHTML"></div>'
+        )
+
+    response = HTMLResponse('<div id="import-safety-rematch-poll" hidden></div>')
+    response.headers["HX-Trigger"] = "import:review-refresh"
+    return response
 
 
 async def _render_import_review_partial(

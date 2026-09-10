@@ -341,11 +341,6 @@ class ImportServiceReviewMixin:
         imported_series = await session.get(ImportedSeries, imp_file.import_series_id)
         if imported_series is None:
             raise NotFoundError("ImportedSeries", imp_file.import_series_id)
-        if imported_series.status in {ImportSeriesStatus.MATCHED, ImportSeriesStatus.DUPLICATE}:
-            diagnostics = dict(imported_series.diagnostics or {})
-            diagnostics["rematch_pending"] = True
-            imported_series.diagnostics = diagnostics
-            await session.flush()
         return imported_series
 
     async def allow_safety_blocked_file_once_for_retry(
@@ -393,6 +388,7 @@ class ImportServiceReviewMixin:
             (imported_series.files_matched or 0) <= 0
             and (imported_series.files_conflict or 0) <= 0
             and (imported_series.files_no_match or 0) <= 0
+            and int((imported_series.diagnostics or {}).get("safety_blocked_files") or 0) <= 0
         ):
             job = await session.get(ImportJob, job_id)
             if job is None:

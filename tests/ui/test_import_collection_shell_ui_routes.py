@@ -3202,9 +3202,43 @@ class TestImportShellRouteContracts:
         assert "Preparing this file for matching" in response.text
         assert "Preparing match" in response.text
         assert 'data-testid="import-review-safety-rematch-spinner"' in response.text
+        assert 'id="import-safety-rematch-poll"' in response.text
+        assert f'hx-get="/import/{job_id}/review-rematch-status"' in response.text
         assert 'hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]"' in response.text
         assert 'data-testid="import-review-allow-safety-file"' not in response.text
         assert 'data-testid="import-review-skip-safety-file"' not in response.text
+
+        pending_response = await authenticated_client.get(f"/import/{job_id}/review-rematch-status")
+        assert pending_response.status_code == 200
+        assert 'id="import-safety-rematch-poll"' in pending_response.text
+        assert 'hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]"' in (
+            pending_response.text
+        )
+        assert "HX-Trigger" not in pending_response.headers
+
+        async with sec_db() as session:
+            refreshed_series = await session.get(ImportedSeries, 1)
+            assert refreshed_series is not None
+            diagnostics = dict(refreshed_series.diagnostics or {})
+            diagnostics.pop("rematch_pending", None)
+            refreshed_series.diagnostics = diagnostics
+            approved_file = await session.scalar(
+                select(ImportedFile).where(
+                    ImportedFile.import_job_id == job_id,
+                    ImportedFile.status == ImportedFileStatus.SAFETY_APPROVED,
+                )
+            )
+            assert approved_file is not None
+            approved_file.status = ImportedFileStatus.MATCHED
+            await session.commit()
+
+        completed_response = await authenticated_client.get(
+            f"/import/{job_id}/review-rematch-status"
+        )
+        assert completed_response.status_code == 200
+        assert 'id="import-safety-rematch-poll"' in completed_response.text
+        assert "hx-trigger=" not in completed_response.text
+        assert completed_response.headers["HX-Trigger"] == "import:review-refresh"
 
     async def test_import_review_returns_to_all_when_safety_tab_becomes_empty(
         self,

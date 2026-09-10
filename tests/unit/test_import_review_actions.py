@@ -679,6 +679,51 @@ async def test_allow_safety_blocked_file_once_keeps_file_in_safety_review_until_
     recompute_series.assert_awaited_once_with(db_session, job)
 
 
+async def test_allow_safety_blocked_file_once_recovers_skipped_series_target(
+    db_session: AsyncSession,
+) -> None:
+    service = ImportService(
+        series_service=AsyncMock(),
+        metadata_service=AsyncMock(),
+        event_bus=AsyncMock(),
+    )
+    job = await _create_job_row(db_session)
+    imported = await _create_imported_series(
+        db_session,
+        job,
+        status=ImportSeriesStatus.SKIPPED,
+    )
+    imported.cv_id = 163486
+    oversized = _make_file(
+        job,
+        imported,
+        name="East of West - The End Times Compendium.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        include_in_import=False,
+    )
+    oversized.diagnostics = {
+        "safety_block": {
+            "kind": "archive_decompressed_size",
+            "category": "decompression_size_limit",
+            "code": "archive_decompressed_size_limit",
+            "reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
+            "overrideable": True,
+        }
+    }
+    db_session.add(oversized)
+    await db_session.flush()
+
+    updated_series = await service.allow_safety_blocked_file_once(
+        db_session,
+        job.id,
+        oversized.id,
+    )
+
+    assert updated_series.status == ImportSeriesStatus.MATCHED
+    assert updated_series.diagnostics["rematch_pending"] is True
+    assert oversized.status == ImportedFileStatus.SAFETY_APPROVED
+
+
 async def test_allow_safety_blocked_file_once_rejects_non_overrideable_blocks(
     db_session: AsyncSession,
 ) -> None:
@@ -846,6 +891,64 @@ async def test_skip_safety_blocked_file_marks_file_skipped_and_unselects_series(
     assert updated_file.include_in_import is False
     assert imported.selected_for_import is False
     assert updated_file.diagnostics["resolution"] == "skipped"
+
+
+async def test_skip_safety_file_keeps_series_match_while_another_safety_item_remains(
+    db_session: AsyncSession,
+) -> None:
+    service = ImportService(
+        series_service=AsyncMock(),
+        metadata_service=AsyncMock(),
+        event_bus=AsyncMock(),
+    )
+    job = await _create_job_row(db_session)
+    imported = await _create_imported_series(db_session, job)
+    imported.cv_id = 163486
+    missing_reference = _make_file(
+        job,
+        imported,
+        name="removed-by-mylar.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        include_in_import=False,
+    )
+    missing_reference.diagnostics = {
+        "safety_block": {
+            "kind": "source_revalidation",
+            "category": "source_missing",
+            "code": "source_missing",
+            "reason": "The recorded file is missing.",
+            "overrideable": False,
+        }
+    }
+    oversized = _make_file(
+        job,
+        imported,
+        name="East of West - The End Times Compendium.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        include_in_import=False,
+    )
+    oversized.diagnostics = {
+        "safety_block": {
+            "kind": "archive_decompressed_size",
+            "category": "decompression_size_limit",
+            "code": "archive_decompressed_size_limit",
+            "reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
+            "overrideable": True,
+        }
+    }
+    db_session.add_all([missing_reference, oversized])
+    await db_session.flush()
+
+    updated_series = await service.skip_safety_blocked_file(
+        db_session,
+        job.id,
+        missing_reference.id,
+    )
+
+    assert updated_series.status == ImportSeriesStatus.MATCHED
+    assert updated_series.diagnostics["safety_blocked_files"] == 1
+    assert missing_reference.status == ImportedFileStatus.SKIPPED
+    assert oversized.status == ImportedFileStatus.SAFETY_BLOCKED
 
 
 async def test_skip_safety_blocked_file_refreshes_linked_story_arc_state(
