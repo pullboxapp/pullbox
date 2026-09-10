@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from itsdangerous import SignatureExpired
+from sqlalchemy import select
 
+from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.models.config import SystemConfig
 from pullbox.models.import_job import (
@@ -26,6 +29,8 @@ from pullbox.models.story_arc import (
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.models.user import User
 from pullbox.services.import_safety_source_cleanup import (
+    _load_token,
+    _serializer,
     move_one_page_source_to_trash,
     preview_one_page_source_cleanup,
 )
@@ -328,3 +333,168 @@ async def test_source_is_restored_when_cleanup_database_commit_fails(
 
     assert source.read_bytes() == b"one-page source"
     assert list(trash.rglob("possible-cover.cbz")) == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preview_rejects_unknown_and_inactive_jobs(db_session) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(NotFoundError):
+        await preview_one_page_source_cleanup(db_session, 999, 1, actor_id=42)
+
+    job = ImportJob(
+        source_path="/tmp/import",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.SCANNING,
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    with pytest.raises(ValidationError, match="during review"):
+        await preview_one_page_source_cleanup(db_session, job.id, 1, actor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preview_rejects_missing_or_ineligible_file(
+    db_session,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    job_id, file_id, _source, _trash = await _seed_cleanup_case(
+        db_session,
+        tmp_path,
+        allow_managed_writes=True,
+    )
+
+    with pytest.raises(NotFoundError):
+        await preview_one_page_source_cleanup(db_session, job_id, file_id + 99, actor_id=42)
+
+    imported_file = await db_session.get(ImportedFile, file_id)
+    assert imported_file is not None
+    imported_file.status = ImportedFileStatus.MATCHED
+    await db_session.commit()
+    with pytest.raises(ValidationError, match="one-page archive"):
+        await preview_one_page_source_cleanup(db_session, job_id, file_id, actor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preview_rejects_symlinked_or_missing_source(
+    db_session,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    job_id, file_id, source, _trash = await _seed_cleanup_case(
+        db_session,
+        tmp_path,
+        allow_managed_writes=True,
+    )
+    target = source.with_name("target.cbz")
+    target.write_bytes(source.read_bytes())
+    source.unlink()
+    source.symlink_to(target)
+
+    with pytest.raises(ValidationError, match="Symlinked"):
+        await preview_one_page_source_cleanup(db_session, job_id, file_id, actor_id=42)
+
+    source.unlink()
+    with pytest.raises(ValidationError, match="changed or is unavailable"):
+        await preview_one_page_source_cleanup(db_session, job_id, file_id, actor_id=42)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preview_reports_unwritable_folder_source(
+    db_session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    job_id, file_id, _source, _trash = await _seed_cleanup_case(
+        db_session,
+        tmp_path,
+        allow_managed_writes=False,
+        source_type=ImportSourceType.FILESYSTEM,
+    )
+    monkeypatch.setattr("pullbox.services.import_safety_source_cleanup.os.access", lambda *_: False)
+
+    preview = await preview_one_page_source_cleanup(db_session, job_id, file_id, actor_id=42)
+
+    assert preview.can_move_to_trash is False
+    assert "permission" in preview.unavailable_reason
+
+
+def test_source_cleanup_tokens_reject_invalid_expired_and_non_mapping_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="invalid"):
+        _load_token("not-a-token")
+
+    non_mapping = str(_serializer().dumps(["unexpected"]))
+    with pytest.raises(ValidationError, match="invalid"):
+        _load_token(non_mapping)
+
+    class ExpiredSerializer:
+        def loads(self, *_args: object, **_kwargs: object) -> object:
+            raise SignatureExpired("old")
+
+    monkeypatch.setattr(
+        "pullbox.services.import_safety_source_cleanup._serializer",
+        ExpiredSerializer,
+    )
+    with pytest.raises(ValidationError, match="expired"):
+        _load_token("expired")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_move_rejects_token_for_another_actor_or_missing_signature(
+    db_session,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    job_id, file_id, _source, _trash = await _seed_cleanup_case(
+        db_session,
+        tmp_path,
+        allow_managed_writes=True,
+    )
+    preview = await preview_one_page_source_cleanup(db_session, job_id, file_id, actor_id=42)
+    assert preview.preview_token is not None
+
+    with pytest.raises(ValidationError, match="does not match"):
+        await move_one_page_source_to_trash(
+            db_session,
+            job_id,
+            file_id,
+            actor_id=7,
+            preview_token=preview.preview_token,
+        )
+
+    missing_signature = str(
+        _serializer().dumps({"job_id": job_id, "file_id": file_id, "actor_id": 42})
+    )
+    with pytest.raises(ValidationError, match="invalid"):
+        await move_one_page_source_to_trash(
+            db_session,
+            job_id,
+            file_id,
+            actor_id=42,
+            preview_token=missing_signature,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_move_rechecks_availability_after_preview(
+    db_session,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    job_id, file_id, _source, _trash = await _seed_cleanup_case(
+        db_session,
+        tmp_path,
+        allow_managed_writes=True,
+    )
+    preview = await preview_one_page_source_cleanup(db_session, job_id, file_id, actor_id=42)
+    assert preview.preview_token is not None
+    root = (await db_session.scalars(select(LibraryRoot))).one()
+    root.allow_managed_writes = False
+    await db_session.commit()
+
+    with pytest.raises(ValidationError, match="reference-only"):
+        await move_one_page_source_to_trash(
+            db_session,
+            job_id,
+            file_id,
+            actor_id=42,
+            preview_token=preview.preview_token,
+        )
