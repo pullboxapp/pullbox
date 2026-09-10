@@ -1499,6 +1499,111 @@ class TestMylar3Import:
             }
         ]
 
+    async def test_corroborated_comicinfo_replaces_stale_mylar_issue_identity(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "Dark Nights - Death Metal Omnibus (2023)"
+        file_path = series_dir / "Dark Nights - Death Metal Omnibus 01.cbz"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(file_path, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("page001.jpg", b"\xff\xd8\xff\xd9")
+            archive.writestr(
+                "ComicInfo.xml",
+                """<?xml version="1.0"?>
+                <ComicInfo>
+                  <Series>Dark Nights: Death Metal Omnibus</Series>
+                  <Number>1</Number>
+                  <Title>HC</Title>
+                  <Format>Trade Paper Back</Format>
+                  <Notes>[cv_vol_id:166912] [cv_issue_id:1132072]</Notes>
+                </ComicInfo>
+                """,
+            )
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-166912",
+                    "ComicName": "Dark Nights - Death Metal Omnibus",
+                    "ComicYear": "2023",
+                    "ComicPublisher": "DC Comics",
+                    "ComicLocation": str(series_dir),
+                    "Total": 1,
+                }
+            ],
+            issues=[
+                {
+                    "IssueID": "899000001",
+                    "ComicID": "CV-166912",
+                    "ComicName": "Dark Nights - Death Metal Omnibus",
+                    "IssueName": "HC",
+                    "Issue_Number": "1",
+                    "Location": file_path.name,
+                    "IssueDate": "2024-01-01",
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        imported_file = await db_session.scalar(
+            sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert imported_file is not None
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.files_matched == 0
+        assert imported_file.status == ImportedFileStatus.SAFETY_BLOCKED
+
+        await service.allow_safety_blocked_file_once(
+            db_session,
+            job.id,
+            imported_file.id,
+        )
+        await service.rematch_imported_series_files(db_session, job.id, series_item.id)
+
+        assert series_item.files_matched == 1
+        assert series_item.files_no_match == 0
+        assert imported_file.status == ImportedFileStatus.MATCHED
+        assert imported_file.comicvine_issue_id == 1132072
+        assert imported_file.matched_issue_cv_id == 1132072
+        source_metadata = imported_file.diagnostics["source_metadata"]
+        assert source_metadata["mylar3_issue_identity_reconciliation"] == {
+            "recorded_comicvine_issue_id": 899000001,
+            "embedded_comicvine_issue_id": 1132072,
+            "comicvine_series_id": 166912,
+            "issue_number": 1.0,
+            "method": "corroborated_embedded_comicinfo",
+        }
+        assert "identity_conflicts" not in source_metadata
+
     async def test_agreeing_mylar_sidecar_and_comicinfo_stays_provider_free(
         self,
         db_session,

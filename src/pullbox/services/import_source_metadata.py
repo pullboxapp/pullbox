@@ -19,6 +19,7 @@ from pullbox.core.source_metadata import (
     SourceMetadataExtractor,
     volume_subtitle_hint_from_filename,
 )
+from pullbox.core.type_semantics import issue_type_family
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
 from pullbox.models.issue import IssueType
 
@@ -397,9 +398,28 @@ async def load_deferred_source_metadata_for_import_file(
         update["issue_number"] = base_metadata.issue_number
     if loaded_metadata.year is None and base_metadata.year is not None:
         update["year"] = base_metadata.year
+    issue_identity_reconciliation = _corroborated_comicinfo_issue_reconciliation(
+        base_metadata,
+        loaded_metadata,
+    )
     identity_conflicts = _reconcile_loaded_exact_identities(base_metadata, loaded_metadata)
+    if issue_identity_reconciliation is not None:
+        recorded_issue_id = issue_identity_reconciliation["recorded_comicvine_issue_id"]
+        embedded_issue_id = issue_identity_reconciliation["embedded_comicvine_issue_id"]
+        identity_conflicts = [
+            conflict
+            for conflict in identity_conflicts
+            if not (
+                conflict.get("field") == "comicvine_issue_id"
+                and conflict.get("first") == recorded_issue_id
+                and conflict.get("conflicting") == embedded_issue_id
+            )
+        ]
     reconciliation = base_metadata.diagnostics.get("mylar3_path_reconciliation")
     diagnostics = dict(loaded_metadata.diagnostics)
+    if issue_identity_reconciliation is not None:
+        diagnostics["mylar3_issue_identity_reconciliation"] = issue_identity_reconciliation
+        update["diagnostics"] = diagnostics
     folder_scope_conflict = _deferred_mylar_folder_scope_conflict(
         base_metadata,
         loaded_metadata,
@@ -415,6 +435,9 @@ async def load_deferred_source_metadata_for_import_file(
             **diagnostics,
             "identity_conflicts": identity_conflicts,
         }
+    elif "identity_conflicts" in diagnostics:
+        diagnostics.pop("identity_conflicts", None)
+        update["diagnostics"] = diagnostics
     base_series_signal = base_metadata.signals.get("comicvine_series_id")
     if (
         base_metadata.comicvine_series_id is not None
@@ -426,7 +449,11 @@ async def load_deferred_source_metadata_for_import_file(
             "comicvine_series_id": MetadataSignal.MYLAR3,
         }
     base_issue_signal = base_metadata.signals.get("comicvine_issue_id")
-    if base_metadata.comicvine_issue_id is not None and base_issue_signal == MetadataSignal.MYLAR3:
+    if (
+        base_metadata.comicvine_issue_id is not None
+        and base_issue_signal == MetadataSignal.MYLAR3
+        and issue_identity_reconciliation is None
+    ):
         updated_signals = update.get("signals")
         if not isinstance(updated_signals, dict):
             updated_signals = loaded_metadata.signals
@@ -532,6 +559,49 @@ def _reconcile_loaded_exact_identities(
         if conflict not in conflicts:
             conflicts.append(conflict)
     return conflicts
+
+
+def _corroborated_comicinfo_issue_reconciliation(
+    base_metadata: SourceMetadata,
+    loaded_metadata: SourceMetadata,
+) -> dict[str, object] | None:
+    """Prefer an embedded issue ID when independent local evidence proves a stale Mylar ID."""
+    recorded_issue_id = base_metadata.comicvine_issue_id
+    embedded_issue_id = loaded_metadata.comicvine_issue_id
+    if (
+        recorded_issue_id is None
+        or embedded_issue_id is None
+        or recorded_issue_id == embedded_issue_id
+        or base_metadata.signals.get("comicvine_issue_id") != MetadataSignal.MYLAR3
+        or loaded_metadata.signals.get("comicvine_issue_id") != MetadataSignal.COMICINFO
+        or base_metadata.comicvine_series_id is None
+        or loaded_metadata.comicvine_series_id is None
+        or base_metadata.comicvine_series_id != loaded_metadata.comicvine_series_id
+        or loaded_metadata.signals.get("comicvine_series_id") != MetadataSignal.COMICINFO
+        or base_metadata.issue_number is None
+        or loaded_metadata.issue_number is None
+        or not _issue_numbers_equal(base_metadata.issue_number, loaded_metadata.issue_number)
+        or issue_type_family(base_metadata.issue_type)
+        != issue_type_family(loaded_metadata.issue_type)
+        or loaded_metadata.diagnostics.get("has_comicinfo") is not True
+    ):
+        return None
+
+    raw_loaded_conflicts = loaded_metadata.diagnostics.get("identity_conflicts")
+    if isinstance(raw_loaded_conflicts, list) and any(
+        isinstance(conflict, dict)
+        and conflict.get("field") in {"comicvine_series_id", "comicvine_issue_id"}
+        for conflict in raw_loaded_conflicts
+    ):
+        return None
+
+    return {
+        "recorded_comicvine_issue_id": int(recorded_issue_id),
+        "embedded_comicvine_issue_id": int(embedded_issue_id),
+        "comicvine_series_id": int(loaded_metadata.comicvine_series_id),
+        "issue_number": float(loaded_metadata.issue_number),
+        "method": "corroborated_embedded_comicinfo",
+    }
 
 
 def _deferred_mylar_folder_scope_conflict(

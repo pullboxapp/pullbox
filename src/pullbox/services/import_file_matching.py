@@ -1981,7 +1981,15 @@ def _persist_deferred_source_evidence(
         diagnostics["comicvine_series_id"] = metadata.comicvine_series_id
     imp_file.diagnostics = diagnostics
     imp_file.has_comicinfo = bool(metadata.diagnostics.get("has_comicinfo"))
-    if imp_file.comicvine_issue_id is None and metadata.comicvine_issue_id is not None:
+    issue_identity_reconciliation = metadata.diagnostics.get("mylar3_issue_identity_reconciliation")
+    if metadata.comicvine_issue_id is not None and (
+        imp_file.comicvine_issue_id is None
+        or (
+            isinstance(issue_identity_reconciliation, dict)
+            and issue_identity_reconciliation.get("embedded_comicvine_issue_id")
+            == metadata.comicvine_issue_id
+        )
+    ):
         imp_file.comicvine_issue_id = metadata.comicvine_issue_id
 
 
