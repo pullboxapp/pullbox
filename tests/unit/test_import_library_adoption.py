@@ -31,6 +31,7 @@ from pullbox.models.series import Series
 from pullbox.models.user import User
 from pullbox.services.import_library_adoption import (
     create_clean_library_import,
+    prepare_clean_library_import,
     preview_clean_library_import,
 )
 
@@ -129,7 +130,7 @@ async def _seed_referenced_import(
 
 
 @pytest.mark.asyncio
-async def test_preview_and_create_clean_library_import_clone_referenced_ownership(
+async def test_preview_create_and_prepare_clean_library_import_clone_referenced_ownership(
     db_session: AsyncSession,
 ) -> None:
     (
@@ -168,6 +169,20 @@ async def test_preview_and_create_clean_library_import_clone_referenced_ownershi
     assert clean_job.source_preserved is True
     assert clean_job.target_library_root_id == target_root.id
     assert clean_job.progress_snapshot["source_import_job_id"] == source_job.id
+    assert clean_job.progress_snapshot["clean_library_adoption_prepared"] is False
+
+    cloned_files_before_prepare = list(
+        (
+            await db_session.scalars(
+                select(ImportedFile).where(ImportedFile.import_job_id == clean_job.id)
+            )
+        ).all()
+    )
+    assert cloned_files_before_prepare == []
+
+    await prepare_clean_library_import(db_session, clean_job.id)
+    await db_session.refresh(clean_job)
+    assert clean_job.progress_snapshot["clean_library_adoption_prepared"] is True
 
     cloned_file = (
         await db_session.scalars(

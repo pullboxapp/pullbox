@@ -880,14 +880,56 @@ class TestImportResultsPartial:
             clean_library_reference_bytes=2048,
             clean_library_mixed_folder_repair_count=0,
             clean_library_target_roots=[
-                {"id": 9, "name": "Clean library", "path": "/library-clean"}
+                {
+                    "id": 9,
+                    "name": "Clean library",
+                    "path": "/library-clean",
+                    "rename_on_import": True,
+                    "normalize_to_cbz": True,
+                    "update_comicinfo": True,
+                    "skip_existing": True,
+                }
             ],
         )
 
         assert 'data-testid="import-clean-library-modal"' in html
+        assert 'class="modal-shell"' in html
+        assert 'role="dialog"' in html
+        assert 'aria-modal="true"' in html
+        assert 'aria-labelledby="import-clean-library-title"' in html
+        assert 'id="import-clean-library-title"' in html
+        assert 'x-init="initializeCleanLibraryModal()"' in html
+        assert 'x-ref="cleanLibraryDialog"' in html
+        assert '@keydown.tab.window="trapCleanLibraryModalFocus($event)"' in html
+        assert 'data-testid="clean-library-close-action"' in html
+        assert 'data-testid="clean-library-cancel-action"' in html
+        assert 'x-ref="cleanLibraryInitialFocus"' in html
+        assert 'class="space-y-4 px-5 py-5"' in html
         assert 'data-testid="clean-library-target-root"' in html
         assert 'data-dropdown-select-contract="v1"' in html
-        assert 'data-testid="clean-library-preview-action"' in html
+        assert 'data-testid="clean-library-policy-summary"' in html
+        assert 'data-testid="clean-library-settings-action"' in html
+        settings_action = html.index('data-testid="clean-library-settings-action"')
+        assert 'class="btn-ghost btn-sm"' in html[settings_action : settings_action + 180]
+        assert 'data-testid="clean-library-build-action"' in html
+        assert 'data-testid="clean-library-progress"' in html
+        assert 'class="app-progress"' in html
+        assert "Build clean library" in html
+        assert "Preview clean library" not in html
+
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        start = script.index("function importResultsData")
+        end = script.index("function conflictResolutionData", start)
+        results_controller = script[start:end]
+        assert "initializeCleanLibraryModal" in results_controller
+        assert "closeCleanLibraryModal" in results_controller
+        assert "trapCleanLibraryModalFocus" in results_controller
+        assert "cleanLibraryReturnFocus" in results_controller
+        assert "refreshCleanLibraryProgress" in results_controller
+        assert "scheduleCleanLibraryProgressPoll" in results_controller
+        build_start = results_controller.index("buildCleanLibrary: async function")
+        build_end = results_controller.index("archiveImport: async function", build_start)
+        assert "pbConfirm" not in results_controller[build_start:build_end]
 
     def test_completed_cover_details_offer_explicit_post_import_source_cleanup(self) -> None:
         from types import SimpleNamespace

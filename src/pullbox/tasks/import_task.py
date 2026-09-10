@@ -30,6 +30,7 @@ from pullbox.services.import_counters import job_stats
 from pullbox.services.import_job_execution_progress import (
     reconcile_durable_import_execution_counters,
 )
+from pullbox.services.import_library_adoption import prepare_clean_library_import
 from pullbox.services.import_workflow_state import (
     emit_progress,
     import_control_state_for_job,
@@ -695,6 +696,11 @@ class ImportRunner:
                     )
                     await session.commit()
                 elif job.status == ImportJobStatus.IMPORTING:
+                    await prepare_clean_library_import(
+                        session,
+                        job_id,
+                        progress_callback=progress_callback,
+                    )
                     result = await service.run_import(
                         session,
                         job_id,
@@ -809,6 +815,11 @@ async def _run_single_job_once(
                         progress_callback=progress_callback,
                     )
                 else:
+                    await prepare_clean_library_import(
+                        session,
+                        job_id,
+                        progress_callback=progress_callback,
+                    )
                     run_import_result = await service.run_import(
                         session,
                         job_id,

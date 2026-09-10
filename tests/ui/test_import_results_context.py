@@ -926,7 +926,15 @@ async def test_completed_reference_import_offers_separate_clean_library_root(
     assert context["clean_library_reference_bytes"] == source_path.stat().st_size
     assert context["clean_library_mixed_folder_repair_count"] == 0
     assert context["clean_library_target_roots"] == [
-        {"id": clean_root.id, "name": "Clean library", "path": str(clean_path)}
+        {
+            "id": clean_root.id,
+            "name": "Clean library",
+            "path": str(clean_path),
+            "rename_on_import": True,
+            "normalize_to_cbz": False,
+            "update_comicinfo": False,
+            "skip_existing": False,
+        }
     ]
 
 

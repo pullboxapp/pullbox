@@ -8210,8 +8210,32 @@ function importResultsData(config) {
     cleanupRunningAction: "",
     cleanupError: "",
     cleanLibraryTargetRootId: cfg.defaultCleanLibraryRootId || "",
+    cleanLibraryRootPolicies: Array.isArray(cfg.cleanLibraryRootPolicies)
+      ? cfg.cleanLibraryRootPolicies
+      : [],
+    cleanLibraryJobId:
+      cfg.activeCleanLibraryJob && cfg.activeCleanLibraryJob.id
+        ? Number(cfg.activeCleanLibraryJob.id)
+        : null,
+    cleanLibraryStatus:
+      cfg.activeCleanLibraryJob && cfg.activeCleanLibraryJob.status
+        ? String(cfg.activeCleanLibraryJob.status).toLowerCase()
+        : "",
+    cleanLibraryProgress:
+      cfg.activeCleanLibraryJob && cfg.activeCleanLibraryJob.progress_snapshot
+        ? Math.max(
+            0,
+            Math.min(100, Number(cfg.activeCleanLibraryJob.progress_snapshot.progress) || 0)
+          )
+        : 0,
+    cleanLibraryProgressMessage:
+      cfg.activeCleanLibraryJob && cfg.activeCleanLibraryJob.progress_snapshot
+        ? String(cfg.activeCleanLibraryJob.progress_snapshot.message || "")
+        : "",
+    cleanLibraryProgressPollTimer: null,
     cleanLibraryRunning: false,
     cleanLibraryError: "",
+    cleanLibraryReturnFocus: null,
     retryError: "",
     refreshUrl: cfg.refreshUrl || "/import/" + (cfg.jobId || "") + "/results-partial",
     refreshTarget: cfg.refreshTarget || "[data-testid='import-collection-results']",
@@ -8222,6 +8246,202 @@ function importResultsData(config) {
 
     toggleFailedFiles: function () {
       this.showFailedFiles = !this.showFailedFiles;
+    },
+
+    initializeCleanLibraryModal: function () {
+      this.cleanLibraryReturnFocus = document.activeElement;
+      var self = this;
+      this.$nextTick(function () {
+        window.requestAnimationFrame(function () {
+          var target = self.$refs.cleanLibraryInitialFocus || self.$refs.cleanLibraryDialog;
+          if (target && typeof target.focus === "function") {
+            target.focus({ preventScroll: true });
+          }
+        });
+      });
+      if (this.cleanLibraryJobId) {
+        this.refreshCleanLibraryProgress();
+      }
+    },
+
+    closeCleanLibraryModal: function () {
+      this.clearCleanLibraryProgressPoll();
+      var returnFocus = this.cleanLibraryReturnFocus;
+      this.cleanLibraryReturnFocus = null;
+      this.open = false;
+      window.setTimeout(function () {
+        closeImportCvSearchModal();
+        if (
+          returnFocus &&
+          document.contains(returnFocus) &&
+          typeof returnFocus.focus === "function"
+        ) {
+          returnFocus.focus({ preventScroll: true });
+        }
+      }, 0);
+    },
+
+    selectedCleanLibraryPolicy: function () {
+      var targetRootId = Number(this.cleanLibraryTargetRootId);
+      return (
+        this.cleanLibraryRootPolicies.find(function (root) {
+          return Number(root && root.id) === targetRootId;
+        }) || {}
+      );
+    },
+
+    cleanLibraryPolicyLabel: function (key) {
+      var policy = this.selectedCleanLibraryPolicy();
+      var enabled = policy[key] === true;
+      var labels = {
+        rename_on_import: enabled
+          ? "Use the selected root's naming templates"
+          : "Keep current file and folder names",
+        normalize_to_cbz: enabled
+          ? "Normalize supported archives to CBZ"
+          : "Keep each supported archive format",
+        update_comicinfo: enabled
+          ? "Write matched metadata to ComicInfo.xml"
+          : "Keep embedded ComicInfo.xml unchanged",
+        skip_existing: enabled
+          ? "Skip issues already in the destination"
+          : "Allow another managed copy when valid",
+      };
+      return labels[key] || "Use current import settings";
+    },
+
+    clearCleanLibraryProgressPoll: function () {
+      if (this.cleanLibraryProgressPollTimer) {
+        window.clearTimeout(this.cleanLibraryProgressPollTimer);
+        this.cleanLibraryProgressPollTimer = null;
+      }
+    },
+
+    cleanLibraryIsTerminal: function () {
+      return ["completed", "failed", "cancelled", "rolled_back"].indexOf(
+        this.cleanLibraryStatus
+      ) !== -1;
+    },
+
+    cleanLibraryStatusLabel: function () {
+      var labels = {
+        importing: "Building",
+        pausing: "Pausing",
+        paused: "Paused",
+        stalled: "Needs attention",
+        cancelling: "Cancelling",
+        rolling_back: "Rolling back",
+        completed: "Complete",
+        failed: "Failed",
+        cancelled: "Cancelled",
+        rolled_back: "Rolled back",
+      };
+      return labels[this.cleanLibraryStatus] || "Queued";
+    },
+
+    cleanLibraryJobUrl: function () {
+      var step = this.cleanLibraryStatus === "completed" ? 5 : 4;
+      return (
+        "/import?tab=collection&resume_job_id=" +
+        encodeURIComponent(this.cleanLibraryJobId || "") +
+        "&resume_step=" +
+        step
+      );
+    },
+
+    scheduleCleanLibraryProgressPoll: function () {
+      var self = this;
+      self.clearCleanLibraryProgressPoll();
+      if (!self.cleanLibraryJobId || self.cleanLibraryIsTerminal() || !self.open) {
+        return;
+      }
+      self.cleanLibraryProgressPollTimer = window.setTimeout(function () {
+        self.cleanLibraryProgressPollTimer = null;
+        self.refreshCleanLibraryProgress();
+      }, 1000);
+    },
+
+    refreshCleanLibraryProgress: async function () {
+      if (!this.cleanLibraryJobId) {
+        return;
+      }
+      try {
+        var response = await fetch(
+          "/import/" + this.cleanLibraryJobId + "/progress-state",
+          { headers: { Accept: "application/json" } }
+        );
+        if (!response.ok) {
+          throw new Error("Could not refresh clean-library progress.");
+        }
+        var progress = await response.json();
+        this.cleanLibraryStatus = String(progress.status || this.cleanLibraryStatus).toLowerCase();
+        var nextProgress = Number(progress.progress);
+        if (Number.isFinite(nextProgress)) {
+          this.cleanLibraryProgress = Math.max(
+            this.cleanLibraryProgress,
+            Math.max(0, Math.min(100, Math.round(nextProgress)))
+          );
+        }
+        if (this.cleanLibraryStatus === "completed") {
+          this.cleanLibraryProgress = 100;
+        }
+        this.cleanLibraryProgressMessage = String(
+          progress.message || this.cleanLibraryProgressMessage || "Building the clean library..."
+        );
+        if (this.cleanLibraryStatus === "failed" && progress.error_message) {
+          this.cleanLibraryError = String(progress.error_message);
+        }
+      } catch (err) {
+        this.cleanLibraryError =
+          err && err.message ? err.message : "Could not refresh clean-library progress.";
+      } finally {
+        this.scheduleCleanLibraryProgressPoll();
+      }
+    },
+
+    trapCleanLibraryModalFocus: function (event) {
+      if (!event || !this.open || !this.$refs.cleanLibraryDialog) {
+        return;
+      }
+      var dialog = this.$refs.cleanLibraryDialog;
+      var panel = event.target && event.target.closest
+        ? event.target.closest("[data-dropdown-select-panel]")
+        : null;
+      var focusable = Array.prototype.filter.call(
+        dialog.querySelectorAll(
+          'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+            'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        ),
+        function (element) {
+          return element.getClientRects().length > 0;
+        }
+      );
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
+        return;
+      }
+      if (panel) {
+        event.preventDefault();
+        var labelledBy = panel.getAttribute("aria-labelledby");
+        var trigger = labelledBy ? dialog.querySelector("#" + CSS.escape(labelledBy)) : null;
+        var triggerIndex = trigger ? focusable.indexOf(trigger) : -1;
+        var destination = event.shiftKey
+          ? trigger || focusable[0]
+          : focusable[Math.min(focusable.length - 1, triggerIndex + 1)];
+        destination.focus({ preventScroll: true });
+        return;
+      }
+      var active = document.activeElement;
+      var first = focusable[0];
+      var last = focusable[focusable.length - 1];
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
     },
 
     retryFailed: async function () {
@@ -8436,29 +8656,6 @@ function importResultsData(config) {
         if (!previewResponse.ok) {
           throw new Error(preview.detail || "Could not preview the clean library.");
         }
-        var fileCount = Math.max(0, Number(preview.eligible_file_count) || 0);
-        var seriesCount = Math.max(0, Number(preview.eligible_series_count) || 0);
-        var byteCount = Math.max(0, Number(preview.total_bytes) || 0);
-        var formattedBytes =
-          window._pb && typeof window._pb.formatBytes === "function"
-            ? window._pb.formatBytes(byteCount)
-            : byteCount.toLocaleString() + " bytes";
-        var confirmed = await pbConfirm({
-          title: "Build a clean Pullbox library?",
-          message:
-            "Pullbox will copy and standardize " +
-            fileCount.toLocaleString() +
-            " files across " +
-            seriesCount.toLocaleString() +
-            " series (" +
-            formattedBytes +
-            ") in the selected managed root. The original Mylar files will remain unchanged.",
-          confirmText: "Build clean library",
-          destructive: false,
-        });
-        if (!confirmed) {
-          return;
-        }
         var response = await fetch(
           "/api/v1/import/" + this.jobId + "/clean-library",
           {
@@ -8480,11 +8677,11 @@ function importResultsData(config) {
         if (!response.ok) {
           throw new Error(result.detail || "Could not start the clean-library build.");
         }
-        dispatchImportWizardAdvance({
-          step: 4,
-          jobId: result.job_id,
-          jobStatus: "importing",
-        });
+        this.cleanLibraryJobId = Number(result.job_id);
+        this.cleanLibraryStatus = "importing";
+        this.cleanLibraryProgress = 0;
+        this.cleanLibraryProgressMessage = "Preparing the clean-library work plan...";
+        await this.refreshCleanLibraryProgress();
       } catch (err) {
         var message =
           err && err.message ? err.message : "Could not start the clean-library build.";

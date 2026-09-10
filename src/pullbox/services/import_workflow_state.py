@@ -34,6 +34,12 @@ SCAN_PROGRESS_MATCH_END = 80
 SCAN_PROGRESS_FILE_MATCH_START = 80
 SCAN_PROGRESS_FILE_MATCH_END = 99
 WORKFLOW_SNAPSHOT_VERSION = 2
+_PERSISTENT_IMPORT_CONTEXT_KEYS = (
+    "clean_library_adoption",
+    "clean_library_adoption_prepared",
+    "clean_library_source_snapshot",
+    "source_import_job_id",
+)
 ImportProgressMode = Literal["scan", "import", "rollback"]
 _INVENTORY_PROGRESS_THRESHOLDS: tuple[tuple[int, int], ...] = (
     (1, 1),
@@ -505,7 +511,21 @@ def runtime_snapshot_payload(
         ),
         "control_state": import_control_state_for_job(job),
     }
+    for key in _PERSISTENT_IMPORT_CONTEXT_KEYS:
+        if key in snapshot:
+            runtime[key] = snapshot[key]
     return runtime
+
+
+def _scale_clean_library_progress(job: ImportJob, event: ImportProgressEvent) -> None:
+    """Reserve the first five percent for clean-library plan preparation."""
+    snapshot = dict(job.progress_snapshot or {})
+    if (
+        snapshot.get("clean_library_adoption") is not True
+        or event.phase == "clean_library_preparing"
+    ):
+        return
+    event.progress = min(100, 5 + round(event.progress * 0.95))
 
 
 def initialize_progress_snapshot(
@@ -628,7 +648,11 @@ async def persist_progress_snapshot(
     event: ImportProgressEvent,
 ) -> None:
     """Persist the latest progress payload on the job for recovery/UI hydration."""
+    existing_snapshot = dict(job.progress_snapshot or {})
     payload = event.model_dump(mode="json")
+    for key in _PERSISTENT_IMPORT_CONTEXT_KEYS:
+        if key in existing_snapshot:
+            payload[key] = existing_snapshot[key]
     if int(payload.get("progress_revision") or 0) <= 0:
         payload["progress_revision"] = next_progress_revision(job)
     else:
@@ -696,6 +720,7 @@ async def emit_live_progress(
     """Publish an explicit live-only event without writing a durable snapshot."""
     if job.status in _PROTECTED_RUNTIME_STATUSES and event.status != job.status:
         return
+    _scale_clean_library_progress(job, event)
 
     highest_revision = max(
         int(revision_state.get("value") or 0),
@@ -733,6 +758,7 @@ async def emit_progress(
     """
     if job.status in _PROTECTED_RUNTIME_STATUSES and event.status != job.status:
         return
+    _scale_clean_library_progress(job, event)
     event.mode = cast("ImportProgressMode", snapshot_mode_for_job(job, default=event.mode))
     if event.progress_revision <= 0:
         event.progress_revision = next_progress_revision(job)

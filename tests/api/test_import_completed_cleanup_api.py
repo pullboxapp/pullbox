@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from sqlalchemy import func, select
 
 from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.models.import_job import (
@@ -346,6 +347,13 @@ async def test_clean_library_api_previews_and_starts_managed_copy(
         assert created is not None
         assert created.file_handling_mode.value == "managed_copy"
         assert created.source_preserved is True
+        assert created.progress_snapshot["clean_library_adoption_prepared"] is False
+        created_file_count = await session.scalar(
+            select(func.count())
+            .select_from(ImportedFile)
+            .where(ImportedFile.import_job_id == created.id)
+        )
+        assert created_file_count == 0
 
 
 @pytest.mark.asyncio

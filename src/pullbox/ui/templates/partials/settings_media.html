@@ -269,7 +269,7 @@
     title_style="plain",
     body_class="p-0"
   ) %}
-    <form x-data="dirtyForm()" @input="checkDirty()" @change="checkDirty()" @submit.prevent="saveConfig($el).then(() => markClean())">
+    <form id="import-policy" x-data="dirtyForm()" @input="checkDirty()" @change="checkDirty()" @submit.prevent="saveConfig($el).then(() => markClean())">
       <div class="settings-rows">
         {% call settings_row(label="Preferred Format", help="When two otherwise valid releases exist, this format receives priority.") %}
           {{ dropdown_select(

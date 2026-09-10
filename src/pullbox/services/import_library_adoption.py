@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from sqlalchemy import func, insert, select
+from sqlalchemy import delete, func, insert, select
 
 from pullbox.core.config_resolver import get_application_secret
 from pullbox.core.exceptions import NotFoundError, ValidationError
@@ -27,11 +27,17 @@ from pullbox.models.import_job import (
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.models.series import Series
+from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_completed_cleanup import (
     CompletedImportCleanupAction,
     count_completed_import_cleanup_scope,
 )
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
+from pullbox.services.import_workflow_state import (
+    emit_progress,
+    phase_progress,
+    raise_if_job_cancelled,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +47,9 @@ if TYPE_CHECKING:
 _TOKEN_SALT: Final = "completed-import-clean-library-v1"
 _TOKEN_MAX_AGE_SECONDS: Final = 15 * 60
 _TOKEN_VERSION: Final = 1
+_SERIES_BATCH_SIZE: Final = 500
+_FILE_BATCH_SIZE: Final = 2_000
+_PREPARATION_PROGRESS_END: Final = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,14 +247,13 @@ async def preview_clean_library_import(
     )
 
 
-def _validate_token(
+def _snapshot_from_token(
     token: str,
     *,
     source_job_id: int,
     target_root_id: int,
     actor_id: int,
-    snapshot: _AdoptionSnapshot,
-) -> None:
+) -> _AdoptionSnapshot:
     try:
         payload = _serializer().loads(token, max_age=_TOKEN_MAX_AGE_SECONDS)
     except SignatureExpired as exc:
@@ -254,20 +262,33 @@ def _validate_token(
         raise ValidationError("The clean-library preview is invalid. Preview it again.") from exc
     if not isinstance(payload, Mapping):
         raise ValidationError("The clean-library preview is invalid. Preview it again.")
-    expected_snapshot = {
-        "file_count": snapshot.file_count,
-        "series_count": snapshot.series_count,
-        "total_bytes": snapshot.total_bytes,
-        "digest": snapshot.digest,
-    }
     if (
         payload.get("version") != _TOKEN_VERSION
         or payload.get("source_job_id") != source_job_id
         or payload.get("target_root_id") != target_root_id
         or payload.get("actor_id") != actor_id
-        or payload.get("snapshot") != expected_snapshot
     ):
         raise ValidationError("The clean-library scope changed. Preview it again.")
+    raw_snapshot = payload.get("snapshot")
+    if not isinstance(raw_snapshot, Mapping):
+        raise ValidationError("The clean-library preview is invalid. Preview it again.")
+    try:
+        snapshot = _AdoptionSnapshot(
+            file_count=int(raw_snapshot["file_count"]),
+            series_count=int(raw_snapshot["series_count"]),
+            total_bytes=int(raw_snapshot["total_bytes"]),
+            digest=str(raw_snapshot["digest"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValidationError("The clean-library preview is invalid. Preview it again.") from exc
+    if (
+        snapshot.file_count <= 0
+        or snapshot.series_count <= 0
+        or snapshot.total_bytes < 0
+        or not snapshot.digest
+    ):
+        raise ValidationError("The clean-library preview is invalid. Preview it again.")
+    return snapshot
 
 
 def _adoption_diagnostics(
@@ -300,32 +321,36 @@ async def _create_adoption_series(
     *,
     job: ImportJob,
     source_job_id: int,
+    batch_callback: Callable[[int], Awaitable[None]] | None = None,
 ) -> dict[int, int]:
-    rows = (
-        await session.execute(
-            select(
-                Series.id,
-                Series.title,
-                Series.year_start,
-                Series.comicvine_id,
-                func.count(ImportedFile.id),
-                func.min(LibraryFile.file_path),
-            )
-            .select_from(ImportedFile)
-            .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
-            .join(Issue, Issue.id == LibraryFile.issue_id)
-            .join(Series, Series.id == Issue.series_id)
-            .where(*_eligible_sources(source_job_id))
-            .group_by(Series.id, Series.title, Series.year_start, Series.comicvine_id)
-            .order_by(Series.id)
-        )
-    ).all()
     imported_series_by_id: dict[int, int] = {}
-    for start in range(0, len(rows), 500):
+    last_series_id = 0
+    while True:
+        rows = (
+            await session.execute(
+                select(
+                    Series.id,
+                    Series.title,
+                    Series.year_start,
+                    Series.comicvine_id,
+                    func.count(ImportedFile.id),
+                    func.min(LibraryFile.file_path),
+                )
+                .select_from(ImportedFile)
+                .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+                .join(Issue, Issue.id == LibraryFile.issue_id)
+                .join(Series, Series.id == Issue.series_id)
+                .where(*_eligible_sources(source_job_id))
+                .where(Series.id > last_series_id)
+                .group_by(Series.id, Series.title, Series.year_start, Series.comicvine_id)
+                .order_by(Series.id)
+                .limit(_SERIES_BATCH_SIZE)
+            )
+        ).all()
+        if not rows:
+            break
         pending: list[ImportedSeries] = []
-        for series_id, title, year_start, comicvine_id, file_count, sample_path in rows[
-            start : start + 500
-        ]:
+        for series_id, title, year_start, comicvine_id, file_count, sample_path in rows:
             imported_series = ImportedSeries(
                 import_job_id=job.id,
                 raw_series_name=title,
@@ -356,6 +381,9 @@ async def _create_adoption_series(
         imported_series_by_id.update(
             {int(item.series_id): int(item.id) for item in pending if item.series_id is not None}
         )
+        last_series_id = int(rows[-1][0])
+        if batch_callback is not None:
+            await batch_callback(len(imported_series_by_id))
     return imported_series_by_id
 
 
@@ -365,79 +393,299 @@ async def _create_adoption_files(
     job_id: int,
     source_job_id: int,
     imported_series_by_id: dict[int, int],
+    batch_callback: Callable[[int], Awaitable[None]] | None = None,
 ) -> None:
-    stream = await session.stream(
-        select(
-            ImportedFile.id.label("source_imported_file_id"),
-            ImportedFile.diagnostics.label("source_diagnostics"),
-            LibraryFile.id.label("source_library_file_id"),
-            LibraryFile.file_path,
-            LibraryFile.file_name,
-            LibraryFile.file_size,
-            LibraryFile.file_format,
-            LibraryFile.has_comicinfo,
-            LibraryFile.source_signature,
-            LibraryFile.library_root_id.label("source_library_root_id"),
-            Issue.id.label("issue_id"),
-            Issue.comicvine_id.label("issue_comicvine_id"),
-            Issue.issue_number,
-            Issue.issue_number_text,
-            Series.id.label("series_id"),
-            Series.title.label("series_title"),
-            Series.year_start,
+    completed = 0
+    last_file_id = 0
+    while True:
+        rows = (
+            (
+                await session.execute(
+                    select(
+                        ImportedFile.id.label("source_imported_file_id"),
+                        ImportedFile.diagnostics.label("source_diagnostics"),
+                        LibraryFile.id.label("source_library_file_id"),
+                        LibraryFile.file_path,
+                        LibraryFile.file_name,
+                        LibraryFile.file_size,
+                        LibraryFile.file_format,
+                        LibraryFile.has_comicinfo,
+                        LibraryFile.source_signature,
+                        LibraryFile.library_root_id.label("source_library_root_id"),
+                        Issue.id.label("issue_id"),
+                        Issue.comicvine_id.label("issue_comicvine_id"),
+                        Issue.issue_number,
+                        Issue.issue_number_text,
+                        Series.id.label("series_id"),
+                        Series.title.label("series_title"),
+                        Series.year_start,
+                    )
+                    .select_from(ImportedFile)
+                    .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+                    .join(Issue, Issue.id == LibraryFile.issue_id)
+                    .join(Series, Series.id == Issue.series_id)
+                    .where(*_eligible_sources(source_job_id))
+                    .where(ImportedFile.id > last_file_id)
+                    .order_by(ImportedFile.id)
+                    .limit(_FILE_BATCH_SIZE)
+                )
+            )
+            .mappings()
+            .all()
         )
-        .select_from(ImportedFile)
-        .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
-        .join(Issue, Issue.id == LibraryFile.issue_id)
-        .join(Series, Series.id == Issue.series_id)
-        .where(*_eligible_sources(source_job_id))
-        .order_by(ImportedFile.id)
-        .execution_options(yield_per=2_000)
-    )
-    pending: list[dict[str, object]] = []
-    async for row in stream.mappings():
-        series_id = int(row["series_id"])
-        issue_number = float(row["issue_number"])
-        issue_number_text = row["issue_number_text"]
-        pending.append(
-            {
-                "import_job_id": job_id,
-                "import_series_id": imported_series_by_id[series_id],
-                "file_path": str(row["file_path"]),
-                "file_name": str(row["file_name"]),
-                "file_size": int(row["file_size"]),
-                "file_format": row["file_format"].value,
-                "parsed_series": str(row["series_title"]),
-                "parsed_issue_number": issue_number,
-                "parsed_year": row["year_start"],
-                "has_comicinfo": bool(row["has_comicinfo"]),
-                "comicvine_issue_id": row["issue_comicvine_id"],
-                "issue_number_raw": (
-                    str(issue_number_text) if issue_number_text else f"{issue_number:g}"
-                ),
-                "status": ImportedFileStatus.CONFIRMED,
-                "matched_issue_id": int(row["issue_id"]),
-                "matched_issue_cv_id": row["issue_comicvine_id"],
-                "match_confidence": "high",
-                "match_method": "clean_library_adoption",
-                "include_in_import": True,
-                "source_signature": dict(row["source_signature"] or {}),
-                "diagnostics": _adoption_diagnostics(
-                    source_diagnostics=row["source_diagnostics"],
-                    source_job_id=source_job_id,
-                    source_imported_file_id=int(row["source_imported_file_id"]),
-                    source_library_file_id=int(row["source_library_file_id"]),
-                    source_path=str(row["file_path"]),
-                    source_library_root_id=int(row["source_library_root_id"]),
-                    source_signature=row["source_signature"],
-                ),
-            }
-        )
-        if len(pending) >= 2_000:
-            await session.execute(insert(ImportedFile), pending)
-            pending.clear()
-    if pending:
+        if not rows:
+            break
+        pending: list[dict[str, object]] = []
+        for row in rows:
+            series_id = int(row["series_id"])
+            issue_number = float(row["issue_number"])
+            issue_number_text = row["issue_number_text"]
+            pending.append(
+                {
+                    "import_job_id": job_id,
+                    "import_series_id": imported_series_by_id[series_id],
+                    "file_path": str(row["file_path"]),
+                    "file_name": str(row["file_name"]),
+                    "file_size": int(row["file_size"]),
+                    "file_format": row["file_format"].value,
+                    "parsed_series": str(row["series_title"]),
+                    "parsed_issue_number": issue_number,
+                    "parsed_year": row["year_start"],
+                    "has_comicinfo": bool(row["has_comicinfo"]),
+                    "comicvine_issue_id": row["issue_comicvine_id"],
+                    "issue_number_raw": (
+                        str(issue_number_text) if issue_number_text else f"{issue_number:g}"
+                    ),
+                    "status": ImportedFileStatus.CONFIRMED,
+                    "matched_issue_id": int(row["issue_id"]),
+                    "matched_issue_cv_id": row["issue_comicvine_id"],
+                    "match_confidence": "high",
+                    "match_method": "clean_library_adoption",
+                    "include_in_import": True,
+                    "source_signature": dict(row["source_signature"] or {}),
+                    "diagnostics": _adoption_diagnostics(
+                        source_diagnostics=row["source_diagnostics"],
+                        source_job_id=source_job_id,
+                        source_imported_file_id=int(row["source_imported_file_id"]),
+                        source_library_file_id=int(row["source_library_file_id"]),
+                        source_path=str(row["file_path"]),
+                        source_library_root_id=int(row["source_library_root_id"]),
+                        source_signature=row["source_signature"],
+                    ),
+                }
+            )
         await session.execute(insert(ImportedFile), pending)
+        completed += len(pending)
+        last_file_id = int(rows[-1]["source_imported_file_id"])
+        if batch_callback is not None:
+            await batch_callback(completed)
+
+
+def _snapshot_payload(snapshot: _AdoptionSnapshot) -> dict[str, object]:
+    return {
+        "file_count": snapshot.file_count,
+        "series_count": snapshot.series_count,
+        "total_bytes": snapshot.total_bytes,
+        "digest": snapshot.digest,
+    }
+
+
+def _snapshot_from_job(job: ImportJob) -> _AdoptionSnapshot:
+    raw = dict(job.progress_snapshot or {}).get("clean_library_source_snapshot")
+    if not isinstance(raw, Mapping):
+        raise ValidationError("The clean-library preparation scope is unavailable.")
+    try:
+        return _AdoptionSnapshot(
+            file_count=int(raw["file_count"]),
+            series_count=int(raw["series_count"]),
+            total_bytes=int(raw["total_bytes"]),
+            digest=str(raw["digest"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValidationError("The clean-library preparation scope is invalid.") from exc
+
+
+async def _find_active_clean_library_import(
+    session: AsyncSession,
+    *,
+    source_job_id: int,
+    target_root_id: int,
+) -> ImportJob | None:
+    jobs = list(
+        (
+            await session.scalars(
+                select(ImportJob)
+                .where(
+                    ImportJob.status.in_(
+                        {
+                            ImportJobStatus.IMPORTING,
+                            ImportJobStatus.PAUSING,
+                            ImportJobStatus.PAUSED,
+                            ImportJobStatus.STALLED,
+                            ImportJobStatus.CANCELLING,
+                            ImportJobStatus.ROLLING_BACK,
+                        }
+                    ),
+                    ImportJob.target_library_root_id == target_root_id,
+                )
+                .order_by(ImportJob.id.desc())
+            )
+        ).all()
+    )
+    for job in jobs:
+        progress = dict(job.progress_snapshot or {})
+        if (
+            progress.get("clean_library_adoption") is True
+            and int(progress.get("source_import_job_id") or 0) == source_job_id
+        ):
+            return job
+    return None
+
+
+async def prepare_clean_library_import(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None = None,
+) -> bool:
+    """Materialize a clean-library plan inside the durable import worker."""
+    job = await session.get(ImportJob, job_id, populate_existing=True)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+    progress = dict(job.progress_snapshot or {})
+    if progress.get("clean_library_adoption") is not True:
+        return False
+    if progress.get("clean_library_adoption_prepared") is True:
+        return False
+
+    source_job_id = int(progress.get("source_import_job_id") or 0)
+    if source_job_id <= 0 or job.target_library_root_id is None:
+        raise ValidationError("The clean-library preparation context is incomplete.")
+    expected_snapshot = _snapshot_from_job(job)
+    await _load_source_job(session, source_job_id)
+    await _require_mixed_folder_repairs_complete(session, source_job_id)
+    await _load_target_root(session, int(job.target_library_root_id), source_job_id)
+    current_snapshot = await _build_snapshot(session, source_job_id)
+    if current_snapshot != expected_snapshot:
+        raise ValidationError(
+            "The clean-library source changed after preview. Open the organizer and try again."
+        )
+
+    await session.execute(delete(ImportedFile).where(ImportedFile.import_job_id == job_id))
+    await session.execute(delete(ImportedSeries).where(ImportedSeries.import_job_id == job_id))
+
+    total_units = expected_snapshot.series_count + expected_snapshot.file_count
+
+    async def report_progress(
+        completed_units: int,
+        *,
+        message: str,
+        item_label: str,
+    ) -> None:
+        await raise_if_job_cancelled(session, job_id)
+        job.progress_snapshot = {
+            **dict(job.progress_snapshot or {}),
+            "clean_library_adoption": True,
+            "clean_library_adoption_prepared": False,
+            "source_import_job_id": source_job_id,
+            "clean_library_source_snapshot": _snapshot_payload(expected_snapshot),
+        }
+        await emit_progress(
+            session,
+            job,
+            ImportProgressEvent(
+                job_id=job_id,
+                status=ImportJobStatus.IMPORTING,
+                mode="import",
+                phase="clean_library_preparing",
+                progress=phase_progress(
+                    0,
+                    _PREPARATION_PROGRESS_END,
+                    completed_units,
+                    total_units,
+                ),
+                message=message,
+                current_file_name=item_label,
+                current_file_stage="clean_library_preparing",
+                current_file_progress_current=completed_units,
+                current_file_progress_total=total_units,
+                current_file_progress_pct=round((completed_units / total_units) * 100),
+                current_file_progress_unit="items",
+            ),
+            progress_callback,
+        )
+
+    await report_progress(
+        0,
+        message="Preparing the clean-library work plan...",
+        item_label="Preparing library records",
+    )
+    imported_series_by_id = await _create_adoption_series(
+        session,
+        job=job,
+        source_job_id=source_job_id,
+        batch_callback=lambda completed: report_progress(
+            completed,
+            message=(f"Prepared {completed:,} of {expected_snapshot.series_count:,} series."),
+            item_label="Preparing series",
+        ),
+    )
+    await _create_adoption_files(
+        session,
+        job_id=job_id,
+        source_job_id=source_job_id,
+        imported_series_by_id=imported_series_by_id,
+        batch_callback=lambda completed: report_progress(
+            expected_snapshot.series_count + completed,
+            message=(f"Prepared {completed:,} of {expected_snapshot.file_count:,} files."),
+            item_label="Preparing files",
+        ),
+    )
+
+    job = await session.get(ImportJob, job_id, populate_existing=True)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+    job.series_found = expected_snapshot.series_count
+    job.series_duplicate = expected_snapshot.series_count
+    job.total_files_found = expected_snapshot.file_count
+    job.total_files_matched = expected_snapshot.file_count
+    job.progress_snapshot = {
+        **dict(job.progress_snapshot or {}),
+        "clean_library_adoption": True,
+        "clean_library_adoption_prepared": True,
+        "source_import_job_id": source_job_id,
+        "clean_library_source_snapshot": _snapshot_payload(expected_snapshot),
+    }
+    session.add(
+        ImportJobLog(
+            import_job_id=job.id,
+            level="INFO",
+            event="clean_library_adoption_prepared",
+            message=(
+                f"Prepared {expected_snapshot.file_count} referenced files for a clean managed "
+                "library."
+            ),
+            data={
+                "source_import_job_id": source_job_id,
+                "target_library_root_id": job.target_library_root_id,
+                "eligible_file_count": expected_snapshot.file_count,
+                "eligible_series_count": expected_snapshot.series_count,
+                "total_bytes": expected_snapshot.total_bytes,
+                "source_preserved": True,
+            },
+        )
+    )
+    await report_progress(
+        total_units,
+        message="Clean-library plan ready. Starting file processing...",
+        item_label="Library plan ready",
+    )
+    job.progress_snapshot = {
+        **dict(job.progress_snapshot or {}),
+        "clean_library_adoption_prepared": True,
+    }
+    await session.commit()
+    return True
 
 
 async def create_clean_library_import(
@@ -451,17 +699,26 @@ async def create_clean_library_import(
     """Create a managed-copy import that adopts exact referenced library files."""
     source_job = await _load_source_job(session, source_job_id)
     await _require_mixed_folder_repairs_complete(session, source_job_id)
-    snapshot = await _build_snapshot(session, source_job_id)
-    if snapshot.file_count == 0:
-        raise ValidationError("This import has no referenced files available to standardize.")
     target_root = await _load_target_root(session, target_root_id, source_job_id)
-    _validate_token(
+    snapshot = _snapshot_from_token(
         preview_token,
         source_job_id=source_job_id,
         target_root_id=target_root_id,
         actor_id=actor_id,
-        snapshot=snapshot,
     )
+
+    active_job = await _find_active_clean_library_import(
+        session,
+        source_job_id=source_job_id,
+        target_root_id=target_root_id,
+    )
+    if active_job is not None:
+        return CleanLibraryImportResult(
+            source_job_id=source_job_id,
+            job_id=int(active_job.id),
+            eligible_file_count=snapshot.file_count,
+            eligible_series_count=snapshot.series_count,
+        )
 
     policy = await load_effective_library_ingest_policy(session, target_root)
     job = ImportJob(
@@ -479,26 +736,17 @@ async def create_clean_library_import(
         progress_snapshot={
             "mode": "import",
             "phase": "queued",
+            "progress": 0,
             "message": "Preparing a clean Pullbox-managed library.",
             "source_import_job_id": source_job.id,
             "clean_library_adoption": True,
+            "clean_library_adoption_prepared": False,
+            "clean_library_source_snapshot": _snapshot_payload(snapshot),
         },
     )
     apply_ingest_policy_to_import_job(job, policy)
     session.add(job)
     await session.flush()
-
-    imported_series_by_id = await _create_adoption_series(
-        session,
-        job=job,
-        source_job_id=source_job_id,
-    )
-    await _create_adoption_files(
-        session,
-        job_id=int(job.id),
-        source_job_id=source_job_id,
-        imported_series_by_id=imported_series_by_id,
-    )
 
     job.series_found = snapshot.series_count
     job.series_duplicate = snapshot.series_count
@@ -508,10 +756,8 @@ async def create_clean_library_import(
         ImportJobLog(
             import_job_id=job.id,
             level="INFO",
-            event="clean_library_adoption_created",
-            message=(
-                f"Prepared {snapshot.file_count} referenced files for a clean managed library."
-            ),
+            event="clean_library_adoption_queued",
+            message=(f"Queued {snapshot.file_count} referenced files for a clean managed library."),
             data={
                 "source_import_job_id": source_job.id,
                 "target_library_root_id": target_root.id,

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import case, func, select
 
+from pullbox.core.library_policy import load_effective_library_ingest_policy
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -103,6 +104,44 @@ async def load_clean_library_summary(
     session: AsyncSession,
     job_id: int,
 ) -> dict[str, object]:
+    active_clean_job: ImportJob | None = None
+    active_jobs = list(
+        (
+            await session.scalars(
+                select(ImportJob)
+                .where(
+                    ImportJob.status.in_(
+                        {
+                            ImportJobStatus.IMPORTING,
+                            ImportJobStatus.PAUSING,
+                            ImportJobStatus.PAUSED,
+                            ImportJobStatus.STALLED,
+                            ImportJobStatus.CANCELLING,
+                            ImportJobStatus.ROLLING_BACK,
+                        }
+                    )
+                )
+                .order_by(ImportJob.id.desc())
+            )
+        ).all()
+    )
+    for candidate in active_jobs:
+        progress = dict(candidate.progress_snapshot or {})
+        if (
+            progress.get("clean_library_adoption") is True
+            and int(progress.get("source_import_job_id") or 0) == job_id
+        ):
+            active_clean_job = candidate
+            break
+    active_payload = (
+        {
+            "id": int(active_clean_job.id),
+            "status": active_clean_job.status.value,
+            "progress_snapshot": dict(active_clean_job.progress_snapshot or {}),
+        }
+        if active_clean_job is not None
+        else None
+    )
     eligibility = (
         ImportedFile.import_job_id == job_id,
         ImportedFile.status == ImportedFileStatus.IMPORTED,
@@ -127,11 +166,15 @@ async def load_clean_library_summary(
     ).one()
     reference_count = int(count_row[0] or 0)
     if reference_count == 0:
+        active_snapshot = dict(active_clean_job.progress_snapshot or {}) if active_clean_job else {}
+        source_snapshot = active_snapshot.get("clean_library_source_snapshot")
+        source_snapshot = source_snapshot if isinstance(source_snapshot, dict) else {}
         return {
-            "clean_library_reference_count": 0,
-            "clean_library_reference_series_count": 0,
-            "clean_library_reference_bytes": 0,
+            "clean_library_reference_count": int(source_snapshot.get("file_count") or 0),
+            "clean_library_reference_series_count": int(source_snapshot.get("series_count") or 0),
+            "clean_library_reference_bytes": int(source_snapshot.get("total_bytes") or 0),
             "clean_library_target_roots": [],
+            "clean_library_active_job": active_payload,
         }
     source_root_paths = set(
         (
@@ -158,16 +201,28 @@ async def load_clean_library_summary(
             )
         ).all()
     )
-    targets = [
-        {"id": root.id, "name": root.name, "path": root.path}
-        for root in roots
-        if not any(_library_paths_overlap(root.path, source) for source in source_root_paths)
-    ]
+    targets: list[dict[str, object]] = []
+    for root in roots:
+        if any(_library_paths_overlap(root.path, source) for source in source_root_paths):
+            continue
+        policy = await load_effective_library_ingest_policy(session, root)
+        targets.append(
+            {
+                "id": root.id,
+                "name": root.name,
+                "path": root.path,
+                "rename_on_import": policy.rename_on_import,
+                "normalize_to_cbz": policy.normalize_imported_archives_to_cbz,
+                "update_comicinfo": policy.update_embedded_comicinfo_from_match,
+                "skip_existing": policy.skip_existing_files,
+            }
+        )
     return {
         "clean_library_reference_count": reference_count,
         "clean_library_reference_series_count": int(count_row[1] or 0),
         "clean_library_reference_bytes": int(count_row[2] or 0),
         "clean_library_target_roots": targets,
+        "clean_library_active_job": active_payload,
     }
 
 
