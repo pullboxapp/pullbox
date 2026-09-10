@@ -39,14 +39,33 @@ from pullbox.services.import_source_metadata import (
 from scripts.mylar3_import_fixture import create_mylar3_db
 
 
-def _archive(path, *, issue_id=703887, number="1", pages=2, series="Firefly: Bad Company"):
+def _archive(
+    path,
+    *,
+    issue_id=703887,
+    series_id=None,
+    number="1",
+    pages=2,
+    series="Firefly: Bad Company",
+    nested_incomplete=False,
+):
     path.parent.mkdir(parents=True, exist_ok=True)
+    notes = (
+        f"<Notes>[cv_vol_id:{series_id}] [cv_issue_id:{issue_id}]</Notes>"
+        if series_id is not None
+        else ""
+    )
     with zipfile.ZipFile(path, "w") as archive:
+        if nested_incomplete:
+            archive.writestr(
+                f"{series}/ComicInfo.xml",
+                f"<ComicInfo><Series>{series}</Series><Year>2019</Year></ComicInfo>",
+            )
         archive.writestr(
             "ComicInfo.xml",
             f"<ComicInfo><Series>{series}</Series><Number>{number}</Number>"
             f"<Year>2019</Year><Web>https://comicvine.gamespot.com/issue/4000-{issue_id}/</Web>"
-            "</ComicInfo>",
+            f"{notes}</ComicInfo>",
         )
         for page in range(pages):
             archive.writestr(f"{page}.jpg", b"page")
@@ -248,6 +267,239 @@ async def test_scan_reconciles_identical_cross_folder_copies_to_missing_mylar_is
         str(duplicate),
     ]
     assert target_rows[1].diagnostics["mylar3_cross_folder_reconciliation"]["role"] == ("canonical")
+
+
+async def test_scan_reconciles_stale_mylar_issue_ids_from_unique_comicinfo_series_slots(
+    db_session,
+    tmp_path,
+):
+    comics = tmp_path / "comics"
+    target_folder = comics / "Babyteeth (2017)"
+    wrong_folder = comics / "Aliens Epic Collection (2023)"
+    target_folder.mkdir(parents=True)
+    files = [
+        (
+            wrong_folder / "Babyteeth (2017) Vol 01 - Volume 1 - Born.cbz",
+            1,
+            644570,
+            871891001,
+        ),
+        (
+            wrong_folder / "Babyteeth (2017) Vol 03 - Vol. 3 - Cradle.cbz",
+            3,
+            727350,
+            871891002,
+        ),
+        (
+            wrong_folder / "Babyteeth (2017) Vol 04 - Vol. 4 - Grave.cbz",
+            4,
+            1166031,
+            871891003,
+        ),
+    ]
+    for path, number, actual_issue_id, _recorded_issue_id in files:
+        _archive(
+            path,
+            issue_id=actual_issue_id,
+            series_id=171891,
+            number=str(number),
+            series="Babyteeth",
+            nested_incomplete=True,
+        )
+    aliens = wrong_folder / "Aliens Epic Collection Vol 01.cbz"
+    _archive(aliens, issue_id=1067467, series_id=148973, series="Aliens Epic Collection")
+    db = tmp_path / "mylar.db"
+    create_mylar3_db(
+        db,
+        series=[
+            {
+                "ComicID": "171891",
+                "ComicName": "Babyteeth",
+                "ComicYear": "2017",
+                "ComicLocation": str(target_folder),
+                "Total": 3,
+            },
+            {
+                "ComicID": "148973",
+                "ComicName": "Aliens Epic Collection",
+                "ComicYear": "2023",
+                "ComicLocation": str(wrong_folder),
+                "Total": 1,
+            },
+        ],
+        issues=[
+            *[
+                {
+                    "IssueID": str(recorded_issue_id),
+                    "ComicID": "171891",
+                    "ComicName": "Babyteeth",
+                    "Issue_Number": str(number),
+                    "Location": path.name,
+                }
+                for path, number, _actual_issue_id, recorded_issue_id in files
+            ],
+            {
+                "IssueID": "1067467",
+                "ComicID": "148973",
+                "ComicName": "Aliens Epic Collection",
+                "Issue_Number": "1",
+                "Location": aliens.name,
+            },
+        ],
+    )
+
+    discovered = await Mylar3Reader(db, include_missing_files=True).read_series()
+    before = {path: path.read_bytes() for path, *_rest in files}
+    stat = comics.stat()
+    validate_mylar_in_place_files(
+        discovered,
+        [MylarReferenceRootBoundary(1, comics, comics, stat.st_dev, stat.st_ino)],
+    )
+
+    await validate_discovered_files_safety(db_session, discovered)
+
+    by_cv_id = {series.mylar3_cv_id: series for series in discovered}
+    babyteeth = by_cv_id[171891]
+    aliens_series = by_cv_id[148973]
+    assert [file.file_path for file in babyteeth.files] == [str(path) for path, *_rest in files]
+    assert [file.file_path for file in aliens_series.files] == [str(aliens)]
+    assert [file.comicvine_issue_id for file in babyteeth.files] == [
+        actual_issue_id for _path, _number, actual_issue_id, _recorded_issue_id in files
+    ]
+    for recovered, (_path, _number, actual_issue_id, recorded_issue_id) in zip(
+        babyteeth.files, files, strict=True
+    ):
+        evidence = recovered.metadata_diagnostics["mylar3_cross_folder_reconciliation"]
+        assert evidence["method"] == "verified_cross_folder_series_issue_filename"
+        assert evidence["comicvine_issue_id"] == actual_issue_id
+        assert evidence["recorded_comicvine_issue_id"] == recorded_issue_id
+        assert evidence["comicvine_series_id"] == 171891
+    assert "kind" not in babyteeth.diagnostics
+    assert "reason" not in babyteeth.diagnostics
+    assert "rejection_reason" not in babyteeth.diagnostics
+    assert babyteeth.diagnostics["mylar3_path"]["status"] == "reconciled"
+    assert babyteeth.diagnostics["mylar3_path_recovery"] == {
+        "status": "complete",
+        "recovered_file_count": 3,
+        "remaining_missing_file_count": 0,
+    }
+    assert before == {path: path.read_bytes() for path in before}
+
+    job = ImportJob(source_path=str(db), source_type=ImportSourceType.MYLAR3)
+    db_session.add(job)
+    await db_session.flush()
+    pairs = await materialize_discovered_scan_results(db_session, job, discovered)
+    babyteeth_import = next(item for series, item in pairs if series.mylar3_cv_id == 171891)
+    assert babyteeth_import.status == ImportSeriesStatus.PENDING
+    babyteeth_rows = list(
+        await db_session.scalars(
+            select(ImportedFile)
+            .where(ImportedFile.import_series_id == babyteeth_import.id)
+            .order_by(ImportedFile.id)
+        )
+    )
+    assert len(babyteeth_rows) == 3
+    assert all(row.status == ImportedFileStatus.PENDING for row in babyteeth_rows)
+
+
+async def test_scan_keeps_only_unresolved_cross_folder_mylar_paths_in_file_review(
+    db_session,
+    tmp_path,
+):
+    comics = tmp_path / "comics"
+    target_folder = comics / "Babyteeth (2017)"
+    wrong_folder = comics / "Aliens Epic Collection (2023)"
+    target_folder.mkdir(parents=True)
+    recovered = wrong_folder / "Babyteeth (2017) Vol 01 - Volume 1 - Born.cbz"
+    _archive(
+        recovered,
+        issue_id=644570,
+        series_id=171891,
+        number="1",
+        series="Babyteeth",
+        nested_incomplete=True,
+    )
+    aliens = wrong_folder / "Aliens Epic Collection Vol 01.cbz"
+    _archive(aliens, issue_id=1067467, series_id=148973, series="Aliens Epic Collection")
+    missing_name = "Babyteeth (2017) Vol 02 - Volume 2.cbz"
+    db = tmp_path / "mylar.db"
+    create_mylar3_db(
+        db,
+        series=[
+            {
+                "ComicID": "171891",
+                "ComicName": "Babyteeth",
+                "ComicYear": "2017",
+                "ComicLocation": str(target_folder),
+                "Total": 2,
+            },
+            {
+                "ComicID": "148973",
+                "ComicName": "Aliens Epic Collection",
+                "ComicYear": "2023",
+                "ComicLocation": str(wrong_folder),
+                "Total": 1,
+            },
+        ],
+        issues=[
+            {
+                "IssueID": "871891001",
+                "ComicID": "171891",
+                "ComicName": "Babyteeth",
+                "Issue_Number": "1",
+                "Location": recovered.name,
+            },
+            {
+                "IssueID": "871891002",
+                "ComicID": "171891",
+                "ComicName": "Babyteeth",
+                "Issue_Number": "2",
+                "Location": missing_name,
+            },
+            {
+                "IssueID": "1067467",
+                "ComicID": "148973",
+                "ComicName": "Aliens Epic Collection",
+                "Issue_Number": "1",
+                "Location": aliens.name,
+            },
+        ],
+    )
+
+    discovered = await Mylar3Reader(db, include_missing_files=True).read_series()
+    stat = comics.stat()
+    validate_mylar_in_place_files(
+        discovered,
+        [MylarReferenceRootBoundary(1, comics, comics, stat.st_dev, stat.st_ino)],
+    )
+    await validate_discovered_files_safety(db_session, discovered)
+
+    babyteeth = next(series for series in discovered if series.mylar3_cv_id == 171891)
+    assert "kind" not in babyteeth.diagnostics
+    assert babyteeth.diagnostics["mylar3_path"]["status"] == "partially_reconciled"
+    assert babyteeth.diagnostics["mylar3_path_recovery"] == {
+        "status": "partial",
+        "recovered_file_count": 1,
+        "remaining_missing_file_count": 1,
+    }
+
+    job = ImportJob(source_path=str(db), source_type=ImportSourceType.MYLAR3)
+    db_session.add(job)
+    await db_session.flush()
+    pairs = await materialize_discovered_scan_results(db_session, job, discovered)
+    babyteeth_import = next(item for series, item in pairs if series.mylar3_cv_id == 171891)
+    assert babyteeth_import.status == ImportSeriesStatus.PENDING
+    rows = list(
+        await db_session.scalars(
+            select(ImportedFile)
+            .where(ImportedFile.import_series_id == babyteeth_import.id)
+            .order_by(ImportedFile.file_name)
+        )
+    )
+    assert {row.file_name: row.status for row in rows} == {
+        missing_name: ImportedFileStatus.SAFETY_BLOCKED,
+        recovered.name: ImportedFileStatus.PENDING,
+    }
 
 
 async def test_scan_does_not_guess_between_different_cross_folder_copies(

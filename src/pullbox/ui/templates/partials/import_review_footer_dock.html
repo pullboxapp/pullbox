@@ -3,7 +3,7 @@
 {% if import_review_footer_mode == "conflicts" %}
   {% set conflict_pagination_base_url = conflict_footer_base_url|default("/import/" ~ job.id ~ "/review-partial?status=conflicts&sort=" ~ sort) %}
   {% set conflict_pagination_target = conflict_footer_hx_target|default("#import-step-review-shell") %}
-  {% set conflict_pagination_swap = conflict_footer_hx_swap|default("outerHTML") %}
+  {% set conflict_pagination_swap = conflict_footer_hx_swap|default("morph:outerHTML") %}
   {% set conflict_pagination_sync = conflict_footer_hx_sync|default("#import-step-review-shell:replace") %}
   <div data-testid="import-conflicts-pagination" class="px-4 sm:px-6">
     {{ page_dock(
@@ -37,7 +37,7 @@
         {"label": "per page", "value": page_size|string},
       ],
       hx_target="#import-step-review-shell",
-      hx_swap="outerHTML",
+      hx_swap="morph:outerHTML",
       hx_select="",
       hx_base_url=story_arc_pagination_base_url,
       hx_sync="#import-step-review-shell:replace",
@@ -61,7 +61,7 @@
         {"label": "per page", "value": page_size|string},
       ],
       hx_target="#import-step-review-shell",
-      hx_swap="outerHTML",
+      hx_swap="morph:outerHTML",
       hx_select="",
       hx_base_url=review_pagination_base_url,
       hx_sync="#import-step-review-shell:replace",

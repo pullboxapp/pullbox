@@ -758,11 +758,19 @@ class TestImportShellRouteContracts:
         assert "'stream:' + entry._streamToken" in template
         assert "'synthetic:' + idx" in template
 
-    async def test_import_review_shell_reprocesses_htmx_after_morph_swaps(self) -> None:
+    async def test_import_review_shell_morphs_without_resetting_the_viewport(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
         review_template = Path(
             "src/pullbox/ui/templates/partials/import_step_review.html"
         ).read_text()
+        related_templates = [
+            review_template,
+            Path(
+                "src/pullbox/ui/templates/partials/import_story_arc_review_table.html"
+            ).read_text(),
+            Path("src/pullbox/ui/templates/partials/import_source_cleanup_modal.html").read_text(),
+            Path("src/pullbox/ui/templates/partials/import_review_footer_dock.html").read_text(),
+        ]
 
         assert 'settledTarget.id === "import-step-review"' in script
         assert 'settledTarget.id === "conflicts-content"' in script
@@ -775,6 +783,32 @@ class TestImportShellRouteContracts:
         assert 'performHtmxSwap("GET", this.buildRefreshUrl(),' in script
         assert "openConflictView: function () {" not in script
         assert "x-on:import:open-conflicts.window" not in review_template
+        load_start = script.index("function loadImportReviewShell(url)")
+        load_end = script.index("function pbFormatDurationMs", load_start)
+        loader = script[load_start:load_end]
+        assert "captureImportReviewViewport(currentShell)" in loader
+        assert "Idiomorph.morph(currentShell, nextShell" in loader
+        assert "restoreImportReviewViewport(viewportState" in loader
+        assert "destroyAlpineTree(currentShell)" in loader
+        assert "Alpine.initTree(activeShell)" in loader
+        assert "currentShell.replaceWith(nextShell)" not in loader
+        for template in related_templates:
+            assert 'hx-swap="outerHTML"' not in template
+
+    async def test_htmx_swaps_initialize_alpine_once_before_settle(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        after_swap_start = script.index('document.addEventListener("htmx:afterSwap"')
+        after_swap_end = script.index("function _isPrimaryUnmodifiedClick", after_swap_start)
+        after_swap_listener = script[after_swap_start:after_swap_end]
+        after_settle_start = script.index('document.addEventListener("htmx:afterSettle"')
+        after_settle_end = script.index(
+            'document.addEventListener("htmx:oobAfterSwap"', after_settle_start
+        )
+        after_settle_listener = script[after_settle_start:after_settle_end]
+
+        assert "function initializePreparedAlpineSwap(detail)" in script
+        assert "initializePreparedAlpineSwap(e.detail || {});" in after_swap_listener
+        assert "Alpine.initTree(settledTarget)" not in after_settle_listener
 
     async def test_import_review_bulk_selection_uses_canonical_shell_refresh(
         self,
@@ -794,15 +828,67 @@ class TestImportShellRouteContracts:
         )
         assert "selectCurrentPageMatched" not in script
 
-    async def test_import_review_offers_one_click_ready_import_and_defers_follow_up(self) -> None:
+    async def test_import_review_uses_the_expanded_review_workspace_as_primary_surface(
+        self,
+    ) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
         template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
 
-        assert "importAllReady: async function () {" in script
-        assert 'data-testid="import-review-guided-summary"' in template
-        assert 'data-testid="import-review-import-ready"' in template
-        assert "Import all ready comics" in template
-        assert "Deferred follow-up" in template
+        assert "importAllReady: async function () {" not in script
+        assert 'data-testid="import-review-guided-summary"' not in template
+        assert 'data-testid="import-review-import-ready"' not in template
+        assert "Import all ready comics" not in template
+        assert 'data-testid="import-review-details"' not in template
+        assert "Review details" not in template
+        assert 'data-testid="import-review-action-bar"' in template
+        assert "data-import-review-selection-summary" in template
+        assert "data-import-review-import-button" in template
+        assert 'data-testid="import-review-series-filters"' in template
+
+    async def test_import_review_row_expansion_is_stable_and_action_scoped(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
+
+        assert 'id="import-review-series-row-{{ active_review_view }}-{{ item.id }}"' in template
+        assert 'data-import-review-row-key="{{ active_review_view }}:{{ item.id }}"' in template
+        assert 'data-import-review-pending-subitems="{{ pending_subitem_count }}"' in template
+        assert "importReviewRowExpansionData" not in template
+        assert '@click="toggle()"' not in template
+        assert 'x-show="expanded"' not in template
+        assert "data-import-review-expand-action" in template
+        assert "data-import-review-detail-row" in template
+        assert "function toggleImportReviewRow(button)" in script
+        assert "function setImportReviewRowExpanded(row, expanded)" in script
+        assert "expandedRows:" in script
+        assert "previousPendingSubitems > 0 && nextPendingSubitems === 0" in script
+        assert "captureImportReviewViewport(target, requestElement)" in script
+
+    async def test_import_review_restores_expanded_rows_before_swap_can_paint(self) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        after_swap_start = script.index('document.addEventListener("htmx:afterSwap"')
+        after_swap_end = script.index("function _isPrimaryUnmodifiedClick", after_swap_start)
+        after_swap_listener = script[after_swap_start:after_swap_end]
+
+        assert "function restoreImportReviewExpansionState(state, shell)" in script
+        assert "restoreImportReviewExpansionState(" in after_swap_listener
+        assert "pendingImportReviewViewportState" in after_swap_listener
+
+    async def test_import_review_cancel_survives_shell_morphs_and_uses_global_dialog(
+        self,
+    ) -> None:
+        script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
+        template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
+
+        assert 'data-testid="import-review-cancel"' in template
+        assert 'onclick="cancelImportReview(this)"' in template
+        assert 'data-import-review-cancel-job-id="{{ job.id }}"' in template
+        assert "data-import-review-cancel-label" in template
+        assert "showCancelModal" not in template
+        assert 'class="modal-shell"' not in template
+        assert "function cancelImportReview(button)" in script
+        assert "window.cancelImportReview = cancelImportReview;" in script
+        assert 'confirmText: "Cancel Import"' in script
+        assert 'method: "DELETE"' in script
 
     async def test_import_source_uses_automatic_nonblocking_defaults(
         self,
@@ -1114,7 +1200,7 @@ class TestImportShellRouteContracts:
         assert "previousSourceType !== sourceType" in select_source
         assert "this.mylarPathPreview = null;" not in preview
 
-    async def test_import_review_keeps_detailed_statuses_behind_follow_up_controls(
+    async def test_import_review_renders_detailed_statuses_without_a_disclosure_gate(
         self,
         authenticated_client,
         sec_db,
@@ -1124,10 +1210,12 @@ class TestImportShellRouteContracts:
         response = await authenticated_client.get(f"/import/{job_id}/review-partial")
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-details"' in response.text
-        assert 'data-testid="import-review-needs-attention-action"' in response.text
-        assert 'data-testid="import-review-story-arc-follow-up-action"' in response.text
-        assert "Review details" in response.text
+        assert 'data-testid="import-review-details"' not in response.text
+        assert 'data-testid="import-review-needs-attention-action"' not in response.text
+        assert 'data-testid="import-review-story-arc-follow-up-action"' not in response.text
+        assert "Review details" not in response.text
+        assert 'data-testid="import-review-series-filters"' in response.text
+        assert "data-import-review-import-button" in response.text
 
     async def test_split_series_review_requires_future_destination_without_relocation(self) -> None:
         template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
@@ -1355,9 +1443,7 @@ class TestImportShellRouteContracts:
         log_download = response.text.split(
             'data-testid="import-progress-log-download"', maxsplit=1
         )[1].split("</a>", maxsplit=1)[0]
-        assert 'class="btn-ghost btn-sm inline-flex items-center gap-2 shrink-0"' in (
-            log_download
-        )
+        assert 'class="btn-ghost btn-sm inline-flex items-center gap-2 shrink-0"' in (log_download)
 
     async def test_import_progress_partial_hydrates_review_snapshot(
         self,
@@ -1791,7 +1877,7 @@ class TestImportShellRouteContracts:
         assert 'id="import-step-review-shell"' in response.text
         assert "reviewToken:" in response.text
         assert 'hx-target="#import-step-review-shell"' in response.text
-        assert 'hx-swap="outerHTML"' in response.text
+        assert 'hx-swap="morph:outerHTML"' in response.text
         assert "data-import-review-toolbar-selection-summary" in response.text
         assert 'data-testid="import-review-save-conflict-choices"' not in response.text
         assert 'data-testid="import-review-reset-conflict-choices"' not in response.text
@@ -1801,12 +1887,10 @@ class TestImportShellRouteContracts:
         assert "Review your library" not in response.text
         assert "Import everything Pullbox understands now." not in response.text
         action_bar_index = response.text.index('data-testid="import-review-action-bar"')
-        guided_summary_index = response.text.index(
-            'data-testid="import-review-guided-summary"'
-        )
         status_bar_index = response.text.index('data-testid="import-review-series-filters"')
-        assert action_bar_index < guided_summary_index
         assert action_bar_index < status_bar_index
+        assert 'data-testid="import-review-guided-summary"' not in response.text
+        assert 'data-testid="import-review-details"' not in response.text
 
     async def test_import_review_partial_explains_selected_layout_review(
         self,
@@ -3136,6 +3220,74 @@ class TestImportShellRouteContracts:
         assert response.status_code == 200
         assert 'name="review_status_filter" value=""' in response.text
         assert 'data-import-review-view="series"' in response.text
+
+    async def test_import_review_reports_remaining_subitems_after_each_safety_skip(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.api.middleware import SESSION_COOKIE_NAME
+        from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+        from pullbox.services.auth_service import AuthService
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 1)
+            assert series is not None
+            files = list(
+                (
+                    await session.execute(
+                        select(ImportedFile)
+                        .where(ImportedFile.import_series_id == series.id)
+                        .order_by(ImportedFile.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(files) == 3
+            for imp_file in files[:2]:
+                imp_file.status = ImportedFileStatus.SAFETY_BLOCKED
+                imp_file.include_in_import = False
+                imp_file.error_message = "Archive requires safety review"
+                imp_file.diagnostics = {
+                    "safety_block": {
+                        "kind": "file_safety_blocked",
+                        "reason": "Archive requires safety review",
+                        "overrideable": True,
+                    }
+                }
+            series.files_matched = 1
+            series.diagnostics = {"safety_blocked_files": 2}
+            await session.commit()
+            series_id = series.id
+            blocked_file_ids = [imp_file.id for imp_file in files[:2]]
+
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+        assert response.status_code == 200
+        assert f'id="import-review-series-row-series-{series_id}"' in response.text
+        assert 'data-import-review-pending-subitems="2"' in response.text
+
+        session_token = authenticated_client.cookies.get(SESSION_COOKIE_NAME)
+        assert session_token
+        csrf_header = {"x-csrf-token": AuthService.get_csrf_token_from_session(session_token) or ""}
+        first_skip = await authenticated_client.post(
+            f"/import/{job_id}/files/{blocked_file_ids[0]}/safety/skip?status=series",
+            headers=csrf_header,
+        )
+        assert first_skip.status_code == 200
+        assert f'id="import-review-series-row-series-{series_id}"' in first_skip.text
+        assert 'data-import-review-pending-subitems="1"' in first_skip.text
+        assert files[0].file_name not in first_skip.text
+        assert files[1].file_name in first_skip.text
+
+        final_skip = await authenticated_client.post(
+            f"/import/{job_id}/files/{blocked_file_ids[1]}/safety/skip?status=series",
+            headers=csrf_header,
+        )
+        assert final_skip.status_code == 200
+        assert f'id="import-review-series-row-series-{series_id}"' in final_skip.text
+        assert 'data-import-review-pending-subitems="0"' in final_skip.text
 
     async def test_import_review_allow_safety_file_post_refreshes_review(
         self,

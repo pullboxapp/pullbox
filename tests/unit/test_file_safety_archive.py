@@ -151,6 +151,29 @@ def test_run_safety_checks_inspects_zip_archive_once(
     )
 
 
+def test_run_safety_checks_prefers_canonical_root_comicinfo(tmp_path: Path) -> None:
+    archive = tmp_path / "duplicate-comicinfo.cbz"
+    with zipfile.ZipFile(archive, "w") as payload:
+        payload.writestr("Legacy/ComicInfo.xml", "<ComicInfo><Series>Wrong</Series></ComicInfo>")
+        payload.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Babyteeth</Series><Number>1</Number></ComicInfo>",
+        )
+        payload.writestr("page001.jpg", b"ok")
+
+    report = run_safety_checks(
+        archive,
+        block_dangerous=True,
+        max_archive_size=2000 * 1024 * 1024,
+    ).archives[0]
+
+    assert report.comicinfo_entry_count == 2
+    assert report.comicinfo_entry == "ComicInfo.xml"
+    assert report.comicinfo is not None
+    assert report.comicinfo.series == "Babyteeth"
+    assert report.comicinfo.number == "1"
+
+
 def test_run_safety_checks_rejects_dangerous_files_on_disk(tmp_path: Path) -> None:
     payload = tmp_path / "nested" / "setup.exe"
     payload.parent.mkdir()

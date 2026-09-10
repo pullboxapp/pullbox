@@ -408,6 +408,20 @@ class TestArchiveMetadataExtraction:
             "issue_number": 9.0,
         }
 
+    def test_volume_subtitle_with_preparsed_issue_still_uses_base_series(self) -> None:
+        metadata = SourceMetadataExtractor().from_release_title(
+            "Babyteeth (2017) Vol 03 - Vol. 3 - Cradle.cbz"
+        )
+
+        assert metadata.series_name == "Babyteeth"
+        assert metadata.issue_number == 3.0
+        assert metadata.issue_type == IssueType.VOLUME
+        assert metadata.diagnostics["volume_subtitle_hint"] == {
+            "base_series": "Babyteeth",
+            "subtitle": "Vol 3 - Cradle",
+            "issue_number": 3.0,
+        }
+
     def test_publisher_prefixed_volume_subtitle_release_uses_actual_base_series(self) -> None:
         metadata = SourceMetadataExtractor().from_release_title(
             "Image.Comics-Drifter.Vol.01.Out.Of.The.Night.2015.Retail.Comic.eBook-BitBook"

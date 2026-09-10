@@ -49,7 +49,7 @@
           hx-post="/import/{{ preview.job_id }}/files/{{ preview.file_id }}/safety/source-cleanup?status={{ status }}&sort={{ sort }}&page={{ page }}&return_to={{ return_to|default('review') }}"
           {% if return_to|default('review') == 'review' %}
           hx-target="#import-step-review-shell"
-          hx-swap="outerHTML"
+          hx-swap="morph:outerHTML"
           hx-sync="#import-step-review-shell:replace"
           {% else %}
           hx-swap="none"

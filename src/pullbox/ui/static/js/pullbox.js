@@ -1038,6 +1038,63 @@ function importReviewStatusCount(shell, view) {
   return Number(counts && counts[view]) || 0;
 }
 
+async function cancelImportReview(button) {
+  if (!button || button.disabled) {
+    return;
+  }
+
+  var jobId = Number(button.getAttribute("data-import-review-cancel-job-id"));
+  if (!Number.isFinite(jobId) || jobId <= 0) {
+    showToast({ message: "Unable to identify this import.", level: "error" });
+    return;
+  }
+
+  var confirmed = await window.pbConfirm({
+    title: "Cancel Import",
+    message:
+      "This removes the current import job and all of its matched data. Use this only when you are sure the run should not continue.",
+    confirmText: "Cancel Import",
+    destructive: true,
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  var label = button.querySelector("[data-import-review-cancel-label]");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  if (label) {
+    label.textContent = "Cancelling...";
+  }
+
+  try {
+    var response = await fetch("/api/v1/import/" + jobId, {
+      method: "DELETE",
+      headers: { "X-CSRF-Token": readCsrfTokenFromBody() },
+    });
+    if (!response.ok) {
+      var error = await response.json().catch(function () {
+        return { detail: "Failed to cancel import." };
+      });
+      throw new Error(error.detail || "Failed to cancel import.");
+    }
+    purgeImportClientState(jobId);
+    window.location.replace("/import?tab=collection");
+  } catch (err) {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    if (label) {
+      label.textContent = "Cancel";
+    }
+    showToast({
+      message: (err && err.message) || "Failed to cancel import. Please try again.",
+      level: "error",
+    });
+  }
+}
+
+window.cancelImportReview = cancelImportReview;
+
 function importReviewShellHasSeriesBucket(shell, seriesId, bucket) {
   var numericSeriesId = Number(seriesId);
   if (!shell || !Number.isFinite(numericSeriesId) || !bucket) {
@@ -1054,6 +1111,126 @@ function importReviewShellHasSeriesBucket(shell, seriesId, bucket) {
     .filter(Boolean);
   return buckets.indexOf(bucket) >= 0;
 }
+
+function captureImportReviewViewport(shell, preferredElement) {
+  var scroller = document.getElementById("content");
+  var state = {
+    scrollTop: scroller ? scroller.scrollTop : window.scrollY || 0,
+    anchors: [],
+    expandedRows: [],
+  };
+  if (!shell || typeof shell.querySelectorAll !== "function") {
+    return state;
+  }
+
+  var capturedRowKeys = Object.create(null);
+  var captureRow = function (row) {
+    if (!row || !shell.contains(row)) {
+      return;
+    }
+    var rowKey = row.getAttribute("data-import-review-row-key");
+    if (!rowKey || capturedRowKeys[rowKey]) {
+      return;
+    }
+    capturedRowKeys[rowKey] = true;
+    state.anchors.push({
+      key: rowKey,
+      top: row.getBoundingClientRect().top,
+    });
+    if (row.querySelector("[data-import-review-expand-action][aria-expanded='true']")) {
+      state.expandedRows.push({
+        key: rowKey,
+        pendingSubitems:
+          Number(row.getAttribute("data-import-review-pending-subitems")) || 0,
+      });
+    }
+  };
+
+  var preferredRow =
+    preferredElement && typeof preferredElement.closest === "function"
+      ? preferredElement.closest("[data-import-review-series-row]")
+      : null;
+  captureRow(preferredRow);
+
+  var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  var rows = shell.querySelectorAll("[data-import-review-series-row]");
+  for (var i = 0; i < rows.length; i += 1) {
+    var rect = rows[i].getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > viewportHeight) {
+      continue;
+    }
+    captureRow(rows[i]);
+  }
+  return state;
+}
+
+function restoreImportReviewExpansionState(state, shell) {
+  if (!state) {
+    return;
+  }
+  var expandedRows = Array.isArray(state.expandedRows) ? state.expandedRows : [];
+  var renderedRows = shell ? shell.querySelectorAll("[data-import-review-series-row]") : [];
+  for (var expandedIndex = 0; expandedIndex < expandedRows.length; expandedIndex += 1) {
+    var expandedRow = expandedRows[expandedIndex];
+    for (var renderedIndex = 0; renderedIndex < renderedRows.length; renderedIndex += 1) {
+      var renderedRow = renderedRows[renderedIndex];
+      if (renderedRow.getAttribute("data-import-review-row-key") !== expandedRow.key) {
+        continue;
+      }
+      var previousPendingSubitems = Number(expandedRow.pendingSubitems) || 0;
+      var nextPendingSubitems =
+        Number(renderedRow.getAttribute("data-import-review-pending-subitems")) || 0;
+      if (previousPendingSubitems > 0 && nextPendingSubitems === 0) {
+        setImportReviewRowExpanded(renderedRow, false);
+      } else {
+        setImportReviewRowExpanded(renderedRow, true);
+      }
+      break;
+    }
+  }
+}
+
+function restoreImportReviewViewport(state, shell) {
+  if (!state) {
+    return;
+  }
+  var renderedRows = shell ? shell.querySelectorAll("[data-import-review-series-row]") : [];
+  var scroller = document.getElementById("content");
+  var anchors = Array.isArray(state.anchors) ? state.anchors : [];
+  for (var i = 0; i < anchors.length; i += 1) {
+    var anchor = anchors[i];
+    for (var rowIndex = 0; rowIndex < renderedRows.length; rowIndex += 1) {
+      if (renderedRows[rowIndex].getAttribute("data-import-review-row-key") !== anchor.key) {
+        continue;
+      }
+      var delta = renderedRows[rowIndex].getBoundingClientRect().top - anchor.top;
+      if (scroller) {
+        scroller.scrollTop += delta;
+      } else {
+        window.scrollBy(0, delta);
+      }
+      return;
+    }
+  }
+  if (scroller) {
+    scroller.scrollTop = state.scrollTop;
+  } else {
+    window.scrollTo(0, state.scrollTop);
+  }
+}
+
+var pendingImportReviewViewportState = null;
+
+document.body.addEventListener("htmx:beforeSwap", function (event) {
+  var target = event && event.detail ? event.detail.target : null;
+  if (target && target.id === "import-step-review-shell") {
+    var requestElement =
+      event.detail.requestConfig && event.detail.requestConfig.elt
+        ? event.detail.requestConfig.elt
+        : null;
+    pendingImportReviewViewportState = captureImportReviewViewport(target, requestElement);
+  }
+});
 
 function loadImportReviewShell(url) {
   var shell = document.getElementById("import-step-review-shell");
@@ -1095,18 +1272,25 @@ function loadImportReviewShell(url) {
         throw new Error("Import review refresh returned an unexpected response.");
       }
 
+      if (typeof Idiomorph === "undefined" || typeof Idiomorph.morph !== "function") {
+        throw new Error("Import review refresh is unavailable.");
+      }
+      var viewportState = captureImportReviewViewport(currentShell);
       destroyAlpineTree(currentShell);
-      currentShell.replaceWith(nextShell);
-
+      Idiomorph.morph(currentShell, nextShell, { morphStyle: "outerHTML" });
+      var activeShell = document.getElementById("import-step-review-shell");
       if (window.htmx && typeof window.htmx.process === "function") {
-        window.htmx.process(nextShell);
+        window.htmx.process(activeShell);
       }
       if (window.Alpine) {
-        Alpine.initTree(nextShell);
+        Alpine.initTree(activeShell);
       }
+      restoreImportReviewExpansionState(viewportState, activeShell);
+      _dispatchSyntheticHtmxAfterSettle(activeShell);
       _syncFooterDockFromResponse(html);
-      seedSearchFieldStates(nextShell);
-      return nextShell;
+      seedSearchFieldStates(activeShell);
+      restoreImportReviewViewport(viewportState, activeShell);
+      return activeShell;
     })
     .finally(function () {
       var activeShell = document.getElementById("import-step-review-shell");
@@ -1871,109 +2055,33 @@ function clearImportReviewSelection(jobId) {
   void jobId;
 }
 
-function importReviewExpansionStorageKey(jobId) {
-  return "pb-import-review-expanded:" + String(jobId || "");
-}
-
-function normalizeImportReviewExpandedRows(value) {
-  if (Array.isArray(value)) {
-    var rowsFromArray = {};
-    for (var i = 0; i < value.length; i += 1) {
-      var rowId = String(value[i] || "");
-      if (rowId) {
-        rowsFromArray[rowId] = true;
-      }
-    }
-    return rowsFromArray;
-  }
-
-  if (!value || typeof value !== "object") {
-    return {};
-  }
-
-  var rows = {};
-  var keys = Object.keys(value);
-  for (var j = 0; j < keys.length; j += 1) {
-    if (value[keys[j]]) {
-      rows[String(keys[j])] = true;
-    }
-  }
-  return rows;
-}
-
-function readImportReviewExpandedRows(jobId) {
-  if (jobId == null) {
-    return {};
-  }
-
-  try {
-    var raw = window.sessionStorage.getItem(importReviewExpansionStorageKey(jobId));
-    return raw ? normalizeImportReviewExpandedRows(JSON.parse(raw)) : {};
-  } catch (_) {
-    return {};
-  }
-}
-
-function writeImportReviewExpandedRows(jobId, expandedRows) {
-  if (jobId == null) {
+function setImportReviewRowExpanded(row, expanded) {
+  if (!row) {
     return;
   }
-
-  try {
-    var rows = normalizeImportReviewExpandedRows(expandedRows);
-    var rowIds = Object.keys(rows);
-    if (rowIds.length === 0) {
-      window.sessionStorage.removeItem(importReviewExpansionStorageKey(jobId));
-      return;
-    }
-    window.sessionStorage.setItem(importReviewExpansionStorageKey(jobId), JSON.stringify(rowIds));
-  } catch (_) {
-    // Ignore storage availability failures.
+  var actions = row.querySelectorAll("[data-import-review-expand-action]");
+  for (var actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+    actions[actionIndex].setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
+  var icons = row.querySelectorAll("[data-import-review-expand-icon]");
+  for (var iconIndex = 0; iconIndex < icons.length; iconIndex += 1) {
+    icons[iconIndex].classList.toggle("rotate-180", expanded);
+  }
+  var details = row.querySelectorAll("[data-import-review-detail-row]");
+  for (var detailIndex = 0; detailIndex < details.length; detailIndex += 1) {
+    details[detailIndex].hidden = !expanded;
   }
 }
 
-function isImportReviewRowExpanded(jobId, rowId) {
-  if (rowId == null) {
-    return false;
-  }
-  var expandedRows = readImportReviewExpandedRows(jobId);
-  return expandedRows[String(rowId)] === true;
-}
-
-function setImportReviewRowExpanded(jobId, rowId, expanded) {
-  if (rowId == null) {
+function toggleImportReviewRow(button) {
+  var row = button ? button.closest("[data-import-review-series-row]") : null;
+  if (!row) {
     return;
   }
-
-  var expandedRows = readImportReviewExpandedRows(jobId);
-  var key = String(rowId);
-  if (expanded) {
-    expandedRows[key] = true;
-  } else {
-    delete expandedRows[key];
-  }
-  writeImportReviewExpandedRows(jobId, expandedRows);
+  setImportReviewRowExpanded(row, button.getAttribute("aria-expanded") !== "true");
 }
 
-function importReviewRowExpansionData(config) {
-  var cfg = config || {};
-  return {
-    expanded: false,
-    jobId: cfg.jobId,
-    rowId: cfg.rowId,
-
-    init: function () {
-      this.expanded = isImportReviewRowExpanded(this.jobId, this.rowId);
-    },
-
-    toggle: function () {
-      this.expanded = !this.expanded;
-      setImportReviewRowExpanded(this.jobId, this.rowId, this.expanded);
-    },
-  };
-}
-
-window.importReviewRowExpansionData = importReviewRowExpansionData;
+window.toggleImportReviewRow = toggleImportReviewRow;
 
 function readImportConflictCommitState(jobId) {
   function normalizeCommittedPages(pages) {
@@ -7165,9 +7273,6 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       Number(cfg.selectedItemCount) ||
       (Number(cfg.matchedSelectedCount) || 0) + (Number(cfg.duplicateSelectedCount) || 0),
     importableItemCount: Number(cfg.importableItemCount) || 0,
-    needsAttentionCount: Number(cfg.needsAttentionCount) || 0,
-    needsAttentionFileCount: Number(cfg.needsAttentionFileCount) || 0,
-    deferredFollowUpCount: Number(cfg.deferredFollowUpCount) || 0,
     resolvedConflictGroupCount: Number(cfg.resolvedConflictGroupCount) || 0,
     conflictSeriesCount: Number(cfg.conflictSeriesCount) || 0,
     visibleFileConflictGroupCount: 0,
@@ -7176,8 +7281,6 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     jobId: cfg.jobId,
     currentView: cfg.currentView || "series",
     conflictsCommitted: false,
-    showCancelModal: false,
-    cancelling: false,
     reviewToken: typeof cfg.reviewToken === "string" ? cfg.reviewToken : "",
     preferredRootId:
       cfg.preferredRootId === null || typeof cfg.preferredRootId === "undefined"
@@ -7988,9 +8091,6 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         this.importableItemCount =
           Number(summary.importable_items_total) ||
           (Number(summary.matched_series_importable) || 0) + this.duplicateImportableCount;
-        this.needsAttentionCount = Number(summary.needs_attention_total) || 0;
-        this.needsAttentionFileCount = Number(summary.needs_attention_files_total) || 0;
-        this.deferredFollowUpCount = Number(summary.deferred_follow_up_total) || 0;
         this.resolvedConflictGroupCount = Number(summary.resolved_file_conflict_groups) || 0;
         this.conflictSeriesCount = Number(summary.series_conflicts_total) || 0;
         this.syncConflictCommitFlags();
@@ -8009,63 +8109,8 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       }
     },
 
-    cancelImport: async function () {
-      this.cancelling = true;
-      try {
-        await fetch("/api/v1/import/" + this.jobId, {
-          method: "DELETE",
-          headers: { "X-CSRF-Token": readCsrfTokenFromBody() },
-        });
-        purgeImportClientState(this.jobId);
-      } finally {
-        window.location.replace("/import");
-      }
-    },
-
     syncSelectionUi: function () {
       this.syncSelectionSummaryUi();
-    },
-
-    importAllReady: async function () {
-      if (this.importableItemCount === 0 || this.confirming) {
-        return;
-      }
-      if (!this.hasRequiredPreferredRoot()) {
-        this.confirmError =
-          "Choose a preferred managed destination for future acquisitions before importing this split series.";
-        return;
-      }
-
-      this.confirming = true;
-      this.confirmError = "";
-      try {
-        await this.setAllImportableSelection(true);
-        var response = await fetch("/api/v1/import/" + this.jobId + "/confirm", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": readCsrfTokenFromBody(),
-          },
-          body: JSON.stringify({
-            series_ids: [],
-            story_arc_ids: [],
-            story_arc_decisions: [],
-            target_library_root_id: this.preferredRootId,
-          }),
-        });
-        if (!response.ok) {
-          var error = await response.json().catch(function () {
-            return { detail: "Failed to confirm import" };
-          });
-          throw new Error(error.detail || "Server error (" + response.status + ")");
-        }
-        clearImportConflictCommitState(this.jobId);
-        dispatchImportWizardAdvance({ step: 4, jobStatus: "importing" });
-      } catch (err) {
-        this.confirmError = err && err.message ? err.message : "Failed to import ready comics.";
-      } finally {
-        this.confirming = false;
-      }
     },
 
     confirmImport: async function () {
@@ -20664,6 +20709,24 @@ function prepareAlpineSwap(detail, target) {
   return true;
 }
 
+function initializePreparedAlpineSwap(detail) {
+  if (!detail || !detail.xhr || !_htmxRequestsNeedingAlpineInit.has(detail.xhr)) {
+    return false;
+  }
+
+  _htmxRequestsNeedingAlpineInit.delete(detail.xhr);
+  var target = resolveHtmxLiveTarget(detail.target);
+  if (!target || target.isConnected === false) {
+    return false;
+  }
+
+  if (window.Alpine) {
+    Alpine.initTree(target);
+  }
+  seedSearchFieldStates(target);
+  return true;
+}
+
 function _purgeDetailHistoryRestoreEntry(pathname, search) {
   var normalizedPath = normalizePath(pathname || window.location.pathname);
   if (!_isDetailHistoryRestorePath(normalizedPath)) {
@@ -20804,21 +20867,9 @@ document.body.addEventListener("htmx:beforeSwap", function (e) {
 });
 
 document.addEventListener("htmx:afterRequest", function (e) {
-  var detail = e.detail || {};
-  if (!detail.xhr || !_htmxRequestsNeedingAlpineInit.has(detail.xhr)) {
-    return;
-  }
-
-  _htmxRequestsNeedingAlpineInit.delete(detail.xhr);
-  var target = resolveHtmxLiveTarget(detail.target);
-  if (!target || target.isConnected === false) {
-    return;
-  }
-
-  if (window.Alpine) {
-    Alpine.initTree(target);
-  }
-  seedSearchFieldStates(target);
+  // afterSwap normally initializes the replacement. Keep this as a fallback
+  // for HTMX request paths that complete without dispatching afterSwap.
+  initializePreparedAlpineSwap(e.detail || {});
 });
 
 // After a shell content swap, update the header title from the full-page response.
@@ -20861,6 +20912,17 @@ function _syncFooterDockFromResponse(responseText) {
 }
 
 document.addEventListener("htmx:afterSwap", function (e) {
+  initializePreparedAlpineSwap(e.detail || {});
+  var swappedTarget = resolveHtmxLiveTarget(e.detail.target);
+  if (
+    swappedTarget &&
+    swappedTarget.id === "import-step-review-shell" &&
+    pendingImportReviewViewportState
+  ) {
+    // Restore disclosure state in the swap task so a collapsed frame never paints.
+    restoreImportReviewExpansionState(pendingImportReviewViewportState, swappedTarget);
+  }
+
   if (e.detail.target && e.detail.target.id === "content" && e.detail.xhr) {
     _startContentSwapEnter();
     _syncFooterDockFromResponse(e.detail.xhr.responseText);
@@ -21867,11 +21929,6 @@ document.addEventListener("htmx:afterSettle", function (e) {
     window.htmx.process(settledTarget);
   }
 
-  // Re-initialize Alpine components in the primary HTMX swap target.
-  if (window.Alpine && settledTarget) {
-    Alpine.initTree(settledTarget);
-  }
-
   if (
     settledTarget &&
     (settledTarget.id === "import-step-review" ||
@@ -21901,6 +21958,15 @@ document.addEventListener("htmx:afterSettle", function (e) {
         // If Alpine scope lookup fails, leave the swapped shell intact.
       }
     }
+  }
+
+  if (
+    settledTarget &&
+    settledTarget.id === "import-step-review-shell" &&
+    pendingImportReviewViewportState
+  ) {
+    restoreImportReviewViewport(pendingImportReviewViewportState, settledTarget);
+    pendingImportReviewViewportState = null;
   }
 
   if (settledTarget) {

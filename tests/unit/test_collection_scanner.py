@@ -1117,6 +1117,41 @@ class TestMetadataGrouping:
         assert sorted(item.source_ordinal for item in discovered_files) == [1, 2]
 
     @pytest.mark.asyncio
+    async def test_folder_import_splits_babyteeth_files_out_of_aliens_folder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        folder = tmp_path / "Aliens Epic Collection (2023)"
+        folder.mkdir()
+        _make_cbz(
+            folder / "Aliens Epic Collection Vol 01.cbz",
+            "<ComicInfo><Series>Aliens Epic Collection</Series><Number>1</Number>"
+            "<Notes>[cv_vol_id:148973] [cv_issue_id:1067467]</Notes></ComicInfo>",
+        )
+        for number, issue_id, suffix in (
+            (1, 644570, "Volume 1 - Born"),
+            (3, 727350, "Vol. 3 - Cradle"),
+            (4, 1166031, "Vol. 4 - Grave"),
+        ):
+            _make_cbz(
+                folder / f"Babyteeth (2017) Vol {number:02} - {suffix}.cbz",
+                f"<ComicInfo><Series>Babyteeth</Series><Number>{number}</Number>"
+                f"<Notes>[cv_vol_id:171891] [cv_issue_id:{issue_id}]</Notes></ComicInfo>",
+            )
+
+        results = await _scan_all(CollectionScanner(), tmp_path)
+
+        by_title = {result.raw_series_name: result for result in results}
+        assert set(by_title) == {"Aliens Epic Collection", "Babyteeth"}
+        assert by_title["Aliens Epic Collection"].file_count == 1
+        assert by_title["Babyteeth"].file_count == 3
+        assert {file.parsed_issue_number for file in by_title["Babyteeth"].files} == {
+            1.0,
+            3.0,
+            4.0,
+        }
+
+    @pytest.mark.asyncio
     async def test_folder_cohort_ordinals_are_global_and_path_stable(self, tmp_path: Path) -> None:
         _make_series_dir(tmp_path, "Zulu", files=["Zulu 001.cbz"])
         _make_series_dir(tmp_path, "Alpha", files=["Alpha 001.cbz", "Alpha 002.cbz"])

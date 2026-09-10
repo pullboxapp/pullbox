@@ -232,6 +232,39 @@ async def test_restore_is_unavailable_when_mylar_root_is_reference_only(
 
 
 @pytest.mark.asyncio
+async def test_restore_accepts_series_filename_fallback_evidence(
+    db_session,
+    tmp_path: Path,
+) -> None:
+    (
+        job,
+        imported_file,
+        _library_file,
+        _action,
+        _source,
+        _expected,
+        _trash,
+    ) = await _seed_recovered_file(db_session, tmp_path)
+    diagnostics = dict(imported_file.diagnostics)
+    evidence = dict(diagnostics["mylar3_cross_folder_reconciliation"])
+    evidence["method"] = "verified_cross_folder_series_issue_filename"
+    diagnostics["mylar3_cross_folder_reconciliation"] = evidence
+    imported_file.diagnostics = diagnostics
+    await db_session.commit()
+
+    preview = await preview_misplaced_source_cleanup(
+        db_session,
+        job.id,
+        imported_file.id,
+        MisplacedSourceCleanupAction.RESTORE_RECORDED_PATH,
+        actor_id=42,
+    )
+
+    assert preview.can_apply is True
+    assert preview.preview_token is not None
+
+
+@pytest.mark.asyncio
 async def test_restore_refuses_an_occupied_recorded_path(db_session, tmp_path: Path) -> None:
     (
         job,

@@ -112,6 +112,10 @@ class _DuplicateCleanupContext:
 
 
 _TOKEN_SALT: Final = "import-misplaced-source-cleanup-v1"
+_VERIFIED_CROSS_FOLDER_METHODS: Final = (
+    "verified_cross_folder_issue_identity",
+    "verified_cross_folder_series_issue_filename",
+)
 _TOKEN_MAX_AGE_SECONDS: Final = 15 * 60
 
 
@@ -138,7 +142,7 @@ def _cleanup_scope_filters(
     evidence = ImportedFile.diagnostics["mylar3_cross_folder_reconciliation"]
     base: tuple[ColumnElement[bool], ...] = (
         ImportedFile.import_job_id == job_id,
-        evidence["method"].as_string() == "verified_cross_folder_issue_identity",
+        evidence["method"].as_string().in_(_VERIFIED_CROSS_FOLDER_METHODS),
     )
     if action is MisplacedSourceCleanupAction.RESTORE_RECORDED_PATH:
         return (
@@ -283,7 +287,7 @@ async def _load_restore_context(
     if (
         imported_file.status is not ImportedFileStatus.IMPORTED
         or not isinstance(evidence, Mapping)
-        or evidence.get("method") != "verified_cross_folder_issue_identity"
+        or evidence.get("method") not in _VERIFIED_CROSS_FOLDER_METHODS
         or evidence.get("role") != "canonical"
     ):
         raise ValidationError(
@@ -376,7 +380,7 @@ async def _load_duplicate_context(
     if (
         imported_file.status is not ImportedFileStatus.DUPLICATE_FILE
         or not isinstance(evidence, Mapping)
-        or evidence.get("method") != "verified_cross_folder_issue_identity"
+        or evidence.get("method") not in _VERIFIED_CROSS_FOLDER_METHODS
         or evidence.get("role") != "identical_duplicate"
         or isinstance(cleaned, Mapping)
     ):

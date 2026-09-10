@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from typing import TYPE_CHECKING
 
 import py7zr
@@ -75,6 +76,25 @@ class TestArchiveReaderCb7:
         xml_bytes = ArchiveReader(archive).read_file("metadata/ComicInfo.xml")
 
         assert b"<Series>Batman</Series>" in xml_bytes
+
+
+def test_read_comicinfo_prefers_canonical_root_member(tmp_path: Path) -> None:
+    archive = tmp_path / "duplicate-comicinfo.cbz"
+    with zipfile.ZipFile(archive, "w") as payload:
+        payload.writestr(
+            "Legacy/ComicInfo.xml",
+            "<ComicInfo><Series>Wrong nested metadata</Series></ComicInfo>",
+        )
+        payload.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Babyteeth</Series><Number>1</Number></ComicInfo>",
+        )
+
+    comicinfo = ArchiveReader(archive).read_comicinfo()
+
+    assert comicinfo is not None
+    assert comicinfo.series == "Babyteeth"
+    assert comicinfo.number == "1"
 
 
 class TestArchiveReaderCbr:

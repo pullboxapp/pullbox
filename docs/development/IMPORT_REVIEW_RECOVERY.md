@@ -72,8 +72,12 @@ Available recovery actions are intentionally narrow:
 
 During a Mylar scan, Pullbox can also reconcile one stale recorded path with a
 file found in another series folder when the embedded ComicInfo issue ID is an
-exact match. It links one canonical file in place for import and classifies
-only byte-identical extra copies as duplicates. Filename guesses, ambiguous
+exact match. If Mylar's issue ID is stale, Pullbox can use a stricter fallback
+only when the embedded ComicInfo series ID, series title, issue number, and
+issue ID are trusted; the recorded filename is exact; and the missing record
+and candidate are both unique. The real embedded issue ID is preserved. Pullbox
+links one canonical file in place for import and classifies only byte-identical
+extra copies from the exact-ID path as duplicates. Filename guesses, ambiguous
 records, conflicting embedded identity, and non-identical candidates remain
 untouched for review.
 
