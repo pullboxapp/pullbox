@@ -103,6 +103,25 @@ class TestImportHistoryTabRouteContracts:
         assert f"import-job-row-{archived_id}" in archived_response.text
         assert f"import-history-restore-{archived_id}" in archived_response.text
 
+    async def test_archive_toggle_targets_the_replaceable_history_panel(
+        self,
+        authenticated_client,
+    ) -> None:  # type: ignore[no-untyped-def]
+        response = await authenticated_client.get("/import?tab=history")
+
+        assert response.status_code == 200
+        assert len(re.findall(r'(?<![-\w])id="import-history-page"', response.text)) == 1
+        assert 'hx-target="#import-history-page"' in response.text
+
+        archived_response = await authenticated_client.get(
+            "/import?tab=history&show_archived=true",
+            headers={"HX-Request": "true", "HX-Target": "import-history-page"},
+        )
+
+        assert archived_response.status_code == 200
+        assert len(re.findall(r'(?<![-\w])id="import-history-page"', archived_response.text)) == 1
+        assert ">\n            Show current\n          </a>" in archived_response.text
+
     @pytest.mark.parametrize("source_type", ["filesystem", "mylar3"])
     async def test_step_four_explains_that_import_continues_in_background(
         self,

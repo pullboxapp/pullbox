@@ -1,6 +1,7 @@
 {% from "components/search_field.html" import search_field %}
 
 <div
+  id="import-history-page"
   data-testid="import-history-page"
   class="downloads-panel-stack import-history-page-shell"
   x-data="importHistoryPage({ csrfToken: '{{ csrf_token }}' })"
