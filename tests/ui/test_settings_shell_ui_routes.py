@@ -529,12 +529,14 @@ class TestSettingsRouteContracts:
         toggle_enabled_start = response.text.index(
             'data-testid="settings-media-library-root-toggle-enabled"'
         )
-        assert 'class="btn-ghost btn-sm"' in response.text[
-            make_default_start : make_default_start + 180
-        ]
-        assert 'class="btn-ghost btn-sm"' in response.text[
-            toggle_enabled_start : toggle_enabled_start + 180
-        ]
+        assert (
+            'class="btn-ghost btn-sm"'
+            in response.text[make_default_start : make_default_start + 180]
+        )
+        assert (
+            'class="btn-ghost btn-sm"'
+            in response.text[toggle_enabled_start : toggle_enabled_start + 180]
+        )
         assert "Reference existing files" in response.text
         assert "Allow managed files" in response.text
         assert "Default managed destination" in response.text

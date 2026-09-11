@@ -642,15 +642,15 @@ async def prepare_clean_library_import(
         ),
     )
 
-    job = await session.get(ImportJob, job_id, populate_existing=True)
-    if job is None:
+    refreshed_job = await session.get(ImportJob, job_id, populate_existing=True)
+    if refreshed_job is None:
         raise NotFoundError("ImportJob", job_id)
-    job.series_found = expected_snapshot.series_count
-    job.series_duplicate = expected_snapshot.series_count
-    job.total_files_found = expected_snapshot.file_count
-    job.total_files_matched = expected_snapshot.file_count
-    job.progress_snapshot = {
-        **dict(job.progress_snapshot or {}),
+    refreshed_job.series_found = expected_snapshot.series_count
+    refreshed_job.series_duplicate = expected_snapshot.series_count
+    refreshed_job.total_files_found = expected_snapshot.file_count
+    refreshed_job.total_files_matched = expected_snapshot.file_count
+    refreshed_job.progress_snapshot = {
+        **dict(refreshed_job.progress_snapshot or {}),
         "clean_library_adoption": True,
         "clean_library_adoption_prepared": True,
         "source_import_job_id": source_job_id,
@@ -658,7 +658,7 @@ async def prepare_clean_library_import(
     }
     session.add(
         ImportJobLog(
-            import_job_id=job.id,
+            import_job_id=refreshed_job.id,
             level="INFO",
             event="clean_library_adoption_prepared",
             message=(
@@ -667,7 +667,7 @@ async def prepare_clean_library_import(
             ),
             data={
                 "source_import_job_id": source_job_id,
-                "target_library_root_id": job.target_library_root_id,
+                "target_library_root_id": refreshed_job.target_library_root_id,
                 "eligible_file_count": expected_snapshot.file_count,
                 "eligible_series_count": expected_snapshot.series_count,
                 "total_bytes": expected_snapshot.total_bytes,
@@ -680,8 +680,8 @@ async def prepare_clean_library_import(
         message="Clean-library plan ready. Starting file processing...",
         item_label="Library plan ready",
     )
-    job.progress_snapshot = {
-        **dict(job.progress_snapshot or {}),
+    refreshed_job.progress_snapshot = {
+        **dict(refreshed_job.progress_snapshot or {}),
         "clean_library_adoption_prepared": True,
     }
     await session.commit()
