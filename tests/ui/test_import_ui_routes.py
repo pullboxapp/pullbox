@@ -2577,7 +2577,12 @@ class TestImportUnmatchedTab:
                 source_type=ImportSourceType.FILESYSTEM,
                 status=ImportJobStatus.COMPLETED,
             )
-            session.add_all([resolved_job, actionable_job])
+            nonrenderable_metadata_job = ImportJob(
+                source_path="/tmp/nonrenderable-metadata",
+                source_type=ImportSourceType.FILESYSTEM,
+                status=ImportJobStatus.COMPLETED,
+            )
+            session.add_all([resolved_job, actionable_job, nonrenderable_metadata_job])
             await session.flush()
 
             hydrating = Series(
@@ -2590,7 +2595,12 @@ class TestImportUnmatchedTab:
                 sort_title="Needs Retry",
                 issue_catalog_state=IssueCatalogState.FAILED,
             )
-            session.add_all([hydrating, failed])
+            duplicate_failed = Series(
+                title="Duplicate Metadata Failure",
+                sort_title="Duplicate Metadata Failure",
+                issue_catalog_state=IssueCatalogState.FAILED,
+            )
+            session.add_all([hydrating, failed, duplicate_failed])
             await session.flush()
 
             resolved_series = ImportedSeries(
@@ -2605,7 +2615,13 @@ class TestImportUnmatchedTab:
                 status=ImportSeriesStatus.IMPORTED,
                 series_id=failed.id,
             )
-            session.add_all([resolved_series, actionable_series])
+            nonrenderable_series = ImportedSeries(
+                import_job_id=nonrenderable_metadata_job.id,
+                raw_series_name="Duplicate Metadata Failure",
+                status=ImportSeriesStatus.DUPLICATE,
+                series_id=duplicate_failed.id,
+            )
+            session.add_all([resolved_series, actionable_series, nonrenderable_series])
             await session.flush()
             session.add(
                 ImportedFile(

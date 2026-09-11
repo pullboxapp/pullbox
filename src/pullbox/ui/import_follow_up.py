@@ -102,6 +102,7 @@ def _follow_up_job_filter() -> ColumnElement[bool]:
         .join(Series, Series.id == ImportedSeries.series_id)
         .where(
             ImportedSeries.import_job_id == ImportJob.id,
+            ImportedSeries.status == ImportSeriesStatus.IMPORTED,
             Series.issue_catalog_state == IssueCatalogState.FAILED,
         )
         .exists()

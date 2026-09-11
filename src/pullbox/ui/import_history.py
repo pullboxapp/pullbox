@@ -260,8 +260,11 @@ async def _load_import_history_context(
                     select(ImportedFile.import_job_id)
                     .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
                     .join(Issue, Issue.id == LibraryFile.issue_id)
+                    .join(ImportJob, ImportJob.id == ImportedFile.import_job_id)
                     .where(
                         ImportedFile.import_job_id.in_(job_ids),
+                        ImportJob.status == ImportJobStatus.COMPLETED,
+                        ImportJob.archived_at.is_(None),
                         ImportedFile.status == ImportedFileStatus.IMPORTED,
                         ImportedFile.matched_issue_id == Issue.id,
                         LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED,
