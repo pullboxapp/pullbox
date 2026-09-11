@@ -1,0 +1,167 @@
+{#- Persistent selector plus action for creating catalog content. -#}
+<div
+  x-data="{
+    open: false,
+    selectedKey: 'series',
+    selectedLabel: 'Series',
+    selectedHref: '/series/add',
+    selectOption(key, label, href) {
+      this.selectedKey = key;
+      this.selectedLabel = label;
+      this.selectedHref = href;
+      this.open = false;
+      setTimeout(() => this.$refs.primary.focus(), 75);
+    }
+  }"
+  @click.outside="open = false"
+  @focusout="if ($event.relatedTarget && !$el.contains($event.relatedTarget)) open = false"
+  @keydown.escape.window="if (open) { $event.preventDefault(); open = false; $refs.trigger.focus() }"
+  data-testid="header-add-menu"
+  data-split-action-menu="true"
+  class="header-add-menu"
+>
+  <button
+    x-ref="primary"
+    data-testid="header-add-action"
+    type="button"
+    data-add-target="/series/add"
+    :data-add-target="selectedHref"
+    aria-label="Add Series"
+    :aria-label="'Add ' + selectedLabel"
+    @click.stop="window.location.assign(selectedHref)"
+    class="btn-primary btn-sm header-add-menu__primary"
+  >
+    <svg
+      class="shrink-0"
+      style="width:var(--pb-control-icon-size);height:var(--pb-control-icon-size);"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
+    </svg>
+    <span>Add</span>
+  </button>
+
+  <button
+    x-ref="trigger"
+    type="button"
+    data-testid="header-add-menu-trigger"
+    aria-label="Choose what to add, currently Series"
+    :aria-label="'Choose what to add, currently ' + selectedLabel"
+    aria-haspopup="menu"
+    aria-controls="header-add-menu-panel"
+    :aria-expanded="open ? 'true' : 'false'"
+    @click="open = !open"
+    {#- Firefox finishes the key sequence before accepting focus on a newly shown option. -#}
+    @keydown.arrow-down.prevent="open = true; setTimeout(() => document.getElementById('header-add-menu-series').focus(), 75)"
+    @keydown.arrow-up.prevent="open = true; setTimeout(() => document.getElementById('header-add-menu-story-arc').focus(), 75)"
+    class="btn-primary btn-sm header-add-menu__trigger"
+  >
+    <span x-text="selectedLabel">Series</span>
+    <svg
+      class="header-add-menu__chevron"
+      :class="open ? 'rotate-180' : ''"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/>
+    </svg>
+  </button>
+
+  <div
+    x-cloak
+    x-show="open"
+    id="header-add-menu-panel"
+    data-testid="header-add-menu-panel"
+    role="menu"
+    aria-label="Choose what to add"
+    class="header-add-menu__panel"
+  >
+    <button
+      id="header-add-menu-series"
+      data-testid="header-add-menu-series"
+      type="button"
+      role="menuitemradio"
+      tabindex="-1"
+      :aria-checked="selectedKey === 'series' ? 'true' : 'false'"
+      :class="selectedKey === 'series' ? 'header-add-menu__item--selected' : ''"
+      @click="selectOption('series', 'Series', '/series/add')"
+      @keydown.arrow-down.prevent="document.getElementById('header-add-menu-story-arc').focus()"
+      @keydown.arrow-up.prevent="document.getElementById('header-add-menu-story-arc').focus()"
+      @keydown.home.prevent="document.getElementById('header-add-menu-series').focus()"
+      @keydown.end.prevent="document.getElementById('header-add-menu-story-arc').focus()"
+      class="header-add-menu__item"
+    >
+      <svg fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 5.25A2.25 2.25 0 016.75 3h10.5a2.25 2.25 0 012.25 2.25v13.5A2.25 2.25 0 0117.25 21H6.75a2.25 2.25 0 01-2.25-2.25V5.25zM8.25 3v18"/>
+      </svg>
+      <span class="header-add-menu__item-label">Series</span>
+      <svg
+        x-cloak
+        x-show="selectedKey === 'series'"
+        class="header-add-menu__check"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
+      </svg>
+    </button>
+    <button
+      id="header-add-menu-story-arc"
+      data-testid="header-add-menu-story-arc"
+      type="button"
+      role="menuitemradio"
+      tabindex="-1"
+      :aria-checked="selectedKey === 'story-arc' ? 'true' : 'false'"
+      :class="selectedKey === 'story-arc' ? 'header-add-menu__item--selected' : ''"
+      @click="selectOption('story-arc', 'Story Arc', '/story-arcs/add')"
+      @keydown.arrow-down.prevent="document.getElementById('header-add-menu-series').focus()"
+      @keydown.arrow-up.prevent="document.getElementById('header-add-menu-series').focus()"
+      @keydown.home.prevent="document.getElementById('header-add-menu-series').focus()"
+      @keydown.end.prevent="document.getElementById('header-add-menu-story-arc').focus()"
+      class="header-add-menu__item"
+    >
+      <svg fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 5.25h4.125A3.375 3.375 0 0112 8.625v10.5a3.375 3.375 0 00-3.375-3.375H4.5V5.25zm15 0h-4.125A3.375 3.375 0 0012 8.625v10.5a3.375 3.375 0 013.375-3.375H19.5V5.25z"/>
+      </svg>
+      <span class="header-add-menu__item-label">Story Arc</span>
+      <svg
+        x-cloak
+        x-show="selectedKey === 'story-arc'"
+        class="header-add-menu__check"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
+      </svg>
+    </button>
+    <div
+      data-testid="header-add-menu-cbl"
+      role="menuitem"
+      aria-disabled="true"
+      class="header-add-menu__item header-add-menu__item--disabled"
+    >
+      <svg fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 4.5h10.5A1.5 1.5 0 0118 6v12a1.5 1.5 0 01-1.5 1.5H6A1.5 1.5 0 014.5 18V6A1.5 1.5 0 016 4.5zM8.25 8.25h6.75m-6.75 3.75h6.75m-6.75 3.75h4.5"/>
+      </svg>
+      <span class="header-add-menu__item-label">CBL Reading List</span>
+      <span class="header-add-menu__soon">Coming Soon</span>
+    </div>
+  </div>
+</div>
