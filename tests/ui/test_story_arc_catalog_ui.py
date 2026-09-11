@@ -78,6 +78,17 @@ async def test_registry_links_to_dedicated_comicvine_add_page(
     assert 'hx-target="#story-arc-add-results"' in response.text
     assert 'data-search-field-contract="baseline-v2"' in response.text
     assert 'data-testid="story-arc-add-results"' in response.text
+    assert 'data-comicvine-search-loading-contract="v1"' in response.text
+    assert re.search(
+        (
+            r'data-testid="story-arc-add-results-loading"[^>]*'
+            r'role="status"[^>]*aria-live="polite"'
+        ),
+        response.text,
+    )
+    assert 'class="h-5 w-5 animate-spin"' in response.text
+    assert "Searching ComicVine" in response.text
+    assert "Large catalogs can take a moment." in response.text
     assert 'data-testid="story-arc-add-footer-dock"' in response.text
     assert "Search Comic Vine" in response.text
     assert 'data-testid="story-arcs-create-form"' not in response.text

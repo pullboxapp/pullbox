@@ -1,0 +1,21 @@
+{% macro comicvine_search_loading(element_id, testid) -%}
+  <div
+    id="{{ element_id }}"
+    data-testid="{{ testid }}"
+    data-comicvine-search-loading-contract="v1"
+    class="add-series-results-loading htmx-indicator"
+    role="status"
+    aria-live="polite"
+  >
+    <div class="add-series-results-loading-card">
+      <svg class="h-5 w-5 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+      </svg>
+      <div>
+        <p class="add-series-results-loading-title">Searching ComicVine</p>
+        <p class="add-series-results-loading-copy">Large catalogs can take a moment.</p>
+      </div>
+    </div>
+  </div>
+{%- endmacro %}

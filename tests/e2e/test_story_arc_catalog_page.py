@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from playwright.sync_api import Page, Route, expect
@@ -26,6 +27,47 @@ def catalog_provider(monkeypatch: pytest.MonkeyPatch) -> CatalogProvider:
         "pullbox.providers.metadata.comicvine.ComicVineProvider", lambda **_: provider
     )
     return provider
+
+
+def test_catalog_search_uses_standard_comicvine_loading_popup(
+    authed_page: Page, seeded_server: str
+) -> None:
+    page = authed_page
+    held_routes: list[Route] = []
+
+    def hold_search(route: Route) -> None:
+        query = parse_qs(urlparse(route.request.url).query).get("q", [""])[0]
+        if query:
+            held_routes.append(route)
+            return
+        route.continue_()
+
+    page.route("**/story-arcs/add**", hold_search)
+    page.goto(f"{seeded_server}/story-arcs/add", wait_until="networkidle")
+    query = page.get_by_label("Comic Vine arc name")
+    query.fill("Numbering")
+    query.press("Enter")
+
+    indicator = page.get_by_test_id("story-arc-add-results-loading")
+    expect(indicator).to_be_visible()
+    expect(indicator).to_have_attribute("aria-live", "polite")
+    expect(indicator).to_have_attribute("data-comicvine-search-loading-contract", "v1")
+    expect(indicator.get_by_text("Searching ComicVine", exact=True)).to_be_visible()
+    expect(indicator.get_by_text("Large catalogs can take a moment.", exact=True)).to_be_visible()
+    spinner = indicator.locator("svg").first
+    expect(spinner).to_have_css("width", "20px")
+    expect(spinner).to_have_css("height", "20px")
+    assert held_routes
+
+    held_routes.pop().fulfill(
+        status=200,
+        content_type="text/html",
+        body=(
+            '<section id="story-arc-add-results" data-testid="story-arc-add-results" '
+            'class="add-series-results-shell space-y-3"></section>'
+        ),
+    )
+    page.unroute("**/story-arcs/add**")
 
 
 def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(

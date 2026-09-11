@@ -801,6 +801,7 @@ class TestSeriesRouteContracts:
         assert 'data-testid="add-series-search-history-panel"' in response.text
         assert 'data-testid="add-series-search-indicator"' not in response.text
         assert 'data-testid="add-series-results-loading"' in response.text
+        assert 'data-comicvine-search-loading-contract="v1"' in response.text
         assert 'hx-sync="#add-series-search-form:replace"' in response.text
         assert 'hx-indicator="#add-series-results-loading"' in response.text
         assert 'data-search-field-contract="baseline-v2"' in response.text
