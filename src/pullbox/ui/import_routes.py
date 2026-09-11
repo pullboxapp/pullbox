@@ -1,6 +1,7 @@
 """Import workspace UI routes and loaders."""
 
 from collections.abc import Callable, Mapping
+from html import escape
 from typing import Annotated
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
@@ -564,9 +565,10 @@ async def import_review_rematch_status(
 
     pending = await has_pending_import_safety_rematch(session, job_id)
     if pending:
+        escaped_job_id = escape(str(job_id), quote=True)
         return HTMLResponse(
             f'<div id="import-safety-rematch-poll" hidden '
-            f'hx-get="/import/{job_id}/review-rematch-status" '
+            f'hx-get="/import/{escaped_job_id}/review-rematch-status" '
             'hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]" '
             'hx-target="this" hx-swap="outerHTML"></div>'
         )

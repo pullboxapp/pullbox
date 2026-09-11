@@ -3243,6 +3243,31 @@ class TestImportShellRouteContracts:
         assert "hx-trigger=" not in completed_response.text
         assert completed_response.headers["HX-Trigger"] == "import:review-refresh"
 
+    async def test_import_review_rematch_poll_escapes_job_id_in_html_attribute(
+        self,
+    ) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from pullbox.ui.import_routes import import_review_rematch_status
+
+        session = AsyncMock()
+        session.get.return_value = object()
+        hostile_job_id = '1" autofocus onfocus="alert(1)'
+
+        with patch(
+            "pullbox.ui.import_routes.has_pending_import_safety_rematch",
+            new=AsyncMock(return_value=True),
+        ):
+            response = await import_review_rematch_status(  # type: ignore[arg-type]
+                hostile_job_id,
+                object(),  # type: ignore[arg-type]
+                session,
+            )
+
+        body = response.body.decode("utf-8")
+        assert hostile_job_id not in body
+        assert "&quot; autofocus onfocus=&quot;alert(1)" in body
+
     async def test_import_review_returns_to_all_when_safety_tab_becomes_empty(
         self,
         authenticated_client,
