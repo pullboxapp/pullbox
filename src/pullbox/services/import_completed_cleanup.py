@@ -1256,6 +1256,7 @@ async def _apply_mixed_folder_resolutions(
 
     affected_series_ids: set[int] = set()
     retry_series_ids: set[int] = set()
+    affected_file_ids: list[int] = []
     for resolution in resolutions:
         target_import_series = imported_target_by_series_id.get(resolution.target_series_id)
         if target_import_series is None:
@@ -1288,6 +1289,7 @@ async def _apply_mixed_folder_resolutions(
         imported_file = await session.get(ImportedFile, resolution.file_id)
         if imported_file is None:  # pragma: no cover - signed snapshot guards deletion
             raise ValidationError("A mixed-folder file disappeared. Preview the action again.")
+        affected_file_ids.append(int(imported_file.id))
         diagnostics = dict(imported_file.diagnostics or {})
         diagnostics["completed_import_cleanup"] = {
             "action": CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES.value,
@@ -1380,6 +1382,11 @@ async def _apply_mixed_folder_resolutions(
         affected_series_ids.update(
             {resolution.source_import_series_id, int(target_import_series.id)}
         )
+    await refresh_story_arc_entries_for_import_files(
+        session,
+        import_job_id=job.id,
+        import_file_ids=affected_file_ids,
+    )
     await session.flush()
     return affected_series_ids, retry_series_ids
 

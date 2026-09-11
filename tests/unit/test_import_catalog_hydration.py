@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -327,6 +328,73 @@ async def test_retryable_provider_failure_pauses_hydration_without_failing_backl
     assert series_rows[2].issue_catalog_last_checked_at is None
 
     assert await hydration_module.load_pending_catalog_hydration(session_factory) == []
+
+
+async def test_scheduled_catalog_hydration_resumes_after_provider_cooldown(
+    db_session,
+    monkeypatch,
+) -> None:
+    series = Series(
+        title="Cooldown Recovery",
+        sort_title="cooldown recovery",
+        comicvine_id=6350,
+        issue_catalog_state=IssueCatalogState.HYDRATING,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+
+    class TransientRateLimitService(CatalogHydrationSeriesServiceStub):
+        async def prefetch_comicvine_bundle(
+            self,
+            comicvine_id: int,
+        ) -> tuple[dict[str, int], list[Any]]:
+            self.prefetch_calls.append(comicvine_id)
+            if len(self.prefetch_calls) == 1:
+                raise ProviderError(
+                    "comicvine",
+                    "HTTP 420: /volumes/",
+                    details={"status_code": 420, "retryable": True},
+                )
+            return {"comicvine_id": comicvine_id}, []
+
+    service = TransientRateLimitService()
+    monkeypatch.setattr(
+        hydration_module,
+        "CATALOG_HYDRATION_RETRY_DELAY",
+        timedelta(milliseconds=25),
+    )
+
+    hydration_module.schedule_catalog_hydration(
+        session_factory,
+        series_service=service,
+        series_id=series.id,
+        search_on_add=False,
+    )
+
+    try:
+        async with asyncio.timeout(1):
+            while True:
+                await db_session.refresh(series)
+                if series.issue_catalog_state is IssueCatalogState.COMPLETE:
+                    break
+                await asyncio.sleep(0.01)
+    finally:
+        pending_tasks = [
+            *hydration_module.catalog_hydration_tasks,
+            *hydration_module.catalog_hydration_retry_tasks,
+        ]
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    assert service.prefetch_calls == [6350, 6350]
+    assert series.issue_catalog_error is None
 
 
 async def test_old_rate_limited_failed_catalog_is_resumed_after_backoff(db_session) -> None:

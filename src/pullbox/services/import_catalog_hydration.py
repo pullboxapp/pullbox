@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import or_, update
+from sqlalchemy import func, or_, update
 from sqlalchemy import select as sa_select
 
 from pullbox.core.exceptions import ProviderError
@@ -32,6 +32,7 @@ CATALOG_HYDRATION_RETRY_DELAY = timedelta(hours=2)
 _RETRYABLE_ERROR_PREFIX = "Retryable ComicVine hydration failure: "
 
 catalog_hydration_tasks: set[asyncio.Task[None]] = set()
+catalog_hydration_retry_tasks: set[asyncio.Task[None]] = set()
 _catalog_hydration_semaphore: asyncio.Semaphore | None = None
 _catalog_hydration_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
@@ -92,6 +93,9 @@ def schedule_catalog_hydration(
         return
     if _catalog_hydration_methods(series_service) is None:
         return
+    for retry_task in tuple(catalog_hydration_retry_tasks):
+        if not retry_task.done():
+            retry_task.cancel()
     if any(not task.done() for task in catalog_hydration_tasks):
         return
 
@@ -111,11 +115,44 @@ def schedule_catalog_hydration(
                 return
             await asyncio.sleep(0)
             if not await load_pending_catalog_hydration(session_factory, limit=1):
+                await ensure_catalog_hydration_retry_scheduled(
+                    session_factory,
+                    series_service=series_service,
+                )
                 return
 
     task = asyncio.create_task(run_hydration())
     catalog_hydration_tasks.add(task)
     task.add_done_callback(catalog_hydration_tasks.discard)
+
+
+async def ensure_catalog_hydration_retry_scheduled(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    series_service: Any,
+) -> None:
+    """Wake the catalog drain when the shared provider cooldown expires."""
+    retry_delay = await load_catalog_hydration_retry_delay(session_factory)
+    if retry_delay is None:
+        return
+    if any(not task.done() for task in catalog_hydration_retry_tasks):
+        return
+
+    async def retry_after_cooldown() -> None:
+        await asyncio.sleep(retry_delay)
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            catalog_hydration_retry_tasks.discard(current_task)
+        schedule_catalog_hydration(
+            session_factory,
+            series_service=series_service,
+            series_id=0,
+            search_on_add=False,
+        )
+
+    task = asyncio.create_task(retry_after_cooldown())
+    catalog_hydration_retry_tasks.add(task)
+    task.add_done_callback(catalog_hydration_retry_tasks.discard)
 
 
 async def run_pending_catalog_hydration(
@@ -438,6 +475,27 @@ async def load_pending_catalog_hydration(
             )
             for series_id, monitored in result.all()
         ]
+
+
+async def load_catalog_hydration_retry_delay(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> float | None:
+    """Return seconds until the earliest active provider cooldown expires."""
+    now = datetime.now(UTC)
+    retry_cutoff = now - CATALOG_HYDRATION_RETRY_DELAY
+    async with session_factory() as session:
+        paused_at = await session.scalar(
+            sa_select(func.min(Series.issue_catalog_last_checked_at)).where(
+                Series.issue_catalog_state == IssueCatalogState.HYDRATING,
+                Series.issue_catalog_error.startswith(_RETRYABLE_ERROR_PREFIX),
+                Series.issue_catalog_last_checked_at.isnot(None),
+                Series.issue_catalog_last_checked_at > retry_cutoff,
+            )
+        )
+    if paused_at is None:
+        return None
+    retry_at = paused_at + CATALOG_HYDRATION_RETRY_DELAY
+    return max(0.0, (retry_at - now).total_seconds())
 
 
 def catalog_hydration_gate() -> asyncio.Semaphore:

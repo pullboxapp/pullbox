@@ -29,7 +29,10 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSourceType,
 )
-from pullbox.services.import_catalog_hydration import run_pending_catalog_hydration
+from pullbox.services.import_catalog_hydration import (
+    ensure_catalog_hydration_retry_scheduled,
+    run_pending_catalog_hydration,
+)
 from pullbox.services.import_comicinfo_enrichment import (
     run_pending_import_comicinfo_enrichment,
     schedule_import_comicinfo_enrichment,
@@ -788,10 +791,15 @@ class ImportService(
         session_factory: async_sessionmaker[AsyncSession],
     ) -> int:
         """Resume full catalog hydration left pending after a restart."""
-        return await run_pending_catalog_hydration(
+        recovered = await run_pending_catalog_hydration(
             session_factory,
             series_service=self._series_service,
         )
+        await ensure_catalog_hydration_retry_scheduled(
+            session_factory,
+            series_service=self._series_service,
+        )
+        return recovered
 
     async def _process_series_files(
         self,

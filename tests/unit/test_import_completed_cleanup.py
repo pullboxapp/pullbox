@@ -27,6 +27,8 @@ from pullbox.models.library import (
     MatchConfidence,
 )
 from pullbox.models.series import Series
+from pullbox.models.story_arc import StoryArcResolutionState, StoryArcSourceKind
+from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.models.user import User
 from pullbox.services.import_completed_cleanup import (
     CompletedImportCleanupAction,
@@ -507,6 +509,33 @@ async def _seed_mixed_folder_candidate(
     return job, source_series, target_import_series, mixed_file, issue
 
 
+async def _seed_story_arc_entry_for_mixed_file(
+    session: AsyncSession,
+    *,
+    job: ImportJob,
+    mixed_file: ImportedFile,
+) -> ImportedStoryArcEntry:
+    arc = ImportedStoryArc(
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.MYLAR3,
+        source_key=f"mixed-folder-{mixed_file.id}",
+        source_ordinal=1,
+        name="Recovered Arc",
+    )
+    session.add(arc)
+    await session.flush()
+    entry = ImportedStoryArcEntry(
+        imported_story_arc_id=arc.id,
+        import_file_id=mixed_file.id,
+        source_ordinal=1,
+        resolution_state=StoryArcResolutionState.AMBIGUOUS,
+        source_kind=StoryArcSourceKind.MYLAR3,
+    )
+    session.add(entry)
+    await session.flush()
+    return entry
+
+
 @pytest.mark.asyncio
 async def test_mixed_folder_comicinfo_reassigns_file_and_retries_correct_series(
     db_session: AsyncSession,
@@ -584,6 +613,12 @@ async def test_mixed_folder_target_already_owned_is_resolved_without_retry(
         mixed_file,
         issue,
     ) = await _seed_mixed_folder_candidate(db_session, with_library_file=True)
+    story_arc_entry = await _seed_story_arc_entry_for_mixed_file(
+        db_session,
+        job=job,
+        mixed_file=mixed_file,
+    )
+    await db_session.commit()
     target_library_file = (
         await db_session.scalars(select(LibraryFile).where(LibraryFile.issue_id == issue.id))
     ).one()
@@ -604,6 +639,7 @@ async def test_mixed_folder_target_already_owned_is_resolved_without_retry(
 
     await db_session.refresh(job)
     await db_session.refresh(mixed_file)
+    await db_session.refresh(story_arc_entry)
     assert result.requires_import_retry is False
     assert job.status is ImportJobStatus.COMPLETED
     assert mixed_file.import_series_id == target_import_series.id
@@ -611,6 +647,8 @@ async def test_mixed_folder_target_already_owned_is_resolved_without_retry(
     assert mixed_file.status is ImportedFileStatus.ALREADY_OWNED
     assert mixed_file.include_in_import is False
     assert mixed_file.library_file_id == target_library_file.id
+    assert story_arc_entry.matched_issue_id == issue.id
+    assert story_arc_entry.resolution_state is StoryArcResolutionState.RESOLVED
 
 
 @pytest.mark.asyncio
@@ -747,6 +785,12 @@ async def test_mixed_folder_cleanup_corrects_wrong_referenced_issue_ownership(
         },
     )
     db_session.add(mixed_file)
+    await db_session.flush()
+    story_arc_entry = await _seed_story_arc_entry_for_mixed_file(
+        db_session,
+        job=job,
+        mixed_file=mixed_file,
+    )
     await db_session.commit()
 
     preview = await preview_completed_import_cleanup(
@@ -767,6 +811,7 @@ async def test_mixed_folder_cleanup_corrects_wrong_referenced_issue_ownership(
     await db_session.refresh(library_file)
     await db_session.refresh(wrong_issue)
     await db_session.refresh(target_issue)
+    await db_session.refresh(story_arc_entry)
     assert result.requires_import_retry is False
     assert mixed_file.import_series_id == target_import_series.id
     assert mixed_file.matched_issue_id == target_issue.id
@@ -776,6 +821,8 @@ async def test_mixed_folder_cleanup_corrects_wrong_referenced_issue_ownership(
     assert target_issue.status is IssueStatus.OWNED
     assert wrong_issue.status is expected_previous_status
     assert mixed_file.file_path == "/comics/Fritzi Ritz/Action Comics 1002.cbz"
+    assert story_arc_entry.matched_issue_id == target_issue.id
+    assert story_arc_entry.resolution_state is StoryArcResolutionState.RESOLVED
 
 
 @pytest.mark.asyncio
