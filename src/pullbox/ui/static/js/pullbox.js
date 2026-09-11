@@ -3140,9 +3140,9 @@ function importSourceData(config) {
     mylarPathAutoDetect: true,
     mylarPathConfirmed: false,
     mylarUnresolvedConfirmed: false,
-    mylarRootRegistrationPath: "",
-    mylarRootRegistrationErrorPath: "",
-    mylarRootRegistrationError: "",
+    referenceRootRegistrationPath: "",
+    referenceRootRegistrationErrorPath: "",
+    referenceRootRegistrationError: "",
     attentionResolvingKey: "",
     attentionResolutionErrors: {},
     acknowledgedAttentionActions: {},
@@ -3351,14 +3351,14 @@ function importSourceData(config) {
       }
     },
 
-    registerMylarReferenceRoot: async function (group) {
+    registerReferenceRoot: async function (group) {
       var rootPath = String((group && group.root_path) || "").trim();
-      if (!rootPath || this.mylarRootRegistrationPath) {
+      if (!rootPath || this.referenceRootRegistrationPath) {
         return false;
       }
       var leaf = rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "library";
       var rootPayload = {
-        name: ("Mylar reference - " + leaf + " - " + rootPath).slice(0, 255),
+        name: ("Existing files - " + leaf + " - " + rootPath).slice(0, 255),
         path: rootPath,
         allow_referenced_registrations: true,
         allow_managed_writes: false,
@@ -3395,9 +3395,9 @@ function importSourceData(config) {
         return payload;
       }.bind(this);
 
-      this.mylarRootRegistrationPath = rootPath;
-      this.mylarRootRegistrationErrorPath = "";
-      this.mylarRootRegistrationError = "";
+      this.referenceRootRegistrationPath = rootPath;
+      this.referenceRootRegistrationErrorPath = "";
+      this.referenceRootRegistrationError = "";
       try {
         var preview = await request("/api/v1/config/library-roots/preview");
         if (!preview.can_create) {
@@ -3408,18 +3408,22 @@ function importSourceData(config) {
         }
         await request("/api/v1/config/library-roots");
         await this.refreshImportLibraryRoots();
-        await this.previewMylarPaths();
+        if (this.sourceType === "mylar3") {
+          await this.previewMylarPaths();
+        } else {
+          await this.previewLayout();
+        }
         if (typeof showToast === "function") {
           showToast({ message: "Existing-file library root registered.", level: "success" });
         }
         return true;
       } catch (err) {
-        this.mylarRootRegistrationErrorPath = rootPath;
-        this.mylarRootRegistrationError =
+        this.referenceRootRegistrationErrorPath = rootPath;
+        this.referenceRootRegistrationError =
           err && err.message ? err.message : "Pullbox could not register this library root.";
         return false;
       } finally {
-        this.mylarRootRegistrationPath = "";
+        this.referenceRootRegistrationPath = "";
       }
     },
 
@@ -3751,27 +3755,69 @@ function importSourceData(config) {
         this.layoutPreview &&
         !this.layoutPreview.can_keep_in_place
       ) {
-        items.push({
-          key: "in-place-layout",
-          code: "in_place_layout_unavailable",
-          blocks_import: true,
-          reason: "This folder cannot be kept in place yet",
-          suggested_action:
-            "Review the layout details below or choose Copy into Pullbox library.",
-          root_path: this.sourcePath.trim(),
-          action: this.managedLibraryRoots().length ? { kind: "switch_to_managed_copy" } : null,
-          details: {
-            title: "Choose a safe file-handling mode",
-            series_count: 0,
-            location_count: Number(this.layoutPreview.files_considered || 0),
-            known_paths: [this.sourcePath.trim()],
-            steps: [
-              "Review the folder-layout details for paths Pullbox could not safely reference.",
-              "Correct the source layout or choose Copy into Pullbox library.",
-              "Recheck the import issues before starting the scan.",
-            ],
-          },
+        var layoutWarnings = Array.isArray(this.layoutPreview.warnings)
+          ? this.layoutPreview.warnings
+          : [];
+        var sourceOutsideLibraryRoot = layoutWarnings.includes(
+          "source_outside_library_root",
+        );
+        var otherLayoutWarnings = layoutWarnings.filter(function (warning) {
+          return warning !== "source_outside_library_root";
         });
+        if (sourceOutsideLibraryRoot) {
+          items.push({
+            key: "in-place-reference-root",
+            code: "source_outside_library_root",
+            blocks_import: true,
+            reason: "Register this folder for existing files",
+            suggested_action:
+              "Pullbox can add this exact folder as a reference-only library root. Files stay where they are and will not be renamed or modified.",
+            root_path: this.sourcePath.trim(),
+            action: {
+              kind: "register_reference_root",
+              root_path: this.sourcePath.trim(),
+            },
+            details: {
+              title: "Register a reference-only library root",
+              series_count: 0,
+              location_count: Number(this.layoutPreview.files_considered || 0),
+              known_paths: [this.sourcePath.trim()],
+              steps: [
+                "Register this exact folder as an enabled library root for existing-file references.",
+                "Keep managed writes disabled so Pullbox cannot rename or modify files in this folder.",
+                "Recheck the folder before starting the scan.",
+              ],
+            },
+          });
+        }
+        if (
+          !sourceOutsideLibraryRoot ||
+          otherLayoutWarnings.length ||
+          Number(this.layoutPreview.files_outside_root || 0) > 0 ||
+          !!this.layoutPreview.partial
+        ) {
+          items.push({
+            key: "in-place-layout",
+            code: "in_place_layout_unavailable",
+            blocks_import: true,
+            reason: "Some files cannot be safely referenced in place",
+            suggested_action:
+              "Review the folder details and correct the listed source layout or access problem.",
+            root_path: this.sourcePath.trim(),
+            action: null,
+            details: {
+              title: "Review files that cannot be referenced",
+              series_count: 0,
+              location_count: Number(this.layoutPreview.files_considered || 0),
+              known_paths: [this.sourcePath.trim()],
+              steps: [
+                "Review the folder-layout details for paths Pullbox could not safely reference.",
+                "Correct the source layout or access problem shown in the preview.",
+                "Recheck the import issues before starting the scan.",
+              ],
+            },
+          });
+        }
       }
       if (this.sourceType !== "mylar3") {
         return items;
@@ -3932,18 +3978,10 @@ function importSourceData(config) {
               await this.previewMylarPaths();
             }
             break;
-          case "switch_to_managed_copy":
-            this.setFileHandlingMode("managed_copy");
-            if (this.sourceType === "mylar3") {
-              await this.previewMylarPaths();
-            } else {
-              await this.previewLayout();
-            }
-            break;
           case "register_reference_root":
-            if (!(await this.registerMylarReferenceRoot(action))) {
+            if (!(await this.registerReferenceRoot(action))) {
               throw new Error(
-                this.mylarRootRegistrationError ||
+                this.referenceRootRegistrationError ||
                   "Pullbox could not register this path for existing files.",
               );
             }

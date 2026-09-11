@@ -87,6 +87,127 @@ class TestImportCollectionTab:
             "No preferred destination"
         )
 
+    def test_folder_in_place_resolution_registers_source_as_reference_root(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        from playwright.sync_api import expect
+
+        source_path = "/imports/pullbox-real-world-import-lab/profiles/folder/source/comics"
+        root_created = False
+        preview_requests: list[dict[str, object]] = []
+        create_requests: list[dict[str, object]] = []
+
+        def fulfill_layout_preview(route: Route) -> None:
+            response = {
+                "effective_spec": {
+                    "schema_version": 1,
+                    "mode": "auto",
+                    "preset": None,
+                    "series_path_template": None,
+                    "issue_filename_template": None,
+                    "selected_cluster_id": None,
+                    "fallback_to_auto": True,
+                },
+                "classification": "series_folders",
+                "clusters": [],
+                "directories_considered": 3,
+                "files_considered": 12,
+                "files_fitting": 12,
+                "files_ambiguous": 0,
+                "files_outside_root": 0,
+                "archive_probes": 0,
+                "can_keep_in_place": root_created,
+                "can_apply_future_policy": False,
+                "partial": False,
+                "warnings": [] if root_created else ["source_outside_library_root"],
+            }
+            route.fulfill(json=response)
+
+        def fulfill_root_preview(route: Route) -> None:
+            preview_requests.append(route.request.post_data_json)
+            route.fulfill(
+                json={
+                    "can_create": True,
+                    "blocking_reasons": [],
+                    "warnings": [],
+                    "normalized_path": source_path,
+                }
+            )
+
+        def fulfill_roots(route: Route) -> None:
+            nonlocal root_created
+            if route.request.method == "POST":
+                create_requests.append(route.request.post_data_json)
+                root_created = True
+                route.fulfill(status=201, json={"id": 91, **route.request.post_data_json})
+                return
+            roots = [
+                {
+                    "id": 1,
+                    "name": "Comics Directory",
+                    "path": "/comics",
+                    "enabled": True,
+                    "allow_referenced_registrations": True,
+                    "allow_managed_writes": True,
+                    "available": True,
+                    "readable": True,
+                    "writable": True,
+                    "is_default_managed_destination": True,
+                }
+            ]
+            if root_created:
+                roots.append(
+                    {
+                        "id": 91,
+                        "name": "Existing files - comics",
+                        "path": source_path,
+                        "enabled": True,
+                        "allow_referenced_registrations": True,
+                        "allow_managed_writes": False,
+                        "available": True,
+                        "readable": True,
+                        "writable": True,
+                        "is_default_managed_destination": False,
+                    }
+                )
+            route.fulfill(json=roots)
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_layout_preview)
+        authed_page.route("**/api/v1/config/library-roots/preview", fulfill_root_preview)
+        authed_page.route("**/api/v1/config/library-roots", fulfill_roots)
+
+        page = ImportPage(authed_page, seeded_server)
+        page.goto(tab="collection")
+        page.show_collection_source_step()
+        page.source_filesystem_card.click()
+        page.source_path_input.fill(source_path)
+        page.file_handling_in_place.click()
+
+        advanced = authed_page.get_by_test_id("import-advanced-options")
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("1")
+        advanced.locator("summary").first.click()
+        issue = advanced.locator("article").filter(
+            has_text="Register this folder for existing files"
+        )
+        expect(issue).to_contain_text(source_path)
+        issue.get_by_role("button", name="Resolve").click()
+
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_be_hidden()
+        expect(page.file_handling_in_place).to_have_attribute("aria-pressed", "true")
+        expect(page.start_scan_button).to_be_enabled()
+        assert preview_requests == [
+            {
+                "name": f"Existing files - comics - {source_path}",
+                "path": source_path,
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": False,
+                "is_default_managed_destination": False,
+            }
+        ]
+        assert create_requests == preview_requests
+
     def test_advanced_attention_distinguishes_repairs_skips_and_manual_fixes(
         self,
         authed_page: Page,

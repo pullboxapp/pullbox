@@ -1128,7 +1128,7 @@ class TestImportShellRouteContracts:
         assert '"/api/v1/config/library-roots/"' in source_controller
         assert 'fetch("/api/v1/config/library-roots"' in source_controller
         assert "refreshImportLibraryRoots: async function" in source_controller
-        assert "registerMylarReferenceRoot: async function" in source_controller
+        assert "registerReferenceRoot: async function" in source_controller
         assert 'request("/api/v1/config/library-roots/preview")' in source_controller
         assert "allow_referenced_registrations: true" in source_controller
         assert "allow_managed_writes: false" in source_controller
@@ -1157,11 +1157,13 @@ class TestImportShellRouteContracts:
         assert 'case "register_reference_root"' in source_controller
         assert 'case "remove_ineffective_mapping"' in source_controller
         assert 'case "select_managed_destination"' in source_controller
-        assert 'case "switch_to_managed_copy"' in source_controller
+        assert 'case "switch_to_managed_copy"' not in source_controller
         attention_start = source_controller.index("advancedAttentionItems: function")
         attention_end = source_controller.index("advancedAttentionCount: function", attention_start)
         attention_controller = source_controller[attention_start:attention_end]
         assert "can_register_reference_root" not in attention_controller
+        assert 'code: "source_outside_library_root"' in attention_controller
+        assert 'kind: "register_reference_root"' in attention_controller
         resolve_start = source_controller.index("resolveAdvancedAttention: async function")
         resolve_end = source_controller.index(
             "skipAdvancedAttention: async function",
