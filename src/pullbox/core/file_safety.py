@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from pullbox.core.archive import comicinfo_member_sort_key
 from pullbox.core.comicinfo import ComicInfoData, parse_comicinfo
 from pullbox.core.filesystem_scan import iter_supported_files_with_handler
 from pullbox.core.page_sources.base import canonical_page_names
@@ -453,7 +454,7 @@ def inspect_zip_archive_safety(
                     and PurePosixPath(entry.filename.replace("\\", "/")).name.lower()
                     == "comicinfo.xml"
                 ),
-                key=lambda entry: entry.filename.casefold(),
+                key=lambda entry: comicinfo_member_sort_key(entry.filename),
             )
             comicinfo: ComicInfoData | None = None
             comicinfo_entry = comicinfo_entries[0].filename if comicinfo_entries else None
@@ -531,6 +532,9 @@ def run_safety_checks(
     Raises ``FileSafetyError`` if any check fails.
     """
     log = logger.bind(download_path=str(download_path))
+
+    if download_path.is_file() and download_path.stat().st_size == 0:
+        raise FileSafetyError("zero_byte_file", details=[str(download_path)])
 
     # 1. Dangerous files on disk
     if block_dangerous:

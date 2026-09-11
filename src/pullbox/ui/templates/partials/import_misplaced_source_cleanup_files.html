@@ -1,0 +1,65 @@
+<div
+  data-testid="misplaced-source-cleanup-file-page-{{ cleanup_action }}"
+  class="mt-3 overflow-hidden rounded-xl border border-pb-border bg-pb-bg/35"
+>
+  <div class="flex flex-wrap items-center justify-between gap-2 border-b border-pb-border px-3 py-2 text-xs text-pb-text-dim">
+    <span>{{ "{:,}".format(cleanup_page.total) }} file{{ '' if cleanup_page.total == 1 else 's' }}</span>
+    <span>Page {{ cleanup_page.page }} of {{ cleanup_page.total_pages }}</span>
+  </div>
+  <div class="divide-y divide-pb-border">
+    {% for item in cleanup_page.items %}
+      {% set evidence = (item.diagnostics or {}).get('mylar3_cross_folder_reconciliation', {}) %}
+      <div class="px-3 py-3">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div class="min-w-0">
+            <p class="break-words font-mono text-xs font-medium text-pb-text">{{ item.file_name }}</p>
+            {% if cleanup_action == 'restore_recorded_path' %}
+            <dl class="mt-2 space-y-2 text-xs leading-5">
+              <div>
+                <dt class="font-medium text-pb-text-muted">Current path</dt>
+                <dd class="break-all font-mono text-pb-text">{{ item.file_path }}</dd>
+              </div>
+              <div>
+                <dt class="font-medium text-pb-text-muted">Proposed path</dt>
+                <dd class="break-all font-mono text-pb-text">{{ evidence.get('recorded_path') }}</dd>
+              </div>
+            </dl>
+            {% else %}
+            <p class="mt-1 break-words text-xs leading-5 text-pb-text-dim">
+              Pullbox verified this is byte-identical to the imported copy. It remains untouched until you confirm moving it to Trash.
+            </p>
+            {% endif %}
+          </div>
+          <button
+            type="button"
+            class="btn-ghost btn-sm"
+            data-testid="misplaced-source-cleanup-preview-{{ item.id }}"
+            hx-get="/import/{{ job_id }}/files/{{ item.id }}/misplaced-source-cleanup/{{ cleanup_action }}/preview"
+            hx-target="#cv-search-modal"
+            hx-swap="innerHTML"
+          >{{ 'Move file' if cleanup_action == 'restore_recorded_path' else 'Move duplicate to Trash' }}</button>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+  {% if cleanup_page.total_pages > 1 %}
+  <div class="flex items-center justify-between gap-2 border-t border-pb-border px-3 py-2">
+    <button
+      type="button"
+      class="btn-ghost btn-sm"
+      {% if cleanup_page.page <= 1 %}disabled{% endif %}
+      hx-get="/import/{{ job_id }}/misplaced-source-cleanup/{{ cleanup_action }}/files?page={{ cleanup_page.page - 1 }}"
+      hx-target="#misplaced-source-cleanup-detail-{{ cleanup_action }}"
+      hx-swap="innerHTML"
+    >Previous</button>
+    <button
+      type="button"
+      class="btn-ghost btn-sm"
+      {% if cleanup_page.page >= cleanup_page.total_pages %}disabled{% endif %}
+      hx-get="/import/{{ job_id }}/misplaced-source-cleanup/{{ cleanup_action }}/files?page={{ cleanup_page.page + 1 }}"
+      hx-target="#misplaced-source-cleanup-detail-{{ cleanup_action }}"
+      hx-swap="innerHTML"
+    >Next</button>
+  </div>
+  {% endif %}
+</div>

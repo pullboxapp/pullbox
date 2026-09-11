@@ -272,6 +272,7 @@ async def register_library_file(
     allow_resource_safety_exception: bool = False,
     replace_existing_library_file: bool = False,
     replacement_trash_dir: Path | None = None,
+    preserve_replaced_artifact: bool = False,
     source_scan_root: Path | None = None,
     strict_import_target: bool = False,
     recover_existing_managed_artifact: bool = False,
@@ -307,6 +308,7 @@ async def register_library_file(
         allow_resource_safety_exception=allow_resource_safety_exception,
         replace_existing_library_file=replace_existing_library_file,
         replacement_trash_dir=replacement_trash_dir,
+        preserve_replaced_artifact=preserve_replaced_artifact,
         source_scan_root=source_scan_root,
         strict_import_target=strict_import_target,
         recover_existing_managed_artifact=recover_existing_managed_artifact,
@@ -345,6 +347,7 @@ async def register_library_file_with_metadata(
     allow_resource_safety_exception: bool = False,
     replace_existing_library_file: bool = False,
     replacement_trash_dir: Path | None = None,
+    preserve_replaced_artifact: bool = False,
     source_scan_root: Path | None = None,
     strict_import_target: bool = False,
     recover_existing_managed_artifact: bool = False,
@@ -642,6 +645,7 @@ async def register_library_file_with_metadata(
                         prepared_source,
                         replace_existing_library_file=replace_existing_library_file,
                         replacement_trash_dir=replacement_trash_dir,
+                        preserve_replaced_artifact=preserve_replaced_artifact,
                     )
                     same_filesystem = await asyncio.to_thread(
                         paths_on_same_filesystem,
@@ -692,6 +696,7 @@ async def register_library_file_with_metadata(
                         prepared_source,
                         replace_existing_library_file=replace_existing_library_file,
                         replacement_trash_dir=replacement_trash_dir,
+                        preserve_replaced_artifact=preserve_replaced_artifact,
                     )
                     if _can_materialize_cbz_with_comicinfo(
                         prepared_source,
@@ -890,27 +895,44 @@ async def register_library_file_with_metadata(
         extension = final_path.suffix.lstrip(".").lower()
         file_format = _FORMAT_MAP.get(extension, FileFormat.CBZ)
 
-        lf = LibraryFile(
-            file_path=str(final_path),
-            file_name=final_path.name,
-            file_size=stat.st_size,
-            file_format=file_format,
-            file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
-            match_confidence=confidence,
-            parsed_series=series.title if series else None,
-            parsed_issue_number=effective_issue.issue_number,
-            parsed_year=series.year_start if series else None,
-            issue_id=issue.id,
-            library_root_id=root.id,
-            naming_snapshot=naming_snapshot,
-            storage_mode=effective_storage_mode,
-            source_signature=(
-                referenced_signature
-                if referenced_signature is not None
-                else managed_placement_signature or build_file_identity_signature(final_path)
-            ),
+        registered_signature = (
+            referenced_signature
+            if referenced_signature is not None
+            else managed_placement_signature or build_file_identity_signature(final_path)
         )
-        session.add(lf)
+        if replacement_stash is not None:
+            # Keep the canonical row identity so every dependent FK survives a
+            # path-changing replacement, including clean-library adoption.
+            lf = replacement_stash.library_file
+            await _update_existing_library_file_from_path(
+                lf,
+                final_path,
+                issue=effective_issue,
+                series=series,
+                root=root,
+                confidence=confidence,
+                naming_snapshot=naming_snapshot,
+                storage_mode=effective_storage_mode,
+                source_signature=registered_signature,
+            )
+        else:
+            lf = LibraryFile(
+                file_path=str(final_path),
+                file_name=final_path.name,
+                file_size=stat.st_size,
+                file_format=file_format,
+                file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                match_confidence=confidence,
+                parsed_series=series.title if series else None,
+                parsed_issue_number=effective_issue.issue_number,
+                parsed_year=series.year_start if series else None,
+                issue_id=issue.id,
+                library_root_id=root.id,
+                naming_snapshot=naming_snapshot,
+                storage_mode=effective_storage_mode,
+                source_signature=registered_signature,
+            )
+            session.add(lf)
 
         # 10. Set Issue status to OWNED
         issue.status = IssueStatus.OWNED
@@ -993,6 +1015,7 @@ async def _stage_replacement_file(
     *,
     replace_existing_library_file: bool,
     replacement_trash_dir: Path | None,
+    preserve_replaced_artifact: bool = False,
 ) -> _ReplacementStash | None:
     """Move an existing issue file aside before materializing a replacement."""
     if not replace_existing_library_file or issue.library_file is None:
@@ -1000,6 +1023,12 @@ async def _stage_replacement_file(
 
     library_file = issue.library_file
     original_path = Path(library_file.file_path)
+    if preserve_replaced_artifact:
+        return _ReplacementStash(
+            library_file=library_file,
+            original_path=original_path,
+            staged_path=None,
+        )
     if not await asyncio.to_thread(original_path.exists):
         return _ReplacementStash(
             library_file=library_file,

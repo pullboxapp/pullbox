@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -21,17 +21,25 @@ from pullbox.models.import_job import (
     ImportedSeries,
     ImportJob,
     ImportJobStatus,
-    ImportSeriesStatus,
     ImportSourceType,
 )
 from pullbox.services.audit_service import AuditService
-from pullbox.services.import_review_actions import apply_safety_allow_once_to_file
+from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
+from pullbox.services.import_review_actions import (
+    apply_safety_allow_once_to_file,
+    apply_safety_skip_to_file,
+    prepare_series_for_safety_rematch,
+)
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
+from pullbox.services.import_story_arc_resolution import (
+    refresh_story_arc_entries_for_import_files,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 IMPORT_SAFETY_BULK_CONFIRMATION: Final = "ALLOW ONCE"
+IMPORT_SAFETY_BULK_SKIP_CONFIRMATION: Final = "SKIP FILES"
 IMPORT_SAFETY_BULK_PAGE_SIZE: Final = 200
 IMPORT_SAFETY_PREVIEW_EXAMPLE_LIMIT: Final = 3
 IMPORT_SAFETY_SNAPSHOT_PAGE_SIZE: Final = 20_000
@@ -40,7 +48,9 @@ _PREVIEW_TOKEN_SALT: Final = "import-safety-category-preview-v1"
 _PREVIEW_TOKEN_MAX_AGE_SECONDS: Final = 15 * 60
 _PREVIEW_TOKEN_VERSION: Final = 1
 _ALLOW_ONCE_ACTION: Final = "allow_once"
+_SKIP_ACTION: Final = "skip"
 _BULK_OVERRIDEABLE_CATEGORIES: Final = frozenset({ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT})
+_BULK_SKIPPABLE_CATEGORIES: Final = frozenset({ImportSafetyCategory.SINGLE_PAGE_COMIC})
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +82,7 @@ class ImportSafetyBulkPreview:
 
 @dataclass(frozen=True, slots=True)
 class ImportSafetyBulkResult:
-    """Counts from one category-specific allow-once operation."""
+    """Counts from one category-specific safety review operation."""
 
     job_id: int
     source_type: ImportSourceType
@@ -266,6 +276,7 @@ def _build_preview_token(
     category: ImportSafetyCategory,
     actor_id: int,
     snapshot: ImportSafetyBulkSnapshot,
+    action: str = _ALLOW_ONCE_ACTION,
 ) -> str:
     return str(
         _serializer().dumps(
@@ -274,7 +285,7 @@ def _build_preview_token(
                 "job_id": job.id,
                 "source_type": job.source_type.value,
                 "category": category.value,
-                "action": _ALLOW_ONCE_ACTION,
+                "action": action,
                 "actor_id": actor_id,
                 "snapshot": _snapshot_payload(snapshot),
             }
@@ -340,13 +351,14 @@ def _validate_preview_token_scope(
     job: ImportJob,
     category: ImportSafetyCategory,
     actor_id: int,
+    action: str = _ALLOW_ONCE_ACTION,
 ) -> ImportSafetyBulkSnapshot:
     if (
         payload.get("version") != _PREVIEW_TOKEN_VERSION
         or _token_int(payload, "job_id") != job.id
         or payload.get("source_type") != job.source_type.value
         or payload.get("category") != category.value
-        or payload.get("action") != _ALLOW_ONCE_ACTION
+        or payload.get("action") != action
         or _token_int(payload, "actor_id") != actor_id
     ):
         raise ValidationError("The safety preview does not match this job and category.")
@@ -403,6 +415,49 @@ async def preview_import_safety_category(
     )
 
 
+async def preview_import_safety_category_skip(
+    session: AsyncSession,
+    job_id: int,
+    category: ImportSafetyCategory,
+    *,
+    actor_id: int,
+    example_limit: int = IMPORT_SAFETY_PREVIEW_EXAMPLE_LIMIT,
+) -> ImportSafetyBulkPreview:
+    """Preview a source-preserving category skip without mutating any file."""
+    if category not in _BULK_SKIPPABLE_CATEGORIES:
+        raise ValidationError("This safety category cannot be bulk-skipped.")
+    job = await _load_review_job(session, job_id)
+    snapshot = await _load_snapshot(session, job_id, category)
+    if snapshot.matching_count == 0:
+        raise ValidationError(
+            "No safety-blocked files in this job use the selected structured category."
+        )
+    skip_snapshot = replace(snapshot, eligible_count=snapshot.matching_count)
+    examples = await _load_bounded_examples(
+        session,
+        job_id,
+        category,
+        limit=example_limit,
+    )
+    return ImportSafetyBulkPreview(
+        job_id=job.id,
+        source_type=job.source_type,
+        category=category,
+        matching_count=skip_snapshot.matching_count,
+        affected_count=skip_snapshot.matching_count,
+        skipped_count=0,
+        examples=examples,
+        overrideable=True,
+        preview_token=_build_preview_token(
+            job=job,
+            category=category,
+            actor_id=actor_id,
+            snapshot=skip_snapshot,
+            action=_SKIP_ACTION,
+        ),
+    )
+
+
 def _result(
     *,
     job_id: int,
@@ -430,12 +485,14 @@ async def _write_durable_bulk_audit(
     actor_username: str | None,
     source_ip: str | None,
     outcome: Literal["requested", "completed", "interrupted"],
+    action: str = _ALLOW_ONCE_ACTION,
 ) -> None:
     """Commit a fixed-field, path-free audit record before returning."""
+    action_label = "skip" if action == _SKIP_ACTION else "override"
     detail_by_outcome = {
-        "requested": "Import safety category override requested.",
-        "completed": "Import safety category override completed.",
-        "interrupted": "Import safety category override interrupted.",
+        "requested": f"Import safety category {action_label} requested.",
+        "completed": f"Import safety category {action_label} completed.",
+        "interrupted": f"Import safety category {action_label} interrupted.",
     }
     await AuditService.log_event(
         session,
@@ -448,7 +505,7 @@ async def _write_durable_bulk_audit(
             "job_id": result.job_id,
             "source_type": result.source_type.value,
             "category": result.category.value,
-            "action": _ALLOW_ONCE_ACTION,
+            "action": action,
             "affected_count": result.affected_count,
             "skipped_count": result.skipped_count,
             "outcome": outcome,
@@ -611,6 +668,7 @@ async def allow_import_safety_category_once(
             break
 
         affected_series_ids: set[int] = set()
+        affected_file_ids: list[int] = []
         for imp_file in page:
             cursor = max(cursor, imp_file.id)
             diagnostics = imp_file.diagnostics or {}
@@ -623,6 +681,7 @@ async def allow_import_safety_category_once(
             ):
                 continue
             apply_safety_allow_once_to_file(imp_file, allowed_at=allowed_at)
+            affected_file_ids.append(imp_file.id)
             affected_series_ids.add(imp_file.import_series_id)
             affected_count += 1
 
@@ -640,11 +699,13 @@ async def allow_import_safety_category_once(
                 .all()
             )
             for series in imported_series:
-                series.selected_for_import = False
-                if series.status in {ImportSeriesStatus.MATCHED, ImportSeriesStatus.DUPLICATE}:
-                    diagnostics = dict(series.diagnostics or {})
-                    diagnostics["rematch_pending"] = True
-                    series.diagnostics = diagnostics
+                prepare_series_for_safety_rematch(series)
+
+        await refresh_story_arc_entries_for_import_files(
+            session,
+            import_job_id=job_id,
+            import_file_ids=affected_file_ids,
+        )
 
         await session.flush()
         await session.commit()
@@ -679,4 +740,228 @@ async def allow_import_safety_category_once(
         source_ip=source_ip,
         outcome="completed",
     )
+    return result
+
+
+async def skip_import_safety_category(
+    session: AsyncSession,
+    job_id: int,
+    category: ImportSafetyCategory,
+    *,
+    actor_id: int,
+    actor_username: str | None = None,
+    source_ip: str | None = None,
+    preview_token: str,
+    page_size: int = IMPORT_SAFETY_BULK_PAGE_SIZE,
+) -> ImportSafetyBulkResult:
+    """Skip one previewed one-page category while preserving every source file."""
+    if category not in _BULK_SKIPPABLE_CATEGORIES:
+        raise ValidationError("This safety category cannot be bulk-skipped.")
+    if page_size < 1 or page_size > IMPORT_SAFETY_BULK_PAGE_SIZE:
+        raise ValidationError(
+            f"Safety bulk page size must be between 1 and {IMPORT_SAFETY_BULK_PAGE_SIZE}."
+        )
+
+    job = await _load_review_job(session, job_id)
+    payload = _load_preview_token(preview_token)
+    preview_snapshot = _validate_preview_token_scope(
+        payload,
+        job=job,
+        category=category,
+        actor_id=actor_id,
+        action=_SKIP_ACTION,
+    )
+    if preview_snapshot.matching_count <= 0 or preview_snapshot.max_file_id is None:
+        raise ValidationError("This safety category has no files to skip.")
+
+    requested_result = _result(
+        job_id=job_id,
+        source_type=job.source_type,
+        category=category,
+        affected_count=preview_snapshot.matching_count,
+        original_matching_count=preview_snapshot.matching_count,
+        pages_processed=0,
+    )
+    await _write_durable_bulk_audit(
+        session,
+        requested_result,
+        actor_id=actor_id,
+        actor_username=actor_username,
+        source_ip=source_ip,
+        outcome="requested",
+        action=_SKIP_ACTION,
+    )
+
+    try:
+        job = await _load_review_job(session, job_id)
+        current_snapshot = replace(
+            await _load_snapshot(session, job_id, category),
+            eligible_count=preview_snapshot.matching_count,
+        )
+    except (NotFoundError, ValidationError):
+        interrupted_result = _result(
+            job_id=job_id,
+            source_type=job.source_type,
+            category=category,
+            affected_count=0,
+            original_matching_count=preview_snapshot.matching_count,
+            pages_processed=0,
+        )
+        await _write_durable_bulk_audit(
+            session,
+            interrupted_result,
+            actor_id=actor_id,
+            actor_username=actor_username,
+            source_ip=source_ip,
+            outcome="interrupted",
+            action=_SKIP_ACTION,
+        )
+        raise
+    if current_snapshot != preview_snapshot:
+        interrupted_result = _result(
+            job_id=job_id,
+            source_type=job.source_type,
+            category=category,
+            affected_count=0,
+            original_matching_count=preview_snapshot.matching_count,
+            pages_processed=0,
+        )
+        await _write_durable_bulk_audit(
+            session,
+            interrupted_result,
+            actor_id=actor_id,
+            actor_username=actor_username,
+            source_ip=source_ip,
+            outcome="interrupted",
+            action=_SKIP_ACTION,
+        )
+        raise ValidationError("The safety category changed. Preview it again before confirming.")
+
+    affected_count = 0
+    pages_processed = 0
+    cursor = 0
+    max_file_id = preview_snapshot.max_file_id
+    max_updated_at = (
+        datetime.fromisoformat(preview_snapshot.max_updated_at)
+        if preview_snapshot.max_updated_at is not None
+        else None
+    )
+    while True:
+        current_job = await session.get(ImportJob, job_id, populate_existing=True)
+        if (
+            current_job is None
+            or current_job.status != ImportJobStatus.REVIEW
+            or current_job.control_request != ImportControlRequest.NONE
+        ):
+            partial_result = _result(
+                job_id=job_id,
+                source_type=job.source_type,
+                category=category,
+                affected_count=affected_count,
+                original_matching_count=preview_snapshot.matching_count,
+                pages_processed=pages_processed,
+            )
+            await _write_durable_bulk_audit(
+                session,
+                partial_result,
+                actor_id=actor_id,
+                actor_username=actor_username,
+                source_ip=source_ip,
+                outcome="interrupted",
+                action=_SKIP_ACTION,
+            )
+            if affected_count:
+                raise ImportSafetyBulkInterruptedError(partial_result, reason="job_state_changed")
+            raise ValidationError("The import job is no longer available for safety review.")
+
+        page = list(
+            (
+                await session.execute(
+                    select(ImportedFile)
+                    .where(
+                        *_category_filters(job_id, category),
+                        ImportedFile.id > cursor,
+                        ImportedFile.id <= max_file_id,
+                        *((ImportedFile.updated_at <= max_updated_at,) if max_updated_at else ()),
+                    )
+                    .order_by(ImportedFile.id)
+                    .limit(page_size)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not page:
+            break
+
+        affected_series_ids: set[int] = set()
+        affected_file_ids: list[int] = []
+        for imp_file in page:
+            cursor = max(cursor, imp_file.id)
+            diagnostics = imp_file.diagnostics or {}
+            raw_block = diagnostics.get("safety_block")
+            if not isinstance(raw_block, Mapping) or raw_block.get("category") != category.value:
+                continue
+            apply_safety_skip_to_file(imp_file)
+            affected_file_ids.append(imp_file.id)
+            affected_series_ids.add(imp_file.import_series_id)
+            affected_count += 1
+
+        if affected_series_ids:
+            imported_series = list(
+                (
+                    await session.execute(
+                        select(ImportedSeries).where(
+                            ImportedSeries.import_job_id == job_id,
+                            ImportedSeries.id.in_(sorted(affected_series_ids)),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for series in imported_series:
+                series.selected_for_import = False
+            await recompute_file_counters(
+                session,
+                current_job,
+                series_ids=sorted(affected_series_ids),
+            )
+            await recompute_series_counters(session, current_job)
+
+        await refresh_story_arc_entries_for_import_files(
+            session,
+            import_job_id=job_id,
+            import_file_ids=affected_file_ids,
+        )
+
+        await session.flush()
+        await session.commit()
+        pages_processed += 1
+        session.sync_session.expunge_all()
+
+    result = _result(
+        job_id=job_id,
+        source_type=job.source_type,
+        category=category,
+        affected_count=affected_count,
+        original_matching_count=preview_snapshot.matching_count,
+        pages_processed=pages_processed,
+    )
+    outcome: Literal["completed", "interrupted"] = (
+        "completed" if affected_count == preview_snapshot.matching_count else "interrupted"
+    )
+    await _write_durable_bulk_audit(
+        session,
+        result,
+        actor_id=actor_id,
+        actor_username=actor_username,
+        source_ip=source_ip,
+        outcome=outcome,
+        action=_SKIP_ACTION,
+    )
+    if outcome == "interrupted":
+        if affected_count:
+            raise ImportSafetyBulkInterruptedError(result, reason="scope_changed_during_apply")
+        raise ValidationError("The safety category changed. Preview it again before confirming.")
     return result

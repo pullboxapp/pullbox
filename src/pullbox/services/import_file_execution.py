@@ -107,6 +107,135 @@ class _PlaceholderIssueTarget:
     metadata_source: str
 
 
+@dataclass(frozen=True, slots=True)
+class _VerifiedLibraryAdoption:
+    rollback_snapshot: dict[str, object]
+
+
+def _library_adoption_mapping(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigurationError("Clean-library adoption evidence is invalid. Preview it again.")
+    return dict(value)
+
+
+def _library_adoption_positive_int(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigurationError(f"Clean-library adoption {label} is invalid. Preview it again.")
+    return value
+
+
+async def _load_verified_library_adoption(
+    session: AsyncSession,
+    *,
+    job: ImportJob,
+    imported_file: ImportedFile,
+    issue: Issue,
+) -> _VerifiedLibraryAdoption | None:
+    evidence = _library_adoption_mapping(
+        dict(imported_file.diagnostics or {}).get("library_adoption")
+    )
+    if evidence is None:
+        return None
+    if evidence.get("schema_version") != 1 or evidence.get("source_preserved") is not True:
+        raise ConfigurationError("Clean-library adoption evidence is invalid. Preview it again.")
+    if evidence.get("source_storage_mode") != LibraryFileStorageMode.REFERENCED.value:
+        raise ConfigurationError("Only referenced library files can be adopted safely.")
+
+    source_imported_file_id = _library_adoption_positive_int(
+        evidence.get("source_imported_file_id"),
+        "source import file",
+    )
+    source_library_file_id = _library_adoption_positive_int(
+        evidence.get("source_library_file_id"),
+        "source library file",
+    )
+    source_library_root_id = _library_adoption_positive_int(
+        evidence.get("source_library_root_id"),
+        "source library root",
+    )
+    source_job_id = _library_adoption_positive_int(
+        evidence.get("source_import_job_id"),
+        "source import job",
+    )
+    if (
+        job.file_handling_mode is not ImportFileHandlingMode.MANAGED_COPY
+        or not job.source_preserved
+    ):
+        raise ConfigurationError(
+            "Clean-library adoption evidence is attached to the wrong import job."
+        )
+    source_path = evidence.get("source_path")
+    expected_signature = evidence.get("source_signature")
+    if not isinstance(source_path, str) or not source_path:
+        raise ConfigurationError("Clean-library adoption source path is invalid.")
+    if not isinstance(expected_signature, dict) or not expected_signature:
+        raise ConfigurationError("Clean-library adoption source evidence is missing.")
+
+    source_imported_file = await session.get(ImportedFile, source_imported_file_id)
+    source_library_file = await session.get(LibraryFile, source_library_file_id)
+    source_series = await session.get(Series, issue.series_id)
+    if (
+        source_imported_file is None
+        or source_imported_file.import_job_id != source_job_id
+        or source_imported_file.status is not ImportedFileStatus.IMPORTED
+        or source_imported_file.library_file_id != source_library_file_id
+        or source_imported_file.matched_issue_id != issue.id
+        or source_imported_file.file_path != source_path
+        or source_series is None
+    ):
+        raise ConfigurationError(
+            "The original import reference changed after preview. Preview it again."
+        )
+    if (
+        source_library_file is None
+        or source_library_file.storage_mode is not LibraryFileStorageMode.REFERENCED
+        or source_library_file.issue_id != issue.id
+        or source_library_file.library_root_id != source_library_root_id
+        or source_library_file.file_path != source_path
+        or imported_file.file_path != source_path
+        or dict(source_library_file.source_signature or {}) != expected_signature
+    ):
+        raise ConfigurationError(
+            "The referenced library file changed after preview. Preview it again."
+        )
+    current_signature = await asyncio.to_thread(
+        build_file_identity_signature,
+        Path(source_path),
+    )
+    validate_file_identity_signature(expected_signature, current_signature)
+
+    return _VerifiedLibraryAdoption(
+        rollback_snapshot={
+            "schema_version": 1,
+            "source_imported_file_id": source_imported_file_id,
+            "source_library_file_id": source_library_file_id,
+            "file_path": source_library_file.file_path,
+            "file_name": source_library_file.file_name,
+            "file_size": source_library_file.file_size,
+            "file_format": source_library_file.file_format.value,
+            "file_hash": source_library_file.file_hash,
+            "file_modified_at": source_library_file.file_modified_at.isoformat(),
+            "match_confidence": source_library_file.match_confidence.value,
+            "parsed_series": source_library_file.parsed_series,
+            "parsed_issue_number": source_library_file.parsed_issue_number,
+            "parsed_year": source_library_file.parsed_year,
+            "parsed_publisher": source_library_file.parsed_publisher,
+            "has_comicinfo": source_library_file.has_comicinfo,
+            "naming_snapshot": dict(source_library_file.naming_snapshot or {}),
+            "storage_mode": source_library_file.storage_mode.value,
+            "source_signature": dict(source_library_file.source_signature or {}),
+            "issue_id": source_library_file.issue_id,
+            "library_root_id": source_library_file.library_root_id,
+            "source_series_id": source_series.id,
+            "previous_series_path": source_series.path,
+            "previous_series_library_root_id": source_series.library_root_id,
+            "previous_series_preferred_library_root_id": (source_series.preferred_library_root_id),
+        }
+    )
+
+
 def _cleanup_failed_library_artifact(
     *,
     destination_path: Path | None,
@@ -1027,7 +1156,18 @@ async def process_import_series_files(
                 imp_file.match_confidence or "", MatchConfidence.MEDIUM
             )
 
-            if skip_existing_enabled and resolved_issue.id in owned_issue_ids:
+            library_adoption = await _load_verified_library_adoption(
+                session,
+                job=current_job,
+                imported_file=imp_file,
+                issue=resolved_issue,
+            )
+
+            if (
+                library_adoption is None
+                and skip_existing_enabled
+                and resolved_issue.id in owned_issue_ids
+            ):
                 imp_file.status = ImportedFileStatus.SKIPPED
                 await log_event(
                     session,
@@ -1154,10 +1294,29 @@ async def process_import_series_files(
                     ),
                     recovery_imported_file_id=int(imp_file.id),
                     recovery_original_source_path=Path(imp_file.file_path),
+                    replace_existing_library_file=library_adoption is not None,
+                    replacement_trash_dir=None,
+                    preserve_replaced_artifact=library_adoption is not None,
                     source_scan_root=source_scan_root,
                     strict_import_target=not in_place,
                 )
             library_file, registration = _registration_outcome(registration_result)
+            if library_adoption is not None:
+                adopted_series = await session.get(Series, resolved_issue.series_id)
+                if adopted_series is None:  # pragma: no cover - issue FK guarantees this
+                    raise ConfigurationError("The clean-library series no longer exists.")
+                adopted_series.path = str(Path(library_file.file_path).parent)
+                adopted_series.library_root_id = library_file.library_root_id
+                adopted_series.preferred_library_root_id = library_file.library_root_id
+                library_adoption.rollback_snapshot.update(
+                    {
+                        "installed_series_path": adopted_series.path,
+                        "installed_series_library_root_id": adopted_series.library_root_id,
+                        "installed_series_preferred_library_root_id": (
+                            adopted_series.preferred_library_root_id
+                        ),
+                    }
+                )
             library_file.has_comicinfo = bool(
                 library_file.has_comicinfo
                 or imp_file.has_comicinfo
@@ -1304,6 +1463,9 @@ async def process_import_series_files(
                         transfer_method=(
                             source_transfer_method if move_to_library else "leave_in_place"
                         ),
+                    ),
+                    "adopted_reference": (
+                        library_adoption.rollback_snapshot if library_adoption is not None else None
                     ),
                 },
             )

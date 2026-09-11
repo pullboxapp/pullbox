@@ -18,6 +18,83 @@ pytestmark = pytest.mark.e2e
 class TestSettingsPage:
     """Behavior-first E2E checks for the settings shell."""
 
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_disabled_root_removal_preview_confirmation_and_cancel(
+        self,
+        authed_page,
+        seeded_server: str,
+        blocked: bool,
+    ) -> None:  # type: ignore[no-untyped-def]
+        root = {
+            "id": 702,
+            "name": "Offline archive",
+            "path": "/offline/library",
+            "enabled": False,
+            "is_default_managed_destination": False,
+            "allow_managed_writes": True,
+            "allow_referenced_registrations": True,
+            "status": "unavailable",
+            "available": False,
+            "readable": False,
+            "writable": False,
+            "free_bytes": None,
+            "can_disable": True,
+            "warnings": [],
+        }
+        removed = []
+        errors = []
+        authed_page.on("pageerror", lambda error: errors.append(str(error)))
+        authed_page.route(
+            "**/api/v1/config/library-roots",
+            lambda route: route.fulfill(
+                json=[root],
+            ),
+        )
+        authed_page.route(
+            "**/api/v1/config/library-roots/702/remove/preview",
+            lambda route: route.fulfill(
+                json={
+                    **root,
+                    "can_remove": not blocked,
+                    "history_count": 1,
+                    "has_naming_policy": False,
+                    "dependencies": {"series": int(blocked)},
+                    "preview_token": None if blocked else "signed-preview",
+                    "blocking_reasons": ["1 series still uses this root. Relocate it first."]
+                    if blocked
+                    else [],
+                },
+            ),
+        )
+
+        def delete_root(route):  # type: ignore[no-untyped-def]
+            removed.append(route.request.post_data_json)
+            assert route.request.method == "DELETE"
+            route.fulfill(status=204)
+
+        authed_page.route("**/api/v1/config/library-roots/702", delete_root)
+        SettingsPage(authed_page, seeded_server).goto("media")
+        card = authed_page.get_by_test_id("settings-media-library-root-702")
+        card.get_by_role("button", name="Remove Offline archive").click()
+        preview = card.get_by_test_id("settings-media-library-root-removal")
+        preview.wait_for(state="visible")
+        assert "No folders or files will be deleted." in preview.inner_text()
+        confirm = preview.get_by_role("button", name="Confirm removal")
+        if blocked:
+            assert confirm.is_disabled()
+            assert "1 series" in preview.inner_text()
+        else:
+            confirm.click()
+            dialog = authed_page.locator("#pb-confirm-dialog")
+            dialog.get_by_role("button", name="Cancel", exact=True).click()
+            assert removed == []
+            assert card.is_visible()
+            confirm.click()
+            dialog.get_by_role("button", name="Remove root", exact=True).click()
+            card.wait_for(state="detached")
+            assert removed == [{"preview_token": "signed-preview", "confirmation": "REMOVE"}]
+        assert errors == []
+
     def test_media_library_root_manager_previews_and_adds_a_root(
         self,
         authed_page,

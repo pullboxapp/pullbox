@@ -561,6 +561,12 @@ import_progress_state = import_routes.import_progress_state
 import_review_partial = import_routes.import_review_partial
 import_series_reconcile = import_routes.import_series_reconcile
 import_results_partial = import_routes.import_results_partial
+import_clean_library_panel = import_routes.import_clean_library_panel
+import_misplaced_source_cleanup_files_partial = (
+    import_routes.import_misplaced_source_cleanup_files_partial
+)
+import_misplaced_source_cleanup_preview = import_routes.import_misplaced_source_cleanup_preview
+import_misplaced_source_cleanup_apply = import_routes.import_misplaced_source_cleanup_apply
 import_series_details_partial = import_routes.import_series_details_partial
 import_conflicts_partial = import_routes.import_conflicts_partial
 import_log_panel = import_routes.import_log_panel

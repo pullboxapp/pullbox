@@ -134,6 +134,118 @@ async def test_in_place_mapping_is_tried_before_external_identity_is_rejected(
     assert preview.can_confirm is True
 
 
+async def test_in_place_outside_paths_are_grouped_by_unregistered_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "media" / "comics"
+    (source_root / "Batman (2025)").mkdir(parents=True)
+    (source_root / "Superman (2025)").mkdir()
+    managed_root = tmp_path / "pullbox-library"
+    managed_root.mkdir()
+    database = tmp_path / "mylar.db"
+    _write_mylar_path_database(
+        database,
+        comics=[
+            ("CV-1", str(source_root / "Batman (2025)")),
+            ("CV-2", str(source_root / "Superman (2025)")),
+        ],
+        issues=[],
+    )
+    db_session.add(
+        LibraryRoot(
+            name="Pullbox library",
+            path=str(managed_root),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+        )
+    )
+    await db_session.flush()
+
+    preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=True,
+        mappings=[],
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+    )
+
+    assert preview.resolution.outside_root == 2
+    assert [group.model_dump() for group in preview.problem_groups] == [
+        {
+            "root_path": str(source_root),
+            "outcome": "outside_root",
+            "series_count": 2,
+            "location_count": 2,
+            "reason": (f"2 series use {source_root}, which isn't registered as a library root."),
+            "suggested_action": (
+                "Register this path for existing files, then Pullbox will analyze the paths again."
+            ),
+            "can_register_reference_root": True,
+        }
+    ]
+    assert len(preview.attention_items) == 1
+    attention = preview.attention_items[0]
+    assert attention.code == "outside_root"
+    assert attention.blocks_import is True
+    assert attention.root_path == str(source_root)
+    assert attention.action is not None
+    assert attention.action.kind == "register_reference_root"
+    assert attention.action.root_path == str(source_root)
+    assert len(attention.action.fingerprint) == 64
+    assert attention.details.series_count == 2
+    assert attention.details.location_count == 2
+    assert attention.details.known_paths[0] == str(source_root)
+    assert str(source_root / "Batman (2025)") in attention.details.known_paths
+    assert any(str(source_root) in step for step in attention.details.steps)
+    assert preview.attention_fingerprint
+
+
+async def test_in_place_nested_publisher_paths_share_one_unregistered_root_group(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "media" / "comics"
+    (source_root / "DC Comics" / "Batman (2025)").mkdir(parents=True)
+    (source_root / "Marvel" / "Daredevil (2025)").mkdir(parents=True)
+    managed_root = tmp_path / "pullbox-library"
+    managed_root.mkdir()
+    database = tmp_path / "mylar.db"
+    _write_mylar_path_database(
+        database,
+        comics=[
+            ("CV-1", str(source_root / "DC Comics" / "Batman (2025)")),
+            ("CV-2", str(source_root / "Marvel" / "Daredevil (2025)")),
+        ],
+        issues=[],
+    )
+    db_session.add(
+        LibraryRoot(
+            name="Pullbox library",
+            path=str(managed_root),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+        )
+    )
+    await db_session.flush()
+
+    preview = await path_preflight.Mylar3PathPreflightAnalyzer().analyze(
+        db_session,
+        database,
+        auto_detect=True,
+        mappings=[],
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+    )
+
+    assert preview.resolution.outside_root == 2
+    assert len(preview.problem_groups) == 1
+    assert preview.problem_groups[0].root_path == str(source_root)
+    assert preview.problem_groups[0].series_count == 2
+    assert preview.problem_groups[0].can_register_reference_root is True
+
+
 async def test_incomplete_automatic_mapping_cannot_be_confirmed(
     db_session: AsyncSession,
     tmp_path: Path,
@@ -317,6 +429,17 @@ async def test_identity_missing_paths_have_actionable_exceptions_and_safe_contin
     assert data.get("can_continue_with_unresolved") is True
     assert data.get("requires_unresolved_acknowledgement") is True
     assert preview.can_confirm is False
+    unresolved_attention = {
+        item.code: item for item in preview.attention_items if item.code in {"missing", "unmapped"}
+    }
+    assert set(unresolved_attention) == {"missing", "unmapped"}
+    for item in unresolved_attention.values():
+        assert item.blocks_import is False
+        assert item.action is not None
+        assert item.action.kind == "acknowledge_unavailable"
+        assert item.action.fingerprint
+        assert item.details.known_paths
+        assert item.details.steps
     missing = next(
         item for item in data["exceptions"] if item["stored_path"] == str(root / "Missing")
     )
@@ -379,6 +502,10 @@ async def test_entirely_unavailable_library_cannot_continue(
         )
         assert preview.can_confirm is False
         assert preview.model_dump().get("can_continue_with_unresolved") is False
+        assert preview.attention_items
+        assert all(item.blocks_import for item in preview.attention_items)
+        assert all(item.action is None for item in preview.attention_items)
+        assert all(item.details.steps for item in preview.attention_items)
 
 
 async def test_io_errors_and_sensitive_missing_paths_are_not_skippable(

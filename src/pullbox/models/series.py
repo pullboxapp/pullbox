@@ -146,10 +146,10 @@ class Series(Base, IdentityMixin, TimestampMixin):
         ForeignKey("publishers.id", ondelete="SET NULL")
     )
     library_root_id: Mapped[int | None] = mapped_column(
-        ForeignKey("library_roots.id", ondelete="SET NULL")
+        ForeignKey("library_roots.id", ondelete="RESTRICT")
     )
     preferred_library_root_id: Mapped[int | None] = mapped_column(
-        ForeignKey("library_roots.id", ondelete="SET NULL")
+        ForeignKey("library_roots.id", ondelete="RESTRICT")
     )
 
     # Relationships

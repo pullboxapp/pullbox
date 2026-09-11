@@ -109,7 +109,34 @@ class ImportPage(BasePage):
 
     @property
     def source_layout_section(self) -> Locator:
-        return self.page.locator("[data-testid='import-collection-layout-section']").first
+        return self.page.locator("[data-testid='import-layout-advanced']").first
+
+    @property
+    def advanced_options(self) -> Locator:
+        return self.page.locator("[data-testid='import-advanced-options']").first
+
+    @property
+    def advanced_file_management(self) -> Locator:
+        return self.page.locator("[data-testid='import-advanced-file-management']").first
+
+    def open_advanced_options(self) -> None:
+        if not self.advanced_options.evaluate("element => element.open"):
+            self.advanced_options.locator("summary").first.click()
+
+    def open_layout_options(self) -> None:
+        self.open_advanced_options()
+        if not self.source_layout_section.evaluate("element => element.open"):
+            self.source_layout_section.locator("summary").first.click()
+
+    def open_file_management_options(self) -> None:
+        self.open_advanced_options()
+        if not self.advanced_file_management.evaluate("element => element.open"):
+            self.advanced_file_management.locator("summary").first.click()
+
+    def open_mylar_path_options(self) -> None:
+        self.open_advanced_options()
+        if not self.mylar_path_section.evaluate("element => element.open"):
+            self.mylar_path_section.locator("summary").first.click()
 
     @property
     def source_layout_publisher_series(self) -> Locator:
@@ -173,7 +200,21 @@ class ImportPage(BasePage):
 
     @property
     def unmatched_panel(self) -> Locator:
-        return self.page.locator("[data-testid='import-orphaned-page']").first
+        return self.page.locator("[data-testid='import-follow-up-page']").first
+
+    @property
+    def follow_up_job_list(self) -> Locator:
+        return self.page.locator("[data-testid='import-follow-up-job-list']").first
+
+    @property
+    def follow_up_jobs_table(self) -> Locator:
+        return self.page.locator("[data-testid='import-follow-up-jobs-table']").first
+
+    def open_follow_up_job(self, source_path: str) -> None:
+        row = self.follow_up_jobs_table.locator("tbody tr").filter(has_text=source_path).first
+        row.get_by_role("link").click()
+        self.wait_for_htmx()
+        self.unmatched_table.wait_for(state="visible", timeout=5000)
 
     @property
     def stepper(self) -> Locator:
@@ -329,6 +370,10 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-results-retry-action']").first
 
     @property
+    def review_follow_up_button(self) -> Locator:
+        return self.page.locator("[data-testid='import-results-follow-up-action'] a").first
+
+    @property
     def rollback_import_button(self) -> Locator:
         return self.page.locator("[data-testid='import-results-rollback-action']").first
 
@@ -432,7 +477,11 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-orphaned-modal-host']").first
 
     def select_unmatched_view(self, key: str) -> None:
-        self.select_dropdown_option("import-orphaned-view", key)
+        follow_up_view = self.dropdown("import-follow-up-view")
+        dropdown_name = (
+            "import-follow-up-view" if follow_up_view.is_visible() else "import-orphaned-view"
+        )
+        self.select_dropdown_option(dropdown_name, key)
 
     def show_collection_source_step(self) -> None:
         self.page.evaluate(

@@ -38,10 +38,67 @@
     failedCount: {{ failed_count }},
     failedFilesCount: {{ files_failed }},
     canRollback: {{ can_rollback|tojson|forceescape }},
+    defaultCleanLibraryRootId: {{ (clean_library_target_roots|default([])|first|default({})).get('id', '')|tojson|forceescape }},
+    refreshUrl: {{ ('/import?tab=follow-up&job_id=' ~ job.id)|tojson|forceescape if follow_up_workspace|default(false) else ('/import/' ~ job.id ~ '/results-partial')|tojson|forceescape }},
+    refreshTarget: {{ '#import-orphaned-results'|tojson|forceescape if follow_up_workspace|default(false) else "[data-testid='import-collection-results']"|tojson|forceescape }},
   })"
-  data-testid="import-collection-results"
+  data-testid="{{ 'import-follow-up-job-actions' if follow_up_workspace|default(false) else 'import-collection-results' }}"
   class="space-y-6"
 >
+  {% if follow_up_workspace|default(false) %}
+  <div data-testid="import-follow-up-job-action-bar" class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        {% if (failed_count > 0 or files_failed > 0) and not job.removed_library_root_snapshot %}
+        <button
+          type="button"
+          data-testid="import-results-retry-action"
+          :disabled="retrying"
+          @click="retryFailed()"
+          class="btn-warning btn-sm inline-flex items-center gap-2"
+        >
+          <svg x-show="retrying" x-cloak class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          </svg>
+          <span x-text="retrying ? 'Retrying...' : 'Retry failed'"></span>
+        </button>
+        {% endif %}
+        <span x-show="retryError" x-cloak x-text="retryError" class="text-xs text-pb-error"></span>
+      </div>
+      <a href="/import?tab=history" class="btn-ghost btn-sm">View import history</a>
+    </div>
+  </div>
+  {% else %}
+  {% set follow_up_group_count = follow_up_group_count|default(0) %}
+  {% if follow_up_group_count > 0 %}
+  <section data-testid="import-results-follow-up-action" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Follow-up ready</p>
+        <h3 class="section-title-plain">{{ follow_up_group_count }} follow-up group{{ '' if follow_up_group_count == 1 else 's' }} need attention</h3>
+        <p class="section-copy">The import is complete. Matching, recovery, and cleanup decisions are saved in one workspace so you can handle them when convenient.</p>
+      </div>
+      <div class="section-header-actions">
+        <a
+          href="/import?tab=follow-up&amp;job_id={{ job.id }}"
+          hx-get="/import?tab=follow-up&amp;job_id={{ job.id }}"
+          hx-target="#import-content"
+          hx-swap="outerHTML"
+          hx-push-url="true"
+          class="btn-warning btn-sm"
+        >Review follow-up</a>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+  {% if job.removed_library_root_snapshot %}
+  <div class="info-panel" role="status">
+    <p class="font-semibold">Original library root removed</p>
+    <p>{{ job.removed_library_root_snapshot.name }}: <span class="break-all font-mono">{{ job.removed_library_root_snapshot.path }}</span></p>
+    <p>Files and import history were preserved. To retry, start a new import and explicitly choose an enabled destination.</p>
+  </div>
+  {% endif %}
   <div
     data-testid="import-results-action-bar"
     class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3"
@@ -65,22 +122,6 @@
           </svg>
           <span x-show="!rollingBack">Rollback import</span>
           <span x-show="rollingBack" x-cloak>Starting rollback...</span>
-        </button>
-        {% endif %}
-        {% if failed_count > 0 or files_failed > 0 %}
-        <button
-          type="button"
-          data-testid="import-results-retry-action"
-          :disabled="retrying"
-          @click="retryFailed()"
-          class="btn-warning btn-sm inline-flex items-center gap-2"
-        >
-          <svg x-show="retrying" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-          </svg>
-          <span x-show="!retrying">Retry failed</span>
-          <span x-show="retrying" x-cloak>Retrying...</span>
         </button>
         {% endif %}
         <a
@@ -149,52 +190,18 @@
   </div>
   {% endif %}
 
-  {% if job.status.value == 'completed' and unmatched_queue_count > 0 %}
-  <div data-testid="import-results-follow-up-notes" class="space-y-3">
-    {% call inline_alert(tone="warning", icon="warning") %}
-      <span><strong>{{ unmatched_queue_count }} follow-up {{ 'item was' if unmatched_queue_count == 1 else 'items were' }} deferred</strong> to <a
-        href="/import?tab=unmatched"
-        hx-get="/import?tab=unmatched"
-        hx-target="#import-content"
-        hx-swap="outerHTML"
-        hx-push-url="true"
-        class="underline text-pb-interactive hover:text-pb-interactive-hover"
-      >Unmatched</a>{% if files_no_match > 0 %}, covering <strong>{{ files_no_match }} unresolved file{{ 's' if files_no_match != 1 }}</strong>{% endif %}. These were not imported yet; finish or dismiss them when you are ready.</span>
-    {% endcall %}
-  </div>
-  {% endif %}
-
   {% set catalog_sync_attention_count = catalog_sync_attention_count|default(0) %}
   {% set catalog_sync_pending_count = catalog_sync_pending_count|default(0) %}
   {% set catalog_sync_failed_count = catalog_sync_failed_count|default(0) %}
   {% set catalog_sync_series = catalog_sync_series|default([]) %}
-  {% if catalog_sync_attention_count > 0 %}
-  <div data-testid="import-results-catalog-sync-note" class="space-y-3">
-    {% call inline_alert(tone="warning", icon="warning") %}
+  {% if catalog_sync_pending_count > 0 %}
+  <div data-testid="import-results-catalog-sync-note">
+    {% call inline_alert(tone="info", icon="info") %}
       <span>
-        <strong>{{ catalog_sync_attention_count }} series still need ComicVine catalog sync follow-up.</strong>
-        {{ catalog_sync_pending_count }} syncing in the background{% if catalog_sync_failed_count > 0 %};
-        {{ catalog_sync_failed_count }} needs metadata retry{% endif %}.
+        <strong>{{ catalog_sync_pending_count }} series {{ 'is' if catalog_sync_pending_count == 1 else 'are' }} still syncing metadata in the background.</strong>
+        You can leave this page; catalog hydration will continue independently.
       </span>
     {% endcall %}
-    <div class="rounded-xl border border-pb-warning/30 bg-pb-warning/5 px-4 py-3">
-      <div class="flex flex-wrap gap-2">
-        {% for series in catalog_sync_series[:8] %}
-          {% set catalog_state = series.issue_catalog_state.value if series.issue_catalog_state else 'partial' %}
-          <a
-            href="/series/{{ series.id }}"
-            hx-boost="false"
-            class="pill {{ 'pill-error' if catalog_state == 'failed' else 'pill-warning' }} justify-center"
-            title="{{ series.issue_catalog_error or '' }}"
-          >
-            {{ series.title }}
-          </a>
-        {% endfor %}
-        {% if catalog_sync_series|length > 8 %}
-          <span class="pill pill-neutral justify-center">+{{ catalog_sync_series|length - 8 }} more</span>
-        {% endif %}
-      </div>
-    </div>
   </div>
   {% endif %}
 
@@ -204,10 +211,10 @@
         <div class="space-y-2">
           <p class="section-eyebrow">Import results</p>
           <h2 class="text-2xl font-semibold tracking-tight text-pb-text">
-            {% if failed_count == 0 and files_failed == 0 %}
+            {% if failed_count == 0 and files_failed == 0 and follow_up_group_count|default(0) == 0 %}
               The import finished cleanly and the new series are now in Pullbox.
             {% else %}
-              The import finished with a small amount of follow-up still worth checking.
+              The import finished with follow-up still worth checking.
             {% endif %}
           </h2>
         </div>
@@ -230,7 +237,7 @@
             <div class="stat-card">
               <p class="stat-card-kicker">Deferred Follow-up</p>
               <p class="stat-card-value {% if unmatched_queue_count > 0 %}text-pb-warning{% endif %}">{{ unmatched_queue_count }}</p>
-              <p class="stat-card-copy">{{ "Nothing was deferred to Unmatched." if unmatched_queue_count == 0 else "These are unresolved decisions saved for later in Unmatched." }}</p>
+              <p class="stat-card-copy">{{ "Nothing was deferred for follow-up." if unmatched_queue_count == 0 else "These unresolved decisions are saved in Follow-up." }}</p>
             </div>
             <div class="stat-card">
               <p class="stat-card-kicker">Duplicates</p>
@@ -272,7 +279,7 @@
             <div class="stat-card">
               <p class="stat-card-kicker">Files Deferred</p>
               <p class="stat-card-value {% if files_no_match > 0 %}text-pb-warning{% endif %}">{{ files_no_match }}</p>
-              <p class="stat-card-copy">{{ "No files were left for follow-up." if files_no_match == 0 else "These files still need series or issue decisions in Unmatched." }}</p>
+              <p class="stat-card-copy">{{ "No files were left for follow-up." if files_no_match == 0 else "These files still need series or issue decisions in Follow-up." }}</p>
             </div>
             <div class="stat-card">
               <p class="stat-card-kicker">Failed</p>
@@ -283,63 +290,21 @@
         </div>
         {% endif %}
 
-        {% set managed_artifacts_created = managed_artifacts_created|default(0) %}
-        {% set referenced_files_registered = referenced_files_registered|default(0) %}
-        {% set rollback_managed_candidates = rollback_managed_candidates|default(0) %}
-        {% set rollback_reference_candidates = rollback_reference_candidates|default(0) %}
-        {% set rollback_manual_recovery_count = rollback_manual_recovery_count|default(0) %}
-        {% if managed_artifacts_created > 0 or referenced_files_registered > 0 or files_already_owned > 0 %}
-        <div data-testid="import-results-ownership-summary">
-          <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-text-dim">Ownership outcomes</p>
-          <div class="mt-3 grid gap-3 sm:grid-cols-3">
-            <div class="stat-card">
-              <p class="stat-card-kicker">Managed artifacts</p>
-              <p class="stat-card-value text-pb-success">{{ managed_artifacts_created }}</p>
-              <p class="stat-card-copy">Library and Story Arc artifacts created and owned by this import.</p>
-            </div>
-            <div class="stat-card">
-              <p class="stat-card-kicker">In-place references</p>
-              <p class="stat-card-value text-pb-interactive">{{ referenced_files_registered }}</p>
-              <p class="stat-card-copy">Existing source and Story Arc files registered without transferring or changing them.</p>
-            </div>
-            <div class="stat-card">
-              <p class="stat-card-kicker">Already owned</p>
-              <p class="stat-card-value">{{ files_already_owned }}</p>
-              <p class="stat-card-copy">Existing Pullbox registrations left unchanged.</p>
-            </div>
-          </div>
-        </div>
-        {% endif %}
-
-        {% if can_rollback and (rollback_managed_candidates > 0 or rollback_reference_candidates > 0 or rollback_manual_recovery_count > 0) %}
-        <div
-          data-testid="import-results-rollback-summary"
-          class="rounded-xl border border-pb-border bg-pb-card-hover/40 px-4 py-3 text-sm text-pb-text-muted"
-        >
-          <p class="font-medium text-pb-text">Conditional rollback journal</p>
-          <p class="mt-1">
-            {{ rollback_managed_candidates }} managed artifact{{ '' if rollback_managed_candidates == 1 else 's' }} will be fingerprint-checked and removed only when unchanged;
-            {{ rollback_reference_candidates }} reference{{ '' if rollback_reference_candidates == 1 else 's' }} will be detached without deleting source files.
-            {% if rollback_manual_recovery_count > 0 %}
-              {{ rollback_manual_recovery_count }} prior rollback conflict{{ '' if rollback_manual_recovery_count == 1 else 's' }} require{{ 's' if rollback_manual_recovery_count == 1 else '' }} manual recovery.
-            {% endif %}
-          </p>
-        </div>
-        {% endif %}
       </div>
     </div>
   </div>
+  {% endif %}
 
+  {% if follow_up_workspace|default(false) %}
   {% set cleanup_action_summaries = cleanup_action_summaries|default([]) %}
   {% set safety_category_summaries = safety_category_summaries|default([]) %}
-  {% set cleanup_no_action_count = cleanup_no_action_count|default(0) %}
   {% set cleanup_safe_action_count = cleanup_safe_action_count|default(0) %}
   {% set cleanup_needs_review_count = cleanup_needs_review_count|default(0) %}
-  {% if job.status.value == 'completed' and not job.archived_at and (cleanup_action_summaries or cleanup_needs_review_count > 0 or cleanup_no_action_count > 0) %}
+  {% if job.status.value == 'completed' and not job.archived_at and (cleanup_action_summaries or cleanup_needs_review_count > 0) %}
   <section data-testid="import-results-recovery-dashboard" class="section-card overflow-hidden">
     <div class="section-header">
       <div class="section-header-copy">
-        <p class="section-eyebrow">Completed import recovery</p>
+        <p class="section-eyebrow">Follow-up actions</p>
         <h3 class="section-title-plain">Finish cleanup without starting over</h3>
         <p class="section-copy">
           Pullbox grouped the remaining outcomes so large imports stay readable. Preview each safe action before applying it. Source files are never deleted or changed by these cleanup actions.
@@ -347,22 +312,21 @@
       </div>
     </div>
     <div class="section-body space-y-5">
-      <div class="grid gap-3 sm:grid-cols-3">
-        <div class="stat-card">
-          <p class="stat-card-kicker">Already handled</p>
-          <p class="stat-card-value text-pb-success">{{ "{:,}".format(cleanup_no_action_count) }}</p>
-          <p class="stat-card-copy">Duplicates, already-owned files, and dismissed outcomes need no further action.</p>
-        </div>
+      <div class="grid gap-3 sm:grid-cols-2">
+        {% if cleanup_safe_action_count > 0 %}
         <div class="stat-card">
           <p class="stat-card-kicker">Safe next steps</p>
           <p class="stat-card-value text-pb-interactive">{{ "{:,}".format(cleanup_safe_action_count) }}</p>
           <p class="stat-card-copy">Files have a bounded recovery action ready for review.</p>
         </div>
+        {% endif %}
+        {% if cleanup_needs_review_count > 0 %}
         <div class="stat-card">
           <p class="stat-card-kicker">Needs review</p>
           <p class="stat-card-value{% if cleanup_needs_review_count > 0 %} text-pb-warning{% endif %}">{{ "{:,}".format(cleanup_needs_review_count) }}</p>
           <p class="stat-card-copy">Ambiguous or unsafe outcomes remain untouched for manual review.</p>
         </div>
+        {% endif %}
       </div>
 
       {% if cleanup_action_summaries %}
@@ -431,6 +395,118 @@
       {% endif %}
 
       <p x-show="cleanupError" x-cloak x-text="cleanupError" class="text-xs text-pb-error"></p>
+    </div>
+  </section>
+  {% endif %}
+
+  {% set misplaced_source_restore_count = misplaced_source_restore_count|default(0) %}
+  {% set misplaced_source_duplicate_count = misplaced_source_duplicate_count|default(0) %}
+  {% if job.status.value == 'completed' and not job.archived_at and (misplaced_source_restore_count > 0 or misplaced_source_duplicate_count > 0) %}
+  <section data-testid="import-results-misplaced-source-cleanup" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Optional source cleanup</p>
+        <h3 class="section-title-plain">Organize misplaced files</h3>
+        <p class="section-copy">
+          Pullbox found issues whose exact embedded identity belongs to a different Mylar series folder. Review each current and proposed path before changing the source library. Pullbox does not edit the Mylar database.
+        </p>
+      </div>
+    </div>
+    <div class="section-body space-y-3">
+      <div class="inline-alert inline-alert-warning">
+        These actions move existing source files. Nothing moves until you preview and confirm the exact paths. Ambiguous files are never included.
+      </div>
+      <div class="grid gap-3 xl:grid-cols-2">
+        {% if misplaced_source_restore_count > 0 %}
+        <article class="rounded-xl border border-pb-border bg-pb-card-hover/35 p-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <h4 class="text-sm font-semibold text-pb-text">Verified misplaced files</h4>
+            <span class="pill pill-neutral">{{ "{:,}".format(misplaced_source_restore_count) }}</span>
+          </div>
+          <p class="mt-1 text-xs leading-5 text-pb-text-dim">
+            Move verified issues to the exact missing paths recorded by Mylar and keep Pullbox linked to them there.
+          </p>
+          <div class="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              class="btn-ghost btn-sm"
+              data-testid="review-misplaced-source-restore_recorded_path"
+              hx-get="/import/{{ job.id }}/misplaced-source-cleanup/restore_recorded_path/files?page=1"
+              hx-target="#misplaced-source-cleanup-detail-restore_recorded_path"
+              hx-swap="innerHTML"
+            >Review files</button>
+            <button
+              type="button"
+              class="btn-warning btn-sm"
+              data-testid="move-all-verified-misplaced-files"
+              hx-get="/import/{{ job.id }}/misplaced-source-cleanup/restore-recorded-path/preview-all"
+              hx-target="#cv-search-modal"
+              hx-swap="innerHTML"
+            >Move all verified files</button>
+          </div>
+          <div id="misplaced-source-cleanup-detail-restore_recorded_path"></div>
+        </article>
+        {% endif %}
+        {% if misplaced_source_duplicate_count > 0 %}
+        <article class="rounded-xl border border-pb-border bg-pb-card-hover/35 p-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <h4 class="text-sm font-semibold text-pb-text">Remove identical duplicates</h4>
+            <span class="pill pill-neutral">{{ "{:,}".format(misplaced_source_duplicate_count) }}</span>
+          </div>
+          <p class="mt-1 text-xs leading-5 text-pb-text-dim">
+            Move one byte-identical extra copy to the configured Trash folder. The canonical issue remains in place.
+          </p>
+          <button
+            type="button"
+            class="btn-ghost btn-sm mt-4"
+            data-testid="review-misplaced-source-trash_identical_duplicate"
+            hx-get="/import/{{ job.id }}/misplaced-source-cleanup/trash_identical_duplicate/files?page=1"
+            hx-target="#misplaced-source-cleanup-detail-trash_identical_duplicate"
+            hx-swap="innerHTML"
+          >Review files</button>
+          <div id="misplaced-source-cleanup-detail-trash_identical_duplicate"></div>
+        </article>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  {% set story_arcs_created_count = story_arcs_created_count|default(0) %}
+  {% set story_arcs_follow_up_count = story_arcs_follow_up_count|default(0) %}
+  {% if story_arcs_follow_up_count > 0 %}
+  <section data-testid="import-results-story-arcs" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Story Arc follow-up</p>
+        <h3 class="section-title-plain">Story Arc evidence preserved</h3>
+        <p class="section-copy">
+          {{ story_arcs_follow_up_count }} saved for later review. Canonical comics were imported
+          independently and no separate arc files were required.
+        </p>
+      </div>
+      <div class="section-header-actions">
+        <a href="/story-arcs" class="btn-ghost btn-sm">View Story Arcs</a>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if catalog_sync_failed_count|default(0) > 0 %}
+  <section data-testid="import-follow-up-metadata" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Metadata</p>
+        <h3 class="section-title-plain">{{ catalog_sync_failed_count }} series need metadata retry</h3>
+        <p class="section-copy">Background catalog hydration exhausted its retries for these series. Pending hydration is not included here.</p>
+      </div>
+    </div>
+    <div class="section-body flex flex-wrap gap-2">
+      {% for series in catalog_sync_series|default([]) %}
+        {% if series.issue_catalog_state.value == 'failed' %}
+        <a href="/series/{{ series.id }}" class="pill pill-error justify-center" title="{{ series.issue_catalog_error or '' }}">{{ series.title }}</a>
+        {% endif %}
+      {% endfor %}
     </div>
   </section>
   {% endif %}
@@ -565,7 +641,10 @@
     </div>
   </div>
   {% endif %}
+  {% endif %}
 
 </div>
 
+{% if not follow_up_workspace|default(false) %}
 {% include "partials/import_collection_footer_oob.html" %}
+{% endif %}

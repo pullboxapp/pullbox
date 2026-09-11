@@ -110,6 +110,24 @@ ignore:
       name: libexpat1-dev
       version: 2.8.3-1~deb13u1+dhi2
       type: deb
+
+  # Expat 2.8.4 fixes CVE-2026-76956 and CVE-2026-76957, but Debian 13
+  # currently classifies both as no-DSA minor issues and has no fixed stable
+  # package. This shared library is copied only for Fontconfig/Poppler; Pullbox
+  # XML parsing uses Python's separately bundled parser, and pyexpat does not
+  # expose the custom encoding callback required by CVE-2026-76957. Keep these
+  # exceptions exact and temporary. Re-review by 2026-10-07 or on the next DHI
+  # Python refresh, whichever comes first.
+  - vulnerability: CVE-2026-76956
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi2
+      type: deb
+  - vulnerability: CVE-2026-76957
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi2
+      type: deb
   - vulnerability: CVE-2025-59375
     package:
       name: libexpat1

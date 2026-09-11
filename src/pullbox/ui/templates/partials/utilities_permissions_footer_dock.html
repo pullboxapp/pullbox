@@ -1,6 +1,13 @@
 <div
   data-testid="utilities-permissions-footer-dock"
   x-data="{ mode: 'Dry-run', scope: 'Entire library', targets: 'folders + files' }"
+  x-init="
+    if (window.pullboxUtilitiesPermissionsFooterState) {
+      mode = window.pullboxUtilitiesPermissionsFooterState.mode;
+      scope = window.pullboxUtilitiesPermissionsFooterState.scope;
+      targets = window.pullboxUtilitiesPermissionsFooterState.targets;
+    }
+  "
   x-on:utilities:permissions-footer.window="
     mode = $event.detail.mode;
     scope = $event.detail.scope;

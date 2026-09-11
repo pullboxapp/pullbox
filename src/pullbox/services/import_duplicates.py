@@ -208,9 +208,14 @@ def _raw_name_has_scanner_suffix(raw_name: str | None, cv_title: str | None) -> 
     return bool(_SCANNER_STYLE_SUFFIX_RE.fullmatch(suffix))
 
 
-def preferred_file_sort_key(item: ImportedFile) -> tuple[int, int, int, int]:
+def preferred_file_sort_key(item: ImportedFile) -> tuple[int, int, int, int, int]:
     """Prefer richer metadata, stronger confidence, larger files, then older IDs."""
+    cross_folder = dict(item.diagnostics or {}).get("mylar3_cross_folder_reconciliation")
+    canonical_mylar_reference = (
+        isinstance(cross_folder, dict) and cross_folder.get("role") == "canonical"
+    )
     return (
+        1 if canonical_mylar_reference else 0,
         1 if item.has_comicinfo else 0,
         confidence_rank(item.match_confidence),
         item.file_size,

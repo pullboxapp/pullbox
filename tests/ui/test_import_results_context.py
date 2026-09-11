@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -18,7 +19,13 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.models.issue import Issue
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
@@ -37,6 +44,29 @@ from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
     build_import_safety_diagnostics,
 )
+
+
+@pytest.mark.asyncio
+async def test_results_context_counts_optional_mylar_source_cleanup(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/tmp/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    counter = AsyncMock(side_effect=[2, 3])
+    with patch(
+        "pullbox.ui.import_results_context.count_misplaced_source_cleanup_files",
+        counter,
+    ):
+        context = await load_import_results_context(db_session, job)
+
+    assert context["misplaced_source_restore_count"] == 2
+    assert context["misplaced_source_duplicate_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -103,6 +133,52 @@ async def test_load_import_results_context_splits_unmatched_queue_counts(db_sess
     assert context["identified_series_file_no_match_count"] == 1
     assert context["no_match_count"] == 1
     assert context["unmatched_queue_count"] == 2
+    assert context["cleanup_needs_review_count"] == 0
+    assert context["follow_up_group_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_results_count_retryable_failed_inspection_as_safe_next_step(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/tmp/comics",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Archive Retry",
+        status=ImportSeriesStatus.IMPORTED,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    db_session.add(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imported_series.id,
+            file_path="/tmp/comics/archive.cbr",
+            file_name="archive.cbr",
+            file_size=1024,
+            file_format="cbr",
+            status=ImportedFileStatus.FAILED,
+            diagnostics={
+                "source_revalidation": {
+                    "category": ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED.value,
+                    "retryable": True,
+                }
+            },
+        )
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    assert context["cleanup_safe_action_count"] == 1
+    assert context["cleanup_needs_review_count"] == 0
+    assert context["cleanup_action_summaries"][0]["action"] == "retry_source_inspection"
 
 
 @pytest.mark.asyncio
@@ -575,6 +651,39 @@ async def test_arc_only_results_count_only_completed_verified_story_arc_placemen
     assert context["referenced_files_registered"] == 1
     assert context["rollback_managed_candidates"] == 1
     assert context["rollback_reference_candidates"] == 1
+    assert context["story_arcs_created_count"] == 1
+    assert context["story_arcs_follow_up_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_results_report_unresolved_story_arcs_as_optional_follow_up(
+    db_session,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/imports/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    db_session.add(
+        ImportedStoryArc(
+            import_job=job,
+            source_kind=StoryArcSourceKind.FOLDER,
+            source_key=f"folder:follow-up:{job.id}",
+            source_ordinal=1,
+            name="Review Later Arc",
+            status=ImportedStoryArcStatus.NEEDS_REVIEW,
+        )
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    assert context["story_arcs_created_count"] == 0
+    assert context["story_arcs_follow_up_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -684,6 +793,149 @@ async def test_completed_results_group_large_safety_backlog_without_loading_ever
     assert context["cleanup_needs_review_count"] == 2
     assert context["cleanup_action_summaries"][0]["action"] == "dismiss_missing_references"
     assert context["cleanup_action_summaries"][0]["affected_file_count"] == 10
+
+
+@pytest.mark.asyncio
+async def test_completed_results_offer_mixed_folder_ownership_recovery(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/imports/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    source_series = ImportedSeries(
+        import_job=job,
+        raw_series_name="Fritzi Ritz",
+        cv_title="Fritzi Ritz",
+        status=ImportSeriesStatus.IMPORTED,
+    )
+    target = Series(
+        title="Action Comics",
+        sort_title="action comics",
+        year_start=1938,
+        monitored=True,
+    )
+    db_session.add_all([job, source_series, target])
+    await db_session.flush()
+    issue = Issue(series_id=target.id, issue_number=1002, issue_number_text="1002")
+    target_import_series = ImportedSeries(
+        import_job=job,
+        raw_series_name="Action Comics",
+        cv_title="Action Comics",
+        status=ImportSeriesStatus.IMPORTED,
+        series_id=target.id,
+    )
+    db_session.add_all([issue, target_import_series])
+    await db_session.flush()
+    db_session.add(
+        ImportedFile(
+            import_job=job,
+            import_series=source_series,
+            file_path="/comics/Fritzi Ritz/Action Comics 1002.cbz",
+            file_name="Action Comics 1002.cbz",
+            file_size=1024,
+            file_format="cbz",
+            status=ImportedFileStatus.NO_MATCH,
+            diagnostics={
+                "metadata_signals": {
+                    "series_name": "comicinfo",
+                    "issue_number": "comicinfo",
+                },
+                "source_metadata": {"comicinfo": {"series": "Action Comics", "number": "1002"}},
+            },
+        )
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    summaries = {item["action"]: item for item in context["cleanup_action_summaries"]}
+    recovery = summaries["resolve_mixed_folder_files"]
+    assert recovery["label"] == "Resolve mixed-folder files"
+    assert recovery["affected_file_count"] == 1
+    assert recovery["button_label"] == "Resolve and retry"
+    assert context["clean_library_mixed_folder_repair_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_reference_import_offers_separate_clean_library_root(
+    db_session,
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.core.library_file_ownership import build_file_identity_signature
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    source_path = tmp_path / "mylar" / "Batman" / "Batman 001.cbr"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"legacy")
+    clean_path = tmp_path / "clean"
+    clean_path.mkdir()
+    source_root = LibraryRoot(name="Mylar", path=str(tmp_path / "mylar"))
+    clean_root = LibraryRoot(name="Clean library", path=str(clean_path))
+    nested_root = LibraryRoot(name="Unsafe nested", path=str(source_path.parent))
+    series = Series(title="Batman", sort_title="batman", year_start=2016)
+    db_session.add_all([source_root, clean_root, nested_root, series])
+    await db_session.flush()
+    issue = Issue(series_id=series.id, issue_number=1.0, issue_number_text="1")
+    job = ImportJob(
+        source_path="/imports/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add_all([issue, job])
+    await db_session.flush()
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name=series.title,
+        status=ImportSeriesStatus.IMPORTED,
+        series_id=series.id,
+    )
+    library_file = LibraryFile(
+        file_path=str(source_path),
+        file_name=source_path.name,
+        file_size=source_path.stat().st_size,
+        file_format=FileFormat.CBR,
+        file_modified_at=datetime.now(UTC),
+        match_confidence=MatchConfidence.HIGH,
+        issue_id=issue.id,
+        library_root_id=source_root.id,
+        storage_mode=LibraryFileStorageMode.REFERENCED,
+        source_signature=build_file_identity_signature(source_path),
+    )
+    db_session.add_all([imported_series, library_file])
+    await db_session.flush()
+    db_session.add(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imported_series.id,
+            file_path=str(source_path),
+            file_name=source_path.name,
+            file_size=source_path.stat().st_size,
+            file_format="cbr",
+            status=ImportedFileStatus.IMPORTED,
+            matched_issue_id=issue.id,
+            library_file_id=library_file.id,
+        )
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    assert context["clean_library_reference_count"] == 1
+    assert context["clean_library_reference_bytes"] == source_path.stat().st_size
+    assert context["clean_library_mixed_folder_repair_count"] == 0
+    assert context["clean_library_target_roots"] == [
+        {
+            "id": clean_root.id,
+            "name": "Clean library",
+            "path": str(clean_path),
+            "rename_on_import": True,
+            "normalize_to_cbz": False,
+            "update_comicinfo": False,
+            "skip_existing": False,
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -719,7 +719,7 @@ class DashboardMetricLoader:
                     detail=f"{count} files still need a clean match.",
                     count=count,
                     cta_label="Review unmatched",
-                    cta_href="/import?tab=unmatched",
+                    cta_href="/import?tab=follow-up",
                     state="watch",
                 )
             )

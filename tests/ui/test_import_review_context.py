@@ -117,6 +117,72 @@ async def test_safety_review_count_uses_job_series_index(db_session) -> None:  #
 
 
 @pytest.mark.asyncio
+async def test_safety_review_reports_distinct_series_and_file_counts(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_review_context import load_import_review_context
+
+    job = ImportJob(
+        source_path="/tmp/import",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.REVIEW,
+    )
+    first = ImportedSeries(
+        import_job=job,
+        raw_series_name="First",
+        status=ImportSeriesStatus.MATCHED,
+        file_count=2,
+    )
+    second = ImportedSeries(
+        import_job=job,
+        raw_series_name="Second",
+        status=ImportSeriesStatus.MATCHED,
+        file_count=1,
+    )
+    db_session.add_all([job, first, second])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=first.id,
+                file_path="/tmp/import/first-cover.cbz",
+                file_name="first-cover.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_BLOCKED,
+            ),
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=first.id,
+                file_path="/tmp/import/first-corrupt.cbz",
+                file_name="first-corrupt.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_BLOCKED,
+            ),
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=second.id,
+                file_path="/tmp/import/second-cover.cbz",
+                file_name="second-cover.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_BLOCKED,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    context = await load_import_review_context(
+        db_session,
+        job,
+        status="safety_blocked",
+        page=1,
+        sort=None,
+    )
+
+    assert context["status_counts"]["safety_blocked"] == 2
+    assert context["safety_review_series_count"] == 2
+    assert context["safety_review_file_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_load_import_review_context_filters_matched_rows_and_selection_state(
     db_session,
 ) -> None:  # type: ignore[no-untyped-def]

@@ -97,6 +97,12 @@ SAFE_FILTER_ALLOWLIST = {
         "partials/import_history_results.html",
         "{{ job.created_at|localtime|safe if job.created_at else '—' }}",
     ),
+    (
+        "partials/import_follow_up_jobs.html",
+        '<td class="downloads-mono-cell is-right hidden lg:table-cell">'
+        "{{ (follow_up_job.import_completed_at or "
+        "follow_up_job.created_at)|localtime|safe }}</td>",
+    ),
 }
 
 

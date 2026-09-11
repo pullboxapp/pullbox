@@ -102,6 +102,12 @@
             <td>
               <span class="downloads-release-name tooltip-wrap" data-tooltip-auto data-tip-size="wide">
                 <span class="block truncate" data-tooltip-measure>{{ job.source_path }}</span>
+                {% if job.removed_library_root_snapshot %}
+                <span class="block text-xs text-pb-warning" title="{{ job.removed_library_root_snapshot.path }}">
+                  Original root removed: {{ job.removed_library_root_snapshot.name }}.
+                  Start a new import to choose a destination.
+                </span>
+                {% endif %}
               </span>
             </td>
             <td>
@@ -168,6 +174,24 @@
                       <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5V6.75A2.25 2.25 0 0012.75 4.5h-6A2.25 2.25 0 004.5 6.75v10.5A2.25 2.25 0 006.75 19.5h10.5A2.25 2.25 0 0019.5 17.25v-6A2.25 2.25 0 0017.25 9H13.5A1.5 1.5 0 0112 7.5V3.75"/>
                     </svg>
                   </a>
+                {% endif %}
+
+                {% if job.id in clean_library_job_ids|default([]) and not job.archived_at %}
+                  <button
+                    type="button"
+                    data-testid="import-history-organize-{{ job.id }}"
+                    class="downloads-action-btn import-history-action-btn"
+                    hx-get="/import/{{ job.id }}/clean-library-panel"
+                    hx-target="#cv-search-modal"
+                    hx-swap="innerHTML"
+                    data-tip="Organize library"
+                    data-tip-pos="left"
+                    aria-label="Build a clean Pullbox library from import {{ job.id }}"
+                  >
+                    <svg class="import-history-action-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 5.25h16.5M6.75 9.75h10.5m-7.5 4.5h4.5m-2.25 4.5h.008v.008H12v-.008z"/>
+                    </svg>
+                  </button>
                 {% endif %}
 
                 {% if control_state.get('can_rollback') %}

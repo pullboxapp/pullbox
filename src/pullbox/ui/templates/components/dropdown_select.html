@@ -47,6 +47,7 @@
   local_model="",
   local_on_change="",
   options_expression="",
+  disabled_expression="",
   on_change=""
 ) %}
 {%- set normalized_size = namespace(value=size) -%}
@@ -85,13 +86,15 @@
   x-data='dropdownSelectData({
     value: {{ value|default("", true)|string|tojson }},
     options: {% if options_expression %}{{ options_expression }}{% else %}{{ options|tojson }}{% endif %},
-    disabled: {{ "true" if disabled else "false" }},
+    disabled: {% if disabled_expression %}Boolean({{ disabled_expression }}){% else %}{{ "true" if disabled else "false" }}{% endif %},
     fitWidth: {{ "true" if fit_width else "false" }},
     wrapOptions: {{ "true" if wrap_options else "false" }},
     changeExpression: {{ change_handler.value|trim|tojson }}
   })'
   x-init="init()"
-  {% if local_model %}x-effect="syncExternalValue({{ local_model }})"{% endif %}
+  {% if options_expression or local_model or disabled_expression %}
+  x-effect="{% if options_expression %}syncExternalOptions({{ options_expression }});{% endif %}{% if local_model %} syncExternalValue({{ local_model }});{% endif %}{% if disabled_expression %} syncExternalDisabled({{ disabled_expression }});{% endif %}"
+  {% endif %}
   x-on:keydown.escape.prevent.stop="close()"
   x-on:keydown.tab="close(false)"
   x-bind:data-dropdown-value="value"
@@ -140,6 +143,7 @@
     x-on:keydown.arrow-down.prevent="openAndFocus(1)"
     x-on:keydown.arrow-up.prevent="openAndFocus(-1)"
     x-bind:aria-expanded="open ? 'true' : 'false'"
+    x-bind:aria-disabled="disabled ? 'true' : 'false'"
     x-bind:disabled="disabled"
     aria-haspopup="listbox"
     {% if invalid %}aria-invalid="true"{% endif %}

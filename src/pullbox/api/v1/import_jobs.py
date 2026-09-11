@@ -122,7 +122,10 @@ from pullbox.schemas.import_story_arc_preflight import (
 )
 from pullbox.services import import_mylar3_path_reports as path_reports
 from pullbox.services.import_layout_analysis import ImportLayoutAnalyzer
-from pullbox.services.import_mylar3_path_preflight import Mylar3PathPreflightAnalyzer
+from pullbox.services.import_mylar3_path_preflight import (
+    Mylar3PathPreflightAnalyzer,
+    add_report_unavailable_attention,
+)
 from pullbox.services.import_story_arc_preflight import StoryArcPreflightAnalyzer
 from pullbox.tasks.import_task import (
     purge_import_runtime_state,
@@ -283,6 +286,7 @@ async def preview_import_mylar_paths(
     except (OSError, ValueError):
         logger.warning("mylar_preflight_report_unavailable", exc_info=True)
         result.warnings.append("report_unavailable")
+        result = add_report_unavailable_attention(result, path_reports.report_directory())
     logger.info(
         "mylar_path_preflight_completed",
         report_id=result.report_id,

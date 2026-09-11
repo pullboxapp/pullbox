@@ -39,14 +39,33 @@ from pullbox.services.import_source_metadata import (
 from scripts.mylar3_import_fixture import create_mylar3_db
 
 
-def _archive(path, *, issue_id=703887, number="1", pages=2, series="Firefly: Bad Company"):
+def _archive(
+    path,
+    *,
+    issue_id=703887,
+    series_id=None,
+    number="1",
+    pages=2,
+    series="Firefly: Bad Company",
+    nested_incomplete=False,
+):
     path.parent.mkdir(parents=True, exist_ok=True)
+    notes = (
+        f"<Notes>[cv_vol_id:{series_id}] [cv_issue_id:{issue_id}]</Notes>"
+        if series_id is not None
+        else ""
+    )
     with zipfile.ZipFile(path, "w") as archive:
+        if nested_incomplete:
+            archive.writestr(
+                f"{series}/ComicInfo.xml",
+                f"<ComicInfo><Series>{series}</Series><Year>2019</Year></ComicInfo>",
+            )
         archive.writestr(
             "ComicInfo.xml",
             f"<ComicInfo><Series>{series}</Series><Number>{number}</Number>"
             f"<Year>2019</Year><Web>https://comicvine.gamespot.com/issue/4000-{issue_id}/</Web>"
-            "</ComicInfo>",
+            f"{notes}</ComicInfo>",
         )
         for page in range(pages):
             archive.writestr(f"{page}.jpg", b"page")
@@ -119,6 +138,514 @@ async def test_scan_reconciliation_reuses_sidecars_already_read_by_mylar(
     monkeypatch.setattr(SourceMetadataExtractor, "read_sidecars", unexpected_sidecar_read)
     await validate_discovered_files_safety(db_session, discovered)
     assert [file.file_path for file in discovered[0].files] == [str(actual)]
+
+
+async def test_scan_reconciles_unique_trusted_comicinfo_without_mylar_sidecar(db_session, tmp_path):
+    discovered, actual, _db = await _scan(tmp_path)
+    candidate = next(file for file in discovered[0].files if file.file_path == str(actual))
+    candidate.metadata_diagnostics.pop("mylar3_sidecar_data", None)
+    candidate.metadata_diagnostics.pop("mylar3_sidecar", None)
+
+    await validate_discovered_files_safety(db_session, discovered)
+
+    assert [file.file_path for file in discovered[0].files] == [str(actual)]
+    assert candidate.metadata_diagnostics["mylar3_path_reconciliation"]["method"] == (
+        "verified_same_folder_issue_identity"
+    )
+
+
+async def test_scan_reconciles_renamed_collection_with_exact_comicvine_identity(
+    db_session,
+    tmp_path,
+):
+    folder = tmp_path / "Revival 01 (2013) [68730]"
+    actual = folder / ("Revival: Deluxe Collection - Revival 01 (2013) Deluxe 01 - Volume One.cbz")
+    _archive(
+        actual,
+        issue_id=431478,
+        series_id=68730,
+        number="1",
+        pages=298,
+        series="Revival Deluxe Edition",
+    )
+    recorded_name = "Revival 01 (2013) Deluxe 01 - Volume One.cbz"
+    db = tmp_path / "mylar.db"
+    create_mylar3_db(
+        db,
+        series=[
+            {
+                "ComicID": "68730",
+                "ComicName": "Revival 01",
+                "ComicYear": "2013",
+                "ComicLocation": str(folder),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "431478",
+                "ComicID": "68730",
+                "ComicName": "Revival 01",
+                "IssueName": "Volume One",
+                "Issue_Number": "1",
+                "Location": recorded_name,
+                "IssueDate": "2013-01-01",
+            }
+        ],
+    )
+
+    discovered = await Mylar3Reader(db, include_missing_files=True).read_series()
+    before = actual.read_bytes()
+    stat = tmp_path.stat()
+    validate_mylar_in_place_files(
+        discovered,
+        [MylarReferenceRootBoundary(1, tmp_path, tmp_path, stat.st_dev, stat.st_ino)],
+    )
+
+    await validate_discovered_files_safety(db_session, discovered)
+
+    assert discovered[0].file_count == 1
+    assert [file.file_path for file in discovered[0].files] == [str(actual)]
+    recovered = discovered[0].files[0]
+    assert recovered.parsed_series == "Revival 01"
+    assert recovered.parsed_issue_number == 1
+    assert recovered.comicvine_series_id == 68730
+    assert recovered.comicvine_issue_id == 431478
+    assert "mylar3_folder_scope_conflict" not in recovered.metadata_diagnostics
+    assert "mylar3_folder_scope" not in discovered[0].diagnostics
+    evidence = recovered.metadata_diagnostics["mylar3_path_reconciliation"]
+    assert evidence == {
+        "recorded_path": str(folder / recorded_name),
+        "actual_path": str(actual),
+        "comicvine_issue_id": 431478,
+        "method": "verified_same_folder_issue_identity",
+        "series_name_alias": {
+            "recorded": "Revival 01",
+            "actual": "Revival Deluxe Edition",
+            "accepted_by": "exact_comicvine_series_and_issue_identity",
+        },
+    }
+    assert actual.read_bytes() == before
+
+
+async def test_scan_reconciles_identical_cross_folder_copies_to_missing_mylar_issue(
+    db_session,
+    tmp_path,
+):
+    comics = tmp_path / "comics"
+    target_folder = comics / "Absolute Batman (2024)"
+    wrong_folder = comics / "Crossed Badlands (2012)"
+    canonical = wrong_folder / "Absolute Batman (2024) #001.cbz"
+    duplicate = wrong_folder / "Absolute Batman (2024) #001 (c2c low res variant).cbz"
+    crossed = wrong_folder / "Crossed Badlands 001.cbz"
+    owned_target = target_folder / "Absolute Batman (2024) #002.cbz"
+    _archive(canonical, issue_id=1073108, number="1", series="Absolute Batman")
+    duplicate.write_bytes(canonical.read_bytes())
+    _archive(crossed, issue_id=800001, number="1", series="Crossed Badlands")
+    _archive(owned_target, issue_id=1073109, number="2", series="Absolute Batman")
+    db = tmp_path / "mylar.db"
+    create_mylar3_db(
+        db,
+        series=[
+            {
+                "ComicID": "160294",
+                "ComicName": "Absolute Batman",
+                "ComicYear": "2024",
+                "ComicLocation": str(target_folder),
+                "Total": 1,
+            },
+            {
+                "ComicID": "46576",
+                "ComicName": "Crossed Badlands",
+                "ComicYear": "2012",
+                "ComicLocation": str(wrong_folder),
+                "Total": 1,
+            },
+        ],
+        issues=[
+            {
+                "IssueID": "1073108",
+                "ComicID": "160294",
+                "ComicName": "Absolute Batman",
+                "Issue_Number": "1",
+                "Location": canonical.name,
+            },
+            {
+                "IssueID": "1073109",
+                "ComicID": "160294",
+                "ComicName": "Absolute Batman",
+                "Issue_Number": "2",
+                "Location": owned_target.name,
+            },
+            {
+                "IssueID": "800001",
+                "ComicID": "46576",
+                "ComicName": "Crossed Badlands",
+                "Issue_Number": "1",
+                "Location": crossed.name,
+            },
+        ],
+    )
+
+    discovered = await Mylar3Reader(db, include_missing_files=True).read_series()
+    before = {path: path.read_bytes() for path in (canonical, duplicate, crossed, owned_target, db)}
+    stat = comics.stat()
+    validate_mylar_in_place_files(
+        discovered,
+        [MylarReferenceRootBoundary(1, comics, comics, stat.st_dev, stat.st_ino)],
+    )
+    await validate_discovered_files_safety(db_session, discovered)
+
+    by_cv_id = {series.mylar3_cv_id: series for series in discovered}
+    target = by_cv_id[160294]
+    source = by_cv_id[46576]
+    assert [file.file_path for file in target.files] == [
+        str(owned_target),
+        str(canonical),
+        str(duplicate),
+    ]
+    assert [file.file_path for file in source.files] == [str(crossed)]
+    canonical_evidence = target.files[1].metadata_diagnostics["mylar3_cross_folder_reconciliation"]
+    duplicate_evidence = target.files[2].metadata_diagnostics["mylar3_cross_folder_reconciliation"]
+    assert canonical_evidence == {
+        "recorded_path": str(target_folder / canonical.name),
+        "actual_path": str(canonical),
+        "comicvine_issue_id": 1073108,
+        "comicvine_series_id": 160294,
+        "method": "verified_cross_folder_issue_identity",
+        "role": "canonical",
+        "source_series": "Crossed Badlands",
+    }
+    assert duplicate_evidence["role"] == "identical_duplicate"
+    assert duplicate_evidence["canonical_path"] == str(canonical)
+    assert "mylar3_folder_scope_conflict" not in target.files[1].metadata_diagnostics
+    assert "mylar3_unrecorded_file" not in target.files[1].metadata_diagnostics
+    assert "mylar3_folder_scope" not in source.diagnostics
+    assert before == {path: path.read_bytes() for path in before}
+
+    job = ImportJob(source_path=str(db), source_type=ImportSourceType.MYLAR3)
+    db_session.add(job)
+    await db_session.flush()
+    pairs = await materialize_discovered_scan_results(db_session, job, discovered)
+    target_import = next(item for series, item in pairs if series.mylar3_cv_id == 160294)
+    target_rows = list(
+        await db_session.scalars(
+            select(ImportedFile)
+            .where(ImportedFile.import_series_id == target_import.id)
+            .order_by(ImportedFile.id)
+        )
+    )
+    assert [row.file_path for row in target_rows] == [
+        str(owned_target),
+        str(canonical),
+        str(duplicate),
+    ]
+    assert target_rows[1].diagnostics["mylar3_cross_folder_reconciliation"]["role"] == ("canonical")
+
+
+async def test_scan_reconciles_stale_mylar_issue_ids_from_unique_comicinfo_series_slots(
+    db_session,
+    tmp_path,
+):
+    comics = tmp_path / "comics"
+    target_folder = comics / "Babyteeth (2017)"
+    wrong_folder = comics / "Aliens Epic Collection (2023)"
+    target_folder.mkdir(parents=True)
+    files = [
+        (
+            wrong_folder / "Babyteeth (2017) Vol 01 - Volume 1 - Born.cbz",
+            1,
+            644570,
+            871891001,
+        ),
+        (
+            wrong_folder / "Babyteeth (2017) Vol 03 - Vol. 3 - Cradle.cbz",
+            3,
+            727350,
+            871891002,
+        ),
+        (
+            wrong_folder / "Babyteeth (2017) Vol 04 - Vol. 4 - Grave.cbz",
+            4,
+            1166031,
+            871891003,
+        ),
+    ]
+    for path, number, actual_issue_id, _recorded_issue_id in files:
+        _archive(
+            path,
+            issue_id=actual_issue_id,
+            series_id=171891,
+            number=str(number),
+            series="Babyteeth",
+            nested_incomplete=True,
+        )
+    aliens = wrong_folder / "Aliens Epic Collection Vol 01.cbz"
+    _archive(aliens, issue_id=1067467, series_id=148973, series="Aliens Epic Collection")
+    db = tmp_path / "mylar.db"
+    create_mylar3_db(
+        db,
+        series=[
+            {
+                "ComicID": "171891",
+                "ComicName": "Babyteeth",
+                "ComicYear": "2017",
+                "ComicLocation": str(target_folder),
+                "Total": 3,
+            },
+            {
+                "ComicID": "148973",
+                "ComicName": "Aliens Epic Collection",
+                "ComicYear": "2023",
+                "ComicLocation": str(wrong_folder),
+                "Total": 1,
+            },
+        ],
+        issues=[
+            *[
+                {
+                    "IssueID": str(recorded_issue_id),
+                    "ComicID": "171891",
+                    "ComicName": "Babyteeth",
+                    "Issue_Number": str(number),
+                    "Location": path.name,
+                }
+                for path, number, _actual_issue_id, recorded_issue_id in files
+            ],
+            {
+                "IssueID": "1067467",
+                "ComicID": "148973",
+                "ComicName": "Aliens Epic Collection",
+                "Issue_Number": "1",
+                "Location": aliens.name,
+            },
+        ],
+    )
+
+    discovered = await Mylar3Reader(db, include_missing_files=True).read_series()
+    before = {path: path.read_bytes() for path, *_rest in files}
+    stat = comics.stat()
+    validate_mylar_in_place_files(
+        discovered,
+        [MylarReferenceRootBoundary(1, comics, comics, stat.st_dev, stat.st_ino)],
+    )
+
+    await validate_discovered_files_safety(db_session, discovered)
+
+    by_cv_id = {series.mylar3_cv_id: series for series in discovered}
+    babyteeth = by_cv_id[171891]
+    aliens_series = by_cv_id[148973]
+    assert [file.file_path for file in babyteeth.files] == [str(path) for path, *_rest in files]
+    assert [file.file_path for file in aliens_series.files] == [str(aliens)]
+    assert [file.comicvine_issue_id for file in babyteeth.files] == [
+        actual_issue_id for _path, _number, actual_issue_id, _recorded_issue_id in files
+    ]
+    for recovered, (_path, _number, actual_issue_id, recorded_issue_id) in zip(
+        babyteeth.files, files, strict=True
+    ):
+        evidence = recovered.metadata_diagnostics["mylar3_cross_folder_reconciliation"]
+        assert evidence["method"] == "verified_cross_folder_series_issue_filename"
+        assert evidence["comicvine_issue_id"] == actual_issue_id
+        assert evidence["recorded_comicvine_issue_id"] == recorded_issue_id
+        assert evidence["comicvine_series_id"] == 171891
+    assert "kind" not in babyteeth.diagnostics
+    assert "reason" not in babyteeth.diagnostics
+    assert "rejection_reason" not in babyteeth.diagnostics
+    assert babyteeth.diagnostics["mylar3_path"]["status"] == "reconciled"
+    assert babyteeth.diagnostics["mylar3_path_recovery"] == {
+        "status": "complete",
+        "recovered_file_count": 3,
+        "remaining_missing_file_count": 0,
+    }
+    assert before == {path: path.read_bytes() for path in before}
+
+    job = ImportJob(source_path=str(db), source_type=ImportSourceType.MYLAR3)
+    db_session.add(job)
+    await db_session.flush()
+    pairs = await materialize_discovered_scan_results(db_session, job, discovered)
+    babyteeth_import = next(item for series, item in pairs if series.mylar3_cv_id == 171891)
+    assert babyteeth_import.status == ImportSeriesStatus.PENDING
+    babyteeth_rows = list(
+        await db_session.scalars(
+            select(ImportedFile)
+            .where(ImportedFile.import_series_id == babyteeth_import.id)
+            .order_by(ImportedFile.id)
+        )
+    )
+    assert len(babyteeth_rows) == 3
+    assert all(row.status == ImportedFileStatus.PENDING for row in babyteeth_rows)
+
+
+async def test_scan_keeps_only_unresolved_cross_folder_mylar_paths_in_file_review(
+    db_session,
+    tmp_path,
+):
+    comics = tmp_path / "comics"
+    target_folder = comics / "Babyteeth (2017)"
+    wrong_folder = comics / "Aliens Epic Collection (2023)"
+    target_folder.mkdir(parents=True)
+    recovered = wrong_folder / "Babyteeth (2017) Vol 01 - Volume 1 - Born.cbz"
+    _archive(
+        recovered,
+        issue_id=644570,
+        series_id=171891,
+        number="1",
+        series="Babyteeth",
+        nested_incomplete=True,
+    )
+    aliens = wrong_folder / "Aliens Epic Collection Vol 01.cbz"
+    _archive(aliens, issue_id=1067467, series_id=148973, series="Aliens Epic Collection")
+    missing_name = "Babyteeth (2017) Vol 02 - Volume 2.cbz"
+    db = tmp_path / "mylar.db"
+    create_mylar3_db(
+        db,
+        series=[
+            {
+                "ComicID": "171891",
+                "ComicName": "Babyteeth",
+                "ComicYear": "2017",
+                "ComicLocation": str(target_folder),
+                "Total": 2,
+            },
+            {
+                "ComicID": "148973",
+                "ComicName": "Aliens Epic Collection",
+                "ComicYear": "2023",
+                "ComicLocation": str(wrong_folder),
+                "Total": 1,
+            },
+        ],
+        issues=[
+            {
+                "IssueID": "871891001",
+                "ComicID": "171891",
+                "ComicName": "Babyteeth",
+                "Issue_Number": "1",
+                "Location": recovered.name,
+            },
+            {
+                "IssueID": "871891002",
+                "ComicID": "171891",
+                "ComicName": "Babyteeth",
+                "Issue_Number": "2",
+                "Location": missing_name,
+            },
+            {
+                "IssueID": "1067467",
+                "ComicID": "148973",
+                "ComicName": "Aliens Epic Collection",
+                "Issue_Number": "1",
+                "Location": aliens.name,
+            },
+        ],
+    )
+
+    discovered = await Mylar3Reader(db, include_missing_files=True).read_series()
+    stat = comics.stat()
+    validate_mylar_in_place_files(
+        discovered,
+        [MylarReferenceRootBoundary(1, comics, comics, stat.st_dev, stat.st_ino)],
+    )
+    await validate_discovered_files_safety(db_session, discovered)
+
+    babyteeth = next(series for series in discovered if series.mylar3_cv_id == 171891)
+    assert "kind" not in babyteeth.diagnostics
+    assert babyteeth.diagnostics["mylar3_path"]["status"] == "partially_reconciled"
+    assert babyteeth.diagnostics["mylar3_path_recovery"] == {
+        "status": "partial",
+        "recovered_file_count": 1,
+        "remaining_missing_file_count": 1,
+    }
+
+    job = ImportJob(source_path=str(db), source_type=ImportSourceType.MYLAR3)
+    db_session.add(job)
+    await db_session.flush()
+    pairs = await materialize_discovered_scan_results(db_session, job, discovered)
+    babyteeth_import = next(item for series, item in pairs if series.mylar3_cv_id == 171891)
+    assert babyteeth_import.status == ImportSeriesStatus.PENDING
+    rows = list(
+        await db_session.scalars(
+            select(ImportedFile)
+            .where(ImportedFile.import_series_id == babyteeth_import.id)
+            .order_by(ImportedFile.file_name)
+        )
+    )
+    assert {row.file_name: row.status for row in rows} == {
+        missing_name: ImportedFileStatus.SAFETY_BLOCKED,
+        recovered.name: ImportedFileStatus.PENDING,
+    }
+
+
+async def test_scan_does_not_guess_between_different_cross_folder_copies(
+    db_session,
+    tmp_path,
+):
+    comics = tmp_path / "comics"
+    target_folder = comics / "Absolute Batman (2024)"
+    wrong_folder = comics / "Crossed Badlands (2012)"
+    first = wrong_folder / "Absolute Batman 001 scan A.cbz"
+    second = wrong_folder / "Absolute Batman 001 scan B.cbz"
+    owned_target = target_folder / "Absolute Batman (2024) #002.cbz"
+    _archive(first, issue_id=1073108, number="1", series="Absolute Batman")
+    _archive(second, issue_id=1073108, number="1", pages=3, series="Absolute Batman")
+    _archive(owned_target, issue_id=1073109, number="2", series="Absolute Batman")
+    db = tmp_path / "mylar.db"
+    create_mylar3_db(
+        db,
+        series=[
+            {
+                "ComicID": "160294",
+                "ComicName": "Absolute Batman",
+                "ComicYear": "2024",
+                "ComicLocation": str(target_folder),
+                "Total": 1,
+            },
+            {
+                "ComicID": "46576",
+                "ComicName": "Crossed Badlands",
+                "ComicYear": "2012",
+                "ComicLocation": str(wrong_folder),
+                "Total": 0,
+            },
+        ],
+        issues=[
+            {
+                "IssueID": "1073108",
+                "ComicID": "160294",
+                "ComicName": "Absolute Batman",
+                "Issue_Number": "1",
+                "Location": "Absolute Batman (2024) #001.cbz",
+            },
+            {
+                "IssueID": "1073109",
+                "ComicID": "160294",
+                "ComicName": "Absolute Batman",
+                "Issue_Number": "2",
+                "Location": owned_target.name,
+            },
+        ],
+    )
+
+    discovered = await Mylar3Reader(db, include_missing_files=True).read_series()
+    stat = comics.stat()
+    validate_mylar_in_place_files(
+        discovered,
+        [MylarReferenceRootBoundary(1, comics, comics, stat.st_dev, stat.st_ino)],
+    )
+    await validate_discovered_files_safety(db_session, discovered)
+
+    by_cv_id = {series.mylar3_cv_id: series for series in discovered}
+    target = by_cv_id[160294]
+    source = by_cv_id[46576]
+    assert [file.file_name for file in target.files] == [
+        "Absolute Batman (2024) #001.cbz",
+        owned_target.name,
+    ]
+    assert {file.file_name for file in source.files} == {first.name, second.name}
+    assert all(
+        "mylar3_cross_folder_reconciliation" not in file.metadata_diagnostics
+        for file in source.files
+    )
 
 
 def test_missing_source_message_does_not_claim_file_changed_after_scan():
@@ -308,6 +835,7 @@ async def test_saved_reconciliation_never_guesses_or_changes_review_decisions(
     [
         "no_archive_id",
         "different_series",
+        "alias_without_exact_series_identity",
         "different_number",
         "annual",
         "conflict",
@@ -324,6 +852,12 @@ async def test_shared_identity_rule_rejects_conflicting_evidence(db_session, tmp
         fresh = replace(fresh, signals={"comicvine_issue_id": MetadataSignal.RELEASE_TITLE})
     elif case == "different_series":
         fresh = replace(fresh, comicvine_series_id=42)
+    elif case == "alias_without_exact_series_identity":
+        fresh = replace(
+            fresh,
+            series_name="Firefly Deluxe Edition",
+            comicvine_series_id=None,
+        )
     elif case == "different_number":
         fresh = replace(fresh, issue_number=2)
     elif case == "annual":

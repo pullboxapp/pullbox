@@ -1038,6 +1038,63 @@ function importReviewStatusCount(shell, view) {
   return Number(counts && counts[view]) || 0;
 }
 
+async function cancelImportReview(button) {
+  if (!button || button.disabled) {
+    return;
+  }
+
+  var jobId = Number(button.getAttribute("data-import-review-cancel-job-id"));
+  if (!Number.isFinite(jobId) || jobId <= 0) {
+    showToast({ message: "Unable to identify this import.", level: "error" });
+    return;
+  }
+
+  var confirmed = await window.pbConfirm({
+    title: "Cancel Import",
+    message:
+      "This removes the current import job and all of its matched data. Use this only when you are sure the run should not continue.",
+    confirmText: "Cancel Import",
+    destructive: true,
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  var label = button.querySelector("[data-import-review-cancel-label]");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  if (label) {
+    label.textContent = "Cancelling...";
+  }
+
+  try {
+    var response = await fetch("/api/v1/import/" + jobId, {
+      method: "DELETE",
+      headers: { "X-CSRF-Token": readCsrfTokenFromBody() },
+    });
+    if (!response.ok) {
+      var error = await response.json().catch(function () {
+        return { detail: "Failed to cancel import." };
+      });
+      throw new Error(error.detail || "Failed to cancel import.");
+    }
+    purgeImportClientState(jobId);
+    window.location.replace("/import?tab=collection");
+  } catch (err) {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    if (label) {
+      label.textContent = "Cancel";
+    }
+    showToast({
+      message: (err && err.message) || "Failed to cancel import. Please try again.",
+      level: "error",
+    });
+  }
+}
+
+window.cancelImportReview = cancelImportReview;
+
 function importReviewShellHasSeriesBucket(shell, seriesId, bucket) {
   var numericSeriesId = Number(seriesId);
   if (!shell || !Number.isFinite(numericSeriesId) || !bucket) {
@@ -1054,6 +1111,126 @@ function importReviewShellHasSeriesBucket(shell, seriesId, bucket) {
     .filter(Boolean);
   return buckets.indexOf(bucket) >= 0;
 }
+
+function captureImportReviewViewport(shell, preferredElement) {
+  var scroller = document.getElementById("content");
+  var state = {
+    scrollTop: scroller ? scroller.scrollTop : window.scrollY || 0,
+    anchors: [],
+    expandedRows: [],
+  };
+  if (!shell || typeof shell.querySelectorAll !== "function") {
+    return state;
+  }
+
+  var capturedRowKeys = Object.create(null);
+  var captureRow = function (row) {
+    if (!row || !shell.contains(row)) {
+      return;
+    }
+    var rowKey = row.getAttribute("data-import-review-row-key");
+    if (!rowKey || capturedRowKeys[rowKey]) {
+      return;
+    }
+    capturedRowKeys[rowKey] = true;
+    state.anchors.push({
+      key: rowKey,
+      top: row.getBoundingClientRect().top,
+    });
+    if (row.querySelector("[data-import-review-expand-action][aria-expanded='true']")) {
+      state.expandedRows.push({
+        key: rowKey,
+        pendingSubitems:
+          Number(row.getAttribute("data-import-review-pending-subitems")) || 0,
+      });
+    }
+  };
+
+  var preferredRow =
+    preferredElement && typeof preferredElement.closest === "function"
+      ? preferredElement.closest("[data-import-review-series-row]")
+      : null;
+  captureRow(preferredRow);
+
+  var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  var rows = shell.querySelectorAll("[data-import-review-series-row]");
+  for (var i = 0; i < rows.length; i += 1) {
+    var rect = rows[i].getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > viewportHeight) {
+      continue;
+    }
+    captureRow(rows[i]);
+  }
+  return state;
+}
+
+function restoreImportReviewExpansionState(state, shell) {
+  if (!state) {
+    return;
+  }
+  var expandedRows = Array.isArray(state.expandedRows) ? state.expandedRows : [];
+  var renderedRows = shell ? shell.querySelectorAll("[data-import-review-series-row]") : [];
+  for (var expandedIndex = 0; expandedIndex < expandedRows.length; expandedIndex += 1) {
+    var expandedRow = expandedRows[expandedIndex];
+    for (var renderedIndex = 0; renderedIndex < renderedRows.length; renderedIndex += 1) {
+      var renderedRow = renderedRows[renderedIndex];
+      if (renderedRow.getAttribute("data-import-review-row-key") !== expandedRow.key) {
+        continue;
+      }
+      var previousPendingSubitems = Number(expandedRow.pendingSubitems) || 0;
+      var nextPendingSubitems =
+        Number(renderedRow.getAttribute("data-import-review-pending-subitems")) || 0;
+      if (previousPendingSubitems > 0 && nextPendingSubitems === 0) {
+        setImportReviewRowExpanded(renderedRow, false);
+      } else {
+        setImportReviewRowExpanded(renderedRow, true);
+      }
+      break;
+    }
+  }
+}
+
+function restoreImportReviewViewport(state, shell) {
+  if (!state) {
+    return;
+  }
+  var renderedRows = shell ? shell.querySelectorAll("[data-import-review-series-row]") : [];
+  var scroller = document.getElementById("content");
+  var anchors = Array.isArray(state.anchors) ? state.anchors : [];
+  for (var i = 0; i < anchors.length; i += 1) {
+    var anchor = anchors[i];
+    for (var rowIndex = 0; rowIndex < renderedRows.length; rowIndex += 1) {
+      if (renderedRows[rowIndex].getAttribute("data-import-review-row-key") !== anchor.key) {
+        continue;
+      }
+      var delta = renderedRows[rowIndex].getBoundingClientRect().top - anchor.top;
+      if (scroller) {
+        scroller.scrollTop += delta;
+      } else {
+        window.scrollBy(0, delta);
+      }
+      return;
+    }
+  }
+  if (scroller) {
+    scroller.scrollTop = state.scrollTop;
+  } else {
+    window.scrollTo(0, state.scrollTop);
+  }
+}
+
+var pendingImportReviewViewportState = null;
+
+document.body.addEventListener("htmx:beforeSwap", function (event) {
+  var target = event && event.detail ? event.detail.target : null;
+  if (target && target.id === "import-step-review-shell") {
+    var requestElement =
+      event.detail.requestConfig && event.detail.requestConfig.elt
+        ? event.detail.requestConfig.elt
+        : null;
+    pendingImportReviewViewportState = captureImportReviewViewport(target, requestElement);
+  }
+});
 
 function loadImportReviewShell(url) {
   var shell = document.getElementById("import-step-review-shell");
@@ -1095,18 +1272,25 @@ function loadImportReviewShell(url) {
         throw new Error("Import review refresh returned an unexpected response.");
       }
 
+      if (typeof Idiomorph === "undefined" || typeof Idiomorph.morph !== "function") {
+        throw new Error("Import review refresh is unavailable.");
+      }
+      var viewportState = captureImportReviewViewport(currentShell);
       destroyAlpineTree(currentShell);
-      currentShell.replaceWith(nextShell);
-
+      Idiomorph.morph(currentShell, nextShell, { morphStyle: "outerHTML" });
+      var activeShell = document.getElementById("import-step-review-shell");
       if (window.htmx && typeof window.htmx.process === "function") {
-        window.htmx.process(nextShell);
+        window.htmx.process(activeShell);
       }
       if (window.Alpine) {
-        Alpine.initTree(nextShell);
+        Alpine.initTree(activeShell);
       }
+      restoreImportReviewExpansionState(viewportState, activeShell);
+      _dispatchSyntheticHtmxAfterSettle(activeShell);
       _syncFooterDockFromResponse(html);
-      seedSearchFieldStates(nextShell);
-      return nextShell;
+      seedSearchFieldStates(activeShell);
+      restoreImportReviewViewport(viewportState, activeShell);
+      return activeShell;
     })
     .finally(function () {
       var activeShell = document.getElementById("import-step-review-shell");
@@ -1773,7 +1957,40 @@ function fileBrowserMixin(config) {
 }
 
 function dispatchImportWizardAdvance(detail) {
-  window.dispatchEvent(new CustomEvent("wizard:advance", { detail: detail || {} }));
+  var payload = detail || {};
+  var collectionPage = document.querySelector("[data-testid='import-collection-page']");
+  if (collectionPage && collectionPage.isConnected) {
+    window.dispatchEvent(new CustomEvent("wizard:advance", { detail: payload }));
+    return;
+  }
+
+  var jobId = payload.jobId;
+  var step = Number(payload.step);
+  if (jobId == null || !Number.isFinite(step) || step < 2) {
+    window.dispatchEvent(new CustomEvent("wizard:advance", { detail: payload }));
+    return;
+  }
+
+  var path =
+    "/import?tab=collection&resume_job_id=" +
+    encodeURIComponent(jobId) +
+    "&resume_step=" +
+    encodeURIComponent(step);
+  var importContent = document.getElementById("import-content");
+  if (!importContent || typeof htmx === "undefined") {
+    window.location.assign(path);
+    return;
+  }
+
+  if (window.history && typeof window.history.pushState === "function") {
+    window.history.pushState({}, "", path);
+  }
+  performHtmxSwap("GET", path, {
+    target: "#import-content",
+    swap: "outerHTML",
+  }).catch(function () {
+    window.location.assign(path);
+  });
 }
 
 function importReviewAdvanceStorageKey(jobId) {
@@ -1871,109 +2088,33 @@ function clearImportReviewSelection(jobId) {
   void jobId;
 }
 
-function importReviewExpansionStorageKey(jobId) {
-  return "pb-import-review-expanded:" + String(jobId || "");
-}
-
-function normalizeImportReviewExpandedRows(value) {
-  if (Array.isArray(value)) {
-    var rowsFromArray = {};
-    for (var i = 0; i < value.length; i += 1) {
-      var rowId = String(value[i] || "");
-      if (rowId) {
-        rowsFromArray[rowId] = true;
-      }
-    }
-    return rowsFromArray;
-  }
-
-  if (!value || typeof value !== "object") {
-    return {};
-  }
-
-  var rows = {};
-  var keys = Object.keys(value);
-  for (var j = 0; j < keys.length; j += 1) {
-    if (value[keys[j]]) {
-      rows[String(keys[j])] = true;
-    }
-  }
-  return rows;
-}
-
-function readImportReviewExpandedRows(jobId) {
-  if (jobId == null) {
-    return {};
-  }
-
-  try {
-    var raw = window.sessionStorage.getItem(importReviewExpansionStorageKey(jobId));
-    return raw ? normalizeImportReviewExpandedRows(JSON.parse(raw)) : {};
-  } catch (_) {
-    return {};
-  }
-}
-
-function writeImportReviewExpandedRows(jobId, expandedRows) {
-  if (jobId == null) {
+function setImportReviewRowExpanded(row, expanded) {
+  if (!row) {
     return;
   }
-
-  try {
-    var rows = normalizeImportReviewExpandedRows(expandedRows);
-    var rowIds = Object.keys(rows);
-    if (rowIds.length === 0) {
-      window.sessionStorage.removeItem(importReviewExpansionStorageKey(jobId));
-      return;
-    }
-    window.sessionStorage.setItem(importReviewExpansionStorageKey(jobId), JSON.stringify(rowIds));
-  } catch (_) {
-    // Ignore storage availability failures.
+  var actions = row.querySelectorAll("[data-import-review-expand-action]");
+  for (var actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+    actions[actionIndex].setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
+  var icons = row.querySelectorAll("[data-import-review-expand-icon]");
+  for (var iconIndex = 0; iconIndex < icons.length; iconIndex += 1) {
+    icons[iconIndex].classList.toggle("rotate-180", expanded);
+  }
+  var details = row.querySelectorAll("[data-import-review-detail-row]");
+  for (var detailIndex = 0; detailIndex < details.length; detailIndex += 1) {
+    details[detailIndex].hidden = !expanded;
   }
 }
 
-function isImportReviewRowExpanded(jobId, rowId) {
-  if (rowId == null) {
-    return false;
-  }
-  var expandedRows = readImportReviewExpandedRows(jobId);
-  return expandedRows[String(rowId)] === true;
-}
-
-function setImportReviewRowExpanded(jobId, rowId, expanded) {
-  if (rowId == null) {
+function toggleImportReviewRow(button) {
+  var row = button ? button.closest("[data-import-review-series-row]") : null;
+  if (!row) {
     return;
   }
-
-  var expandedRows = readImportReviewExpandedRows(jobId);
-  var key = String(rowId);
-  if (expanded) {
-    expandedRows[key] = true;
-  } else {
-    delete expandedRows[key];
-  }
-  writeImportReviewExpandedRows(jobId, expandedRows);
+  setImportReviewRowExpanded(row, button.getAttribute("aria-expanded") !== "true");
 }
 
-function importReviewRowExpansionData(config) {
-  var cfg = config || {};
-  return {
-    expanded: false,
-    jobId: cfg.jobId,
-    rowId: cfg.rowId,
-
-    init: function () {
-      this.expanded = isImportReviewRowExpanded(this.jobId, this.rowId);
-    },
-
-    toggle: function () {
-      this.expanded = !this.expanded;
-      setImportReviewRowExpanded(this.jobId, this.rowId, this.expanded);
-    },
-  };
-}
-
-window.importReviewRowExpansionData = importReviewRowExpansionData;
+window.toggleImportReviewRow = toggleImportReviewRow;
 
 function readImportConflictCommitState(jobId) {
   function normalizeCommittedPages(pages) {
@@ -2757,7 +2898,7 @@ function importCollectionFooterData(config) {
       Number(snapshot.series_found) || 0,
     ),
     recentJobs: Number(cfg.recentJobs) || 0,
-    unmatched: Number(cfg.unmatched) || 0,
+    followUp: Number(cfg.followUp) || 0,
     libraryRoots: Number(cfg.libraryRoots) || 0,
 
     footerPhaseLabel: function () {
@@ -2817,7 +2958,7 @@ function importCollectionFooterData(config) {
       return [
         { label: "active import", value: this.resumeJobId ? "ready" : "idle" },
         { label: "recent jobs", value: String(this.recentJobs) },
-        { label: "unmatched", value: String(this.unmatched) },
+        { label: "follow-up", value: String(this.followUp) },
         { label: "library roots", value: String(this.libraryRoots) },
       ];
     },
@@ -2915,89 +3056,24 @@ function importCollectionFooterData(config) {
   };
 }
 
-function mylarPathProblemsData() {
-  return {
-    reportId: null,
-    items: [],
-    total: 0,
-    page: 1,
-    pageSize: 25,
-    search: "",
-    loading: false,
-    error: "",
-    controller: null,
-    requestId: 0,
-    init() {
-      this.setReport(this.mylarPathPreview);
-      this.$watch("mylarPathPreview", (preview) => this.setReport(preview));
-    },
-    destroy() {
-      this.requestId += 1;
-      if (this.controller) this.controller.abort();
-    },
-    setReport(preview) {
-      this.destroy();
-      this.reportId = preview && preview.report_id;
-      this.items = (preview && preview.exceptions) || [];
-      this.total = (preview && preview.exception_count) || 0;
-      this.page = 1;
-      this.search = "";
-      this.error = "";
-      this.loading = false;
-    },
-    get pages() {
-      return Math.max(1, Math.ceil(this.total / this.pageSize));
-    },
-    get exportUrl() {
-      return this.reportId
-        ? "/api/v1/import/mylar-path-reports/" + encodeURIComponent(this.reportId) + "/export"
-        : "";
-    },
-    async load(page) {
-      if (!this.reportId) return;
-      if (this.controller) this.controller.abort();
-      const controller = new AbortController();
-      this.controller = controller;
-      const requestId = ++this.requestId;
-      this.loading = true;
-      this.error = "";
-      try {
-        const query = new URLSearchParams({ page: String(page), search: this.search });
-        const response = await fetch(
-          "/api/v1/import/mylar-path-reports/" + encodeURIComponent(this.reportId) + "?" + query,
-          { signal: controller.signal },
-        );
-        if (!response.ok) throw new Error("Report unavailable or expired. Analyze Mylar paths again.");
-        const data = await response.json();
-        if (requestId !== this.requestId) return;
-        this.items = data.items;
-        this.total = data.total;
-        this.page = data.page;
-      } catch (error) {
-        if (error.name !== "AbortError" && requestId === this.requestId) {
-          this.error = error.message;
-        }
-      } finally {
-        if (requestId === this.requestId) this.loading = false;
-      }
-    },
-  };
-}
-
 function importSourceData(config) {
   var cfg = config || {};
   var libraryRoots = Array.isArray(cfg.libraryRoots) ? cfg.libraryRoots : [];
-  var defaultManagedRoot = libraryRoots.find(function (root) {
+  var initialManagedRoots = libraryRoots.filter(function (root) {
     return !!(
       root &&
       root.enabled !== false &&
       root.allow_managed_writes !== false &&
       root.available !== false &&
-      root.writable !== false &&
-      root.is_default_managed_destination
+      root.writable !== false
     );
   });
-  var initialTargetRootId = defaultManagedRoot ? Number(defaultManagedRoot.id) : null;
+  var defaultManagedRoot = initialManagedRoots.find(function (root) {
+    return !!root.is_default_managed_destination;
+  });
+  var initialTargetRoot =
+    defaultManagedRoot || (initialManagedRoots.length === 1 ? initialManagedRoots[0] : null);
+  var initialTargetRootId = initialTargetRoot ? Number(initialTargetRoot.id) : null;
   var emptyStoryArcPreview = function () {
     return {
       evidence_detected: false,
@@ -3064,6 +3140,15 @@ function importSourceData(config) {
     mylarPathAutoDetect: true,
     mylarPathConfirmed: false,
     mylarUnresolvedConfirmed: false,
+    referenceRootRegistrationPath: "",
+    referenceRootRegistrationErrorPath: "",
+    referenceRootRegistrationError: "",
+    attentionResolvingKey: "",
+    attentionResolutionErrors: {},
+    acknowledgedAttentionActions: {},
+    attentionDetailsOpen: false,
+    attentionDetailsItem: null,
+    attentionDetailsReturnFocus: null,
     storyArcPreview: emptyStoryArcPreview(),
     storyArcPreviewLoading: false,
     storyArcPreviewError: "",
@@ -3091,6 +3176,10 @@ function importSourceData(config) {
     futurePolicyRequestId: 0,
 
     selectSourceType: function (sourceType) {
+      var previousSourceType = this.sourceType;
+      if (previousSourceType !== sourceType) {
+        this.sourcePath = "";
+      }
       this.sourceType = sourceType;
       if (sourceType !== "filesystem" && sourceType !== "mylar3") {
         this.fileHandlingMode = "managed_copy";
@@ -3104,7 +3193,6 @@ function importSourceData(config) {
       } else if (sourceType === "mylar3") {
         this.scheduleMylarPathPreview();
       }
-      this.scheduleStoryArcPreview();
     },
 
     selectImportSource: function (selection) {
@@ -3112,7 +3200,6 @@ function importSourceData(config) {
       this.clearMylarPathPreview(true);
       this.scheduleLayoutPreview();
       this.scheduleMylarPathPreview();
-      this.scheduleStoryArcPreview();
       this.closeFileBrowser();
     },
 
@@ -3120,7 +3207,6 @@ function importSourceData(config) {
       this.clearMylarPathPreview(true);
       this.scheduleLayoutPreview();
       this.scheduleMylarPathPreview();
-      this.scheduleStoryArcPreview();
     },
 
     setFileHandlingMode: function (mode) {
@@ -3138,7 +3224,9 @@ function importSourceData(config) {
         var defaultRoot = this.managedLibraryRoots().find(function (root) {
           return !!root.is_default_managed_destination;
         });
-        this.targetLibraryRootId = defaultRoot ? Number(defaultRoot.id) : null;
+        var managedRoots = this.managedLibraryRoots();
+        var automaticRoot = defaultRoot || (managedRoots.length === 1 ? managedRoots[0] : null);
+        this.targetLibraryRootId = automaticRoot ? Number(automaticRoot.id) : null;
       }
       if (this.fileHandlingMode === "in_place") {
         this.scheduleLayoutPreview();
@@ -3158,6 +3246,60 @@ function importSourceData(config) {
           root.writable !== false
         );
       });
+    },
+
+    managedLibraryRootOptions: function (emptyLabel) {
+      var options = this.managedLibraryRoots().map(function (root) {
+        return {
+          value: String(root.id),
+          label:
+            String(root.name || "Library") +
+            " — " +
+            String(root.path || "") +
+            (root.is_default_managed_destination ? " (default)" : ""),
+        };
+      });
+      if (emptyLabel) {
+        options.unshift({ value: "", label: String(emptyLabel) });
+      }
+      return options;
+    },
+
+    selectedManagedLibraryRoot: function () {
+      var selectedRootId = Number(this.targetLibraryRootId);
+      return (
+        this.managedLibraryRoots().find(function (root) {
+          return Number(root.id) === selectedRootId && selectedRootId > 0;
+        }) || null
+      );
+    },
+
+    shouldShowFileDestinationControl: function () {
+      var managedRoots = this.managedLibraryRoots();
+      if (this.fileHandlingMode === "managed_copy") {
+        return managedRoots.length > 1 || !this.hasSelectedManagedDestination();
+      }
+      return managedRoots.length !== 1;
+    },
+
+    fileDestinationSummary: function () {
+      var managedRoots = this.managedLibraryRoots();
+      var selectedRoot = this.selectedManagedLibraryRoot();
+      if (this.fileHandlingMode === "managed_copy") {
+        if (selectedRoot) {
+          return (
+            String(selectedRoot.name || "Library") +
+            " will receive the managed copies from this import."
+          );
+        }
+        return managedRoots.length
+          ? "Choose the writable library that should receive this import."
+          : "Set up a writable library before importing copies.";
+      }
+      if (!managedRoots.length) {
+        return "Existing files can stay where they are, but future downloads need a writable library.";
+      }
+      return "Existing files stay where they are. You can override where Pullbox manages future files.";
     },
 
     refreshImportLibraryRoots: async function () {
@@ -3187,16 +3329,18 @@ function importSourceData(config) {
             return String(left.name || "").localeCompare(String(right.name || ""));
           });
         if (!this.hasSelectedManagedDestination()) {
-          var defaultRoot = this.managedLibraryRoots().find(function (root) {
+          var managedRoots = this.managedLibraryRoots();
+          var defaultRoot = managedRoots.find(function (root) {
             return !!root.is_default_managed_destination;
           });
+          var automaticRoot =
+            defaultRoot || (managedRoots.length === 1 ? managedRoots[0] : null);
           this.targetLibraryRootId =
-            this.fileHandlingMode === "managed_copy" && defaultRoot
-              ? Number(defaultRoot.id)
+            this.fileHandlingMode === "managed_copy" && automaticRoot
+              ? Number(automaticRoot.id)
               : null;
         }
         if (this.sourceType === "mylar3") {
-          this.clearMylarPathPreview(false);
           this.scheduleMylarPathPreview();
         }
       } catch (err) {
@@ -3204,6 +3348,82 @@ function importSourceData(config) {
           err && err.message ? err.message : "Could not refresh library roots.";
       } finally {
         this.libraryRootsRefreshing = false;
+      }
+    },
+
+    registerReferenceRoot: async function (group) {
+      var rootPath = String((group && group.root_path) || "").trim();
+      if (!rootPath || this.referenceRootRegistrationPath) {
+        return false;
+      }
+      var leaf = rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "library";
+      var rootPayload = {
+        name: ("Existing files - " + leaf + " - " + rootPath).slice(0, 255),
+        path: rootPath,
+        allow_referenced_registrations: true,
+        allow_managed_writes: false,
+        is_default_managed_destination: false,
+      };
+      var request = async function (path) {
+        var response = await fetch(path, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": this.csrfToken(),
+          },
+          body: JSON.stringify(rootPayload),
+        });
+        var payload = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          var detail = payload.detail;
+          if (Array.isArray(detail)) {
+            detail = detail
+              .map(function (item) {
+                return item && item.msg ? item.msg : "";
+              })
+              .filter(Boolean)
+              .join(" ");
+          }
+          throw new Error(
+            (payload.error && payload.error.message) ||
+              detail ||
+              "Pullbox could not register this library root.",
+          );
+        }
+        return payload;
+      }.bind(this);
+
+      this.referenceRootRegistrationPath = rootPath;
+      this.referenceRootRegistrationErrorPath = "";
+      this.referenceRootRegistrationError = "";
+      try {
+        var preview = await request("/api/v1/config/library-roots/preview");
+        if (!preview.can_create) {
+          throw new Error(
+            (preview.blocking_reasons || []).join(" ") ||
+              "This path cannot be registered for existing files.",
+          );
+        }
+        await request("/api/v1/config/library-roots");
+        await this.refreshImportLibraryRoots();
+        if (this.sourceType === "mylar3") {
+          await this.previewMylarPaths();
+        } else {
+          await this.previewLayout();
+        }
+        if (typeof showToast === "function") {
+          showToast({ message: "Existing-file library root registered.", level: "success" });
+        }
+        return true;
+      } catch (err) {
+        this.referenceRootRegistrationErrorPath = rootPath;
+        this.referenceRootRegistrationError =
+          err && err.message ? err.message : "Pullbox could not register this library root.";
+        return false;
+      } finally {
+        this.referenceRootRegistrationPath = "";
       }
     },
 
@@ -3490,6 +3710,399 @@ function importSourceData(config) {
       });
     },
 
+    advancedAttentionItems: function () {
+      if (!this.sourceType || !this.sourcePath.trim()) {
+        return [];
+      }
+      var items = [];
+      if (this.requiresManagedDestination() && !this.hasSelectedManagedDestination()) {
+        var managedRoots = this.managedLibraryRoots();
+        var preferredRoot = managedRoots.find(function (root) {
+          return !!root.is_default_managed_destination;
+        });
+        if (!preferredRoot && managedRoots.length === 1) {
+          preferredRoot = managedRoots[0];
+        }
+        items.push({
+          key: "managed-destination",
+          code: "managed_destination_required",
+          blocks_import: true,
+          reason: "Choose a managed destination",
+          suggested_action:
+            "Open Where new files go and select an available, writable Pullbox library.",
+          root_path: "",
+          action: preferredRoot
+            ? { kind: "select_managed_destination", library_root_id: Number(preferredRoot.id) }
+            : null,
+          details: {
+            title: "Choose where Pullbox will manage files",
+            series_count: 0,
+            location_count: 0,
+            known_paths: managedRoots.map(function (root) {
+              return String(root.path || "");
+            }),
+            steps: [
+              "Open Where new files go.",
+              "Choose an available, writable Pullbox library.",
+              "Recheck the import issues before starting the scan.",
+            ],
+          },
+        });
+      }
+      if (
+        this.sourceType === "filesystem" &&
+        this.fileHandlingMode === "in_place" &&
+        this.layoutPreview &&
+        !this.layoutPreview.can_keep_in_place
+      ) {
+        var layoutWarnings = Array.isArray(this.layoutPreview.warnings)
+          ? this.layoutPreview.warnings
+          : [];
+        var sourceOutsideLibraryRoot = layoutWarnings.includes(
+          "source_outside_library_root",
+        );
+        var otherLayoutWarnings = layoutWarnings.filter(function (warning) {
+          return warning !== "source_outside_library_root";
+        });
+        if (sourceOutsideLibraryRoot) {
+          items.push({
+            key: "in-place-reference-root",
+            code: "source_outside_library_root",
+            blocks_import: true,
+            reason: "Register this folder for existing files",
+            suggested_action:
+              "Pullbox can add this exact folder as a reference-only library root. Files stay where they are and will not be renamed or modified.",
+            root_path: this.sourcePath.trim(),
+            action: {
+              kind: "register_reference_root",
+              root_path: this.sourcePath.trim(),
+            },
+            details: {
+              title: "Register a reference-only library root",
+              series_count: 0,
+              location_count: Number(this.layoutPreview.files_considered || 0),
+              known_paths: [this.sourcePath.trim()],
+              steps: [
+                "Register this exact folder as an enabled library root for existing-file references.",
+                "Keep managed writes disabled so Pullbox cannot rename or modify files in this folder.",
+                "Recheck the folder before starting the scan.",
+              ],
+            },
+          });
+        }
+        if (
+          !sourceOutsideLibraryRoot ||
+          otherLayoutWarnings.length ||
+          Number(this.layoutPreview.files_outside_root || 0) > 0 ||
+          !!this.layoutPreview.partial
+        ) {
+          items.push({
+            key: "in-place-layout",
+            code: "in_place_layout_unavailable",
+            blocks_import: true,
+            reason: "Some files cannot be safely referenced in place",
+            suggested_action:
+              "Review the folder details and correct the listed source layout or access problem.",
+            root_path: this.sourcePath.trim(),
+            action: null,
+            details: {
+              title: "Review files that cannot be referenced",
+              series_count: 0,
+              location_count: Number(this.layoutPreview.files_considered || 0),
+              known_paths: [this.sourcePath.trim()],
+              steps: [
+                "Review the folder-layout details for paths Pullbox could not safely reference.",
+                "Correct the source layout or access problem shown in the preview.",
+                "Recheck the import issues before starting the scan.",
+              ],
+            },
+          });
+        }
+      }
+      if (this.sourceType !== "mylar3") {
+        return items;
+      }
+      if (this.mylarPathPreviewError) {
+        items.push({
+          key: "mylar-path-error",
+          code: "mylar_path_analysis_failed",
+          blocks_import: true,
+          reason: "Pullbox could not analyze the Mylar library paths",
+          suggested_action: this.mylarPathPreviewError,
+          root_path: this.sourcePath.trim(),
+          action: null,
+          details: {
+            title: "Mylar path analysis did not finish",
+            series_count: 0,
+            location_count: 0,
+            known_paths: [this.sourcePath.trim()],
+            steps: [
+              "Confirm that the selected Mylar database still exists and is readable inside Pullbox.",
+              "Correct the mount or file permissions if the database is unavailable.",
+              "Run the path check again after access is restored.",
+            ],
+          },
+        });
+        return items;
+      }
+      if (!this.mylarPathPreview) {
+        return items;
+      }
+      var serverItems = Array.isArray(this.mylarPathPreview.attention_items)
+        ? this.mylarPathPreview.attention_items
+        : [];
+      serverItems.forEach(
+        function (item) {
+          var action = item && item.action ? item.action : null;
+          var acknowledged = action
+            ? this.acknowledgedAttentionActions[String(item.key || "")]
+            : null;
+          if (
+            action &&
+            action.kind === "acknowledge_unavailable" &&
+            acknowledged === action.fingerprint
+          ) {
+            return;
+          }
+          items.push(item);
+        }.bind(this),
+      );
+      return items;
+    },
+
+    advancedAttentionCount: function () {
+      return this.advancedAttentionItems().length;
+    },
+
+    advancedAttentionError: function (item) {
+      return this.attentionResolutionErrors[String((item && item.key) || "")] || "";
+    },
+
+    restoreSkippedAttentionActions: function (preview) {
+      this.acknowledgedAttentionActions = {};
+      var sourcePath = this.sourcePath.trim();
+      var attentionFingerprint = String((preview && preview.attention_fingerprint) || "");
+      if (!sourcePath || !attentionFingerprint) {
+        return;
+      }
+      try {
+        var raw = window.sessionStorage.getItem("pb-import-mylar-skips:v1");
+        if (!raw) {
+          return;
+        }
+        var stored = JSON.parse(raw);
+        if (
+          !stored ||
+          stored.source_path !== sourcePath ||
+          stored.attention_fingerprint !== attentionFingerprint
+        ) {
+          window.sessionStorage.removeItem("pb-import-mylar-skips:v1");
+          return;
+        }
+        var available = {};
+        (Array.isArray(preview.attention_items) ? preview.attention_items : []).forEach(
+          function (item) {
+            if (
+              item &&
+              item.action &&
+              item.action.kind === "acknowledge_unavailable" &&
+              item.action.fingerprint
+            ) {
+              available[String(item.key || "")] = String(item.action.fingerprint);
+            }
+          },
+        );
+        var restored = {};
+        Object.keys(stored.actions || {}).forEach(function (key) {
+          var fingerprint = String(stored.actions[key] || "");
+          if (fingerprint && available[key] === fingerprint) {
+            restored[key] = fingerprint;
+          }
+        });
+        this.acknowledgedAttentionActions = restored;
+        if (!Object.keys(restored).length) {
+          window.sessionStorage.removeItem("pb-import-mylar-skips:v1");
+        }
+      } catch (_err) {
+        this.acknowledgedAttentionActions = {};
+        try {
+          window.sessionStorage.removeItem("pb-import-mylar-skips:v1");
+        } catch (_storageErr) {
+          // Storage may be unavailable in privacy-restricted browser contexts.
+        }
+      }
+    },
+
+    persistSkippedAttentionActions: function () {
+      var sourcePath = this.sourcePath.trim();
+      var attentionFingerprint = String(
+        (this.mylarPathPreview && this.mylarPathPreview.attention_fingerprint) || "",
+      );
+      try {
+        if (
+          !sourcePath ||
+          !attentionFingerprint ||
+          !Object.keys(this.acknowledgedAttentionActions).length
+        ) {
+          window.sessionStorage.removeItem("pb-import-mylar-skips:v1");
+          return;
+        }
+        window.sessionStorage.setItem(
+          "pb-import-mylar-skips:v1",
+          JSON.stringify({
+            source_path: sourcePath,
+            attention_fingerprint: attentionFingerprint,
+            actions: this.acknowledgedAttentionActions,
+          }),
+        );
+      } catch (_err) {
+        // Skips still work for this page when browser storage is unavailable.
+      }
+    },
+
+    resolveAdvancedAttention: async function (item) {
+      var key = String((item && item.key) || "");
+      var action = item && item.action ? item.action : null;
+      if (!key || !action || this.attentionResolvingKey) {
+        return;
+      }
+      this.attentionResolvingKey = key;
+      this.attentionResolutionErrors = Object.assign({}, this.attentionResolutionErrors, {
+        [key]: "",
+      });
+      try {
+        switch (action.kind) {
+          case "select_managed_destination":
+            this.targetLibraryRootId = Number(action.library_root_id || 0) || null;
+            if (this.sourceType === "mylar3") {
+              await this.previewMylarPaths();
+            }
+            break;
+          case "register_reference_root":
+            if (!(await this.registerReferenceRoot(action))) {
+              throw new Error(
+                this.referenceRootRegistrationError ||
+                  "Pullbox could not register this path for existing files.",
+              );
+            }
+            break;
+          case "remove_ineffective_mapping":
+            var mappingIndex = this.mylarPathMappings.findIndex(function (mapping) {
+              return !!(
+                mapping &&
+                mapping.stored_prefix === action.stored_prefix &&
+                mapping.pullbox_prefix === action.pullbox_prefix
+              );
+            });
+            if (mappingIndex < 0) {
+              throw new Error("This mapping changed. Review the current path details.");
+            }
+            this.mylarPathAutoDetect = false;
+            this.mylarPathMappings.splice(mappingIndex, 1);
+            await this.previewMylarPaths();
+            break;
+          default:
+            throw new Error("This issue does not have a supported automatic resolution.");
+        }
+        if (this.sourceType === "mylar3" && this.mylarPathPreviewError) {
+          throw new Error(this.mylarPathPreviewError);
+        }
+        if (this.sourceType === "filesystem" && this.layoutPreviewError) {
+          throw new Error(this.layoutPreviewError);
+        }
+        if (
+          this.advancedAttentionItems().some(function (candidate) {
+            return String((candidate && candidate.key) || "") === key;
+          })
+        ) {
+          throw new Error(
+            "Pullbox made the change, but this issue is still present after rechecking.",
+          );
+        }
+      } catch (err) {
+        this.attentionResolutionErrors = Object.assign({}, this.attentionResolutionErrors, {
+          [key]: err && err.message ? err.message : "Pullbox could not resolve this issue.",
+        });
+      } finally {
+        this.attentionResolvingKey = "";
+      }
+    },
+
+    skipAdvancedAttention: async function (item) {
+      var key = String((item && item.key) || "");
+      var action = item && item.action ? item.action : null;
+      if (
+        !key ||
+        !action ||
+        action.kind !== "acknowledge_unavailable" ||
+        this.attentionResolvingKey
+      ) {
+        return;
+      }
+      this.attentionResolvingKey = key;
+      this.attentionResolutionErrors = Object.assign({}, this.attentionResolutionErrors, {
+        [key]: "",
+      });
+      try {
+        await this.previewMylarPaths();
+        if (this.mylarPathPreviewError) {
+          throw new Error(this.mylarPathPreviewError);
+        }
+        var attentionItems =
+          this.mylarPathPreview && Array.isArray(this.mylarPathPreview.attention_items)
+            ? this.mylarPathPreview.attention_items
+            : [];
+        var confirmed = attentionItems.find(function (candidate) {
+          return !!(
+            candidate &&
+            candidate.key === key &&
+            candidate.action &&
+            candidate.action.kind === "acknowledge_unavailable" &&
+            candidate.action.fingerprint === action.fingerprint
+          );
+        });
+        if (!confirmed) {
+          throw new Error("The path evidence changed. Review the updated issue before continuing.");
+        }
+        this.acknowledgedAttentionActions = Object.assign(
+          {},
+          this.acknowledgedAttentionActions,
+          { [key]: action.fingerprint },
+        );
+        this.persistSkippedAttentionActions();
+      } catch (err) {
+        this.attentionResolutionErrors = Object.assign({}, this.attentionResolutionErrors, {
+          [key]: err && err.message ? err.message : "Pullbox could not skip this issue.",
+        });
+      } finally {
+        this.attentionResolvingKey = "";
+      }
+    },
+
+    openAdvancedAttentionDetails: function (item, returnFocus) {
+      this.attentionDetailsItem = item || null;
+      this.attentionDetailsReturnFocus = returnFocus || null;
+      this.attentionDetailsOpen = !!item;
+      var self = this;
+      this.$nextTick(function () {
+        if (self.$refs.attentionDetailsDialog) {
+          self.$refs.attentionDetailsDialog.focus();
+        }
+      });
+    },
+
+    closeAdvancedAttentionDetails: function () {
+      var returnFocus = this.attentionDetailsReturnFocus;
+      this.attentionDetailsOpen = false;
+      this.attentionDetailsItem = null;
+      this.attentionDetailsReturnFocus = null;
+      if (returnFocus && typeof returnFocus.focus === "function") {
+        this.$nextTick(function () {
+          returnFocus.focus();
+        });
+      }
+    },
+
     toggleStoryArcImport: function () {
       if (!this.storyArcImportRequested) {
         this.storyArcMaterializationRequested = false;
@@ -3506,9 +4119,7 @@ function importSourceData(config) {
       if (
         this.sourceType === "mylar3" &&
         (!this.mylarPathPreview ||
-          !(this.mylarPathPreview.can_confirm || this.mylarPathPreview.can_continue_with_unresolved) ||
-          (this.mylarPathPreview.requires_unresolved_acknowledgement && !this.mylarUnresolvedConfirmed) ||
-          (this.mylarPathPreview.requires_confirmation && !this.mylarPathConfirmed))
+          !(this.mylarPathPreview.can_confirm || this.mylarPathPreview.can_continue_with_unresolved))
       ) {
         return false;
       }
@@ -3533,7 +4144,7 @@ function importSourceData(config) {
       return this.layoutChoice !== "custom" || !!this.customSeriesPathTemplate.trim();
     },
 
-    clearMylarPathPreview: function (resetMappings) {
+    cancelMylarPathPreviewRefresh: function (preserveInitialLoading) {
       if (this.mylarPathPreviewTimer) {
         clearTimeout(this.mylarPathPreviewTimer);
         this.mylarPathPreviewTimer = null;
@@ -3543,11 +4154,17 @@ function importSourceData(config) {
         this.mylarPathPreviewController = null;
       }
       this.mylarPathPreviewRequestId += 1;
+      this.mylarPathPreviewLoading = !!preserveInitialLoading && !this.mylarPathPreview;
+    },
+
+    clearMylarPathPreview: function (resetMappings) {
+      this.cancelMylarPathPreviewRefresh(false);
       this.mylarPathPreview = null;
-      this.mylarPathPreviewLoading = false;
       this.mylarPathPreviewError = "";
       this.mylarPathConfirmed = false;
       this.mylarUnresolvedConfirmed = false;
+      this.acknowledgedAttentionActions = {};
+      this.attentionResolutionErrors = {};
       if (resetMappings) {
         this.mylarPathMappings = [];
         this.mylarPathAutoDetect = true;
@@ -3558,10 +4175,10 @@ function importSourceData(config) {
       if (this.sourceType !== "mylar3") {
         return;
       }
-      if (this.mylarPathPreviewTimer) {
-        clearTimeout(this.mylarPathPreviewTimer);
-      }
+      var preserveInitialLoading = this.mylarPathPreviewLoading && !this.mylarPathPreview;
+      this.cancelMylarPathPreviewRefresh(preserveInitialLoading);
       if (!this.canAnalyzeMylarPaths()) {
+        this.mylarPathPreviewLoading = false;
         return;
       }
       var self = this;
@@ -3573,13 +4190,12 @@ function importSourceData(config) {
 
     mylarPathMappingChanged: function () {
       this.mylarPathAutoDetect = false;
-      this.clearMylarPathPreview(false);
       this.scheduleMylarPathPreview();
     },
 
     addMylarPathMapping: function () {
       this.mylarPathAutoDetect = false;
-      this.clearMylarPathPreview(false);
+      this.cancelMylarPathPreviewRefresh(false);
       this.mylarPathMappings.push({
         id: ++this.mylarPathMappingId,
         stored_prefix: "",
@@ -3589,35 +4205,59 @@ function importSourceData(config) {
 
     removeMylarPathMapping: function (index) {
       this.mylarPathAutoDetect = false;
-      this.clearMylarPathPreview(false);
       this.mylarPathMappings.splice(index, 1);
       this.scheduleMylarPathPreview();
     },
 
     resetAutomaticMylarPaths: function () {
-      this.clearMylarPathPreview(true);
-      this.previewMylarPaths();
+      this.previewMylarPaths({ resetAutomatic: true });
     },
 
-    previewMylarPaths: async function () {
-      if (!this.canAnalyzeMylarPaths()) {
+    reconcileMylarPathMappings: function (mappings) {
+      var available = this.mylarPathMappings.slice();
+      return (mappings || []).map(
+        function (mapping) {
+          var existingIndex = available.findIndex(function (candidate) {
+            return !!(
+              candidate &&
+              candidate.stored_prefix === mapping.stored_prefix &&
+              candidate.pullbox_prefix === mapping.pullbox_prefix
+            );
+          });
+          var existing = existingIndex >= 0 ? available.splice(existingIndex, 1)[0] : null;
+          return {
+            id: existing ? existing.id : ++this.mylarPathMappingId,
+            stored_prefix: mapping.stored_prefix,
+            pullbox_prefix: mapping.pullbox_prefix,
+          };
+        }.bind(this),
+      );
+    },
+
+    previewMylarPaths: async function (options) {
+      var opts = options || {};
+      var resetAutomatic = opts.resetAutomatic === true;
+      if (
+        this.sourceType !== "mylar3" ||
+        !this.sourcePath.trim() ||
+        (!resetAutomatic && !this.canAnalyzeMylarPaths())
+      ) {
         return;
       }
-      if (this.mylarPathPreviewTimer) {
-        clearTimeout(this.mylarPathPreviewTimer);
-        this.mylarPathPreviewTimer = null;
-      }
-      if (this.mylarPathPreviewController) {
-        this.mylarPathPreviewController.abort();
-      }
-      var requestId = ++this.mylarPathPreviewRequestId;
+      this.cancelMylarPathPreviewRefresh(false);
+      var requestId = this.mylarPathPreviewRequestId;
       var controller = new AbortController();
+      var requestAutoDetect = resetAutomatic ? true : this.mylarPathAutoDetect;
+      var requestMappings = resetAutomatic
+        ? []
+        : this.mylarPathMappings.map(function (mapping) {
+            return {
+              stored_prefix: String(mapping.stored_prefix || "").trim(),
+              pullbox_prefix: String(mapping.pullbox_prefix || "").trim(),
+            };
+          });
       this.mylarPathPreviewController = controller;
       this.mylarPathPreviewLoading = true;
-      this.mylarPathPreviewError = "";
-      this.mylarPathPreview = null;
-      this.mylarPathConfirmed = false;
-      this.mylarUnresolvedConfirmed = false;
       try {
         var response = await fetch("/api/v1/import/mylar-path-preview", {
           method: "POST",
@@ -3630,13 +4270,8 @@ function importSourceData(config) {
             source_path: this.sourcePath.trim(),
             source_type: "mylar3",
             file_handling_mode: this.fileHandlingMode,
-            auto_detect: this.mylarPathAutoDetect,
-            mappings: this.mylarPathMappings.map(function (mapping) {
-              return {
-                stored_prefix: String(mapping.stored_prefix || "").trim(),
-                pullbox_prefix: String(mapping.pullbox_prefix || "").trim(),
-              };
-            }),
+            auto_detect: requestAutoDetect,
+            mappings: requestMappings,
           }),
         });
         var payload = await response.json().catch(function () {
@@ -3661,17 +4296,15 @@ function importSourceData(config) {
         if (requestId !== this.mylarPathPreviewRequestId) {
           return;
         }
+        this.mylarPathPreviewError = "";
+        this.mylarPathAutoDetect = requestAutoDetect;
+        this.restoreSkippedAttentionActions(payload);
         this.mylarPathPreview = payload;
-        this.mylarPathMappings = (payload.mappings || []).map(
-          function (mapping) {
-            return {
-              id: ++this.mylarPathMappingId,
-              stored_prefix: mapping.stored_prefix,
-              pullbox_prefix: mapping.pullbox_prefix,
-            };
-          }.bind(this),
+        this.mylarPathMappings = this.reconcileMylarPathMappings(payload.mappings);
+        this.mylarPathConfirmed = !!(
+          payload.can_confirm || payload.can_continue_with_unresolved
         );
-        this.mylarPathConfirmed = !!(payload.can_confirm && !payload.requires_confirmation);
+        this.mylarUnresolvedConfirmed = !!payload.can_continue_with_unresolved;
       } catch (err) {
         if (err && err.name === "AbortError") {
           return;
@@ -3724,7 +4357,6 @@ function importSourceData(config) {
       this.storyArcPreview = emptyStoryArcPreview();
       this.storyArcPreviewLoading = false;
       this.storyArcPreviewError = "";
-      this.storyArcImportRequested = false;
       this.storyArcMaterializationRequested = false;
     },
 
@@ -3741,7 +4373,6 @@ function importSourceData(config) {
       this.storyArcPreview = emptyStoryArcPreview();
       this.storyArcPreviewLoading = false;
       this.storyArcPreviewError = "";
-      this.storyArcImportRequested = false;
       this.storyArcMaterializationRequested = false;
       if (!this.canAnalyzeStoryArcs()) {
         return;
@@ -3770,7 +4401,6 @@ function importSourceData(config) {
       this.storyArcPreviewLoading = true;
       this.storyArcPreviewError = "";
       this.storyArcPreview = emptyStoryArcPreview();
-      this.storyArcImportRequested = false;
       this.storyArcMaterializationRequested = false;
       try {
         var response = await fetch("/api/v1/import/story-arc-preview", {
@@ -3980,14 +4610,16 @@ function importSourceData(config) {
               : null,
             future_layout_requested: this.futureLayoutRequested,
             future_root_policy: this.futureLayoutRequested ? this.futureRootPolicy : null,
-            story_arc_import_requested: this.storyArcImportRequested,
-            story_arc_materialization_requested: this.storyArcMaterializationRequested,
+            story_arc_import_requested: false,
+            story_arc_materialization_requested: false,
             mylar3_path_map: this.sourceType === "mylar3"
               ? Object.assign({}, this.mylarPathPreview.path_map || {})
               : {},
             mylar3_path_map_confirmed: this.sourceType === "mylar3",
-            mylar3_allow_unresolved_paths: this.sourceType === "mylar3" && this.mylarUnresolvedConfirmed,
-            mylar3_unresolved_fingerprint: this.sourceType === "mylar3" && this.mylarUnresolvedConfirmed
+            mylar3_allow_unresolved_paths: this.sourceType === "mylar3" &&
+              !!this.mylarPathPreview.can_continue_with_unresolved,
+            mylar3_unresolved_fingerprint: this.sourceType === "mylar3" &&
+              this.mylarPathPreview.can_continue_with_unresolved
               ? this.mylarPathPreview.unresolved_fingerprint : null,
           }),
         });
@@ -6720,8 +7352,6 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     jobId: cfg.jobId,
     currentView: cfg.currentView || "series",
     conflictsCommitted: false,
-    showCancelModal: false,
-    cancelling: false,
     reviewToken: typeof cfg.reviewToken === "string" ? cfg.reviewToken : "",
     preferredRootId:
       cfg.preferredRootId === null || typeof cfg.preferredRootId === "undefined"
@@ -7056,6 +7686,21 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       if (!Number.isFinite(rootId)) {
         rootId = null;
       }
+      if (materialize && rootId === null) {
+        var rootTrigger = formElement.querySelector(
+          "[data-testid^='import-story-arc-policy-root-'] [data-dropdown-select-trigger]",
+        );
+        if (rootTrigger) {
+          rootTrigger.focus();
+        }
+        if (typeof showToast === "function") {
+          showToast({
+            message: "Choose an approved library root before confirming this policy.",
+            level: "warning",
+          });
+        }
+        return;
+      }
       var destinationElement = field("destination_root");
       var symlinkElement = field("symlink_style");
       var digestElement = field("expected_policy_digest");
@@ -7278,16 +7923,15 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       }
     },
 
-    selectAllImportable: async function () {
-      try {
-        var seriesResponse = await fetch("/api/v1/import/" + this.jobId + "/series/selection-bulk", {
+    setAllImportableSelection: async function (includeInImport) {
+      var seriesResponse = await fetch("/api/v1/import/" + this.jobId + "/series/selection-bulk", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-CSRF-Token": readCsrfTokenFromBody(),
           },
           body: JSON.stringify({
-            include_in_import: true,
+            include_in_import: includeInImport,
             imported_series_ids: [],
           }),
         });
@@ -7298,7 +7942,12 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
             .catch(function () {
               return {};
             });
-          throw new Error(seriesError.detail || "Failed to select matched series.");
+          throw new Error(
+            seriesError.detail ||
+              (includeInImport
+                ? "Failed to select matched series."
+                : "Failed to clear series selection."),
+          );
         }
 
         var fileResponse = await fetch("/api/v1/import/" + this.jobId + "/files/selection-bulk", {
@@ -7308,7 +7957,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
             "X-CSRF-Token": readCsrfTokenFromBody(),
           },
           body: JSON.stringify({
-            include_in_import: true,
+            include_in_import: includeInImport,
           }),
         });
 
@@ -7318,9 +7967,18 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
             .catch(function () {
               return {};
             });
-          throw new Error(fileError.detail || "Failed to select in-library files.");
+          throw new Error(
+            fileError.detail ||
+              (includeInImport
+                ? "Failed to select in-library files."
+                : "Failed to clear in-library file selection."),
+          );
         }
+    },
 
+    selectAllImportable: async function () {
+      try {
+        await this.setAllImportableSelection(true);
         await this.refreshReviewSummary();
         await this.refreshSeriesReview();
       } catch (err) {
@@ -7337,47 +7995,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     deselectAllImportable: async function () {
       try {
-        var seriesResponse = await fetch("/api/v1/import/" + this.jobId + "/series/selection-bulk", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": readCsrfTokenFromBody(),
-          },
-          body: JSON.stringify({
-            include_in_import: false,
-            imported_series_ids: [],
-          }),
-        });
-
-        if (!seriesResponse.ok) {
-          var seriesError = await seriesResponse
-            .json()
-            .catch(function () {
-              return {};
-            });
-          throw new Error(seriesError.detail || "Failed to clear series selection.");
-        }
-
-        var fileResponse = await fetch("/api/v1/import/" + this.jobId + "/files/selection-bulk", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": readCsrfTokenFromBody(),
-          },
-          body: JSON.stringify({
-            include_in_import: false,
-          }),
-        });
-
-        if (!fileResponse.ok) {
-          var fileError = await fileResponse
-            .json()
-            .catch(function () {
-              return {};
-            });
-          throw new Error(fileError.detail || "Failed to clear in-library file selection.");
-        }
-
+        await this.setAllImportableSelection(false);
         await this.refreshReviewSummary();
         await this.refreshSeriesReview();
       } catch (err) {
@@ -7562,19 +8180,6 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       }
     },
 
-    cancelImport: async function () {
-      this.cancelling = true;
-      try {
-        await fetch("/api/v1/import/" + this.jobId, {
-          method: "DELETE",
-          headers: { "X-CSRF-Token": readCsrfTokenFromBody() },
-        });
-        purgeImportClientState(this.jobId);
-      } finally {
-        window.location.replace("/import");
-      }
-    },
-
     syncSelectionUi: function () {
       this.syncSelectionSummaryUi();
     },
@@ -7642,7 +8247,36 @@ function importResultsData(config) {
     safetyRetryingFileId: null,
     cleanupRunningAction: "",
     cleanupError: "",
+    cleanLibraryTargetRootId: cfg.defaultCleanLibraryRootId || "",
+    cleanLibraryRootPolicies: Array.isArray(cfg.cleanLibraryRootPolicies)
+      ? cfg.cleanLibraryRootPolicies
+      : [],
+    cleanLibraryJobId:
+      cfg.activeCleanLibraryJob && cfg.activeCleanLibraryJob.id
+        ? Number(cfg.activeCleanLibraryJob.id)
+        : null,
+    cleanLibraryStatus:
+      cfg.activeCleanLibraryJob && cfg.activeCleanLibraryJob.status
+        ? String(cfg.activeCleanLibraryJob.status).toLowerCase()
+        : "",
+    cleanLibraryProgress:
+      cfg.activeCleanLibraryJob && cfg.activeCleanLibraryJob.progress_snapshot
+        ? Math.max(
+            0,
+            Math.min(100, Number(cfg.activeCleanLibraryJob.progress_snapshot.progress) || 0)
+          )
+        : 0,
+    cleanLibraryProgressMessage:
+      cfg.activeCleanLibraryJob && cfg.activeCleanLibraryJob.progress_snapshot
+        ? String(cfg.activeCleanLibraryJob.progress_snapshot.message || "")
+        : "",
+    cleanLibraryProgressPollTimer: null,
+    cleanLibraryRunning: false,
+    cleanLibraryError: "",
+    cleanLibraryReturnFocus: null,
     retryError: "",
+    refreshUrl: cfg.refreshUrl || "/import/" + (cfg.jobId || "") + "/results-partial",
+    refreshTarget: cfg.refreshTarget || "[data-testid='import-collection-results']",
 
     toggleFailedSeries: function () {
       this.showFailedSeries = !this.showFailedSeries;
@@ -7650,6 +8284,202 @@ function importResultsData(config) {
 
     toggleFailedFiles: function () {
       this.showFailedFiles = !this.showFailedFiles;
+    },
+
+    initializeCleanLibraryModal: function () {
+      this.cleanLibraryReturnFocus = document.activeElement;
+      var self = this;
+      this.$nextTick(function () {
+        window.requestAnimationFrame(function () {
+          var target = self.$refs.cleanLibraryInitialFocus || self.$refs.cleanLibraryDialog;
+          if (target && typeof target.focus === "function") {
+            target.focus({ preventScroll: true });
+          }
+        });
+      });
+      if (this.cleanLibraryJobId) {
+        this.refreshCleanLibraryProgress();
+      }
+    },
+
+    closeCleanLibraryModal: function () {
+      this.clearCleanLibraryProgressPoll();
+      var returnFocus = this.cleanLibraryReturnFocus;
+      this.cleanLibraryReturnFocus = null;
+      this.open = false;
+      window.setTimeout(function () {
+        closeImportCvSearchModal();
+        if (
+          returnFocus &&
+          document.contains(returnFocus) &&
+          typeof returnFocus.focus === "function"
+        ) {
+          returnFocus.focus({ preventScroll: true });
+        }
+      }, 0);
+    },
+
+    selectedCleanLibraryPolicy: function () {
+      var targetRootId = Number(this.cleanLibraryTargetRootId);
+      return (
+        this.cleanLibraryRootPolicies.find(function (root) {
+          return Number(root && root.id) === targetRootId;
+        }) || {}
+      );
+    },
+
+    cleanLibraryPolicyLabel: function (key) {
+      var policy = this.selectedCleanLibraryPolicy();
+      var enabled = policy[key] === true;
+      var labels = {
+        rename_on_import: enabled
+          ? "Use the selected root's naming templates"
+          : "Keep current file and folder names",
+        normalize_to_cbz: enabled
+          ? "Normalize supported archives to CBZ"
+          : "Keep each supported archive format",
+        update_comicinfo: enabled
+          ? "Write matched metadata to ComicInfo.xml"
+          : "Keep embedded ComicInfo.xml unchanged",
+        skip_existing: enabled
+          ? "Skip issues already in the destination"
+          : "Allow another managed copy when valid",
+      };
+      return labels[key] || "Use current import settings";
+    },
+
+    clearCleanLibraryProgressPoll: function () {
+      if (this.cleanLibraryProgressPollTimer) {
+        window.clearTimeout(this.cleanLibraryProgressPollTimer);
+        this.cleanLibraryProgressPollTimer = null;
+      }
+    },
+
+    cleanLibraryIsTerminal: function () {
+      return ["completed", "failed", "cancelled", "rolled_back"].indexOf(
+        this.cleanLibraryStatus
+      ) !== -1;
+    },
+
+    cleanLibraryStatusLabel: function () {
+      var labels = {
+        importing: "Building",
+        pausing: "Pausing",
+        paused: "Paused",
+        stalled: "Needs attention",
+        cancelling: "Cancelling",
+        rolling_back: "Rolling back",
+        completed: "Complete",
+        failed: "Failed",
+        cancelled: "Cancelled",
+        rolled_back: "Rolled back",
+      };
+      return labels[this.cleanLibraryStatus] || "Queued";
+    },
+
+    cleanLibraryJobUrl: function () {
+      var step = this.cleanLibraryStatus === "completed" ? 5 : 4;
+      return (
+        "/import?tab=collection&resume_job_id=" +
+        encodeURIComponent(this.cleanLibraryJobId || "") +
+        "&resume_step=" +
+        step
+      );
+    },
+
+    scheduleCleanLibraryProgressPoll: function () {
+      var self = this;
+      self.clearCleanLibraryProgressPoll();
+      if (!self.cleanLibraryJobId || self.cleanLibraryIsTerminal() || !self.open) {
+        return;
+      }
+      self.cleanLibraryProgressPollTimer = window.setTimeout(function () {
+        self.cleanLibraryProgressPollTimer = null;
+        self.refreshCleanLibraryProgress();
+      }, 1000);
+    },
+
+    refreshCleanLibraryProgress: async function () {
+      if (!this.cleanLibraryJobId) {
+        return;
+      }
+      try {
+        var response = await fetch(
+          "/import/" + this.cleanLibraryJobId + "/progress-state",
+          { headers: { Accept: "application/json" } }
+        );
+        if (!response.ok) {
+          throw new Error("Could not refresh clean-library progress.");
+        }
+        var progress = await response.json();
+        this.cleanLibraryStatus = String(progress.status || this.cleanLibraryStatus).toLowerCase();
+        var nextProgress = Number(progress.progress);
+        if (Number.isFinite(nextProgress)) {
+          this.cleanLibraryProgress = Math.max(
+            this.cleanLibraryProgress,
+            Math.max(0, Math.min(100, Math.round(nextProgress)))
+          );
+        }
+        if (this.cleanLibraryStatus === "completed") {
+          this.cleanLibraryProgress = 100;
+        }
+        this.cleanLibraryProgressMessage = String(
+          progress.message || this.cleanLibraryProgressMessage || "Building the clean library..."
+        );
+        if (this.cleanLibraryStatus === "failed" && progress.error_message) {
+          this.cleanLibraryError = String(progress.error_message);
+        }
+      } catch (err) {
+        this.cleanLibraryError =
+          err && err.message ? err.message : "Could not refresh clean-library progress.";
+      } finally {
+        this.scheduleCleanLibraryProgressPoll();
+      }
+    },
+
+    trapCleanLibraryModalFocus: function (event) {
+      if (!event || !this.open || !this.$refs.cleanLibraryDialog) {
+        return;
+      }
+      var dialog = this.$refs.cleanLibraryDialog;
+      var panel = event.target && event.target.closest
+        ? event.target.closest("[data-dropdown-select-panel]")
+        : null;
+      var focusable = Array.prototype.filter.call(
+        dialog.querySelectorAll(
+          'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+            'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        ),
+        function (element) {
+          return element.getClientRects().length > 0;
+        }
+      );
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
+        return;
+      }
+      if (panel) {
+        event.preventDefault();
+        var labelledBy = panel.getAttribute("aria-labelledby");
+        var trigger = labelledBy ? dialog.querySelector("#" + CSS.escape(labelledBy)) : null;
+        var triggerIndex = trigger ? focusable.indexOf(trigger) : -1;
+        var destination = event.shiftKey
+          ? trigger || focusable[0]
+          : focusable[Math.min(focusable.length - 1, triggerIndex + 1)];
+        destination.focus({ preventScroll: true });
+        return;
+      }
+      var active = document.activeElement;
+      var first = focusable[0];
+      var last = focusable[focusable.length - 1];
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
     },
 
     retryFailed: async function () {
@@ -7751,8 +8581,8 @@ function importResultsData(config) {
     },
 
     refreshResults: function () {
-      var url = "/import/" + this.jobId + "/results-partial";
-      var target = "[data-testid='import-collection-results']";
+      var url = this.refreshUrl;
+      var target = this.refreshTarget;
       if (window.htmx && document.querySelector(target)) {
         window.htmx.ajax("GET", url, { target: target, swap: "outerHTML" });
         return;
@@ -7841,6 +8671,64 @@ function importResultsData(config) {
         }
       } finally {
         this.cleanupRunningAction = "";
+      }
+    },
+
+    buildCleanLibrary: async function () {
+      if (!this.jobId || !this.cleanLibraryTargetRootId || this.cleanLibraryRunning) {
+        return;
+      }
+      this.cleanLibraryRunning = true;
+      this.cleanLibraryError = "";
+      try {
+        var targetRootId = Number(this.cleanLibraryTargetRootId);
+        var previewResponse = await fetch(
+          "/api/v1/import/" +
+            this.jobId +
+            "/clean-library/preview?target_root_id=" +
+            encodeURIComponent(targetRootId)
+        );
+        var preview = await previewResponse.json().catch(function () {
+          return {};
+        });
+        if (!previewResponse.ok) {
+          throw new Error(preview.detail || "Could not preview the clean library.");
+        }
+        var response = await fetch(
+          "/api/v1/import/" + this.jobId + "/clean-library",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": readCsrfTokenFromBody(),
+            },
+            body: JSON.stringify({
+              target_root_id: targetRootId,
+              preview_token: preview.preview_token,
+              confirmation: "BUILD CLEAN LIBRARY",
+            }),
+          }
+        );
+        var result = await response.json().catch(function () {
+          return {};
+        });
+        if (!response.ok) {
+          throw new Error(result.detail || "Could not start the clean-library build.");
+        }
+        this.cleanLibraryJobId = Number(result.job_id);
+        this.cleanLibraryStatus = "importing";
+        this.cleanLibraryProgress = 0;
+        this.cleanLibraryProgressMessage = "Preparing the clean-library work plan...";
+        await this.refreshCleanLibraryProgress();
+      } catch (err) {
+        var message =
+          err && err.message ? err.message : "Could not start the clean-library build.";
+        this.cleanLibraryError = message;
+        if (typeof showToast === "function") {
+          showToast({ message: message, level: "error" });
+        }
+      } finally {
+        this.cleanLibraryRunning = false;
       }
     },
 
@@ -11991,13 +12879,15 @@ function utilitiesPermissionsPage(config) {
     },
 
     syncFooterDock: function () {
+      var detail = {
+        mode: this.runModeLabel(),
+        scope: this.scopeLabel(),
+        targets: this.targetsLabel(),
+      };
+      window.pullboxUtilitiesPermissionsFooterState = detail;
       window.dispatchEvent(
         new CustomEvent("utilities:permissions-footer", {
-          detail: {
-            mode: this.runModeLabel(),
-            scope: this.scopeLabel(),
-            targets: this.targetsLabel(),
-          },
+          detail: detail,
         })
       );
     },
@@ -13319,33 +14209,36 @@ function downloadsPage(config) {
 
 function dropdownSelectData(config) {
   var cfg = config || {};
-  var rawOptions = Array.isArray(cfg.options) ? cfg.options : [];
-  var normalizedOptions = rawOptions.map(function (option) {
-    if (Array.isArray(option)) {
-      return {
-        value: option[0] == null ? "" : String(option[0]),
-        label:
-          option[1] == null
-            ? option[0] == null
-              ? ""
-              : String(option[0])
-            : String(option[1]),
-        disabled: false,
-      };
-    }
+  function normalizeOptions(options) {
+    return (Array.isArray(options) ? options : []).map(function (option) {
+      if (Array.isArray(option)) {
+        return {
+          value: option[0] == null ? "" : String(option[0]),
+          label:
+            option[1] == null
+              ? option[0] == null
+                ? ""
+                : String(option[0])
+              : String(option[1]),
+          disabled: false,
+        };
+      }
 
-    var item = option || {};
-    return {
-      value: item.value == null ? "" : String(item.value),
-      label:
-        item.label == null
-          ? item.value == null
-            ? ""
-            : String(item.value)
-          : String(item.label),
-      disabled: Boolean(item.disabled),
-    };
-  });
+      var item = option || {};
+      return {
+        value: item.value == null ? "" : String(item.value),
+        label:
+          item.label == null
+            ? item.value == null
+              ? ""
+              : String(item.value)
+            : String(item.label),
+        disabled: Boolean(item.disabled),
+      };
+    });
+  }
+
+  var normalizedOptions = normalizeOptions(cfg.options);
 
   function findIndexByValue(value) {
     var normalizedValue = value == null ? "" : String(value);
@@ -13450,6 +14343,44 @@ function dropdownSelectData(config) {
       this.syncFromValue();
       this.syncInput();
       this.applyFitWidth();
+    },
+
+    syncExternalOptions: function (nextOptions) {
+      var normalizedNext = normalizeOptions(nextOptions);
+      var unchanged =
+        normalizedNext.length === normalizedOptions.length &&
+        normalizedNext.every(function (option, index) {
+          var current = normalizedOptions[index];
+          return !!(
+            current &&
+            current.value === option.value &&
+            current.label === option.label &&
+            current.disabled === option.disabled
+          );
+        });
+      if (unchanged) {
+        return;
+      }
+
+      normalizedOptions = normalizedNext;
+      this.options = normalizedNext;
+      this.syncFromValue();
+      this.syncInput();
+      this.applyFitWidth();
+      if (this.open) {
+        this.schedulePanelPositionUpdate();
+      }
+    },
+
+    syncExternalDisabled: function (nextDisabled) {
+      var disabled = Boolean(nextDisabled);
+      if (disabled === this.disabled) {
+        return;
+      }
+      this.disabled = disabled;
+      if (disabled && this.open) {
+        this.close(false);
+      }
     },
 
     runChangeExpression: function () {
@@ -16045,7 +16976,7 @@ function orphanedSeriesPage(config) {
 
     searchCv: function (importedSeriesId, query) {
       if (typeof htmx === "undefined") {
-        window.location.assign("/import?tab=unmatched");
+        window.location.assign("/import?tab=follow-up");
         return;
       }
 
@@ -16058,7 +16989,7 @@ function orphanedSeriesPage(config) {
 
     openRecovery: function (importedSeriesId) {
       if (typeof htmx === "undefined") {
-        window.location.assign("/import?tab=unmatched");
+        window.location.assign("/import?tab=follow-up");
         return;
       }
 
@@ -16158,7 +17089,7 @@ function orphanedSeriesPage(config) {
           self.dispatchToast(
             "Identified " +
               ((data && data.cv_title) || "series") +
-              ". Finish the file recovery to remove it from Unmatched.",
+              ". Finish the file recovery to remove it from Follow-up.",
             "success"
           );
           self.refreshResults();
@@ -16698,7 +17629,7 @@ function orphanedRecoveryModal(config) {
 
     reload: function () {
       if (typeof htmx === "undefined") {
-        window.location.assign("/import?tab=unmatched");
+        window.location.assign("/import?tab=follow-up");
         return;
       }
       htmx.ajax("GET", "/import/orphaned/" + cfg.importedSeriesId + "/recovery", {
@@ -20050,6 +20981,24 @@ function prepareAlpineSwap(detail, target) {
   return true;
 }
 
+function initializePreparedAlpineSwap(detail) {
+  if (!detail || !detail.xhr || !_htmxRequestsNeedingAlpineInit.has(detail.xhr)) {
+    return false;
+  }
+
+  _htmxRequestsNeedingAlpineInit.delete(detail.xhr);
+  var target = resolveHtmxLiveTarget(detail.target);
+  if (!target || target.isConnected === false) {
+    return false;
+  }
+
+  if (window.Alpine) {
+    Alpine.initTree(target);
+  }
+  seedSearchFieldStates(target);
+  return true;
+}
+
 function _purgeDetailHistoryRestoreEntry(pathname, search) {
   var normalizedPath = normalizePath(pathname || window.location.pathname);
   if (!_isDetailHistoryRestorePath(normalizedPath)) {
@@ -20190,21 +21139,9 @@ document.body.addEventListener("htmx:beforeSwap", function (e) {
 });
 
 document.addEventListener("htmx:afterRequest", function (e) {
-  var detail = e.detail || {};
-  if (!detail.xhr || !_htmxRequestsNeedingAlpineInit.has(detail.xhr)) {
-    return;
-  }
-
-  _htmxRequestsNeedingAlpineInit.delete(detail.xhr);
-  var target = resolveHtmxLiveTarget(detail.target);
-  if (!target || target.isConnected === false) {
-    return;
-  }
-
-  if (window.Alpine) {
-    Alpine.initTree(target);
-  }
-  seedSearchFieldStates(target);
+  // afterSwap normally initializes the replacement. Keep this as a fallback
+  // for HTMX request paths that complete without dispatching afterSwap.
+  initializePreparedAlpineSwap(e.detail || {});
 });
 
 // After a shell content swap, update the header title from the full-page response.
@@ -20247,6 +21184,17 @@ function _syncFooterDockFromResponse(responseText) {
 }
 
 document.addEventListener("htmx:afterSwap", function (e) {
+  initializePreparedAlpineSwap(e.detail || {});
+  var swappedTarget = resolveHtmxLiveTarget(e.detail.target);
+  if (
+    swappedTarget &&
+    swappedTarget.id === "import-step-review-shell" &&
+    pendingImportReviewViewportState
+  ) {
+    // Restore disclosure state in the swap task so a collapsed frame never paints.
+    restoreImportReviewExpansionState(pendingImportReviewViewportState, swappedTarget);
+  }
+
   if (e.detail.target && e.detail.target.id === "content" && e.detail.xhr) {
     _startContentSwapEnter();
     _syncFooterDockFromResponse(e.detail.xhr.responseText);
@@ -21253,11 +22201,6 @@ document.addEventListener("htmx:afterSettle", function (e) {
     window.htmx.process(settledTarget);
   }
 
-  // Re-initialize Alpine components in the primary HTMX swap target.
-  if (window.Alpine && settledTarget) {
-    Alpine.initTree(settledTarget);
-  }
-
   if (
     settledTarget &&
     (settledTarget.id === "import-step-review" ||
@@ -21287,6 +22230,15 @@ document.addEventListener("htmx:afterSettle", function (e) {
         // If Alpine scope lookup fails, leave the swapped shell intact.
       }
     }
+  }
+
+  if (
+    settledTarget &&
+    settledTarget.id === "import-step-review-shell" &&
+    pendingImportReviewViewportState
+  ) {
+    restoreImportReviewViewport(pendingImportReviewViewportState, settledTarget);
+    pendingImportReviewViewportState = null;
   }
 
   if (settledTarget) {

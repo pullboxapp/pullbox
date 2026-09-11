@@ -18,6 +18,12 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.models.series import Series
+from pullbox.models.story_arc import (
+    ImportedStoryArcStatus,
+    StoryArcResolutionState,
+    StoryArcSourceKind,
+)
+from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.import_review_actions import (
     allow_safety_blocked_file_once,
     bulk_update_file_selection,
@@ -673,6 +679,51 @@ async def test_allow_safety_blocked_file_once_keeps_file_in_safety_review_until_
     recompute_series.assert_awaited_once_with(db_session, job)
 
 
+async def test_allow_safety_blocked_file_once_recovers_skipped_series_target(
+    db_session: AsyncSession,
+) -> None:
+    service = ImportService(
+        series_service=AsyncMock(),
+        metadata_service=AsyncMock(),
+        event_bus=AsyncMock(),
+    )
+    job = await _create_job_row(db_session)
+    imported = await _create_imported_series(
+        db_session,
+        job,
+        status=ImportSeriesStatus.SKIPPED,
+    )
+    imported.cv_id = 163486
+    oversized = _make_file(
+        job,
+        imported,
+        name="East of West - The End Times Compendium.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        include_in_import=False,
+    )
+    oversized.diagnostics = {
+        "safety_block": {
+            "kind": "archive_decompressed_size",
+            "category": "decompression_size_limit",
+            "code": "archive_decompressed_size_limit",
+            "reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
+            "overrideable": True,
+        }
+    }
+    db_session.add(oversized)
+    await db_session.flush()
+
+    updated_series = await service.allow_safety_blocked_file_once(
+        db_session,
+        job.id,
+        oversized.id,
+    )
+
+    assert updated_series.status == ImportSeriesStatus.MATCHED
+    assert updated_series.diagnostics["rematch_pending"] is True
+    assert oversized.status == ImportedFileStatus.SAFETY_APPROVED
+
+
 async def test_allow_safety_blocked_file_once_rejects_non_overrideable_blocks(
     db_session: AsyncSession,
 ) -> None:
@@ -840,3 +891,121 @@ async def test_skip_safety_blocked_file_marks_file_skipped_and_unselects_series(
     assert updated_file.include_in_import is False
     assert imported.selected_for_import is False
     assert updated_file.diagnostics["resolution"] == "skipped"
+
+
+async def test_skip_safety_file_keeps_series_match_while_another_safety_item_remains(
+    db_session: AsyncSession,
+) -> None:
+    service = ImportService(
+        series_service=AsyncMock(),
+        metadata_service=AsyncMock(),
+        event_bus=AsyncMock(),
+    )
+    job = await _create_job_row(db_session)
+    imported = await _create_imported_series(db_session, job)
+    imported.cv_id = 163486
+    missing_reference = _make_file(
+        job,
+        imported,
+        name="removed-by-mylar.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        include_in_import=False,
+    )
+    missing_reference.diagnostics = {
+        "safety_block": {
+            "kind": "source_revalidation",
+            "category": "source_missing",
+            "code": "source_missing",
+            "reason": "The recorded file is missing.",
+            "overrideable": False,
+        }
+    }
+    oversized = _make_file(
+        job,
+        imported,
+        name="East of West - The End Times Compendium.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        include_in_import=False,
+    )
+    oversized.diagnostics = {
+        "safety_block": {
+            "kind": "archive_decompressed_size",
+            "category": "decompression_size_limit",
+            "code": "archive_decompressed_size_limit",
+            "reason": "The archive exceeds Pullbox's configured decompressed-size limit.",
+            "overrideable": True,
+        }
+    }
+    db_session.add_all([missing_reference, oversized])
+    await db_session.flush()
+
+    updated_series = await service.skip_safety_blocked_file(
+        db_session,
+        job.id,
+        missing_reference.id,
+    )
+
+    assert updated_series.status == ImportSeriesStatus.MATCHED
+    assert updated_series.diagnostics["safety_blocked_files"] == 1
+    assert missing_reference.status == ImportedFileStatus.SKIPPED
+    assert oversized.status == ImportedFileStatus.SAFETY_BLOCKED
+
+
+async def test_skip_safety_blocked_file_refreshes_linked_story_arc_state(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job_row(db_session)
+    imported = await _create_imported_series(db_session, job, selected_for_import=True)
+    imp_file = _make_file(
+        job,
+        imported,
+        name="variant-cover.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+    )
+    imp_file.diagnostics = {
+        "safety_block": {
+            "category": "single_page_comic",
+            "code": "single_page_comic",
+            "overrideable": True,
+        }
+    }
+    db_session.add(imp_file)
+    await db_session.flush()
+    arc = ImportedStoryArc(
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.FOLDER,
+        source_key="folder:daredevil",
+        source_ordinal=1,
+        name="Daredevil",
+        status=ImportedStoryArcStatus.NEEDS_REVIEW,
+        diagnostics={"safety_incomplete": True},
+    )
+    db_session.add(arc)
+    await db_session.flush()
+    entry = ImportedStoryArcEntry(
+        imported_story_arc_id=arc.id,
+        import_file_id=imp_file.id,
+        source_ordinal=1,
+        source_kind=StoryArcSourceKind.FOLDER,
+        resolution_state=StoryArcResolutionState.AMBIGUOUS,
+        diagnostics={
+            "safety_code": "single_page_comic",
+            "review_reason": "source_file_safety_blocked",
+        },
+    )
+    db_session.add(entry)
+    await db_session.flush()
+
+    await skip_safety_blocked_file(
+        db_session,
+        job.id,
+        imp_file.id,
+        recompute_file_counters=AsyncMock(),
+        recompute_series_counters=AsyncMock(),
+    )
+
+    assert entry.resolution_state == StoryArcResolutionState.SKIPPED
+    assert entry.selected_for_import is False
+    assert "safety_code" not in entry.diagnostics
+    assert arc.diagnostics["safety_incomplete"] is False
+    assert arc.diagnostics["scan_safety_incomplete"] is True

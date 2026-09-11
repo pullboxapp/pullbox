@@ -2,5 +2,11 @@
   id="import-orphaned-results"
   data-testid="import-orphaned-results"
 >
-  {% include "partials/import_orphaned_table.html" %}
+  {% if selected_follow_up_job %}
+    {% include "partials/import_follow_up_job.html" %}
+  {% elif view == 'dismissed' %}
+    {% include "partials/import_orphaned_table.html" %}
+  {% else %}
+    {% include "partials/import_follow_up_jobs.html" %}
+  {% endif %}
 </section>

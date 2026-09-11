@@ -983,6 +983,8 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     assert "CVE-2026-11824" in config_text
     assert "CVE-2026-14456" in config_text
     assert "CVE-2026-66046" in config_text
+    assert "CVE-2026-76956" in config_text
+    assert "CVE-2026-76957" in config_text
     assert "3.14.6" in config_text
     assert config.get("ignore")
 
@@ -1007,6 +1009,25 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     } == {
         ("libexpat1", "2.8.3-1~deb13u1+dhi2", "deb"),
         ("libexpat1-dev", "2.8.3-1~deb13u1+dhi2", "deb"),
+    }
+
+    current_expat_exceptions = [
+        entry
+        for entry in config["ignore"]
+        if entry.get("vulnerability") in {"CVE-2026-76956", "CVE-2026-76957"}
+    ]
+    assert "Re-review by 2026-10-07" in config_text
+    assert {
+        (
+            entry["vulnerability"],
+            entry["package"]["name"],
+            entry["package"]["version"],
+            entry["package"]["type"],
+        )
+        for entry in current_expat_exceptions
+    } == {
+        (cve, "libexpat1", "2.8.3-1~deb13u1+dhi2", "deb")
+        for cve in {"CVE-2026-76956", "CVE-2026-76957"}
     }
 
 

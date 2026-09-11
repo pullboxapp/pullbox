@@ -519,6 +519,24 @@ class TestSettingsRouteContracts:
         assert 'data-testid="settings-media-library-root-reference-role"' in response.text
         assert 'data-testid="settings-media-library-root-managed-role"' in response.text
         assert 'data-testid="settings-media-library-root-default"' in response.text
+        assert 'data-testid="settings-media-library-root-actions"' in response.text
+        assert 'class="flex flex-wrap justify-end gap-2 sm:col-span-2"' in response.text
+        assert 'data-testid="settings-media-library-root-make-default"' in response.text
+        assert 'data-testid="settings-media-library-root-toggle-enabled"' in response.text
+        make_default_start = response.text.index(
+            'data-testid="settings-media-library-root-make-default"'
+        )
+        toggle_enabled_start = response.text.index(
+            'data-testid="settings-media-library-root-toggle-enabled"'
+        )
+        assert (
+            'class="btn-ghost btn-sm"'
+            in response.text[make_default_start : make_default_start + 180]
+        )
+        assert (
+            'class="btn-ghost btn-sm"'
+            in response.text[toggle_enabled_start : toggle_enabled_start + 180]
+        )
         assert "Reference existing files" in response.text
         assert "Allow managed files" in response.text
         assert "Default managed destination" in response.text
@@ -530,6 +548,10 @@ class TestSettingsRouteContracts:
         assert "Confirm rebind" in response.text
         assert "/rebind/preview" in response.text
         assert 'confirmation: "REBIND"' in response.text
+        assert 'data-testid="settings-media-library-root-removal"' in response.text
+        assert 'confirmation: "REMOVE"' in response.text
+        assert "No folders or files will be deleted." in response.text
+        assert 'method: "DELETE"' in response.text
         assert "Delete library root" not in response.text
         assert "ordinary edits cannot change them" in response.text
         assert "bootstraps the default managed destination" in response.text

@@ -15,6 +15,7 @@ def _file(
     *,
     arc: str | None = None,
     order: str | None = None,
+    evidence_complete: bool = True,
 ) -> FolderArcFileEvidence:
     return FolderArcFileEvidence(
         relative_path=relative_path,
@@ -22,6 +23,7 @@ def _file(
         issue_number="1",
         story_arc=arc,
         story_arc_number=order,
+        evidence_complete=evidence_complete,
     )
 
 
@@ -67,6 +69,24 @@ def test_unlabelled_mixed_series_folder_is_not_silently_an_arc() -> None:
     )
 
     assert result.classification == FolderArcClassification.NORMAL_MIXED_FOLDER
+    assert result.proposed_name is None
+
+
+def test_incomplete_file_does_not_promote_an_unlabelled_mixed_folder_to_story_arc() -> None:
+    result = detect_folder_story_arc(
+        folder_label="Daredevil (2011)",
+        files=(
+            _file("Daredevil 001.cbz", "Daredevil"),
+            _file(
+                "Daredevil variant cover.cbz",
+                "Daredevil variant cover",
+                evidence_complete=False,
+            ),
+        ),
+    )
+
+    assert result.classification == FolderArcClassification.NORMAL_MIXED_FOLDER
+    assert result.reason == "mixed_series_without_strong_arc_evidence"
     assert result.proposed_name is None
 
 

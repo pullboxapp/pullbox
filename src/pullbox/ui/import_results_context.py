@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import case, func, select
 
+from pullbox.core.library_policy import load_effective_library_ingest_policy
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -15,8 +16,10 @@ from pullbox.models.import_job import (
     ImportJobActionStatus,
     ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
-from pullbox.models.library import LibraryFile
+from pullbox.models.issue import Issue
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
@@ -32,8 +35,11 @@ from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEn
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
 from pullbox.services.import_completed_cleanup import (
     CompletedImportCleanupAction,
-    count_completed_import_cleanup_scope,
-    list_completed_import_cleanup_examples,
+    summarize_completed_import_cleanup_scope,
+)
+from pullbox.services.import_misplaced_source_cleanup import (
+    MisplacedSourceCleanupAction,
+    count_misplaced_source_cleanup_files,
 )
 from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
@@ -80,6 +86,144 @@ _MANAGED_PLACEMENT_MODES = frozenset(
         StoryArcPlacementMode.SYMLINK,
     }
 )
+
+
+def _library_paths_overlap(first: str, second: str) -> bool:
+    from pathlib import Path
+
+    first_path = Path(first).resolve(strict=False)
+    second_path = Path(second).resolve(strict=False)
+    return (
+        first_path == second_path
+        or first_path.is_relative_to(second_path)
+        or second_path.is_relative_to(first_path)
+    )
+
+
+async def load_clean_library_summary(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[str, object]:
+    active_clean_job: ImportJob | None = None
+    active_jobs = list(
+        (
+            await session.scalars(
+                select(ImportJob)
+                .where(
+                    ImportJob.status.in_(
+                        {
+                            ImportJobStatus.IMPORTING,
+                            ImportJobStatus.PAUSING,
+                            ImportJobStatus.PAUSED,
+                            ImportJobStatus.STALLED,
+                            ImportJobStatus.CANCELLING,
+                            ImportJobStatus.ROLLING_BACK,
+                        }
+                    )
+                )
+                .order_by(ImportJob.id.desc())
+            )
+        ).all()
+    )
+    for candidate in active_jobs:
+        progress = dict(candidate.progress_snapshot or {})
+        if (
+            progress.get("clean_library_adoption") is True
+            and int(progress.get("source_import_job_id") or 0) == job_id
+        ):
+            active_clean_job = candidate
+            break
+    active_payload = (
+        {
+            "id": int(active_clean_job.id),
+            "status": active_clean_job.status.value,
+            "progress_snapshot": dict(active_clean_job.progress_snapshot or {}),
+        }
+        if active_clean_job is not None
+        else None
+    )
+    eligibility = (
+        ImportedFile.import_job_id == job_id,
+        ImportedFile.status == ImportedFileStatus.IMPORTED,
+        ImportedFile.matched_issue_id == Issue.id,
+        ImportedFile.library_file_id == LibraryFile.id,
+        LibraryFile.issue_id == Issue.id,
+        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED,
+        LibraryFile.file_path == ImportedFile.file_path,
+    )
+    count_row = (
+        await session.execute(
+            select(
+                func.count(ImportedFile.id),
+                func.count(func.distinct(Issue.series_id)),
+                func.coalesce(func.sum(LibraryFile.file_size), 0),
+            )
+            .select_from(ImportedFile)
+            .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+            .join(Issue, Issue.id == LibraryFile.issue_id)
+            .where(*eligibility)
+        )
+    ).one()
+    reference_count = int(count_row[0] or 0)
+    if reference_count == 0:
+        active_snapshot = dict(active_clean_job.progress_snapshot or {}) if active_clean_job else {}
+        source_snapshot = active_snapshot.get("clean_library_source_snapshot")
+        source_snapshot = source_snapshot if isinstance(source_snapshot, dict) else {}
+        return {
+            "clean_library_reference_count": int(source_snapshot.get("file_count") or 0),
+            "clean_library_reference_series_count": int(source_snapshot.get("series_count") or 0),
+            "clean_library_reference_bytes": int(source_snapshot.get("total_bytes") or 0),
+            "clean_library_target_roots": [],
+            "clean_library_active_job": active_payload,
+        }
+    source_root_paths = set(
+        (
+            await session.scalars(
+                select(LibraryRoot.path)
+                .select_from(ImportedFile)
+                .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+                .join(Issue, Issue.id == LibraryFile.issue_id)
+                .join(LibraryRoot, LibraryRoot.id == LibraryFile.library_root_id)
+                .where(*eligibility)
+                .distinct()
+            )
+        ).all()
+    )
+    roots = list(
+        (
+            await session.scalars(
+                select(LibraryRoot)
+                .where(
+                    LibraryRoot.enabled.is_(True),
+                    LibraryRoot.allow_managed_writes.is_(True),
+                )
+                .order_by(LibraryRoot.name, LibraryRoot.id)
+            )
+        ).all()
+    )
+    targets: list[dict[str, object]] = []
+    for root in roots:
+        if any(_library_paths_overlap(root.path, source) for source in source_root_paths):
+            continue
+        policy = await load_effective_library_ingest_policy(session, root)
+        targets.append(
+            {
+                "id": root.id,
+                "name": root.name,
+                "path": root.path,
+                "rename_on_import": policy.rename_on_import,
+                "normalize_to_cbz": policy.normalize_imported_archives_to_cbz,
+                "update_comicinfo": policy.update_embedded_comicinfo_from_match,
+                "skip_existing": policy.skip_existing_files,
+            }
+        )
+    return {
+        "clean_library_reference_count": reference_count,
+        "clean_library_reference_series_count": int(count_row[1] or 0),
+        "clean_library_reference_bytes": int(count_row[2] or 0),
+        "clean_library_target_roots": targets,
+        "clean_library_active_job": active_payload,
+    }
 
 
 async def _count_series_status(
@@ -189,12 +333,12 @@ _CLEANUP_ACTION_PRESENTATION = {
         "tone": "neutral",
     },
     CompletedImportCleanupAction.SKIP_PROBABLE_COVERS: {
-        "label": "Skip probable cover files",
+        "label": "Skip one-page archives",
         "description": (
-            "Exclude one-page image archives that look like series cover art, "
-            "while preserving the source files."
+            "Exclude one-page image archives from this import while preserving the source files. "
+            "They may be cover art, damaged archives, or intentional one-page comics."
         ),
-        "button_label": "Skip cover files",
+        "button_label": "Skip from import",
         "tone": "neutral",
     },
     CompletedImportCleanupAction.SKIP_UNUSABLE_FILES: {
@@ -239,6 +383,15 @@ _CLEANUP_ACTION_PRESENTATION = {
         "button_label": "Accept recommendations",
         "tone": "warning",
     },
+    CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES: {
+        "label": "Resolve mixed-folder files",
+        "description": (
+            "Use exact embedded ComicInfo identity to assign misplaced files to the correct "
+            "Pullbox series and issue. Mylar folders and source files remain unchanged."
+        ),
+        "button_label": "Resolve and retry",
+        "tone": "warning",
+    },
 }
 
 
@@ -248,28 +401,24 @@ async def _load_cleanup_action_summaries(
 ) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
     for action, presentation in _CLEANUP_ACTION_PRESENTATION.items():
-        affected_count, affected_file_count = await count_completed_import_cleanup_scope(
+        summary = await summarize_completed_import_cleanup_scope(
             session,
             job_id,
             action,
         )
-        if affected_count == 0:
+        if summary.affected_count == 0:
             continue
         summaries.append(
             {
                 "action": action.value,
-                "affected_count": affected_count,
-                "affected_file_count": affected_file_count,
+                "affected_count": summary.affected_count,
+                "affected_file_count": summary.affected_file_count,
                 "item_unit": (
                     "group"
                     if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
                     else "file"
                 ),
-                "examples": await list_completed_import_cleanup_examples(
-                    session,
-                    job_id,
-                    action,
-                ),
+                "examples": summary.examples,
                 **presentation,
             }
         )
@@ -700,11 +849,46 @@ async def _load_rollback_journal_summary(
     }
 
 
+async def _load_story_arc_results_summary(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[str, int]:
+    """Summarize created arcs separately from retained follow-up evidence."""
+    created_count, follow_up_count = (
+        await session.execute(
+            select(
+                func.sum(
+                    case(
+                        (ImportedStoryArc.materialized_story_arc_id.is_not(None), 1),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case(
+                        (
+                            ImportedStoryArc.materialized_story_arc_id.is_(None)
+                            & (ImportedStoryArc.status != ImportedStoryArcStatus.SKIPPED),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+            ).where(ImportedStoryArc.import_job_id == job_id)
+        )
+    ).one()
+    return {
+        "story_arcs_created_count": int(created_count or 0),
+        "story_arcs_follow_up_count": int(follow_up_count or 0),
+    }
+
+
 async def load_import_results_context(
     session: AsyncSession,
     job: ImportJob,
+    *,
+    include_clean_library: bool = True,
 ) -> dict[str, object]:
-    """Load aggregate counts and detail rows for the Step 5 results template."""
+    """Load import results, optionally including History-only organizer data."""
     job_id = int(job.id)
     imported_count = await _count_series_status(session, job_id, ImportSeriesStatus.IMPORTED)
     failed_count = await _count_series_status(session, job_id, ImportSeriesStatus.FAILED)
@@ -807,7 +991,43 @@ async def load_import_results_context(
         if job.status is ImportJobStatus.COMPLETED and job.archived_at is None
         else []
     )
+    misplaced_source_restore_count = 0
+    misplaced_source_duplicate_count = 0
+    if (
+        job.status is ImportJobStatus.COMPLETED
+        and job.archived_at is None
+        and job.source_type is ImportSourceType.MYLAR3
+    ):
+        misplaced_source_restore_count = await count_misplaced_source_cleanup_files(
+            session,
+            job_id,
+            MisplacedSourceCleanupAction.RESTORE_RECORDED_PATH,
+        )
+        misplaced_source_duplicate_count = await count_misplaced_source_cleanup_files(
+            session,
+            job_id,
+            MisplacedSourceCleanupAction.TRASH_IDENTICAL_DUPLICATE,
+        )
+    clean_library_summary = (
+        await load_clean_library_summary(session, job_id)
+        if include_clean_library
+        and job.status is ImportJobStatus.COMPLETED
+        and job.archived_at is None
+        else {
+            "clean_library_reference_count": 0,
+            "clean_library_reference_series_count": 0,
+            "clean_library_reference_bytes": 0,
+            "clean_library_target_roots": [],
+        }
+    )
     cleanup_by_action = {str(item["action"]): item for item in cleanup_action_summaries}
+    mixed_folder_summary = cleanup_by_action.get(
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES.value,
+        {},
+    )
+    clean_library_summary["clean_library_mixed_folder_repair_count"] = (
+        _positive_int(mixed_folder_summary.get("affected_file_count")) or 0
+    )
     recommended_summary = cleanup_by_action.get(
         CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS.value,
         {},
@@ -825,19 +1045,15 @@ async def load_import_results_context(
         files_conflict - recommended_conflict_files - already_owned_conflict_files,
         0,
     )
-    actionable_safety_files = sum(
-        _positive_int(item["affected_file_count"]) or 0
-        for item in cleanup_action_summaries
-        if item["action"]
-        in {
-            CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES.value,
-            CompletedImportCleanupAction.SKIP_PROBABLE_COVERS.value,
-            CompletedImportCleanupAction.SKIP_UNUSABLE_FILES.value,
-            CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES.value,
-            CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION.value,
-        }
+    cleanup_safe_action_count = sum(
+        _positive_int(item["affected_file_count"]) or 0 for item in cleanup_action_summaries
     )
-    needs_review_safety_count = max(files_safety_blocked - actionable_safety_files, 0)
+    manual_safety_count = sum(
+        _positive_int(item["count"]) or 0
+        for item in safety_category_summaries
+        if item.get("bucket") == "needs_review"
+    )
+    cleanup_needs_review_count = manual_safety_count + remaining_conflict_files
     files_total = sum(file_status_counts.values())
     orphaned_file_no_match_count = await _orphaned_file_no_match_count(session, job_id)
     identified_series_file_no_match_count = max(
@@ -852,6 +1068,19 @@ async def load_import_results_context(
     )
     catalog_sync_pending_count = len(catalog_sync_series) - catalog_sync_failed_count
     rollback_journal_summary = await _load_rollback_journal_summary(session, job_id)
+    story_arc_results_summary = await _load_story_arc_results_summary(session, job_id)
+    follow_up_group_count = (
+        int(unmatched_queue_count > 0)
+        + len(cleanup_action_summaries)
+        + int(cleanup_needs_review_count > 0)
+        + int(misplaced_source_restore_count > 0)
+        + int(misplaced_source_duplicate_count > 0)
+        + int(failed_count > 0)
+        + int(files_failed > 0)
+        + int(job.status is ImportJobStatus.FAILED and files_safety_blocked > 0)
+        + int(story_arc_results_summary["story_arcs_follow_up_count"] > 0)
+        + int(catalog_sync_failed_count > 0)
+    )
     rollback_incomplete = bool(
         rollback_journal_summary["rollback_manual_recovery_count"]
         and job.status == ImportJobStatus.FAILED
@@ -869,6 +1098,7 @@ async def load_import_results_context(
         "duplicate_count": duplicate_count,
         "no_match_count": no_match_count,
         "unmatched_queue_count": unmatched_queue_count,
+        "follow_up_group_count": follow_up_group_count,
         "failed_series": failed_series,
         "files_total": files_total,
         "files_imported": files_imported,
@@ -902,9 +1132,11 @@ async def load_import_results_context(
         "already_owned_conflict_files": already_owned_conflict_files,
         "remaining_conflict_files": remaining_conflict_files,
         "cleanup_no_action_count": files_duplicate + files_already_owned + files_skipped,
-        "cleanup_safe_action_count": sum(
-            _positive_int(item["affected_file_count"]) or 0 for item in cleanup_action_summaries
-        ),
-        "cleanup_needs_review_count": needs_review_safety_count + remaining_conflict_files,
+        "cleanup_safe_action_count": cleanup_safe_action_count,
+        "cleanup_needs_review_count": cleanup_needs_review_count,
+        "misplaced_source_restore_count": misplaced_source_restore_count,
+        "misplaced_source_duplicate_count": misplaced_source_duplicate_count,
+        **clean_library_summary,
         **rollback_journal_summary,
+        **story_arc_results_summary,
     }

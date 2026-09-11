@@ -140,7 +140,12 @@ def build_import_operation_update(
     event: ImportProgressEvent,
 ) -> OperationProgressUpdate:
     """Map an import event into the shared durable projection contract."""
-    source_label = "Mylar import" if job.source_type is ImportSourceType.MYLAR3 else "Folder import"
+    if dict(job.progress_snapshot or {}).get("clean_library_adoption") is True:
+        source_label = "Library organization"
+    else:
+        source_label = (
+            "Mylar import" if job.source_type is ImportSourceType.MYLAR3 else "Folder import"
+        )
     has_failures = bool((event.series_failed or job.series_failed or 0) > 0)
     attention_required = event.status in {
         ImportJobStatus.FAILED,

@@ -538,6 +538,29 @@ async def test_snapshot_derives_progress_completion_and_explicit_unread_state(
 
 
 @pytest.mark.asyncio
+async def test_snapshot_keeps_started_large_books_visibly_in_progress(
+    db_session: AsyncSession,
+) -> None:
+    user_id, issue_id = await _seed_user_and_issue(db_session)
+
+    progress = await update_reader_progress(
+        db_session,
+        user_id=user_id,
+        issue_id=issue_id,
+        revision="large-compendium",
+        page_index=0,
+        page_count=1_250,
+        completion_candidate=False,
+        expected_revision="large-compendium",
+        expected_page_count=1_250,
+    )
+
+    assert progress.after.has_progress is True
+    assert progress.after.position_percent == 1
+    assert progress.after.is_continue_candidate is True
+
+
+@pytest.mark.asyncio
 async def test_concurrent_initial_progress_writes_create_one_state_row(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reader-state.db'}")
     async with engine.begin() as connection:

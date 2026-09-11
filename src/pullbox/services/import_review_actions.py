@@ -21,9 +21,33 @@ from pullbox.models.import_job import (
 )
 from pullbox.services.import_duplicates import duplicate_merge_is_actionable, is_duplicate_series
 from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
+from pullbox.services.import_story_arc_resolution import (
+    refresh_story_arc_entries_for_import_files,
+)
 
 RecomputeFileCounters = Callable[[AsyncSession, ImportJob, list[int]], Awaitable[None]]
 RecomputeSeriesCounters = Callable[[AsyncSession, ImportJob], Awaitable[None]]
+
+
+def prepare_series_for_safety_rematch(imported_series: ImportedSeries) -> bool:
+    """Restore a proven series target and mark it for safety-file rematching."""
+    if imported_series.status == ImportSeriesStatus.SKIPPED:
+        if imported_series.series_id is not None:
+            imported_series.status = ImportSeriesStatus.DUPLICATE
+        elif imported_series.user_selected_cv_id is not None or imported_series.cv_id is not None:
+            imported_series.status = ImportSeriesStatus.MATCHED
+
+    if imported_series.status not in {
+        ImportSeriesStatus.MATCHED,
+        ImportSeriesStatus.DUPLICATE,
+    }:
+        return False
+
+    diagnostics = dict(imported_series.diagnostics or {})
+    diagnostics["rematch_pending"] = True
+    imported_series.diagnostics = diagnostics
+    imported_series.selected_for_import = False
+    return True
 
 
 def apply_safety_allow_once_to_file(
@@ -333,6 +357,13 @@ async def allow_safety_blocked_file_once(
     )
 
     apply_safety_allow_once_to_file(imp_file, retry_import=retry_import)
+    if not retry_import:
+        prepare_series_for_safety_rematch(imported_series)
+    await refresh_story_arc_entries_for_import_files(
+        session,
+        import_job_id=job_id,
+        import_file_ids=[imp_file.id],
+    )
     imported_series.selected_for_import = bool(retry_import)
     if retry_import and imported_series.status in {
         ImportSeriesStatus.IMPORTED,
@@ -362,6 +393,22 @@ async def skip_safety_blocked_file(
     """Skip a safety-blocked file from the active import review."""
     job, imported_series, imp_file = await _load_safety_blocked_file(session, job_id, file_id)
 
+    apply_safety_skip_to_file(imp_file)
+    await refresh_story_arc_entries_for_import_files(
+        session,
+        import_job_id=job_id,
+        import_file_ids=[imp_file.id],
+    )
+    imported_series.selected_for_import = False
+
+    await recompute_file_counters(session, job, [imported_series.id])
+    await recompute_series_counters(session, job)
+    await session.flush()
+    return imp_file
+
+
+def apply_safety_skip_to_file(imp_file: ImportedFile) -> None:
+    """Apply the source-preserving skip mutation to one reviewed file."""
     diagnostics = dict(imp_file.diagnostics or {})
     imp_file.status = ImportedFileStatus.SKIPPED
     imp_file.include_in_import = False
@@ -379,12 +426,6 @@ async def skip_safety_blocked_file(
         "kind": "file_safety_review",
         "resolution": "skipped",
     }
-    imported_series.selected_for_import = False
-
-    await recompute_file_counters(session, job, [imported_series.id])
-    await recompute_series_counters(session, job)
-    await session.flush()
-    return imp_file
 
 
 def _series_has_match_target(imported_series: ImportedSeries) -> bool:

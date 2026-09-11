@@ -17,6 +17,17 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def calculate_reader_position_percent(
+    last_page_index: int | None,
+    page_count: int | None,
+) -> int:
+    """Return visible whole-number progress for a started reader session."""
+    if last_page_index is None or page_count is None or last_page_index < 0 or page_count <= 0:
+        return 0
+    percentage = ((last_page_index + 1) * 100) // page_count
+    return max(1, min(100, percentage))
+
+
 class ReaderStateValidationError(Exception):
     """Raised when a progress write does not match the current content contract."""
 
@@ -90,9 +101,9 @@ class ReaderStateSnapshot:
 
     @property
     def position_percent(self) -> int:
-        if not self.has_progress or self.last_page_index is None or self.page_count is None:
+        if not self.has_progress:
             return 0
-        return max(0, min(100, ((self.last_page_index + 1) * 100) // self.page_count))
+        return calculate_reader_position_percent(self.last_page_index, self.page_count)
 
     @property
     def is_continue_candidate(self) -> bool:

@@ -496,6 +496,18 @@ the issue catalog as hydrating while full ComicVine issue metadata is fetched
 in the background. This keeps imports responsive without pretending the catalog
 is complete before hydration finishes.
 
+Completed reference-only imports support two bounded follow-up paths. Exact
+ComicInfo or trusted sidecar identity can repair a misplaced file's logical
+series and issue ownership without changing its source path. After those
+corrections, the operator may create a separate managed-copy import from the
+completed results screen. That job reuses the reviewed issue identity, applies
+the destination root's current naming, conversion, and ComicInfo policy, and
+replaces each old referenced registration only after its managed copy is
+published. Its signed preview covers the exact source lineage and non-overlapping
+target root. Rollback restores the original reference and removes only a
+verified unchanged managed artifact; it never deletes or renames the Mylar
+source.
+
 **Required standard**
 
 - Preserve matching quality before optimizing import speed.

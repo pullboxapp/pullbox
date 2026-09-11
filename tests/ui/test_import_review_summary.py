@@ -129,6 +129,10 @@ async def test_load_import_review_summary_uses_persisted_review_rows(
     assert summary["matched_series_selected"] == 1
     assert summary["selected_items_total"] == 1
     assert summary["importable_items_total"] == 1
+    assert summary["ready_to_import_total"] == 1
+    assert summary["needs_attention_total"] == 2
+    assert summary["needs_attention_files_total"] == 2
+    assert summary["deferred_follow_up_total"] == 0
     assert summary["duplicate_files_importable"] == 1
     safety_summary = await load_import_safety_failure_summary(db_session, job, page_size=1)
     assert safety_summary == [

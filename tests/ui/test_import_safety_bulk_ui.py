@@ -216,12 +216,9 @@ async def test_bulk_safety_preview_is_signed_exact_sanitized_and_read_only(
     assert "/private/import" not in response.text
     assert r"C:\Users\Adam" not in response.text
     assert _preview_token(response.text)
-    assert 'name="confirmation"' in response.text
-    assert 'pattern="ALLOW ONCE"' in response.text
-    assert 'autocomplete="off"' in response.text
-    assert 'aria-describedby="safety-bulk-confirmation-help-decompression_size_limit"' in (
-        response.text
-    )
+    assert 'name="confirmation"' not in response.text
+    assert 'pattern="ALLOW ONCE"' not in response.text
+    assert "Type ALLOW ONCE" not in response.text
 
     async with sec_db() as session:
         rows = [await session.get(ImportedFile, file_id) for file_id in seeded["file_ids"]]
@@ -231,7 +228,7 @@ async def test_bulk_safety_preview_is_signed_exact_sanitized_and_read_only(
 
 
 @pytest.mark.asyncio
-async def test_bulk_safety_confirmation_must_match_exact_text_before_mutation(
+async def test_bulk_safety_action_relies_on_signed_preview_without_typed_phrase(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -252,22 +249,18 @@ async def test_bulk_safety_confirmation_must_match_exact_text_before_mutation(
 
     response = await authenticated_client.post(
         f"/import/{seeded['job_id']}/safety/categories/{category}/allow-once",
-        data={
-            "preview_token": _preview_token(preview.text),
-            "confirmation": "allow once",
-        },
+        data={"preview_token": _preview_token(preview.text)},
         headers=_csrf_header_for(authenticated_client),
     )
 
     assert response.status_code == 200
-    assert 'role="alert"' in response.text
-    assert "Type ALLOW ONCE exactly" in response.text
-    assert triggered_rematches == []
+    assert triggered_rematches == [seeded["job_id"]]
     async with sec_db() as session:
         rows = [await session.get(ImportedFile, file_id) for file_id in seeded["file_ids"]]
         assert all(row is not None for row in rows)
-        assert all(row.status == ImportedFileStatus.SAFETY_BLOCKED for row in rows if row)
-        assert (await session.execute(select(AuditLog))).scalars().all() == []
+        assert [row.status for row in rows if row].count(ImportedFileStatus.SAFETY_APPROVED) == 2
+        assert [row.status for row in rows if row].count(ImportedFileStatus.SAFETY_BLOCKED) == 1
+        assert len((await session.execute(select(AuditLog))).scalars().all()) == 2
 
 
 @pytest.mark.asyncio
@@ -293,10 +286,7 @@ async def test_confirmed_bulk_safety_action_audits_actor_refreshes_and_triggers_
 
     response = await authenticated_client.post(
         f"/import/{seeded['job_id']}/safety/categories/{category}/allow-once",
-        data={
-            "preview_token": _preview_token(preview.text),
-            "confirmation": "ALLOW ONCE",
-        },
+        data={"preview_token": _preview_token(preview.text)},
         headers=_csrf_header_for(authenticated_client),
     )
 
@@ -346,10 +336,7 @@ async def test_stale_bulk_safety_preview_refreshes_review_without_mutation(
 
     response = await authenticated_client.post(
         f"/import/{seeded['job_id']}/safety/categories/{category}/allow-once",
-        data={
-            "preview_token": _preview_token(preview.text) + "tampered",
-            "confirmation": "ALLOW ONCE",
-        },
+        data={"preview_token": _preview_token(preview.text) + "tampered"},
         headers=_csrf_header_for(authenticated_client),
     )
 
@@ -381,7 +368,7 @@ async def test_dangerous_bulk_safety_routes_fail_closed_without_mutation(
     )
     apply = await authenticated_client.post(
         f"/import/{seeded['job_id']}/safety/categories/{category}/allow-once",
-        data={"preview_token": "not-a-preview", "confirmation": "ALLOW ONCE"},
+        data={"preview_token": "not-a-preview"},
         headers=_csrf_header_for(authenticated_client),
     )
 
@@ -410,7 +397,7 @@ async def test_bulk_safety_ui_rejects_api_key_only_operator_actions(
     )
     apply = await unauthenticated_client.post(
         f"/import/{seeded['job_id']}/safety/categories/{category}/allow-once",
-        data={"preview_token": "not-a-preview", "confirmation": "ALLOW ONCE"},
+        data={"preview_token": "not-a-preview"},
         headers=headers,
     )
 

@@ -93,6 +93,7 @@ from pullbox.services.import_progress_runtime import (
     import_group_progress_plan,
     import_work_progress,
 )
+from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_root_policy_activation import (
     RootPolicyActivationConflictError,
     activate_future_root_policy,
@@ -107,6 +108,9 @@ from pullbox.services.import_story_arc_placement_completion import (
 from pullbox.services.import_story_arc_resolution import (
     StoryArcResolutionResult,
     resolve_staged_story_arc_entries,
+)
+from pullbox.services.import_story_arc_review import (
+    auto_confirm_trusted_logical_story_arcs,
 )
 from pullbox.services.import_workflow_state import (
     emit_live_progress,
@@ -242,6 +246,7 @@ async def execute_import_job(
     if loaded_job is None:
         raise NotFoundError("ImportJob", job_id)
     job = loaded_job
+    require_retained_import_destination(job)
 
     try:
         await validate_managed_copy_preflight(session, job, stage="execution")
@@ -845,6 +850,8 @@ async def _execute_story_arc_materialization(
             cancellation_check=cancellation_checkpoint,
             durable_checkpoint=durable_story_arc_checkpoint,
         )
+        await auto_confirm_trusted_logical_story_arcs(session, job_id)
+        await durable_story_arc_checkpoint()
         materialization = await materialize_confirmed_story_arcs(
             session,
             import_job_id=job_id,
@@ -858,21 +865,25 @@ async def _execute_story_arc_materialization(
     except Exception as exc:
         # Earlier canonical and story-arc pages may already be durable. Discard
         # only the current page, preserve every committed ownership pointer and
-        # journal row, then durably fail the job before propagating the error.
+        # journal row, and leave the optional arc work for follow-up without
+        # invalidating the canonical comic import.
         await session.rollback()
         persisted_job = await session.get(ImportJob, job_id)
         if persisted_job is None:
             raise NotFoundError("ImportJob", job_id) from exc
-        failure_message = "Story-arc registration failed; canonical files remain imported."
-        persisted_job.status = ImportJobStatus.FAILED
+        failure_message = "Some story arcs need follow-up; canonical comics imported successfully."
+        persisted_job.status = ImportJobStatus.IMPORTING
         persisted_job.import_completed_at = None
         persisted_job.error_message = failure_message
         failure_snapshot = dict(persisted_job.progress_snapshot or {})
         failure_snapshot.update(
             {
-                "status": ImportJobStatus.FAILED.value,
+                "status": ImportJobStatus.IMPORTING.value,
                 "mode": "import",
+                # Keep the seal fence valid so the outer import can publish any
+                # already-durable placement work before it completes.
                 "phase": "story_arcs",
+                "progress": 99,
                 "message": failure_message,
             }
         )
@@ -886,7 +897,7 @@ async def _execute_story_arc_materialization(
             failure_type=type(exc).__name__,
         )
         await session.commit()
-        raise
+        return persisted_job, StoryArcMaterializationResult(arcs_failed=1)
 
     warning_codes = sorted({warning.code for warning in materialization.warnings})
     level = "WARNING" if materialization.arcs_failed else "INFO"

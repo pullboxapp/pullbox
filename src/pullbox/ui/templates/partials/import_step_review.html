@@ -10,6 +10,7 @@
     Shared controller: importReviewData() from pullbox.js.
 -#}
 {% from "components/settings_shell.html" import ui_icon, inline_alert %}
+{% from "components/dropdown_select.html" import dropdown_select %}
 
 {% set overall_series_total = review_summary.series_total if review_summary else total %}
 {% set overall_importable_total = review_summary.importable_items_total if review_summary else 0 %}
@@ -40,7 +41,7 @@
       data-testid="import-review-sort-{{ field }}"
       hx-get="/import/{{ job.id }}/review-partial?{{ sort_qs }}"
       hx-target="#import-step-review-shell"
-      hx-swap="outerHTML"
+      hx-swap="morph:outerHTML"
       hx-sync="#import-step-review-shell:replace"
       class="downloads-sort-btn{% if current_field == field %} is-active{% endif %}"
     >
@@ -205,138 +206,76 @@
   x-on:import:conflicts-reset.window="handleConflictsReset($event.detail)"
   data-testid="import-collection-review"
   data-import-review-status-counts='{{ status_counts|tojson|forceescape }}'
-  {% if safety_rematch_pending %}
-  hx-get="/import/{{ job.id }}/review-partial?status=safety_blocked&sort={{ sort }}&page={{ page }}"
-  hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]"
-  hx-target="#import-step-review-shell"
-  hx-swap="outerHTML"
-  hx-sync="#import-step-review-shell:replace"
-  {% endif %}
   class="space-y-6"
 >
+  {% if safety_rematch_pending %}
+  <div
+    id="import-safety-rematch-poll"
+    hidden
+    hx-get="/import/{{ job.id }}/review-rematch-status"
+    hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]"
+    hx-target="this"
+    hx-swap="morph:outerHTML"
+  ></div>
+  {% endif %}
   <input type="hidden" name="review_status_filter" value="{{ active_review_view if active_review_view != 'series' else '' }}">
   <input type="hidden" name="review_sort" value="{{ sort }}">
   <input type="hidden" name="review_page" value="{{ page }}">
 
-  <section class="rounded-xl border border-pb-border bg-pb-card/50 px-4 py-3">
-    <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-pb-text-dim">Step 3</p>
-    <h2 class="mt-1 text-lg font-semibold text-pb-text">Reconcile for Import</h2>
-    <p class="mt-1 max-w-3xl text-sm leading-6 text-pb-text-sec">
-      Finish series and issue decisions here before starting the file import. Rows that already have a ComicVine series can be reconciled directly without going to Unmatched.
-    </p>
-  </section>
-
-  {% if job.source_type.value == 'mylar3' and job.mylar3_path_map_confirmed %}
-  <section
-    class="rounded-xl border border-pb-border bg-pb-card/50 px-4 py-4"
-    data-testid="import-review-mylar-path-snapshot"
-  >
-    <div class="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-pb-text-dim">
-          Confirmed Mylar path mapping
-        </p>
-        <p class="mt-1 text-xs leading-5 text-pb-text-sec">
-          This is the frozen Step 1 snapshot used by the scan. Retry revalidates these paths
-          before reusing them.
-        </p>
-      </div>
-      <span class="pill pill-success">Confirmed</span>
+  <div data-testid="import-review-action-bar" class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3">
+    <div x-show="confirmError" x-cloak class="mb-3">
+      {% call inline_alert(tone="danger", icon="warning") %}
+        <span x-text="confirmError"></span>
+      {% endcall %}
     </div>
-    {% if job.mylar3_path_map %}
-    <div class="mt-3 space-y-2">
-      {% for stored_prefix, pullbox_prefix in job.mylar3_path_map|dictsort %}
-      <div class="grid gap-1 rounded-lg border border-pb-border-subtle bg-pb-bg/35 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center sm:gap-3">
-        <span class="break-all font-mono text-pb-text">{{ stored_prefix }}</span>
-        <span class="text-pb-text-dim" aria-hidden="true">&rarr;</span>
-        <span class="break-all font-mono text-pb-text">{{ pullbox_prefix }}</span>
-      </div>
-      {% endfor %}
-    </div>
-    {% else %}
-    <div class="mt-3 inline-alert inline-alert-success">
-      Identity only. Mylar paths were confirmed without translation.
-    </div>
-    {% endif %}
-  </section>
-  {% endif %}
 
-  {% if job.story_arc_import_requested %}
-  <div class="inline-alert inline-alert-info" data-testid="import-story-arc-step-one-intent">
-    <div>
-      <p class="font-semibold text-pb-text">
-        {% if job.story_arc_materialization_requested %}
-        Logical arcs and separate arc files requested in Step 1
-        {% else %}
-        Logical arcs requested; separate arc files remain off
-        {% endif %}
-      </p>
-      <p class="mt-1 text-xs leading-5 text-pb-text-sec">
-        Review each detected arc below. Step 1 did not select an arc, confirm a policy, or authorize
-        copies and links.
-      </p>
-    </div>
-  </div>
-  {% endif %}
-
-  <div
-    x-show="showCancelModal"
-    x-transition:enter="transition ease-out duration-200"
-    x-transition:enter-start="opacity-0"
-    x-transition:enter-end="opacity-100"
-    x-transition:leave="transition ease-in duration-150"
-    x-transition:leave-start="opacity-100"
-    x-transition:leave-end="opacity-0"
-    x-cloak
-    class="modal-shell"
-    @keydown.escape.window="showCancelModal = false"
-  >
-    <div class="modal-backdrop" @click="showCancelModal = false"></div>
-    <div
-      x-show="showCancelModal"
-      x-transition:enter="transition ease-out duration-200"
-      x-transition:enter-start="opacity-0 scale-95"
-      x-transition:enter-end="opacity-100 scale-100"
-      x-transition:leave="transition ease-in duration-150"
-      x-transition:leave-start="opacity-100 scale-100"
-      x-transition:leave-end="opacity-0 scale-95"
-      class="modal-panel max-w-md"
-      @click.stop
-    >
-      <div class="modal-header">
-        <div class="flex items-start gap-3">
-          <div class="selection-card-icon text-pb-error">
-            {{ ui_icon("warning", "h-5 w-5") }}
-          </div>
-          <div>
-            <h3 class="text-sm font-semibold text-pb-text">Cancel import</h3>
-            <p class="mt-1 text-sm leading-6 text-pb-text-sec">
-              This removes the current import job and all of its matched data. Use this only when you are sure the run should not continue.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div class="modal-footer">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          @click="showCancelModal = false"
-          :disabled="cancelling"
-          class="btn-ghost btn-sm"
+          data-testid="import-review-back"
+          @click="window.dispatchEvent(new CustomEvent('wizard:advance', { detail: { step: 2, jobStatus: 'review' } }))"
+          class="btn-ghost btn-sm inline-flex items-center gap-1.5"
         >
-          Go back
+          <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
+          </svg>
+          Back
         </button>
         <button
           type="button"
-          @click="cancelImport()"
-          :disabled="cancelling"
-          class="btn-danger btn-sm inline-flex items-center gap-2"
+          data-testid="import-review-cancel"
+          data-import-review-cancel-job-id="{{ job.id }}"
+          onclick="cancelImportReview(this)"
+          class="btn-ghost btn-sm inline-flex items-center justify-center"
         >
-          <svg x-show="cancelling" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <span data-import-review-cancel-label>Cancel</span>
+        </button>
+      </div>
+      <div class="flex flex-wrap items-center gap-3 sm:justify-end">
+        <span
+          data-import-review-selection-summary
+          class="downloads-mono-dim-cell"
+          x-text="importSelectionLabel()"
+        >{{ review_summary.selected_items_total if review_summary else 0 }} items selected for import</span>
+        <button
+          type="button"
+          @click="confirmImport()"
+          :disabled="totalSelectionCount() === 0 || confirming || !hasRequiredPreferredRoot()"
+          data-import-review-import-button
+          class="btn-primary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
+        >
+          <svg x-show="confirming" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
           </svg>
-          <span x-text="cancelling ? 'Cancelling...' : 'Cancel import'"></span>
+          <span
+            data-import-review-import-label
+            x-text="confirming ? 'Importing...' : importActionLabel()"
+          >Import {{ review_summary.selected_items_total if review_summary else 0 }} items</span>
+          <svg x-show="!confirming" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
+          </svg>
         </button>
       </div>
     </div>
@@ -372,19 +311,21 @@
         <label for="import-review-preferred-root" class="field-label">
           Preferred managed destination <span class="text-pb-error" aria-hidden="true">*</span>
         </label>
-        <select
-          id="import-review-preferred-root"
-          data-testid="import-review-preferred-root"
-          class="input-pb mt-2 w-full"
-          x-model.number="preferredRootId"
-          @change="confirmError = ''; syncSelectionSummaryUi()"
-          required
-        >
-          <option value="">Choose a managed destination</option>
-          {% for root in managed_library_root_options %}
-          <option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>
-          {% endfor %}
-        </select>
+        {% set preferred_root_options = [("", "Choose a managed destination")] %}
+        {% for root in managed_library_root_options %}
+          {% set _ = preferred_root_options.append((root.id|string, root.name ~ " — " ~ root.path)) %}
+        {% endfor %}
+        {{ dropdown_select(
+          name="preferred_root_id",
+          value=job.target_library_root_id or "",
+          options=preferred_root_options,
+          local_model="preferredRootId",
+          local_on_change="preferredRootId = $event.detail.value ? Number($event.detail.value) : null; confirmError = ''; syncSelectionSummaryUi()",
+          trigger_id="import-review-preferred-root",
+          root_testid="import-review-preferred-root",
+          wrap_options=true,
+          class_name="mt-2 w-full"
+        ) }}
         {% if not managed_library_root_options %}
         <p class="mt-2 text-xs leading-5 text-pb-error">
           No enabled, available, readable, and writable managed destination is ready.
@@ -401,58 +342,6 @@
     </div>
   </section>
   {% endif %}
-
-  <div data-testid="import-review-action-bar" class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3">
-    <div x-show="confirmError" x-cloak class="mb-3">
-      {% call inline_alert(tone="danger", icon="warning") %}
-        <span x-text="confirmError"></span>
-      {% endcall %}
-    </div>
-
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div class="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          data-testid="import-review-back"
-          @click="window.dispatchEvent(new CustomEvent('wizard:advance', { detail: { step: 2, jobStatus: 'review' } }))"
-          class="btn-ghost btn-sm inline-flex items-center gap-1.5"
-        >
-          <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
-          </svg>
-          Back
-        </button>
-        <button type="button" @click="showCancelModal = true" class="btn-ghost btn-sm inline-flex items-center justify-center">Cancel</button>
-      </div>
-
-      <div class="flex flex-wrap items-center gap-3 sm:justify-end">
-        <span
-          data-import-review-selection-summary
-          class="downloads-mono-dim-cell"
-          x-text="importSelectionLabel()"
-        >{{ review_summary.selected_items_total if review_summary else 0 }} items selected for import</span>
-        <button
-          type="button"
-          @click="confirmImport()"
-          :disabled="totalSelectionCount() === 0 || confirming || !hasRequiredPreferredRoot()"
-          data-import-review-import-button
-          class="btn-primary btn-sm inline-flex items-center gap-2 disabled:opacity-40"
-        >
-          <svg x-show="confirming" class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-          </svg>
-          <span
-            data-import-review-import-label
-            x-text="confirming ? 'Importing...' : importActionLabel()"
-          >Import {{ review_summary.selected_items_total if review_summary else 0 }} items</span>
-          <svg x-show="!confirming" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
-          </svg>
-        </button>
-      </div>
-    </div>
-  </div>
 
       {% set selection_locked_view = active_review_view in ('no_match', 'needs_series', 'needs_issue', 'safety_blocked') %}
       {% set show_selection_column = not selection_locked_view %}
@@ -518,13 +407,13 @@
       {% if safety_blocked_count > 0 %}
       {% set _ = series_filter_items.append({
         "filter_key": "safety_blocked",
-        "label": "Blocked Files",
+        "label": "Safety Review",
         "href": "#",
         "hx_get": "/import/" ~ job.id ~ "/review-partial?status=safety_blocked&sort=" ~ series_tab_sort,
         "hx_target": "#import-step-review-shell",
         "testid": "import-review-series-filter-safety-blocked",
         "active": active_review_view == 'safety_blocked',
-        "count": safety_blocked_count,
+        "count": safety_review_series_count ~ " series · " ~ safety_review_file_count ~ " file" ~ ("" if safety_review_file_count == 1 else "s"),
         "active_class": "chip-btn-error",
         "count_active_class": "count-badge-error",
         "count_inactive_class": "count-badge-neutral",
@@ -534,7 +423,7 @@
       {% if story_arc_count > 0 %}
       {% set _ = series_filter_items.append({
         "filter_key": "story_arcs",
-        "label": "Story Arcs",
+        "label": "Story Arc follow-up",
         "href": "#",
         "hx_get": "/import/" ~ job.id ~ "/review-partial?status=story_arcs&page=1",
         "hx_target": "#import-step-review-shell",
@@ -649,7 +538,7 @@
               data-import-review-view="{{ filter_item.filter_key }}"
               {% if filter_item.hx_get is defined %}hx-get="{{ filter_item.hx_get }}"{% endif %}
               {% if filter_item.hx_target is defined %}hx-target="{{ filter_item.hx_target }}"{% endif %}
-              {% if filter_item.hx_get is defined %}hx-swap="outerHTML"{% endif %}
+              {% if filter_item.hx_get is defined %}hx-swap="morph:outerHTML"{% endif %}
               @click="currentView = '{{ filter_item.filter_key }}'"
               class="{{ filter_item.base_class|default('chip-btn chip-btn-sm') }} {{ initial_state_class }}"
               :class="{ '{{ series_active_class }}': currentView === '{{ filter_item.filter_key }}', '{{ series_inactive_class }}': currentView !== '{{ filter_item.filter_key }}' }"
@@ -671,7 +560,7 @@
               data-import-review-view="conflicts"
               hx-get="/import/{{ job.id }}/review-partial?status=conflicts&sort={{ conflict_tab_sort }}"
               hx-target="#import-step-review-shell"
-              hx-swap="outerHTML"
+              hx-swap="morph:outerHTML"
               @click="currentView = 'conflicts'"
               class="chip-btn chip-btn-sm {{ 'chip-btn-warning' if conflict_active else 'chip-btn-neutral' }}"
               :class="{ 'chip-btn-warning': currentView === 'conflicts', 'chip-btn-neutral': currentView !== 'conflicts' }"
@@ -692,6 +581,7 @@
         <div data-testid="import-review-safety-category-summary" class="grid gap-3 border-b border-pb-border p-4 lg:grid-cols-2">
           {% for safety_category in safety_failure_summary %}
           {% set bulk_preview_for_category = safety_bulk_preview if safety_bulk_preview is defined and safety_bulk_preview and safety_bulk_preview.category.value == safety_category.category else none %}
+          {% set bulk_action_for_category = safety_bulk_action|default('allow_once') if bulk_preview_for_category else 'allow_once' %}
           {% set bulk_error_for_category = safety_bulk_error if safety_bulk_error is defined and safety_bulk_error_category is defined and safety_bulk_error_category == safety_category.category else '' %}
           {% set bulk_overrideable_count = safety_category.bulk_overrideable_count|default(0)|int %}
           <div class="rounded-lg border border-pb-border bg-pb-card-hover/40 p-3">
@@ -700,22 +590,29 @@
               <span class="count-badge count-badge-error">{{ safety_category.count }}</span>
             </div>
             <p class="mt-1 text-xs leading-5 text-pb-text-sec">{{ safety_category.reason }}</p>
-            <p class="mt-1 text-[11px] text-pb-text-dim">
-              {{ 'Retry may help after remediation' if safety_category.retryable else 'Retry alone will not help' }}
-              ·
-              {% if safety_category.overrideable %}
-                Trusted override available
-              {% elif safety_category.bulk_overrideable %}
-                Trusted override available for eligible files
-              {% else %}
-                Override not allowed
-              {% endif %}
-            </p>
-            {% if safety_category.examples %}
-            <p class="mt-2 break-words font-mono text-[11px] text-pb-text-dim">
-              Examples: {{ safety_category.examples|join(', ') }}
-            </p>
-            {% endif %}
+            <details class="mt-2" data-testid="import-review-safety-category-details">
+              <summary class="cursor-pointer text-xs font-semibold text-pb-text-sec">
+                Why this needs review
+              </summary>
+              <div class="mt-2 rounded-md border border-pb-border bg-pb-surface/35 p-2">
+                <p class="text-[11px] text-pb-text-dim">
+                  {{ 'Retry may help after remediation' if safety_category.retryable else 'Retry alone will not help' }}
+                  ·
+                  {% if safety_category.overrideable %}
+                    Trusted override available
+                  {% elif safety_category.bulk_overrideable %}
+                    Trusted override available for eligible files
+                  {% else %}
+                    Override not allowed
+                  {% endif %}
+                </p>
+                {% if safety_category.examples %}
+                <p class="mt-2 break-words font-mono text-[11px] text-pb-text-dim">
+                  Examples: {{ safety_category.examples|join(', ') }}
+                </p>
+                {% endif %}
+              </div>
+            </details>
             {% if bulk_preview_for_category %}
             <section
               data-testid="import-review-safety-bulk-confirmation"
@@ -723,12 +620,16 @@
               aria-labelledby="safety-bulk-confirmation-title-{{ safety_category.category }}"
             >
               <h3 id="safety-bulk-confirmation-title-{{ safety_category.category }}" class="text-sm font-semibold text-pb-text">
-                Review this one-time exception
+                {{ 'Skip these files from this import' if bulk_action_for_category == 'skip' else 'Review this one-time exception' }}
               </h3>
               <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+                {% if bulk_action_for_category == 'skip' %}
+                {{ bulk_preview_for_category.affected_count }} one-page archive{{ '' if bulk_preview_for_category.affected_count == 1 else 's' }} will be excluded from this import. Source files will not be changed or deleted.
+                {% else %}
                 {{ bulk_preview_for_category.affected_count }} of {{ bulk_preview_for_category.matching_count }} file{{ '' if bulk_preview_for_category.matching_count == 1 else 's' }} will be allowed once.
                 {% if bulk_preview_for_category.skipped_count %}
                 {{ bulk_preview_for_category.skipped_count }} file{{ '' if bulk_preview_for_category.skipped_count == 1 else 's' }} will stay blocked.
+                {% endif %}
                 {% endif %}
               </p>
               {% if bulk_preview_for_category.examples %}
@@ -743,49 +644,64 @@
               {% endif %}
               <form
                 method="post"
-                action="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/allow-once?status=safety_blocked&sort={{ sort }}&page={{ page }}"
-                hx-post="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/allow-once?status=safety_blocked&sort={{ sort }}&page={{ page }}"
+                action="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/{{ 'skip' if bulk_action_for_category == 'skip' else 'allow-once' }}?status=safety_blocked&sort={{ sort }}&page={{ page }}"
+                hx-post="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/{{ 'skip' if bulk_action_for_category == 'skip' else 'allow-once' }}?status=safety_blocked&sort={{ sort }}&page={{ page }}"
                 hx-target="#import-step-review-shell"
-                hx-swap="outerHTML"
+                hx-swap="morph:outerHTML"
                 hx-sync="#import-step-review-shell:replace"
                 class="mt-3"
               >
                 <input type="hidden" name="preview_token" value="{{ bulk_preview_for_category.preview_token }}">
-                <label for="safety-bulk-confirmation-{{ safety_category.category }}" class="block text-xs font-semibold text-pb-text">
-                  Type <span class="font-mono">ALLOW ONCE</span> to confirm
-                </label>
-                <p id="safety-bulk-confirmation-help-{{ safety_category.category }}" class="mt-1 text-[11px] leading-5 text-pb-text-sec">
+                <p class="text-[11px] leading-5 text-pb-text-sec">
+                  {% if bulk_action_for_category == 'skip' %}
+                  This applies only to the exact file set in this preview. You can import the source files again later.
+                  {% else %}
                   This exception applies only to the exact file set in this preview. Pullbox will recheck their matches afterward.
+                  {% endif %}
                 </p>
                 {% if bulk_error_for_category %}
                 <p role="alert" class="mt-2 text-xs font-semibold text-pb-error">{{ bulk_error_for_category }}</p>
                 {% endif %}
-                <div class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end">
-                  <input
-                    id="safety-bulk-confirmation-{{ safety_category.category }}"
-                    name="confirmation"
-                    type="text"
-                    required
-                    pattern="ALLOW ONCE"
-                    autocomplete="off"
-                    autocapitalize="off"
-                    spellcheck="false"
-                    aria-describedby="safety-bulk-confirmation-help-{{ safety_category.category }}"
-                    class="input-pb min-w-0 flex-1 font-mono"
-                  >
-                  <div class="flex flex-wrap gap-2">
-                    <button type="submit" class="btn-primary btn-sm">Allow once</button>
-                    <a
-                      href="/import/{{ job.id }}/review-partial?status=safety_blocked&sort={{ sort }}&page={{ page }}"
-                      hx-get="/import/{{ job.id }}/review-partial?status=safety_blocked&sort={{ sort }}&page={{ page }}"
-                      hx-target="#import-step-review-shell"
-                      hx-swap="outerHTML"
-                      class="btn-ghost btn-sm"
-                    >Cancel</a>
-                  </div>
+                <div class="mt-3 flex flex-wrap gap-2">
+                  <button type="submit" class="btn-primary btn-sm">{{ 'Skip from import' if bulk_action_for_category == 'skip' else 'Allow once' }}</button>
+                  <a
+                    href="/import/{{ job.id }}/review-partial?status=safety_blocked&sort={{ sort }}&page={{ page }}"
+                    hx-get="/import/{{ job.id }}/review-partial?status=safety_blocked&sort={{ sort }}&page={{ page }}"
+                    hx-target="#import-step-review-shell"
+                    hx-swap="morph:outerHTML"
+                    class="btn-ghost btn-sm"
+                  >Cancel</a>
                 </div>
               </form>
             </section>
+            {% elif safety_category.category == 'single_page_comic' %}
+            {% if bulk_error_for_category %}
+            <p role="alert" class="mt-2 text-xs font-semibold text-pb-error">{{ bulk_error_for_category }}</p>
+            {% endif %}
+            <p class="mt-2 text-xs leading-5 text-pb-text-sec">
+              If these are covers or other files you do not want imported as issues, preview and skip them together. Pullbox will leave every source file in place.
+            </p>
+            <form
+              method="get"
+              action="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/skip-preview"
+              hx-get="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/skip-preview"
+              hx-target="#import-step-review-shell"
+              hx-swap="morph:outerHTML"
+              hx-sync="#import-step-review-shell:replace"
+              class="mt-2"
+            >
+              <input type="hidden" name="status" value="safety_blocked">
+              <input type="hidden" name="sort" value="{{ sort }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <button
+                type="submit"
+                class="btn-secondary btn-sm w-full sm:w-auto"
+                data-testid="import-review-safety-bulk-skip-preview-{{ safety_category.category }}"
+                aria-label="Preview files to skip for {{ safety_category.label }}"
+              >
+                Review files to skip
+              </button>
+            </form>
             {% elif safety_category.bulk_overrideable|default(false) %}
             {% if bulk_error_for_category %}
             <p role="alert" class="mt-2 text-xs font-semibold text-pb-error">{{ bulk_error_for_category }}</p>
@@ -798,7 +714,7 @@
               action="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/preview"
               hx-get="/import/{{ job.id }}/safety/categories/{{ safety_category.category }}/preview"
               hx-target="#import-step-review-shell"
-              hx-swap="outerHTML"
+              hx-swap="morph:outerHTML"
               hx-sync="#import-step-review-shell:replace"
               class="mt-2"
             >
@@ -884,12 +800,14 @@
           {% set duplicate_selected_files = duplicate_selected_file_counts.get(item.id, 0) if duplicate_selected_file_counts is defined else 0 %}
           {% set duplicate_selectable = item.status.value == 'duplicate' and duplicate_actionable and item.files_matched > 0 %}
           {% set top_candidates = series_diagnostics.get('top_candidates', []) %}
-          {% set can_expand_details = (row_safety_blocked_count > 0) or (item.status.value == 'matched') or (item.status.value in ('no_match', 'duplicate') and series_diagnostics) %}
+          {% set pending_subitem_count = row_safety_blocked_count + item.files_no_match + item.files_conflict %}
           <tbody
+            id="import-review-series-row-{{ active_review_view }}-{{ item.id }}"
             data-import-review-series-row="{{ item.id }}"
+            data-import-review-row-key="{{ active_review_view }}:{{ item.id }}"
             data-import-review-row-status="{{ item.status.value }}"
             data-import-review-row-buckets="{{ row_bucket_tokens|join(' ') }}"
-            {% if can_expand_details %}x-data="importReviewRowExpansionData({ jobId: {{ job.id }}, rowId: {{ item.id }} })"{% endif %}
+            data-import-review-pending-subitems="{{ pending_subitem_count }}"
           >
             <tr>
               {% if show_selection_column %}
@@ -1106,13 +1024,14 @@
                     type="button"
                     class="downloads-action-btn is-warn"
                     data-testid="import-review-safety-details-action"
-                    @click="toggle()"
-                    :aria-expanded="expanded ? 'true' : 'false'"
+                    onclick="toggleImportReviewRow(this)"
+                    aria-expanded="false"
+                    data-import-review-expand-action
                     data-tip="Review blocked files"
                     data-tip-pos="left"
                     aria-label="Review blocked files"
                   >
-                    <svg class="transition-transform" :class="expanded && 'rotate-180'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <svg data-import-review-expand-icon class="transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
                     </svg>
                   </button>
@@ -1179,13 +1098,14 @@
                     type="button"
                     class="downloads-action-btn"
                     data-testid="import-review-why-action"
-                    @click="toggle()"
-                    :aria-expanded="expanded ? 'true' : 'false'"
+                    onclick="toggleImportReviewRow(this)"
+                    aria-expanded="false"
+                    data-import-review-expand-action
                     data-tip="{% if series_conflict %}Review conflict{% else %}Why no match{% endif %}"
                     data-tip-pos="left"
                     aria-label="{% if series_conflict %}Toggle conflict diagnostics{% else %}Toggle no-match diagnostics{% endif %}"
                   >
-                    <svg class="transition-transform" :class="expanded && 'rotate-180'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <svg data-import-review-expand-icon class="transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
                     </svg>
                   </button>
@@ -1221,13 +1141,14 @@
                     type="button"
                     class="downloads-action-btn"
                     data-testid="import-review-matched-why-action"
-                    @click="toggle()"
-                    :aria-expanded="expanded ? 'true' : 'false'"
+                    onclick="toggleImportReviewRow(this)"
+                    aria-expanded="false"
+                    data-import-review-expand-action
                     data-tip="Match details"
                     data-tip-pos="left"
                     aria-label="Toggle match details"
                   >
-                    <svg class="transition-transform" :class="expanded && 'rotate-180'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <svg data-import-review-expand-icon class="transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
                     </svg>
                   </button>
@@ -1267,13 +1188,14 @@
                     type="button"
                     class="downloads-action-btn"
                     data-testid="import-review-duplicate-why-action"
-                    @click="toggle()"
-                    :aria-expanded="expanded ? 'true' : 'false'"
+                    onclick="toggleImportReviewRow(this)"
+                    aria-expanded="false"
+                    data-import-review-expand-action
                     data-tip="Why in library"
                     data-tip-pos="left"
                     aria-label="Toggle duplicate diagnostics"
                   >
-                    <svg class="transition-transform" :class="expanded && 'rotate-180'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <svg data-import-review-expand-icon class="transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
                     </svg>
                   </button>
@@ -1283,13 +1205,13 @@
               </td>
             </tr>
             {% if row_safety_blocked_count > 0 %}
-            <tr x-show="expanded" x-cloak data-testid="import-review-safety-diagnostics" class="table-detail-row">
+            <tr hidden data-import-review-detail-row data-testid="import-review-safety-diagnostics" class="table-detail-row">
               <td colspan="{{ series_table_colspan }}" class="bg-pb-card-hover/40 px-4 py-4">
                 <div class="space-y-3">
                   <div>
-                    <p class="text-[11px] font-semibold uppercase tracking-[0.16em] text-pb-text-dim">Blocked files</p>
+                    <p class="text-[11px] font-semibold uppercase tracking-[0.16em] text-pb-text-dim">Safety review</p>
                     <p class="mt-1 text-sm leading-6 text-pb-text-sec">
-                      These files need review before import. Resource-limit blocks and intentional one-page comics can be allowed once. Files with no comic pages, corrupt files, and unsafe files must be skipped or replaced. Allowing a one-page comic does not disable archive safety limits.
+                      These files need review before import. A one-page archive may be cover art, a damaged archive, or an intentional one-page comic. Review it before choosing Allow once or Skip from import. Files with no comic pages, corrupt files, and unsafe files must be skipped or replaced.
                     </p>
                   </div>
                   <div class="space-y-2">
@@ -1330,7 +1252,7 @@
                             data-testid="import-review-allow-safety-file"
                             hx-post="/import/{{ job.id }}/files/{{ blocked_file.id }}/safety/allow-once?status={{ active_review_view }}&sort={{ sort }}&page={{ page }}"
                             hx-target="#import-step-review-shell"
-                            hx-swap="outerHTML"
+                            hx-swap="morph:outerHTML"
                             hx-sync="#import-step-review-shell:replace"
                           >
                             Allow once
@@ -1345,10 +1267,10 @@
                             data-testid="import-review-skip-safety-file"
                             hx-post="/import/{{ job.id }}/files/{{ blocked_file.id }}/safety/skip?status={{ active_review_view }}&sort={{ sort }}&page={{ page }}"
                             hx-target="#import-step-review-shell"
-                            hx-swap="outerHTML"
+                            hx-swap="morph:outerHTML"
                             hx-sync="#import-step-review-shell:replace"
                           >
-                            Skip
+                            Skip from import
                           </button>
                           {% endif %}
                         </div>
@@ -1362,7 +1284,7 @@
               </td>
             </tr>
             {% elif item.status.value == 'matched' %}
-            <tr x-show="expanded" x-cloak data-testid="import-review-matched-diagnostics" class="table-detail-row">
+            <tr hidden data-import-review-detail-row data-testid="import-review-matched-diagnostics" class="table-detail-row">
               <td colspan="{{ series_table_colspan }}" class="bg-pb-card-hover/40 px-4 py-4">
                 <div data-testid="import-review-matched-detail-grid" class="grid items-start gap-5 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
                   <section class="min-w-0">
@@ -1415,7 +1337,7 @@
             </tr>
             {% endif %}
             {% if item.status.value == 'duplicate' and series_diagnostics %}
-            <tr x-show="expanded" x-cloak data-testid="import-review-duplicate-diagnostics" class="table-detail-row">
+            <tr hidden data-import-review-detail-row data-testid="import-review-duplicate-diagnostics" class="table-detail-row">
               <td colspan="{{ series_table_colspan }}" class="bg-pb-card-hover/40 px-4 py-4">
                 <div data-testid="import-review-duplicate-detail-grid" class="grid items-start gap-5 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
                   <section class="min-w-0">
@@ -1483,7 +1405,7 @@
             </tr>
             {% endif %}
             {% if item.status.value == 'no_match' and series_diagnostics %}
-            <tr x-show="expanded" x-cloak data-testid="import-review-no-match-diagnostics" class="table-detail-row">
+            <tr hidden data-import-review-detail-row data-testid="import-review-no-match-diagnostics" class="table-detail-row">
               <td colspan="{{ series_table_colspan }}" class="bg-pb-card-hover/40 px-4 py-4">
                 <div data-testid="import-review-no-match-detail-grid" class="grid items-start gap-5 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
                   <section class="min-w-0">
@@ -1612,7 +1534,7 @@
 {% if active_review_view == 'conflicts' %}
   {% set conflict_footer_base_url = "/import/" ~ job.id ~ "/review-partial?status=conflicts&sort=" ~ sort %}
   {% set conflict_footer_hx_target = "#import-step-review-shell" %}
-  {% set conflict_footer_hx_swap = "outerHTML" %}
+  {% set conflict_footer_hx_swap = "morph:outerHTML" %}
   {% set conflict_footer_hx_sync = "#import-step-review-shell:replace" %}
 {% endif %}
 <div id="page-footer-dock" data-testid="page-footer-dock" hx-swap-oob="innerHTML">

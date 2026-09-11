@@ -215,8 +215,9 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
 
     # Import settings (captured from wizard)
     target_library_root_id: Mapped[int | None] = mapped_column(
-        ForeignKey("library_roots.id", ondelete="SET NULL")
+        ForeignKey("library_roots.id", ondelete="RESTRICT")
     )
+    removed_library_root_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))  # type: ignore[type-arg]
     monitored: Mapped[bool] = mapped_column(default=False)
     search_on_add: Mapped[bool] = mapped_column(default=False)
     move_to_library: Mapped[bool] = mapped_column(default=True)

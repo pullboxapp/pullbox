@@ -14,7 +14,8 @@
     hx-push-url="true"
     hx-trigger="submit"
   >
-    <input type="hidden" name="tab" value="unmatched">
+    <input type="hidden" name="tab" value="follow-up">
+    {% if selected_follow_up_job %}<input type="hidden" name="job_id" value="{{ selected_follow_up_job.id }}">{% endif %}
     <div class="series-toolbar-body">
       <div class="series-toolbar-browse">
         <div class="series-toolbar-primary">
@@ -25,7 +26,7 @@
               value=view,
               size="sm",
               options=[
-                ("all", "All Follow-up"),
+                ("all", "All follow-up"),
                 ("dismissed", "Dismissed"),
               ],
               root_testid="import-orphaned-view",
@@ -140,7 +141,7 @@
                     :disabled="isDismissingOrphan({{ item.id }})"
                     data-tip="Dismiss"
                     data-tip-pos="left"
-                    aria-label="Dismiss unmatched series {{ item.raw_series_name }}"
+                    aria-label="Dismiss {{ item.raw_series_name }} from import follow-up"
                   >
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>

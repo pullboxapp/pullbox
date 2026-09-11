@@ -179,6 +179,34 @@ def test_content_review_is_distinct_and_cannot_grant_resource_exceptions(code, o
     )
 
 
+def test_one_page_archive_copy_does_not_claim_the_file_is_a_cover() -> None:
+    block = build_import_safety_diagnostics(
+        "single_page_comic",
+        code="single_page_comic",
+        kind="single_page_comic",
+    )
+
+    assert block["reason"] == (
+        "The archive contains one image page. It may be cover art, a damaged archive, "
+        "or an intentional one-page comic. Review it before importing."
+    )
+
+
+def test_missing_source_copy_only_offers_available_recovery_actions() -> None:
+    block = build_import_safety_diagnostics(
+        "source_missing",
+        code="source_missing",
+        kind="source_revalidation",
+    )
+
+    assert block["reason"] == (
+        "No file was found at the recorded path, and Pullbox could not find a safe, verified "
+        "replacement. The saved filename may be outdated, or the file may have been moved or "
+        "removed. Verify the source location or skip this missing reference."
+    )
+    assert "reconcile" not in block["reason"].casefold()
+
+
 def test_build_import_safety_diagnostics_drops_raw_paths_and_preserves_review_contract() -> None:
     diagnostics = build_import_safety_diagnostics(
         "Archive could not be inspected: /mnt/user/private/secret.cbz",

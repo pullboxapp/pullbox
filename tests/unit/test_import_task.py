@@ -558,6 +558,47 @@ class TestRunImportExecuteTask:
         mock_service.run_import.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_execute_task_prepares_clean_library_before_import(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Clean-library row materialization belongs to the durable worker."""
+        job = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
+        job.progress_snapshot = {
+            "mode": "import",
+            "phase": "queued",
+            "clean_library_adoption": True,
+            "clean_library_adoption_prepared": False,
+            "source_import_job_id": 73,
+        }
+        await db_session.commit()
+        events: list[str] = []
+        mock_service = AsyncMock()
+        mock_service.run_import.side_effect = lambda *_args, **_kwargs: events.append("import")
+
+        async def prepare(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            events.append("prepare")
+
+        @asynccontextmanager
+        async def mock_session_ctx():
+            yield db_session
+
+        with (
+            patch("pullbox.tasks.import_task.get_session_factory") as mock_factory,
+            patch(
+                "pullbox.tasks.import_task._build_import_service",
+                return_value=mock_service,
+            ),
+            patch(
+                "pullbox.tasks.import_task.prepare_clean_library_import",
+                side_effect=prepare,
+            ),
+        ):
+            mock_factory.return_value = mock_session_ctx
+            await run_import_execute_task(job.id)
+
+        assert events == ["prepare", "import"]
+
+    @pytest.mark.asyncio
     async def test_execute_task_schedules_comicinfo_enrichment_after_commit(
         self, db_session: AsyncSession
     ) -> None:

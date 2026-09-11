@@ -149,7 +149,7 @@ def test_story_arc_has_policy_monitoring_and_provenance_columns() -> None:
     assert columns.sync_enabled.default.arg is False
     assert columns.policy_schema_version.nullable is True
     assert columns.revision.default.arg == 1
-    assert next(iter(columns.target_library_root_id.foreign_keys)).ondelete == "SET NULL"
+    assert next(iter(columns.target_library_root_id.foreign_keys)).ondelete == "RESTRICT"
     assert next(iter(columns.source_import_job_id.foreign_keys)).ondelete == "SET NULL"
 
     for column_name in ("source_kind", "lifecycle"):

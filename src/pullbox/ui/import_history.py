@@ -6,7 +6,16 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import ColumnElement, String, case, cast, func, or_, select
 
-from pullbox.models.import_job import ImportedSeries, ImportJob, ImportJobStatus, ImportSeriesStatus
+from pullbox.models.import_job import (
+    ImportedFile,
+    ImportedFileStatus,
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSeriesStatus,
+)
+from pullbox.models.issue import Issue
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.services.import_workflow_state import (
     import_control_state_for_job,
     snapshot_mode_for_job,
@@ -224,6 +233,7 @@ async def _load_import_history_context(
         }
         for job in jobs
     }
+    clean_library_job_ids: set[int] = set()
     terminal_result_statuses = {
         ImportJobStatus.COMPLETED,
         ImportJobStatus.FAILED,
@@ -244,6 +254,26 @@ async def _load_import_history_context(
     }
     if jobs:
         job_ids = [job.id for job in jobs]
+        clean_library_job_ids = set(
+            (
+                await session.scalars(
+                    select(ImportedFile.import_job_id)
+                    .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+                    .join(Issue, Issue.id == LibraryFile.issue_id)
+                    .join(ImportJob, ImportJob.id == ImportedFile.import_job_id)
+                    .where(
+                        ImportedFile.import_job_id.in_(job_ids),
+                        ImportJob.status == ImportJobStatus.COMPLETED,
+                        ImportJob.archived_at.is_(None),
+                        ImportedFile.status == ImportedFileStatus.IMPORTED,
+                        ImportedFile.matched_issue_id == Issue.id,
+                        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED,
+                        LibraryFile.file_path == ImportedFile.file_path,
+                    )
+                    .distinct()
+                )
+            ).all()
+        )
         series_counts_result = await session.execute(
             select(
                 ImportedSeries.import_job_id,
@@ -280,6 +310,7 @@ async def _load_import_history_context(
         "job_history_metrics": job_history_metrics,
         "job_control_states": job_control_states,
         "job_resume_steps": job_resume_steps,
+        "clean_library_job_ids": clean_library_job_ids,
         "history_has_live_jobs": any(job.status in live_history_statuses for job in jobs),
         "history_stats": {
             "active": int(active_count or 0),

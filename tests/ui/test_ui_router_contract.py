@@ -119,6 +119,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_review_partial",
         ),
         (
+            "/import/{job_id}/review-rematch-status",
+            ("GET",),
+            "import_review_rematch_status",
+            "import_review_rematch_status",
+        ),
+        (
             "/import/{job_id}/safety/categories/{category}/preview",
             ("GET",),
             "import_review_preview_safety_category",
@@ -129,6 +135,30 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             ("POST",),
             "import_review_allow_safety_category_once",
             "import_review_allow_safety_category_once",
+        ),
+        (
+            "/import/{job_id}/safety/categories/{category}/skip-preview",
+            ("GET",),
+            "import_review_preview_safety_category_skip",
+            "import_review_preview_safety_category_skip",
+        ),
+        (
+            "/import/{job_id}/safety/categories/{category}/skip",
+            ("POST",),
+            "import_review_skip_safety_category",
+            "import_review_skip_safety_category",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/safety/source-cleanup-preview",
+            ("GET",),
+            "import_review_source_cleanup_preview",
+            "import_review_source_cleanup_preview",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/safety/source-cleanup",
+            ("POST",),
+            "import_review_source_cleanup",
+            "import_review_source_cleanup",
         ),
         (
             "/import/{job_id}/files/{file_id}/safety/allow-once",
@@ -155,10 +185,46 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_results_partial",
         ),
         (
+            "/import/{job_id}/clean-library-panel",
+            ("GET",),
+            "import_clean_library_panel",
+            "import_clean_library_panel",
+        ),
+        (
             "/import/{job_id}/cleanup/{action}/files",
             ("GET",),
             "import_completed_cleanup_files_partial",
             "import_completed_cleanup_files_partial",
+        ),
+        (
+            "/import/{job_id}/misplaced-source-cleanup/{action}/files",
+            ("GET",),
+            "import_misplaced_source_cleanup_files_partial",
+            "import_misplaced_source_cleanup_files_partial",
+        ),
+        (
+            "/import/{job_id}/misplaced-source-cleanup/restore-recorded-path/preview-all",
+            ("GET",),
+            "import_misplaced_source_cleanup_preview_all",
+            "import_misplaced_source_cleanup_preview_all",
+        ),
+        (
+            "/import/{job_id}/misplaced-source-cleanup/restore-recorded-path/apply-all",
+            ("POST",),
+            "import_misplaced_source_cleanup_apply_all",
+            "import_misplaced_source_cleanup_apply_all",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}/preview",
+            ("GET",),
+            "import_misplaced_source_cleanup_preview",
+            "import_misplaced_source_cleanup_preview",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}",
+            ("POST",),
+            "import_misplaced_source_cleanup_apply",
+            "import_misplaced_source_cleanup_apply",
         ),
         (
             "/import/{job_id}/series/{series_id}/details-partial",

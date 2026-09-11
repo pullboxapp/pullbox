@@ -124,6 +124,9 @@ class RegisterLibraryFileFunc(Protocol):
         recovery_imported_file_id: int | None = None,
         recovery_original_source_path: Path | None = None,
         placement_started_callback: Callable[..., Awaitable[None] | None] | None = None,
+        replace_existing_library_file: bool = False,
+        replacement_trash_dir: Path | None = None,
+        preserve_replaced_artifact: bool = False,
         source_scan_root: Path | None = None,
         strict_import_target: bool = False,
     ) -> LibraryFile | LibraryFileRegistrationOutcome: ...

@@ -110,7 +110,9 @@ class LibraryFile(Base, IdentityMixin, TimestampMixin):
 
     # Foreign keys
     issue_id: Mapped[int | None] = mapped_column(ForeignKey("issues.id", ondelete="SET NULL"))
-    library_root_id: Mapped[int] = mapped_column(ForeignKey("library_roots.id", ondelete="CASCADE"))
+    library_root_id: Mapped[int] = mapped_column(
+        ForeignKey("library_roots.id", ondelete="RESTRICT")
+    )
 
     # Relationships
     issue: Mapped[Issue | None] = relationship(back_populates="library_file")
@@ -156,15 +158,17 @@ class LibraryRoot(Base, IdentityMixin, TimestampMixin):
 
     # Relationships
     files: Mapped[list[LibraryFile]] = relationship(
-        back_populates="library_root", cascade="all, delete-orphan"
+        back_populates="library_root", passive_deletes="all"
     )
     series: Mapped[list[Series]] = relationship(
         back_populates="library_root",
         foreign_keys="Series.library_root_id",
+        passive_deletes="all",
     )
     preferred_series: Mapped[list[Series]] = relationship(
         back_populates="preferred_library_root",
         foreign_keys="Series.preferred_library_root_id",
+        passive_deletes="all",
     )
     naming_policy: Mapped[LibraryRootPolicy | None] = relationship(
         back_populates="library_root",

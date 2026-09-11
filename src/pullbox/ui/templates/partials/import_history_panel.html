@@ -1,11 +1,13 @@
 {% from "components/search_field.html" import search_field %}
 
 <div
+  id="import-history-page"
   data-testid="import-history-page"
   class="downloads-panel-stack import-history-page-shell"
   x-data="importHistoryPage({ csrfToken: '{{ csrf_token }}' })"
 >
   {% include "partials/import_history_delete_modal.html" %}
+  <div id="cv-search-modal" data-testid="import-history-modal-host"></div>
   <div class="downloads-table-wrap" data-testid="import-history-table-shell">
     <form
       id="import-history-filter-form"

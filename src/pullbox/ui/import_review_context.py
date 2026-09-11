@@ -180,6 +180,41 @@ async def _load_status_counts(
     return status_counts
 
 
+async def _load_safety_review_counts(
+    session: AsyncSession,
+    job_id: int,
+) -> tuple[int, int]:
+    row = (
+        await session.execute(
+            select(
+                func.count(func.distinct(ImportedFile.import_series_id)),
+                func.count(ImportedFile.id),
+            ).where(
+                ImportedFile.import_job_id == job_id,
+                ImportedFile.status.in_(
+                    (ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED)
+                ),
+            )
+        )
+    ).one()
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+async def has_pending_import_safety_rematch(session: AsyncSession, job_id: int) -> bool:
+    """Return whether a review job has an approved file actively awaiting rematch."""
+    pending_file_id = await session.scalar(
+        select(ImportedFile.id)
+        .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
+        .where(
+            ImportedFile.import_job_id == job_id,
+            ImportedFile.status == ImportedFileStatus.SAFETY_APPROVED,
+            ImportedSeries.diagnostics["rematch_pending"].as_boolean().is_(True),
+        )
+        .limit(1)
+    )
+    return pending_file_id is not None
+
+
 async def _load_safety_blocked_files_by_series_id(
     session: AsyncSession,
     job_id: int,
@@ -355,11 +390,6 @@ async def load_import_review_context(
             job_id,
             visible_series_ids,
         )
-        safety_rematch_pending = any(
-            imp_file.status == ImportedFileStatus.SAFETY_APPROVED
-            for files in safety_blocked_files_by_series_id.values()
-            for imp_file in files
-        )
         if visible_series_ids:
             matched_file_targets_by_series_id = await _load_import_review_matched_file_targets(
                 session,
@@ -377,6 +407,10 @@ async def load_import_review_context(
         library_roots = list(library_roots_result.scalars().all())
 
     split_series_review = await load_selected_split_series_review(session, job)
+    safety_review_series_count, safety_review_file_count = await _load_safety_review_counts(
+        session, job_id
+    )
+    safety_rematch_pending = await has_pending_import_safety_rematch(session, job_id)
     managed_library_root_options: list[dict[str, Any]] = []
     if split_series_review.requires_preferred_destination:
         managed_library_root_options = [
@@ -412,6 +446,8 @@ async def load_import_review_context(
         "current_view": current_view,
         "sort": normalized_sort,
         "status_counts": await _load_status_counts(session, job_id),
+        "safety_review_series_count": safety_review_series_count,
+        "safety_review_file_count": safety_review_file_count,
         "review_summary": await load_import_review_summary(session, job),
         "split_series_review": split_series_review,
         "managed_library_root_options": managed_library_root_options,

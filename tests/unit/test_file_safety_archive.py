@@ -72,6 +72,20 @@ def test_run_safety_checks_rejects_unreadable_zip_archive(tmp_path: Path) -> Non
         )
 
 
+def test_run_safety_checks_classifies_zero_byte_archive_before_reader_failure(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "empty.cbz"
+    archive.touch()
+
+    with pytest.raises(FileSafetyError, match="zero_byte_file"):
+        run_safety_checks(
+            archive,
+            block_dangerous=True,
+            max_archive_size=2000 * 1024 * 1024,
+        )
+
+
 def test_ensure_zip_archive_inspectable_ignores_non_zip_and_accepts_valid_zip(
     tmp_path: Path,
 ) -> None:
@@ -135,6 +149,29 @@ def test_run_safety_checks_inspects_zip_archive_once(
         "safe/page002.jpg",
         "metadata/ComicInfo.xml",
     )
+
+
+def test_run_safety_checks_prefers_canonical_root_comicinfo(tmp_path: Path) -> None:
+    archive = tmp_path / "duplicate-comicinfo.cbz"
+    with zipfile.ZipFile(archive, "w") as payload:
+        payload.writestr("Legacy/ComicInfo.xml", "<ComicInfo><Series>Wrong</Series></ComicInfo>")
+        payload.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Babyteeth</Series><Number>1</Number></ComicInfo>",
+        )
+        payload.writestr("page001.jpg", b"ok")
+
+    report = run_safety_checks(
+        archive,
+        block_dangerous=True,
+        max_archive_size=2000 * 1024 * 1024,
+    ).archives[0]
+
+    assert report.comicinfo_entry_count == 2
+    assert report.comicinfo_entry == "ComicInfo.xml"
+    assert report.comicinfo is not None
+    assert report.comicinfo.series == "Babyteeth"
+    assert report.comicinfo.number == "1"
 
 
 def test_run_safety_checks_rejects_dangerous_files_on_disk(tmp_path: Path) -> None:

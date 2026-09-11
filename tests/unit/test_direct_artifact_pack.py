@@ -11,6 +11,7 @@ from pullbox.services.direct_artifact_pack import (
     DirectArtifactPackError,
     _issue_path_token,
     extract_same_series_issue_files,
+    is_separable_issue_pack,
 )
 
 if TYPE_CHECKING:
@@ -132,3 +133,131 @@ def test_rejects_nested_issue_file_for_a_different_series(tmp_path: Path) -> Non
         )
 
     assert caught.value.code == "direct_pack_mixed_series"
+
+
+def test_structural_pack_detection_handles_valid_and_unreadable_archives(tmp_path: Path) -> None:
+    pack = tmp_path / "Alien #5-6.cbz"
+    _write_nested_pack(pack, "Alien #5.cbz", "Alien #6.cbz")
+
+    assert is_separable_issue_pack(pack) is True
+    assert is_separable_issue_pack(tmp_path / "missing.cbz") is False
+
+
+def test_single_expected_issue_does_not_enter_pack_extraction(tmp_path: Path) -> None:
+    assert (
+        extract_same_series_issue_files(
+            tmp_path / "missing.cbz",
+            destination=tmp_path / "extracted",
+            expected_issue_numbers=frozenset({"5"}),
+            expected_series_titles=frozenset({"Alien"}),
+        )
+        == {}
+    )
+
+
+def test_pack_requires_a_normalizable_series_identity(tmp_path: Path) -> None:
+    pack = tmp_path / "Alien #5-6.cbz"
+    _write_nested_pack(pack, "Alien #5.cbz", "Alien #6.cbz")
+
+    with pytest.raises(DirectArtifactPackError) as caught:
+        extract_same_series_issue_files(
+            pack,
+            destination=tmp_path / "extracted",
+            expected_issue_numbers=frozenset({"5", "6"}),
+            expected_series_titles=frozenset({""}),
+        )
+
+    assert caught.value.code == "direct_pack_series_invalid"
+
+
+def test_unreadable_pack_has_stable_failure(tmp_path: Path) -> None:
+    with pytest.raises(DirectArtifactPackError) as caught:
+        extract_same_series_issue_files(
+            tmp_path / "missing.cbz",
+            destination=tmp_path / "extracted",
+            expected_issue_numbers=frozenset({"5", "6"}),
+            expected_series_titles=frozenset({"Alien"}),
+        )
+
+    assert caught.value.code == "direct_pack_unreadable"
+
+
+def test_pack_rejects_unsafe_nested_comic_path(tmp_path: Path) -> None:
+    pack = tmp_path / "Alien #5-6.cbz"
+    _write_nested_pack(pack, "../Alien #5.cbz", "Alien #6.cbz")
+
+    with pytest.raises(DirectArtifactPackError) as caught:
+        extract_same_series_issue_files(
+            pack,
+            destination=tmp_path / "extracted",
+            expected_issue_numbers=frozenset({"5", "6"}),
+            expected_series_titles=frozenset({"Alien"}),
+        )
+
+    assert caught.value.code == "direct_pack_unsafe_member"
+
+
+def test_pack_skips_unparseable_and_unwanted_issue_members(tmp_path: Path) -> None:
+    pack = tmp_path / "Alien #5-6.cbz"
+    _write_nested_pack(pack, "notes.cbz", "Alien #4.cbz", "Alien #5.cbz")
+
+    with pytest.raises(DirectArtifactPackError) as caught:
+        extract_same_series_issue_files(
+            pack,
+            destination=tmp_path / "extracted",
+            expected_issue_numbers=frozenset({"5", "6"}),
+            expected_series_titles=frozenset({"Alien"}),
+        )
+
+    assert caught.value.code == "direct_pack_incomplete"
+
+
+def test_pack_rejects_duplicate_files_for_one_issue(tmp_path: Path) -> None:
+    pack = tmp_path / "Alien #5-6.cbz"
+    _write_nested_pack(pack, "Alien #5.cbz", "nested/Alien #5.cbz", "Alien #6.cbz")
+
+    with pytest.raises(DirectArtifactPackError) as caught:
+        extract_same_series_issue_files(
+            pack,
+            destination=tmp_path / "extracted",
+            expected_issue_numbers=frozenset({"5", "6"}),
+            expected_series_titles=frozenset({"Alien"}),
+        )
+
+    assert caught.value.code == "direct_pack_ambiguous_issue"
+
+
+def test_pack_rejects_invalid_declared_coverage(tmp_path: Path) -> None:
+    pack = tmp_path / "Alien #5-6.cbz"
+    _write_nested_pack(pack, "Alien #5.cbz", "Alien #6.cbz")
+
+    with pytest.raises(DirectArtifactPackError) as caught:
+        extract_same_series_issue_files(
+            pack,
+            destination=tmp_path / "extracted",
+            expected_issue_numbers=frozenset({"not-a-number", "6"}),
+            expected_series_titles=frozenset({"Alien"}),
+        )
+
+    assert caught.value.code == "direct_pack_coverage_invalid"
+
+
+def test_pack_reports_destination_write_failure(tmp_path: Path) -> None:
+    pack = tmp_path / "Alien #5-6.cbz"
+    _write_nested_pack(pack, "Alien #5.cbz", "Alien #6.cbz")
+    destination = tmp_path / "extracted"
+    (destination / "issue-5.cbz").mkdir(parents=True)
+
+    with pytest.raises(DirectArtifactPackError) as caught:
+        extract_same_series_issue_files(
+            pack,
+            destination=destination,
+            expected_issue_numbers=frozenset({"5", "6"}),
+            expected_series_titles=frozenset({"Alien"}),
+        )
+
+    assert caught.value.code == "direct_pack_extract_failed"
+
+
+def test_issue_path_token_falls_back_for_unusual_text() -> None:
+    assert _issue_path_token("Special Edition") == "Special Edition"

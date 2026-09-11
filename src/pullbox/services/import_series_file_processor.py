@@ -110,6 +110,9 @@ async def process_series_files_for_import(
         | None = None,
         recovery_imported_file_id: int | None = None,
         recovery_original_source_path: Path | None = None,
+        replace_existing_library_file: bool = False,
+        replacement_trash_dir: Path | None = None,
+        preserve_replaced_artifact: bool = False,
         source_scan_root: Path | None = None,
         strict_import_target: bool = False,
     ) -> LibraryFile | LibraryFileRegistrationOutcome:
@@ -134,6 +137,9 @@ async def process_series_files_for_import(
             comicinfo_progress_callback=comicinfo_progress_callback,
             recovery_imported_file_id=recovery_imported_file_id,
             recovery_original_source_path=recovery_original_source_path,
+            replace_existing_library_file=replace_existing_library_file,
+            replacement_trash_dir=replacement_trash_dir,
+            preserve_replaced_artifact=preserve_replaced_artifact,
             source_scan_root=source_scan_root,
             strict_import_target=strict_import_target,
         )

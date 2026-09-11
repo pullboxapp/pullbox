@@ -10,7 +10,14 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import func, select
 
 from pullbox.core.exceptions import ValidationError
-from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+from pullbox.models.import_job import (
+    ImportedFile,
+    ImportedFileStatus,
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSourceType,
+)
 from pullbox.models.library import LibraryRoot
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
@@ -176,18 +183,8 @@ async def test_story_arc_select_and_skip_persist_only_staging_decisions(db_sessi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("states", "safety_incomplete", "message"),
-    [
-        ((StoryArcResolutionState.CONFLICT,), False, "conflict"),
-        ((StoryArcResolutionState.RESOLVED,), True, "safety"),
-    ],
-)
-async def test_story_arc_selection_fails_closed_for_conflict_and_safety_rows(
+async def test_story_arc_selection_fails_closed_for_conflict_rows(
     db_session: Any,
-    states: tuple[StoryArcResolutionState, ...],
-    safety_incomplete: bool,
-    message: str,
 ) -> None:
     from pullbox.services.import_story_arc_review import update_import_story_arc_decision
 
@@ -201,11 +198,10 @@ async def test_story_arc_selection_fails_closed_for_conflict_and_safety_rows(
     staged = await _stage_arc(
         db_session,
         job,
-        states=states,
-        safety_incomplete=safety_incomplete,
+        states=(StoryArcResolutionState.CONFLICT,),
     )
 
-    with pytest.raises(ValidationError, match=message):
+    with pytest.raises(ValidationError, match="conflict"):
         await update_import_story_arc_decision(
             db_session,
             job.id,
@@ -219,6 +215,81 @@ async def test_story_arc_selection_fails_closed_for_conflict_and_safety_rows(
         ImportedStoryArcStatus.NEEDS_REVIEW,
     }
     assert staged.selected_for_import is False
+
+
+@pytest.mark.asyncio
+async def test_story_arc_selection_uses_current_linked_file_safety_state(
+    db_session: Any,
+) -> None:
+    from pullbox.services.import_story_arc_review import (
+        load_import_story_arc_review_page,
+        update_import_story_arc_decision,
+    )
+
+    job = ImportJob(
+        source_path="/tmp/import",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.REVIEW,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Daredevil",
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    imported_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path="/tmp/import/Daredevil cover.cbz",
+        file_name="Daredevil cover.cbz",
+        file_size=100,
+        file_format="cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        diagnostics={"safety_block": {"code": "single_page_comic"}},
+    )
+    db_session.add(imported_file)
+    await db_session.flush()
+    staged = await _stage_arc(
+        db_session,
+        job,
+        states=(),
+        safety_incomplete=True,
+    )
+    entry = ImportedStoryArcEntry(
+        imported_story_arc_id=staged.id,
+        import_file_id=imported_file.id,
+        source_ordinal=1,
+        resolution_state=StoryArcResolutionState.AMBIGUOUS,
+        source_kind=StoryArcSourceKind.FOLDER,
+        diagnostics={
+            "safety_code": "single_page_comic",
+            "review_reason": "source_file_safety_blocked",
+        },
+    )
+    db_session.add(entry)
+    await db_session.flush()
+
+    blocked_page = await load_import_story_arc_review_page(db_session, job.id)
+    assert blocked_page.items[0].selection_blocked is True
+    assert blocked_page.items[0].selection_block_reason is not None
+    assert "safety" in blocked_page.items[0].selection_block_reason.lower()
+
+    imported_file.status = ImportedFileStatus.SAFETY_APPROVED
+    imported_file.diagnostics = {"safety_exception": {"allowed_once": True}}
+    await db_session.flush()
+
+    selected = await update_import_story_arc_decision(
+        db_session,
+        job.id,
+        staged.id,
+        action="select",
+        proposed_story_arc_id=None,
+    )
+
+    assert selected.status == ImportedStoryArcStatus.READY
+    assert selected.selected_for_import is True
 
 
 @pytest.mark.asyncio
@@ -271,7 +342,7 @@ async def test_story_arc_review_page_is_paginated_and_preserves_order_and_counts
 
 
 @pytest.mark.asyncio
-async def test_review_summary_keeps_story_arc_counts_out_of_series_totals(db_session: Any) -> None:
+async def test_review_summary_keeps_story_arcs_out_of_ready_import_totals(db_session: Any) -> None:
     from pullbox.ui.import_review_summary import load_import_review_summary
 
     job = ImportJob(
@@ -299,7 +370,12 @@ async def test_review_summary_keeps_story_arc_counts_out_of_series_totals(db_ses
     assert summary["story_arc_entries_resolved"] == 1
     assert summary["story_arc_entries_missing"] == 1
     assert summary["selected_series_total"] == 0
-    assert summary["selected_items_total"] == 1
+    assert summary["selected_items_total"] == 0
+    assert summary["importable_items_total"] == 0
+    assert summary["deferred_story_arcs_total"] == 1
+    assert summary["ready_to_import_total"] == 0
+    assert summary["needs_attention_total"] == 0
+    assert summary["deferred_follow_up_total"] == 1
 
 
 @pytest.mark.asyncio
@@ -344,6 +420,132 @@ async def test_arc_only_confirmation_allows_canonical_issues_without_series_or_f
     assert staged.selected_for_import is True
     assert await db_session.scalar(select(func.count(StoryArc.id))) == 0
     assert await db_session.scalar(select(func.count(IssueStoryArc.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_exact_trusted_arcs_are_auto_confirmed_as_logical_follow_up(
+    db_session: Any,
+) -> None:
+    from pullbox.services.import_story_arc_review import (
+        auto_confirm_trusted_logical_story_arcs,
+    )
+
+    job = ImportJob(
+        source_path="/tmp/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.IMPORTING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    mylar_arc = ImportedStoryArc(
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.MYLAR3,
+        source_key="mylar3:trusted",
+        source_arc_id="trusted",
+        source_ordinal=1,
+        name="Knightfall",
+        status=ImportedStoryArcStatus.DETECTED,
+        diagnostics={"source_name_present": True, "duplicate_reading_order": False},
+    )
+    inferred_folder_arc = ImportedStoryArc(
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.FOLDER,
+        source_key="folder:inferred",
+        source_ordinal=2,
+        name="A folder that looks ordered",
+        status=ImportedStoryArcStatus.NEEDS_REVIEW,
+        diagnostics={"reason": "ordered_mixed_folder_requires_confirmation"},
+    )
+    db_session.add_all([mylar_arc, inferred_folder_arc])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            ImportedStoryArcEntry(
+                imported_story_arc_id=mylar_arc.id,
+                source_ordinal=1,
+                reading_order=1,
+                source_kind=StoryArcSourceKind.MYLAR3,
+                source_issue_id="12345",
+                resolution_state=StoryArcResolutionState.MISSING,
+            ),
+            ImportedStoryArcEntry(
+                imported_story_arc_id=inferred_folder_arc.id,
+                source_ordinal=1,
+                reading_order=1,
+                source_kind=StoryArcSourceKind.FOLDER,
+                resolution_state=StoryArcResolutionState.RESOLVED,
+                evidence={"has_comicinfo": False},
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    confirmed = await auto_confirm_trusted_logical_story_arcs(db_session, job.id)
+
+    assert confirmed == 1
+    assert mylar_arc.status == ImportedStoryArcStatus.CONFIRMED
+    assert mylar_arc.selected_for_import is True
+    assert mylar_arc.proposed_policy_snapshot["activation"] == "confirmed"
+    assert mylar_arc.proposed_policy_snapshot["placement_policy"]["mode"] == "logical"
+    assert inferred_folder_arc.status == ImportedStoryArcStatus.NEEDS_REVIEW
+    assert inferred_folder_arc.selected_for_import is False
+
+
+@pytest.mark.asyncio
+async def test_exact_comicinfo_arc_is_auto_confirmed_but_current_safety_blocks_it(
+    db_session: Any,
+) -> None:
+    from pullbox.services.import_story_arc_review import (
+        auto_confirm_trusted_logical_story_arcs,
+    )
+
+    job = ImportJob(
+        source_path="/tmp/import",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.IMPORTING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    imported_series = ImportedSeries(import_job_id=job.id, raw_series_name="Batman")
+    db_session.add(imported_series)
+    await db_session.flush()
+    blocked_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path="/tmp/import/Batman 1.cbz",
+        file_name="Batman 1.cbz",
+        file_size=100,
+        file_format="cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+    )
+    db_session.add(blocked_file)
+    await db_session.flush()
+    arc = ImportedStoryArc(
+        import_job_id=job.id,
+        source_kind=StoryArcSourceKind.FOLDER,
+        source_key="folder:comicinfo",
+        source_ordinal=1,
+        name="Court of Owls",
+        status=ImportedStoryArcStatus.DETECTED,
+        diagnostics={"reason": "consistent_exact_arc_name"},
+    )
+    db_session.add(arc)
+    await db_session.flush()
+    db_session.add(
+        ImportedStoryArcEntry(
+            imported_story_arc_id=arc.id,
+            import_file_id=blocked_file.id,
+            source_ordinal=1,
+            reading_order=1,
+            source_kind=StoryArcSourceKind.FOLDER,
+            resolution_state=StoryArcResolutionState.RESOLVED,
+            evidence={"has_comicinfo": True},
+        )
+    )
+    await db_session.flush()
+
+    assert await auto_confirm_trusted_logical_story_arcs(db_session, job.id) == 0
+    assert arc.status == ImportedStoryArcStatus.DETECTED
 
 
 @pytest.mark.asyncio

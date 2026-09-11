@@ -33,7 +33,7 @@ _CATEGORY_LABELS: dict[ImportSafetyCategory, str] = {
     ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED: "Archive inspection failed",
     ImportSafetyCategory.ZERO_BYTE: "Zero-byte file",
     ImportSafetyCategory.ARCHIVE_NO_PAGES: "No comic pages",
-    ImportSafetyCategory.SINGLE_PAGE_COMIC: "Possible cover-only file",
+    ImportSafetyCategory.SINGLE_PAGE_COMIC: "One-page archive",
     ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT: "Decompression-size limit",
     ImportSafetyCategory.DANGEROUS_PATH_OR_PAYLOAD: "Dangerous link, path, or payload",
     ImportSafetyCategory.OUTSIDE_APPROVED_ROOT: "Outside approved root",
@@ -65,8 +65,8 @@ _SANITIZED_REASONS: dict[ImportSafetyCategory, str] = {
         "Replace the file or skip it; its series identity is preserved."
     ),
     ImportSafetyCategory.SINGLE_PAGE_COMIC: (
-        "The archive contains only one image page and may be an alternate cover. "
-        "Review the source and allow once only if this is intentionally a one-page comic."
+        "The archive contains one image page. It may be cover art, a damaged archive, "
+        "or an intentional one-page comic. Review it before importing."
     ),
     ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT: (
         "The archive exceeds Pullbox's configured decompressed-size limit."
@@ -82,9 +82,9 @@ _SANITIZED_REASONS: dict[ImportSafetyCategory, str] = {
         "The source changed or became unavailable after scanning. Rescan before retrying."
     ),
     ImportSafetyCategory.SOURCE_MISSING: (
-        "No file was found at the recorded path. The saved filename may be outdated, "
-        "or the file may have been moved or removed. Verify the source location; "
-        "reconcile a proven replacement or skip this missing reference."
+        "No file was found at the recorded path, and Pullbox could not find a safe, verified "
+        "replacement. The saved filename may be outdated, or the file may have been moved or "
+        "removed. Verify the source location or skip this missing reference."
     ),
     ImportSafetyCategory.UNKNOWN: (
         "Pullbox blocked this file because its safety inspection did not complete safely."

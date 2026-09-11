@@ -242,6 +242,42 @@ async def test_emit_progress_persists_snapshot_and_invokes_callback(db_session) 
 
 
 @pytest.mark.asyncio
+async def test_emit_progress_preserves_and_scales_clean_library_context(db_session) -> None:
+    job = _job(ImportJobStatus.IMPORTING, import_started=True)
+    job.progress_snapshot = {
+        "clean_library_adoption": True,
+        "clean_library_adoption_prepared": True,
+        "source_import_job_id": 41,
+        "clean_library_source_snapshot": {
+            "file_count": 10,
+            "series_count": 2,
+            "total_bytes": 1000,
+            "digest": "scope-digest",
+        },
+    }
+    db_session.add(job)
+    await db_session.flush()
+
+    await emit_progress(
+        db_session,
+        job,
+        ImportProgressEvent(
+            job_id=job.id,
+            status=ImportJobStatus.IMPORTING,
+            mode="import",
+            phase="importing",
+            progress=20,
+            message="Copying files",
+        ),
+    )
+
+    assert job.progress_snapshot["progress"] == 24
+    assert job.progress_snapshot["clean_library_adoption"] is True
+    assert job.progress_snapshot["clean_library_adoption_prepared"] is True
+    assert job.progress_snapshot["source_import_job_id"] == 41
+
+
+@pytest.mark.asyncio
 async def test_emit_live_progress_advances_runtime_revision_without_snapshot_write(
     db_session,
 ) -> None:

@@ -4,7 +4,7 @@
     step: {{ resume_step or 1 }},
     resumeJobId: {{ resume_job_id or 'null' }},
     recentJobs: {{ recent_jobs|default([])|length }},
-    unmatched: {{ unmatched_count|default(0) }},
+    followUp: {{ follow_up_count|default(0) }},
     libraryRoots: {{ library_roots|default([])|length }},
     progressSnapshot: {{ resume_progress_snapshot|default({})|tojson|forceescape }}
   })"

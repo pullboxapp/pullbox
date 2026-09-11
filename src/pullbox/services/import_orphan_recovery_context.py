@@ -40,7 +40,7 @@ async def load_orphan_recovery_item(
     if job is None:
         raise NotFoundError("ImportJob", item.import_job_id)
     if job.status != ImportJobStatus.COMPLETED:
-        raise ValidationError("Unmatched recovery is only available for completed imports.")
+        raise ValidationError("Import follow-up is only available for completed imports.")
     has_live_issue_recovery = False
     if item.status == ImportSeriesStatus.IMPORTED:
         has_live_issue_recovery = bool(

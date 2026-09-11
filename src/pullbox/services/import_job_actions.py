@@ -17,7 +17,10 @@ from sqlalchemy import select as sa_select
 from sqlalchemy import update as sa_update
 
 from pullbox.core.exceptions import ConfigurationError, NotFoundError
-from pullbox.core.library_file_ownership import build_managed_placement_signature
+from pullbox.core.library_file_ownership import (
+    build_file_identity_signature,
+    build_managed_placement_signature,
+)
 from pullbox.models.blocklist import BlocklistEntry
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
 from pullbox.models.download import DownloadHistory
@@ -30,7 +33,13 @@ from pullbox.models.import_job import (
     ImportJobActionStatus,
 )
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import LibraryFile, LibraryFileStorageMode
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.pending_match import PendingMatch
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.search_log import SearchLog
@@ -86,6 +95,32 @@ class _ManagedPlacementRollbackPayload(TypedDict):
     imported_story_arc_id: int
     imported_story_arc_entry_id: int
     source_import_job_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class _AdoptedReferenceRollback:
+    source_imported_file: ImportedFile
+    source_library_file_id: int
+    file_path: str
+    file_name: str
+    file_size: int
+    file_format: FileFormat
+    file_hash: str | None
+    file_modified_at: datetime
+    match_confidence: MatchConfidence
+    parsed_series: str | None
+    parsed_issue_number: float | None
+    parsed_year: int | None
+    parsed_publisher: str | None
+    has_comicinfo: bool
+    naming_snapshot: dict[str, object]
+    source_signature: dict[str, object]
+    issue_id: int
+    library_root_id: int
+    series: Series
+    previous_series_path: str | None
+    previous_series_library_root_id: int | None
+    previous_series_preferred_library_root_id: int | None
 
 
 class StoryArcManagedPlacementRollbackDeferredError(RuntimeError):
@@ -478,6 +513,256 @@ def _series_issue_rollback_lock_statement(series_id: int) -> Any:
     )
 
 
+def _adopted_reference_string(
+    snapshot: dict[str, object],
+    key: str,
+    *,
+    optional: bool = False,
+) -> str | None:
+    value = snapshot.get(key)
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or (not value and not optional):
+        raise ValueError(f"Invalid {key} in clean-library rollback action")
+    return value
+
+
+def _adopted_reference_optional_int(
+    snapshot: dict[str, object],
+    key: str,
+) -> int | None:
+    value = snapshot.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Invalid {key} in clean-library rollback action")
+    return value
+
+
+def _adopted_reference_optional_float(
+    snapshot: dict[str, object],
+    key: str,
+) -> float | None:
+    value = snapshot.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"Invalid {key} in clean-library rollback action")
+    return float(value)
+
+
+async def _prepare_adopted_reference_rollback(
+    session: AsyncSession,
+    *,
+    payload: dict[str, Any],
+    managed_library_file: LibraryFile | None,
+) -> tuple[_AdoptedReferenceRollback | None, str | None]:
+    raw_snapshot = payload.get("adopted_reference")
+    if raw_snapshot is None:
+        return None, None
+    if not isinstance(raw_snapshot, dict) or raw_snapshot.get("schema_version") != 1:
+        raise ValueError("Invalid adopted_reference in clean-library rollback action")
+    snapshot: dict[str, object] = dict(raw_snapshot)
+    source_imported_file_id = _positive_int(
+        snapshot.get("source_imported_file_id"),
+        "source_imported_file_id",
+    )
+    source_library_file_id = _positive_int(
+        snapshot.get("source_library_file_id"),
+        "source_library_file_id",
+    )
+    issue_id = _positive_int(snapshot.get("issue_id"), "issue_id")
+    library_root_id = _positive_int(snapshot.get("library_root_id"), "library_root_id")
+    source_series_id = _positive_int(snapshot.get("source_series_id"), "source_series_id")
+    file_path = _adopted_reference_string(snapshot, "file_path")
+    file_name = _adopted_reference_string(snapshot, "file_name")
+    file_modified_at_raw = _adopted_reference_string(snapshot, "file_modified_at")
+    assert file_path is not None
+    assert file_name is not None
+    assert file_modified_at_raw is not None
+    file_size = _non_negative_int(snapshot.get("file_size"), "file_size")
+    try:
+        file_format = FileFormat(str(snapshot.get("file_format") or ""))
+        match_confidence = MatchConfidence(str(snapshot.get("match_confidence") or ""))
+        file_modified_at = datetime.fromisoformat(file_modified_at_raw)
+    except ValueError as exc:
+        raise ValueError("Invalid file metadata in clean-library rollback action") from exc
+    if file_modified_at.tzinfo is None:
+        raise ValueError("Invalid file_modified_at in clean-library rollback action")
+    file_hash = _adopted_reference_string(snapshot, "file_hash", optional=True)
+    parsed_series = _adopted_reference_string(snapshot, "parsed_series", optional=True)
+    parsed_publisher = _adopted_reference_string(snapshot, "parsed_publisher", optional=True)
+    parsed_issue_number = _adopted_reference_optional_float(snapshot, "parsed_issue_number")
+    parsed_year = _adopted_reference_optional_int(snapshot, "parsed_year")
+    previous_series_path = _adopted_reference_string(
+        snapshot,
+        "previous_series_path",
+        optional=True,
+    )
+    previous_series_library_root_id = _adopted_reference_optional_int(
+        snapshot,
+        "previous_series_library_root_id",
+    )
+    previous_series_preferred_library_root_id = _adopted_reference_optional_int(
+        snapshot,
+        "previous_series_preferred_library_root_id",
+    )
+    installed_series_path = _adopted_reference_string(snapshot, "installed_series_path")
+    installed_series_library_root_id = _positive_int(
+        snapshot.get("installed_series_library_root_id"),
+        "installed_series_library_root_id",
+    )
+    installed_series_preferred_library_root_id = _adopted_reference_optional_int(
+        snapshot,
+        "installed_series_preferred_library_root_id",
+    )
+    assert installed_series_path is not None
+    has_comicinfo = snapshot.get("has_comicinfo")
+    naming_snapshot = snapshot.get("naming_snapshot")
+    source_signature = snapshot.get("source_signature")
+    if (
+        snapshot.get("storage_mode") != LibraryFileStorageMode.REFERENCED.value
+        or not isinstance(has_comicinfo, bool)
+        or not isinstance(naming_snapshot, dict)
+        or not isinstance(source_signature, dict)
+        or not source_signature
+    ):
+        raise ValueError("Invalid reference metadata in clean-library rollback action")
+
+    source_imported_file = await session.get(ImportedFile, source_imported_file_id)
+    source_root = await session.get(LibraryRoot, library_root_id)
+    issue = await session.get(Issue, issue_id)
+    series = await session.get(Series, source_series_id)
+    installed_series_path_matches = False
+    if managed_library_file is not None:
+        try:
+            installed_series_path_matches = Path(installed_series_path).resolve(
+                strict=False
+            ) == Path(managed_library_file.file_path).parent.resolve(strict=False)
+        except (OSError, RuntimeError):
+            installed_series_path_matches = False
+    occupied_source = await session.scalar(
+        sa_select(LibraryFile.id).where(LibraryFile.file_path == file_path).limit(1)
+    )
+    occupied_id = await session.get(LibraryFile, source_library_file_id)
+    source_row_reused = (
+        managed_library_file is not None and managed_library_file.id == source_library_file_id
+    )
+    if (
+        managed_library_file is None
+        or managed_library_file.issue_id != issue_id
+        or source_imported_file is None
+        or source_imported_file.status is not ImportedFileStatus.IMPORTED
+        or source_imported_file.matched_issue_id != issue_id
+        or source_imported_file.file_path != file_path
+        or source_imported_file.library_file_id not in {None, source_library_file_id}
+        or source_root is None
+        or issue is None
+        or issue.series_id != source_series_id
+        or series is None
+        or managed_library_file.library_root_id != installed_series_library_root_id
+        or not installed_series_path_matches
+        or occupied_source is not None
+        or (occupied_id is not None and not source_row_reused)
+    ):
+        return None, (
+            "The original Mylar reference no longer matches its clean-library rollback "
+            "record. Pullbox preserved the managed file for review."
+        )
+    installed_series_state = _series_matches_folder_state(
+        series,
+        path=installed_series_path,
+        library_root_id=installed_series_library_root_id,
+        preferred_library_root_id=installed_series_preferred_library_root_id,
+    )
+    previous_series_state = _series_matches_folder_state(
+        series,
+        path=previous_series_path,
+        library_root_id=previous_series_library_root_id,
+        preferred_library_root_id=previous_series_preferred_library_root_id,
+    )
+    if not installed_series_state and not previous_series_state:
+        return None, (
+            "The series storage location changed after clean-library adoption. Pullbox "
+            "preserved the managed file for review."
+        )
+    try:
+        current_signature = build_file_identity_signature(Path(file_path))
+    except (ConfigurationError, OSError, RuntimeError, ValueError):
+        return None, (
+            "The original Mylar source is unavailable. Pullbox preserved the managed file "
+            "for review."
+        )
+    if current_signature != source_signature:
+        return None, (
+            "The original Mylar source changed after adoption. Pullbox preserved the "
+            "managed file for review."
+        )
+    return (
+        _AdoptedReferenceRollback(
+            source_imported_file=source_imported_file,
+            source_library_file_id=source_library_file_id,
+            file_path=file_path,
+            file_name=file_name,
+            file_size=file_size,
+            file_format=file_format,
+            file_hash=file_hash,
+            file_modified_at=file_modified_at,
+            match_confidence=match_confidence,
+            parsed_series=parsed_series,
+            parsed_issue_number=parsed_issue_number,
+            parsed_year=parsed_year,
+            parsed_publisher=parsed_publisher,
+            has_comicinfo=has_comicinfo,
+            naming_snapshot=dict(naming_snapshot),
+            source_signature=dict(source_signature),
+            issue_id=issue_id,
+            library_root_id=library_root_id,
+            series=series,
+            previous_series_path=previous_series_path,
+            previous_series_library_root_id=previous_series_library_root_id,
+            previous_series_preferred_library_root_id=(previous_series_preferred_library_root_id),
+        ),
+        None,
+    )
+
+
+async def _restore_adopted_reference(
+    session: AsyncSession,
+    adopted: _AdoptedReferenceRollback,
+    *,
+    reusable_library_file: LibraryFile | None = None,
+) -> None:
+    restored = reusable_library_file or LibraryFile(id=adopted.source_library_file_id)
+    restored.file_path = adopted.file_path
+    restored.file_name = adopted.file_name
+    restored.file_size = adopted.file_size
+    restored.file_format = adopted.file_format
+    restored.file_hash = adopted.file_hash
+    restored.file_modified_at = adopted.file_modified_at
+    restored.match_confidence = adopted.match_confidence
+    restored.parsed_series = adopted.parsed_series
+    restored.parsed_issue_number = adopted.parsed_issue_number
+    restored.parsed_year = adopted.parsed_year
+    restored.parsed_publisher = adopted.parsed_publisher
+    restored.has_comicinfo = adopted.has_comicinfo
+    restored.naming_snapshot = adopted.naming_snapshot
+    restored.storage_mode = LibraryFileStorageMode.REFERENCED
+    restored.source_signature = adopted.source_signature
+    restored.issue_id = adopted.issue_id
+    restored.library_root_id = adopted.library_root_id
+    if reusable_library_file is None:
+        session.add(restored)
+    await session.flush()
+    adopted.source_imported_file.library_file_id = restored.id
+    issue = await session.get(Issue, adopted.issue_id)
+    if issue is not None:
+        issue.status = IssueStatus.OWNED
+    adopted.series.path = adopted.previous_series_path
+    adopted.series.library_root_id = adopted.previous_series_library_root_id
+    adopted.series.preferred_library_root_id = adopted.previous_series_preferred_library_root_id
+
+
 async def rollback_action(
     session: AsyncSession,
     *,
@@ -518,6 +803,17 @@ async def rollback_action(
         permission_restores = list(payload.get("permission_restores") or [])
 
         library_file = await session.get(LibraryFile, library_file_id)
+        adopted_reference, adoption_block_reason = await _prepare_adopted_reference_rollback(
+            session,
+            payload=payload,
+            managed_library_file=library_file,
+        )
+        if adoption_block_reason is not None:
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = adoption_block_reason
+            action.rolled_back_at = None
+            await session.flush()
+            return
         source_reappeared = (
             not referenced_file
             and transfer_method == "move"
@@ -557,7 +853,14 @@ async def rollback_action(
             action.rolled_back_at = None
             await session.flush()
             return
-        if library_file is not None:
+        reusable_adopted_file = (
+            library_file
+            if adopted_reference is not None
+            and library_file is not None
+            and library_file.id == adopted_reference.source_library_file_id
+            else None
+        )
+        if library_file is not None and reusable_adopted_file is None:
             await session.delete(library_file)
 
         if not referenced_file:
@@ -585,6 +888,13 @@ async def rollback_action(
             _cleanup_import_created_directories(
                 payload,
                 destination_parent=destination_path.parent,
+            )
+        if adopted_reference is not None:
+            await session.flush()
+            await _restore_adopted_reference(
+                session,
+                adopted_reference,
+                reusable_library_file=reusable_adopted_file,
             )
 
     elif action_type == "library_file_placement_started":

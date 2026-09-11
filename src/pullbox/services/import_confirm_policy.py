@@ -13,6 +13,7 @@ from pullbox.core.library_policy import (
 from pullbox.models.import_job import ImportFileHandlingMode
 from pullbox.models.library import LibraryRoot
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
+from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_root_policy_activation import (
     apply_future_root_policy_to_ingest_policy,
 )
@@ -31,6 +32,7 @@ async def apply_confirm_import_policy(
     request: ConfirmImportRequest,
 ) -> None:
     """Apply global import policy and confirm-time overrides to an import job."""
+    require_retained_import_destination(job)
     if request.monitored is not None:
         job.monitored = request.monitored
     if request.target_library_root_id is not None:

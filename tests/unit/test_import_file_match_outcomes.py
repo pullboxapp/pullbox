@@ -69,6 +69,34 @@ def test_apply_matched_file_outcome_marks_new_series_file_matched() -> None:
     assert event.data["confidence"] == "medium"
 
 
+def test_apply_matched_file_outcome_preserves_cross_folder_cleanup_evidence() -> None:
+    evidence = {
+        "recorded_path": "/comics/Absolute Batman/Absolute Batman 001.cbz",
+        "actual_path": "/comics/Crossed/Absolute Batman 001.cbz",
+        "comicvine_issue_id": 1073108,
+        "comicvine_series_id": 160294,
+        "method": "verified_cross_folder_issue_identity",
+        "role": "canonical",
+        "source_series": "Crossed Badlands",
+    }
+    imp_file = ImportedFile(
+        file_name="Absolute Batman 001.cbz",
+        parsed_issue_number=1.0,
+        diagnostics={"mylar3_cross_folder_reconciliation": evidence},
+    )
+    imp_series = ImportedSeries(raw_series_name="Absolute Batman")
+
+    apply_matched_file_outcome(
+        imp_file,
+        imp_series,
+        _candidate(None, confidence="high", method="comicvine_id"),
+        duplicate_series=False,
+        duplicate_target_state=duplicate_target_state,
+    )
+
+    assert imp_file.diagnostics["mylar3_cross_folder_reconciliation"] == evidence
+
+
 def test_apply_matched_file_outcome_preserves_exact_suffix_issue_number() -> None:
     imp_file = ImportedFile(
         file_name="The Amazing Spider-Man 54.LR.cbz",

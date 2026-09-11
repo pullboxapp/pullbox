@@ -94,6 +94,32 @@ async def client(
     reset_setup_cache()
 
 
+@pytest.mark.asyncio
+async def test_remove_root_requires_preview_confirmation_and_csrf(client, _db_factory, tmp_path):  # type: ignore[no-untyped-def]
+    async with _db_factory() as session:
+        root = LibraryRoot(name="Remove me", path=str(tmp_path), enabled=False)
+        session.add(root)
+        await session.commit()
+        root_id = root.id
+    url = f"/api/v1/config/library-roots/{root_id}"
+    headers = _csrf_header_for(client)
+    preview = await client.post(f"{url}/remove/preview", headers=headers)
+    assert preview.status_code == 200
+    assert preview.json()["can_remove"] is True
+    payload = {"confirmation": "REMOVE", "preview_token": preview.json()["preview_token"]}
+    missing_csrf = await client.request("DELETE", url, json=payload)
+    assert missing_csrf.status_code == 403
+    missing_confirmation = await client.request(
+        "DELETE", url, headers=headers, json={"preview_token": payload["preview_token"]}
+    )
+    assert missing_confirmation.status_code == 422
+    removed = await client.request("DELETE", url, headers=headers, json=payload)
+    assert removed.status_code == 204
+    assert (await client.post(f"{url}/remove/preview", headers=headers)).status_code == 404
+    async with _db_factory() as session:
+        assert await session.get(LibraryRoot, root_id) is None
+
+
 class TestGetConfig:
     """GET /api/v1/config returns DB-backed settings with defaults."""
 
@@ -176,7 +202,7 @@ class TestLibraryRootManagement:
         assert [item["name"] for item in listed] == ["Primary Library"]
 
     @pytest.mark.asyncio
-    async def test_patch_rejects_path_and_root_delete_is_not_exposed(
+    async def test_patch_rejects_path_and_root_delete_requires_confirmation(
         self,
         client: AsyncClient,
         tmp_path: Path,
@@ -206,7 +232,7 @@ class TestLibraryRootManagement:
             f"/api/v1/config/library-roots/{root_id}",
             headers=_csrf_header_for(client),
         )
-        assert deleted.status_code == 405
+        assert deleted.status_code == 422
 
     @pytest.mark.asyncio
     async def test_preview_and_explicitly_confirm_library_root_rebind(

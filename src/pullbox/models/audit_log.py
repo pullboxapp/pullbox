@@ -26,6 +26,8 @@ class AuditEventType(StrEnum):
     SECURITY_CONFIG_CHANGED = "security_config_changed"
     LOCAL_BYPASS_TOGGLED = "local_bypass_toggled"
     IMPORT_SAFETY_BULK_OVERRIDE = "import_safety_bulk_override"
+    IMPORT_SAFETY_SOURCE_TRASH = "import_safety_source_trash"
+    IMPORT_MISPLACED_SOURCE_CLEANUP = "import_misplaced_source_cleanup"
     IMPORT_RECOVERY_BULK_ACTION = "import_recovery_bulk_action"
 
 

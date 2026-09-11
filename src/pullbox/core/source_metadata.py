@@ -178,6 +178,11 @@ def volume_subtitle_hint_from_filename(
         base_series,
         flags=re.IGNORECASE,
     )
+    base_series = re.sub(
+        r"\s*(?:\((?:19|20)\d{2}\)|\[(?:19|20)\d{2}\]|(?:19|20)\d{2})\s*$",
+        "",
+        base_series,
+    )
     base_series = re.sub(r"\s+", " ", base_series).strip(" -:")
     base_series = _VOLUME_HINT_PUBLISHER_PREFIX_RE.sub("", base_series).strip(" -:")
     subtitle = _clean_volume_subtitle_hint(normalized_stem[match.end() :])
@@ -442,12 +447,13 @@ class SourceMetadataExtractor:
             issue_number=volume_issue_number,
         )
         volume_issue_applies = issue_type_family(issue_type) == TypeFamily.COLLECTION
-        if volume_issue_applies and volume_hint is not None and issue_number is None:
+        if volume_issue_applies and volume_hint is not None:
             series_name = str(volume_hint["base_series"])
-            issue_number = volume_hint["issue_number"]
-            issue_number_text = format_issue_number(issue_number)
-            signals["issue_number"] = MetadataSignal.RELEASE_TITLE
             diagnostics["volume_subtitle_hint"] = volume_hint
+            if issue_number is None:
+                issue_number = volume_hint["issue_number"]
+                issue_number_text = format_issue_number(issue_number)
+                signals["issue_number"] = MetadataSignal.RELEASE_TITLE
         elif volume_issue_applies and issue_number is None and volume_issue_number is not None:
             issue_number = volume_issue_number
             issue_number_text = format_issue_number(issue_number)

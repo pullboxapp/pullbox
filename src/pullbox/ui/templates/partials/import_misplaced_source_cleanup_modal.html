@@ -1,0 +1,75 @@
+{% set is_restore = preview.action.value == 'restore_recorded_path' %}
+<div
+  class="modal-shell"
+  x-data="{ open: true }"
+  x-show="open"
+  data-testid="import-misplaced-source-cleanup-modal"
+  @keydown.escape.window="open = false; closeImportCvSearchModal()"
+>
+  <div class="modal-backdrop" @click="open = false; closeImportCvSearchModal()"></div>
+  <div class="modal-panel max-w-xl" @click.outside="open = false; closeImportCvSearchModal()">
+    <div class="modal-header">
+      <div class="space-y-1">
+        <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-warning">Optional source cleanup</p>
+        <h3 class="text-base font-semibold text-pb-text">{{ 'Move misplaced file' if is_restore else 'Move duplicate to Trash' }}</h3>
+        <p class="text-xs leading-5 text-pb-text-dim">{{ preview.file_name }}</p>
+      </div>
+      <button type="button" class="icon-btn icon-btn-sm" @click="open = false; closeImportCvSearchModal()" aria-label="Close source cleanup dialog">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="space-y-4 px-5 py-5">
+        <div class="inline-alert inline-alert-warning">
+          <div>
+            <p class="font-semibold text-pb-text">This changes the source library.</p>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              {% if is_restore %}
+              Pullbox will move this verified issue to the exact missing path recorded by Mylar and update its own file reference. This confirmation authorizes this move even when the source root is otherwise reference-only. Pullbox does not edit the Mylar database.
+              {% else %}
+              Pullbox will move this byte-identical extra copy to the configured Trash folder. The canonical imported issue will not move. Pullbox does not edit the Mylar database.
+              {% endif %}
+            </p>
+          </div>
+        </div>
+        <dl class="space-y-3 text-xs">
+          <div>
+            <dt class="font-medium text-pb-text-muted">Current source</dt>
+            <dd class="mt-1 break-all font-mono text-pb-text">{{ preview.source_path }}</dd>
+          </div>
+          {% if preview.destination_path %}
+          <div>
+            <dt class="font-medium text-pb-text-muted">{{ 'Mylar-recorded destination' if is_restore else 'Trash location' }}</dt>
+            <dd class="mt-1 break-all font-mono text-pb-text">{{ preview.destination_path }}</dd>
+          </div>
+          {% endif %}
+        </dl>
+        {% if error %}<p role="alert" class="text-xs font-semibold text-pb-error">{{ error }}</p>{% endif %}
+        {% if preview.can_apply %}
+        <form
+          method="post"
+          action="/import/{{ preview.job_id }}/files/{{ preview.file_id }}/misplaced-source-cleanup/{{ preview.action.value }}"
+          hx-post="/import/{{ preview.job_id }}/files/{{ preview.file_id }}/misplaced-source-cleanup/{{ preview.action.value }}"
+          hx-target="#import-orphaned-results"
+          hx-swap="outerHTML"
+          hx-sync="#import-orphaned-results:replace"
+          hx-on::after-request="if(event.detail.successful){ open = false; closeImportCvSearchModal(); }"
+        >
+          <input type="hidden" name="preview_token" value="{{ preview.preview_token }}">
+          <div class="flex flex-wrap justify-end gap-2">
+            <button type="button" class="btn-ghost btn-sm" @click="open = false; closeImportCvSearchModal()">Cancel</button>
+            <button type="submit" class="{{ 'btn-warning' if is_restore else 'btn-danger' }} btn-sm">{{ 'Move file' if is_restore else 'Move duplicate to Trash' }}</button>
+          </div>
+        </form>
+        {% else %}
+        <div class="inline-alert inline-alert-info">{{ preview.unavailable_reason }}</div>
+        <div class="flex justify-end">
+          <button type="button" class="btn-ghost btn-sm" @click="open = false; closeImportCvSearchModal()">Close</button>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>

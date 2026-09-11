@@ -174,6 +174,100 @@ async def test_stale_path_reconciliation_does_not_merge_conflicting_records(tmp_
     assert "mylar3_path_reconciliation" not in actual.metadata_diagnostics
 
 
+async def test_mixed_series_folder_quarantines_unrecorded_foreign_files(tmp_path):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "Fritzi Ritz (1953)"
+    fritzi = folder / "Fritzi Ritz 001 (1953).cbz"
+    batman = folder / "Batman 001 (2011).cbz"
+    create_minimal_cbz(fritzi)
+    create_minimal_cbz(batman)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-31895",
+                "ComicName": "Fritzi Ritz",
+                "ComicYear": "1953",
+                "ComicLocation": str(folder),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "900001",
+                "ComicID": "31895",
+                "ComicName": "Fritzi Ritz",
+                "Issue_Number": "1",
+                "Location": fritzi.name,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(db).read_series()
+
+    assert len(results) == 1
+    series = results[0]
+    files = {file.file_name: file for file in series.files}
+    assert files[fritzi.name].comicvine_series_id == 31895
+    assert files[fritzi.name].comicvine_issue_id == 900001
+    assert files[batman.name].parsed_series == "Batman"
+    assert files[batman.name].comicvine_series_id is None
+    assert files[batman.name].metadata_signals["series_name"] == "release_title"
+    assert files[batman.name].metadata_diagnostics["mylar3_folder_scope_conflict"] == {
+        "expected_series": "Fritzi Ritz",
+        "parsed_series": "Batman",
+        "recorded_issue": False,
+    }
+    assert series.diagnostics["mylar3_folder_scope"] == {
+        "review_required": True,
+        "unrecorded_file_count": 1,
+        "conflicting_file_count": 1,
+        "examples": [batman.name],
+    }
+
+
+async def test_mixed_series_folder_quarantines_unparseable_named_foreign_file(tmp_path):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "X-Men Unlimited Infinity Comic (2021)"
+    intended = folder / "X-Men Unlimited Infinity Comic 087 (2023).cbz"
+    foreign = folder / "XMen - S1_ABRIL_BR0078 - 1995.cbz"
+    create_minimal_cbz(intended)
+    create_minimal_cbz(foreign)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-139055",
+                "ComicName": "X-Men Unlimited Infinity Comic",
+                "ComicYear": "2021",
+                "ComicLocation": str(folder),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "1000087",
+                "ComicID": "139055",
+                "ComicName": "X-Men Unlimited Infinity Comic",
+                "Issue_Number": "87",
+                "Location": intended.name,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(db).read_series()
+
+    files = {file.file_name: file for file in results[0].files}
+    assert files[intended.name].comicvine_series_id == 139055
+    assert files[foreign.name].parsed_series == "XMen - S1_ABRIL_BR0078"
+    assert files[foreign.name].comicvine_series_id is None
+    assert files[foreign.name].metadata_diagnostics["mylar3_folder_scope_conflict"] == {
+        "expected_series": "X-Men Unlimited Infinity Comic",
+        "parsed_series": "XMen - S1_ABRIL_BR0078",
+        "recorded_issue": False,
+    }
+
+
 @pytest.mark.asyncio
 async def test_selected_layout_applies_to_mapped_mylar_paths_without_overriding_identity(
     tmp_path: Path,

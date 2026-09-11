@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from pullbox.models.import_job import (
     ImportedFile,
@@ -153,6 +153,31 @@ async def load_import_review_summary(
         for status, count in story_arc_counts.items()
         if status in story_arc_reviewable_statuses
     )
+    attention_file_statuses = (
+        ImportedFileStatus.NO_MATCH,
+        ImportedFileStatus.CONFLICT,
+        ImportedFileStatus.SAFETY_BLOCKED,
+        ImportedFileStatus.FAILED,
+    )
+    needs_attention_series_total = int(
+        await session.scalar(
+            select(func.count(func.distinct(ImportedSeries.id)))
+            .outerjoin(ImportedFile, ImportedFile.import_series_id == ImportedSeries.id)
+            .where(
+                ImportedSeries.import_job_id == job.id,
+                or_(
+                    ImportedSeries.status.in_(
+                        [ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.FAILED]
+                    ),
+                    ImportedFile.status.in_(attention_file_statuses),
+                ),
+            )
+        )
+        or 0
+    )
+    needs_attention_files_total = sum(
+        file_counts.get(status.value, 0) for status in attention_file_statuses
+    )
 
     row_summary = {
         "series_total": sum(series_counts.values()),
@@ -184,10 +209,12 @@ async def load_import_review_summary(
         "duplicate_series_importable": duplicate_importable_series_count,
         "duplicate_series_selected": duplicate_selected_series_count,
         "selected_series_total": matched_selected_series_count + duplicate_selected_series_count,
-        "selected_items_total": _object_to_int(selection_state["selected_item_count"])
-        + story_arcs_selected,
-        "importable_items_total": _object_to_int(selection_state["importable_item_count"])
-        + story_arcs_reviewable,
+        # Story Arcs are optional follow-up work, not canonical import items.
+        "selected_items_total": _object_to_int(selection_state["selected_item_count"]),
+        "importable_items_total": _object_to_int(selection_state["importable_item_count"]),
+        "ready_to_import_total": _object_to_int(selection_state["importable_item_count"]),
+        "needs_attention_total": needs_attention_series_total,
+        "needs_attention_files_total": needs_attention_files_total,
         "resolved_file_conflict_groups": resolved_file_conflict_groups,
         "story_arcs_total": sum(story_arc_counts.values()),
         "story_arcs_detected": story_arc_counts.get(ImportedStoryArcStatus.DETECTED.value, 0),
@@ -198,6 +225,8 @@ async def load_import_review_summary(
         "story_arcs_ready": story_arc_counts.get(ImportedStoryArcStatus.READY.value, 0),
         "story_arcs_selected": story_arcs_selected,
         "story_arcs_reviewable": story_arcs_reviewable,
+        "deferred_story_arcs_total": story_arcs_reviewable,
+        "deferred_follow_up_total": story_arcs_reviewable,
         "story_arcs_skipped": story_arc_counts.get(ImportedStoryArcStatus.SKIPPED.value, 0),
         "story_arc_entries_total": sum(story_arc_entry_counts.values()),
         "story_arc_entries_resolved": story_arc_entry_counts.get(

@@ -372,7 +372,7 @@ class TestPageLoads:
         self._assert_no_js_errors()
 
     def test_import_orphaned_page_loads(self, authed_page, seeded_server: str) -> None:  # type: ignore[no-untyped-def]
-        authed_page.goto(f"{seeded_server}/import?tab=unmatched")
+        authed_page.goto(f"{seeded_server}/import?tab=follow-up")
         assert "/login" not in authed_page.url
         self._assert_no_js_errors()
 
