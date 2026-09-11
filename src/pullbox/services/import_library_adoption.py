@@ -34,6 +34,7 @@ from pullbox.services.import_completed_cleanup import (
 )
 from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_import_job
 from pullbox.services.import_workflow_state import (
+    ACTIVE_IMPORT_JOB_STATUSES,
     emit_progress,
     phase_progress,
     raise_if_job_cancelled,
@@ -718,6 +719,18 @@ async def create_clean_library_import(
             job_id=int(active_job.id),
             eligible_file_count=snapshot.file_count,
             eligible_series_count=snapshot.series_count,
+        )
+
+    active_job_id = await session.scalar(
+        select(ImportJob.id)
+        .where(ImportJob.status.in_(ACTIVE_IMPORT_JOB_STATUSES))
+        .order_by(ImportJob.created_at.desc())
+        .limit(1)
+    )
+    if active_job_id is not None:
+        raise ValidationError(
+            "Only one import can be active at a time. "
+            "Finish, discard, or roll back the current import first."
         )
 
     policy = await load_effective_library_ingest_policy(session, target_root)

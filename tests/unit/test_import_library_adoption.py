@@ -220,6 +220,42 @@ async def test_clean_library_import_requires_a_separate_managed_root(
 
 
 @pytest.mark.asyncio
+async def test_clean_library_import_rejects_another_active_import(
+    db_session: AsyncSession,
+) -> None:
+    (
+        source_job,
+        _source_file,
+        _library_file,
+        _source_root,
+        target_root,
+    ) = await _seed_referenced_import(db_session)
+    preview = await preview_clean_library_import(
+        db_session,
+        source_job.id,
+        target_root_id=target_root.id,
+        actor_id=73,
+    )
+    db_session.add(
+        ImportJob(
+            source_path="/imports/already-running",
+            source_type=ImportSourceType.FILESYSTEM,
+            status=ImportJobStatus.SCANNING,
+        )
+    )
+    await db_session.commit()
+
+    with pytest.raises(ValidationError, match="Only one import can be active at a time"):
+        await create_clean_library_import(
+            db_session,
+            source_job.id,
+            target_root_id=target_root.id,
+            actor_id=73,
+            preview_token=preview.preview_token,
+        )
+
+
+@pytest.mark.asyncio
 async def test_clean_library_import_requires_exact_mixed_folder_repairs_first(
     db_session: AsyncSession,
 ) -> None:
