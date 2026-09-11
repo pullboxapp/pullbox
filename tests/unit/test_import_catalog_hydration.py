@@ -383,10 +383,14 @@ async def test_scheduled_catalog_hydration_resumes_after_provider_cooldown(
                 if series.issue_catalog_state is IssueCatalogState.COMPLETE:
                     break
                 await asyncio.sleep(0.01)
+            while hydration_module.catalog_hydration_tasks:
+                active_tasks = list(hydration_module.catalog_hydration_tasks)
+                await asyncio.gather(*active_tasks)
+                await asyncio.sleep(0)
     finally:
         pending_tasks = [
-            *hydration_module.catalog_hydration_tasks,
-            *hydration_module.catalog_hydration_retry_tasks,
+            *(task for task in hydration_module.catalog_hydration_tasks if not task.done()),
+            *(task for task in hydration_module.catalog_hydration_retry_tasks if not task.done()),
         ]
         for task in pending_tasks:
             task.cancel()
