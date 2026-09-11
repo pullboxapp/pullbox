@@ -895,27 +895,44 @@ async def register_library_file_with_metadata(
         extension = final_path.suffix.lstrip(".").lower()
         file_format = _FORMAT_MAP.get(extension, FileFormat.CBZ)
 
-        lf = LibraryFile(
-            file_path=str(final_path),
-            file_name=final_path.name,
-            file_size=stat.st_size,
-            file_format=file_format,
-            file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
-            match_confidence=confidence,
-            parsed_series=series.title if series else None,
-            parsed_issue_number=effective_issue.issue_number,
-            parsed_year=series.year_start if series else None,
-            issue_id=issue.id,
-            library_root_id=root.id,
-            naming_snapshot=naming_snapshot,
-            storage_mode=effective_storage_mode,
-            source_signature=(
-                referenced_signature
-                if referenced_signature is not None
-                else managed_placement_signature or build_file_identity_signature(final_path)
-            ),
+        registered_signature = (
+            referenced_signature
+            if referenced_signature is not None
+            else managed_placement_signature or build_file_identity_signature(final_path)
         )
-        session.add(lf)
+        if replacement_stash is not None:
+            # Keep the canonical row identity so every dependent FK survives a
+            # path-changing replacement, including clean-library adoption.
+            lf = replacement_stash.library_file
+            await _update_existing_library_file_from_path(
+                lf,
+                final_path,
+                issue=effective_issue,
+                series=series,
+                root=root,
+                confidence=confidence,
+                naming_snapshot=naming_snapshot,
+                storage_mode=effective_storage_mode,
+                source_signature=registered_signature,
+            )
+        else:
+            lf = LibraryFile(
+                file_path=str(final_path),
+                file_name=final_path.name,
+                file_size=stat.st_size,
+                file_format=file_format,
+                file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                match_confidence=confidence,
+                parsed_series=series.title if series else None,
+                parsed_issue_number=effective_issue.issue_number,
+                parsed_year=series.year_start if series else None,
+                issue_id=issue.id,
+                library_root_id=root.id,
+                naming_snapshot=naming_snapshot,
+                storage_mode=effective_storage_mode,
+                source_signature=registered_signature,
+            )
+            session.add(lf)
 
         # 10. Set Issue status to OWNED
         issue.status = IssueStatus.OWNED

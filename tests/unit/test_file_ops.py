@@ -32,6 +32,7 @@ from pullbox.models.library import (
     LibraryRootPolicySource,
     MatchConfidence,
 )
+from pullbox.models.matching_suggestion import MatchingSuggestion
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 
@@ -1493,6 +1494,73 @@ class TestReplacementRegistration:
         assert stash.staged_path is None
         assert source_file.exists()
         assert source_file.read_bytes() != prepared_copy.read_bytes()
+
+    @pytest.mark.asyncio
+    async def test_source_preserving_replacement_keeps_library_file_identity_and_dependents(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        source_file: Path,
+        comics_dir_config: Path,
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+
+        target_root = (await session.scalars(select(LibraryRoot).limit(1))).one()
+        source_root = LibraryRoot(
+            name="Legacy Mylar",
+            path=str(source_file.parent),
+            allow_managed_writes=False,
+        )
+        session.add(source_root)
+        await session.flush()
+        issue.series.path = str(source_file.parent / "Batman")
+        issue.series.library_root_id = source_root.id
+        issue.series.preferred_library_root_id = source_root.id
+        referenced = LibraryFile(
+            file_path=str(source_file),
+            file_name=source_file.name,
+            file_size=source_file.stat().st_size,
+            file_format=FileFormat.CBZ,
+            file_modified_at=datetime.fromtimestamp(source_file.stat().st_mtime, tz=UTC),
+            match_confidence=MatchConfidence.HIGH,
+            issue_id=issue.id,
+            library_root_id=source_root.id,
+            storage_mode=LibraryFileStorageMode.REFERENCED,
+        )
+        session.add(referenced)
+        await session.flush()
+        issue.library_file = referenced
+        suggestion = MatchingSuggestion(
+            library_file_id=referenced.id,
+            parent_series_id=issue.series_id,
+            suggested_title="Batman Annual",
+        )
+        session.add(suggestion)
+        await session.flush()
+        referenced_id = referenced.id
+        suggestion_id = suggestion.id
+
+        registered = await register_library_file(
+            session,
+            source_file,
+            issue,
+            MatchConfidence.HIGH,
+            move_to_library=True,
+            library_root_id=target_root.id,
+            loaded_issue=issue,
+            transfer_method="copy",
+            replace_existing_library_file=True,
+            preserve_replaced_artifact=True,
+        )
+
+        assert registered.id == referenced_id
+        assert registered.storage_mode is LibraryFileStorageMode.MANAGED
+        assert registered.library_root_id == target_root.id
+        assert registered.file_path != str(source_file)
+        assert source_file.exists()
+        preserved_suggestion = await session.get(MatchingSuggestion, suggestion_id)
+        assert preserved_suggestion is not None
+        assert preserved_suggestion.library_file_id == registered.id
 
     @pytest.mark.asyncio
     async def test_replacement_same_path_updates_existing_metadata(

@@ -645,6 +645,9 @@ async def _prepare_adopted_reference_rollback(
         sa_select(LibraryFile.id).where(LibraryFile.file_path == file_path).limit(1)
     )
     occupied_id = await session.get(LibraryFile, source_library_file_id)
+    source_row_reused = (
+        managed_library_file is not None and managed_library_file.id == source_library_file_id
+    )
     if (
         managed_library_file is None
         or managed_library_file.issue_id != issue_id
@@ -652,7 +655,7 @@ async def _prepare_adopted_reference_rollback(
         or source_imported_file.status is not ImportedFileStatus.IMPORTED
         or source_imported_file.matched_issue_id != issue_id
         or source_imported_file.file_path != file_path
-        or source_imported_file.library_file_id is not None
+        or source_imported_file.library_file_id not in {None, source_library_file_id}
         or source_root is None
         or issue is None
         or issue.series_id != source_series_id
@@ -660,7 +663,7 @@ async def _prepare_adopted_reference_rollback(
         or managed_library_file.library_root_id != installed_series_library_root_id
         or not installed_series_path_matches
         or occupied_source is not None
-        or occupied_id is not None
+        or (occupied_id is not None and not source_row_reused)
     ):
         return None, (
             "The original Mylar reference no longer matches its clean-library rollback "
@@ -727,28 +730,29 @@ async def _prepare_adopted_reference_rollback(
 async def _restore_adopted_reference(
     session: AsyncSession,
     adopted: _AdoptedReferenceRollback,
+    *,
+    reusable_library_file: LibraryFile | None = None,
 ) -> None:
-    restored = LibraryFile(
-        id=adopted.source_library_file_id,
-        file_path=adopted.file_path,
-        file_name=adopted.file_name,
-        file_size=adopted.file_size,
-        file_format=adopted.file_format,
-        file_hash=adopted.file_hash,
-        file_modified_at=adopted.file_modified_at,
-        match_confidence=adopted.match_confidence,
-        parsed_series=adopted.parsed_series,
-        parsed_issue_number=adopted.parsed_issue_number,
-        parsed_year=adopted.parsed_year,
-        parsed_publisher=adopted.parsed_publisher,
-        has_comicinfo=adopted.has_comicinfo,
-        naming_snapshot=adopted.naming_snapshot,
-        storage_mode=LibraryFileStorageMode.REFERENCED,
-        source_signature=adopted.source_signature,
-        issue_id=adopted.issue_id,
-        library_root_id=adopted.library_root_id,
-    )
-    session.add(restored)
+    restored = reusable_library_file or LibraryFile(id=adopted.source_library_file_id)
+    restored.file_path = adopted.file_path
+    restored.file_name = adopted.file_name
+    restored.file_size = adopted.file_size
+    restored.file_format = adopted.file_format
+    restored.file_hash = adopted.file_hash
+    restored.file_modified_at = adopted.file_modified_at
+    restored.match_confidence = adopted.match_confidence
+    restored.parsed_series = adopted.parsed_series
+    restored.parsed_issue_number = adopted.parsed_issue_number
+    restored.parsed_year = adopted.parsed_year
+    restored.parsed_publisher = adopted.parsed_publisher
+    restored.has_comicinfo = adopted.has_comicinfo
+    restored.naming_snapshot = adopted.naming_snapshot
+    restored.storage_mode = LibraryFileStorageMode.REFERENCED
+    restored.source_signature = adopted.source_signature
+    restored.issue_id = adopted.issue_id
+    restored.library_root_id = adopted.library_root_id
+    if reusable_library_file is None:
+        session.add(restored)
     await session.flush()
     adopted.source_imported_file.library_file_id = restored.id
     issue = await session.get(Issue, adopted.issue_id)
@@ -849,7 +853,14 @@ async def rollback_action(
             action.rolled_back_at = None
             await session.flush()
             return
-        if library_file is not None:
+        reusable_adopted_file = (
+            library_file
+            if adopted_reference is not None
+            and library_file is not None
+            and library_file.id == adopted_reference.source_library_file_id
+            else None
+        )
+        if library_file is not None and reusable_adopted_file is None:
             await session.delete(library_file)
 
         if not referenced_file:
@@ -880,7 +891,11 @@ async def rollback_action(
             )
         if adopted_reference is not None:
             await session.flush()
-            await _restore_adopted_reference(session, adopted_reference)
+            await _restore_adopted_reference(
+                session,
+                adopted_reference,
+                reusable_library_file=reusable_adopted_file,
+            )
 
     elif action_type == "library_file_placement_started":
         destination_path_raw = str(payload.get("destination_path") or "")

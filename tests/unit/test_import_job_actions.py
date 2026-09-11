@@ -37,6 +37,7 @@ from pullbox.models.library import (
     LibraryRoot,
     MatchConfidence,
 )
+from pullbox.models.matching_suggestion import MatchingSuggestion
 from pullbox.models.series import Series
 from pullbox.services.import_job_actions import (
     _series_issue_rollback_lock_statement,
@@ -269,10 +270,18 @@ async def test_rollback_clean_library_adoption_restores_original_reference(
         matched_issue_id=issue.id,
         match_confidence="high",
         source_signature=build_file_identity_signature(source_path),
+        library_file_id=managed_file.id,
     )
     db_session.add(source_imported_file)
     await db_session.flush()
-    original_library_file_id = managed_file.id + 100
+    original_library_file_id = managed_file.id
+    suggestion = MatchingSuggestion(
+        library_file_id=managed_file.id,
+        parent_series_id=series.id,
+        suggested_title="Batman Annual",
+    )
+    db_session.add(suggestion)
+    await db_session.flush()
     action = ImportJobAction(
         import_job_id=adoption_job.id,
         sequence_no=1,
@@ -325,10 +334,14 @@ async def test_rollback_clean_library_adoption_restores_original_reference(
     restored = await db_session.get(LibraryFile, original_library_file_id)
     await db_session.refresh(source_imported_file)
     assert restored is not None
+    assert restored is managed_file
     assert restored.file_path == str(source_path)
     assert restored.storage_mode is LibraryFileStorageMode.REFERENCED
     assert restored.issue_id == issue.id
     assert source_imported_file.library_file_id == restored.id
+    preserved_suggestion = await db_session.get(MatchingSuggestion, suggestion.id)
+    assert preserved_suggestion is not None
+    assert preserved_suggestion.library_file_id == restored.id
     assert series.path == str(source_path.parent)
     assert series.library_root_id == source_root.id
     assert series.preferred_library_root_id == source_root.id
