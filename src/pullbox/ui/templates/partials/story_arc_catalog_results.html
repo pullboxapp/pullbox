@@ -1,3 +1,4 @@
+{% from "components/comicvine_result_cover.html" import comicvine_result_cover %}
 <div data-testid="story-arc-catalog-results" class="space-y-3">
   {% if error_message %}
     <p role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 p-3 text-sm text-pb-text">{{ error_message }}</p>
@@ -16,13 +17,7 @@
     <ul class="add-series-results-list" aria-label="Comic Vine Story Arcs">
       {% for result in results %}
         <li class="add-series-result-card add-series-result-card-static">
-          <div class="add-series-result-cover" aria-hidden="true">
-            <div class="add-series-result-cover-empty">
-              <svg class="h-8 w-8" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 3.75h9m-9 16.5h9M6 6.75h12A2.25 2.25 0 0120.25 9v6A2.25 2.25 0 0118 17.25H6A2.25 2.25 0 013.75 15V9A2.25 2.25 0 016 6.75z"></path>
-              </svg>
-            </div>
-          </div>
+          {{ comicvine_result_cover(result.metadata.cover_url, result.metadata.title) }}
           <div class="add-series-result-main">
             <h3 class="add-series-result-title">{{ result.metadata.title }}</h3>
             <div class="add-series-result-meta">

@@ -14,7 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
-from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.api.deps import (
+    AuthenticatedUser,
+    DbSession,
+    get_request_session_factory,
+)
 from pullbox.config import get_settings
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
@@ -461,6 +465,7 @@ async def story_arc_add(
         q=q,
         page=page,
         base_url="/story-arcs/add",
+        session_factory=get_request_session_factory(request),
     )
     search_context["error_message"] = _ERROR_MESSAGES.get(error or "", "") or str(
         search_context["error_message"]

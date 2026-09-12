@@ -33,7 +33,12 @@ class CatalogProvider:
         if self.fail:
             raise ComicVineError(500, "secret-bearing provider failure must not render")
         return [
-            StoryArcSearchResult(provider_id="42", title="Numbering Event", declared_issue_count=2),
+            StoryArcSearchResult(
+                provider_id="42",
+                title="Numbering Event",
+                cover_url="https://example.test/story-arcs/42.jpg",
+                declared_issue_count=2,
+            ),
             StoryArcSearchResult(provider_id="43", title="Already Here"),
         ], 2
 

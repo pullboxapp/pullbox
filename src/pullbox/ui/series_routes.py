@@ -21,10 +21,10 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
-from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.cover_url_service import build_series_cover_url
 from pullbox.services.library_root_management import list_library_roots
 from pullbox.services.reading_query_service import load_series_reading_aggregates
+from pullbox.ui.comicvine_provider import open_comicvine_ui_provider
 from pullbox.ui.comicvine_series_search import (
     ADD_SERIES_PER_PAGE,
     COMICVINE_SERIES_SEARCH_LIMIT,
@@ -647,13 +647,6 @@ async def load_add_series_search_context(
     base_context["add_series_full_search_url"] = full_search_url
 
     try:
-        from pullbox.core.comicvine_key import get_comicvine_api_key
-        from pullbox.providers.metadata.comicvine import ComicVineProvider
-
-        api_key = await get_comicvine_api_key(session)
-        provider: Any = ComicVineProvider(api_key=api_key)
-        if session_factory is not None:
-            provider = PersistentComicVineCacheProvider(provider, session_factory)
         naming_config = await _system_config_values(
             session,
             (
@@ -665,17 +658,21 @@ async def load_add_series_search_context(
         folder_template = naming_config.get("series_folder_template", "{Series} ({Year})")
         replace_illegal = naming_config.get("replace_illegal_characters", "true") == "true"
         colon_replacement = naming_config.get("colon_replacement", "dash")
-        if preview_mode:
-            cv_results, _total_results = await provider.search_series_page(
-                parsed_query.title_query,
-                parsed_query.year_hint,
-                limit=per_page,
-            )
-        else:
-            cv_results, _total_results = await provider.search_series_globally(
-                parsed_query.title_query,
-                max_results=COMICVINE_SERIES_SEARCH_LIMIT,
-            )
+        async with open_comicvine_ui_provider(
+            session,
+            session_factory=session_factory,
+        ) as provider:
+            if preview_mode:
+                cv_results, _total_results = await provider.search_series_page(
+                    parsed_query.title_query,
+                    parsed_query.year_hint,
+                    limit=per_page,
+                )
+            else:
+                cv_results, _total_results = await provider.search_series_globally(
+                    parsed_query.title_query,
+                    max_results=COMICVINE_SERIES_SEARCH_LIMIT,
+                )
         searchable_total = len(cv_results)
         total_pages = max(1, (searchable_total + per_page - 1) // per_page)
         resolved_page = min(requested_page, total_pages)

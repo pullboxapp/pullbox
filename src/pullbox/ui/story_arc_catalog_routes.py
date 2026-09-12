@@ -14,7 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
-from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.api.deps import (
+    AuthenticatedUser,
+    DbSession,
+    get_request_session_factory,
+)
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.library_policy import load_search_on_add_default
 from pullbox.models.story_arc import StoryArc, StoryArcLifecycle
@@ -23,6 +27,10 @@ from pullbox.services.cover_url_service import build_story_arc_cover_url
 from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
 from pullbox.services.story_arc_service import StoryArcServiceError, StoryArcValidationError
+from pullbox.ui.comicvine_provider import (
+    ComicVineNotConfiguredError,
+    open_comicvine_ui_provider,
+)
 from pullbox.ui.story_arc_catalog_forms import StoryArcCatalogAddForm  # noqa: TC001
 from pullbox.ui.story_arc_presenters import load_story_arc_placement_roots
 
@@ -30,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from fastapi.templating import Jinja2Templates
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from pullbox.services.story_arc_catalog import (
         StoryArcCatalogPreview,
@@ -99,21 +108,21 @@ def _redirect(request: Request, url: str) -> Response:
 
 
 @asynccontextmanager
-async def _catalog_service(session: DbSession) -> AsyncIterator[StoryArcCatalogService]:
-    from pullbox.core.comicvine_key import get_comicvine_api_key
-    from pullbox.providers.metadata.comicvine import ComicVineProvider
+async def _catalog_service(
+    session: DbSession,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> AsyncIterator[StoryArcCatalogService]:
     from pullbox.services.story_arc_catalog import StoryArcCatalogService
 
-    api_key = await get_comicvine_api_key(session)
-    # Authentication/config reads must not keep a transaction open during provider I/O.
-    await session.rollback()
-    if not api_key:
-        raise StoryArcValidationError("Comic Vine is not configured")
-    provider = ComicVineProvider(api_key=api_key)
     try:
-        yield StoryArcCatalogService(provider)
-    finally:
-        await provider.close()
+        async with open_comicvine_ui_provider(
+            session,
+            session_factory=session_factory,
+        ) as provider:
+            yield StoryArcCatalogService(provider)
+    except ComicVineNotConfiguredError as exc:
+        raise StoryArcValidationError("Comic Vine is not configured") from exc
 
 
 def _failure_code(exc: Exception) -> str:
@@ -138,6 +147,7 @@ async def load_story_arc_catalog_search_context(
     q: str,
     page: int,
     base_url: str,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> dict[str, object]:
     """Load one bounded Comic Vine arc result page for full or HTMX shells."""
     query = q.strip()
@@ -146,7 +156,7 @@ async def load_story_arc_catalog_search_context(
     error = ""
     if len(query) >= 2:
         try:
-            async with _catalog_service(session) as service:
+            async with _catalog_service(session, session_factory=session_factory) as service:
                 found, total = await service.search(query, limit=20, offset=(page - 1) * 20)
                 existing = await service.find_existing(
                     session, [item.provider_id for item in found]
@@ -210,6 +220,7 @@ async def story_arc_catalog_search(
         q=q,
         page=page,
         base_url="/story-arcs/catalog",
+        session_factory=get_request_session_factory(request),
     )
     return _render(
         request,
@@ -236,7 +247,10 @@ async def story_arc_catalog_preview(
     preview = None
     message = _ERRORS.get(error, "")
     try:
-        async with _catalog_service(session) as service:
+        async with _catalog_service(
+            session,
+            session_factory=get_request_session_factory(request),
+        ) as service:
             preview = await service.preview(provider_id)
     except (ComicVineError, StoryArcServiceError) as exc:
         await session.rollback()
@@ -282,7 +296,10 @@ async def story_arc_catalog_add(
             code = "file-defaults"
             raise StoryArcValidationError("File defaults changed")
         policy = defaults.proposal()
-        async with _catalog_service(session) as service:
+        async with _catalog_service(
+            session,
+            session_factory=get_request_session_factory(request),
+        ) as service:
             preview = await service.preview(provider_id)
             if preview.fingerprint != form.fingerprint:
                 code = "stale"
@@ -386,7 +403,10 @@ async def story_arc_catalog_refresh_preview(
     changes = None
     message = _ERRORS.get(error, "")
     try:
-        async with _catalog_service(session) as service:
+        async with _catalog_service(
+            session,
+            session_factory=get_request_session_factory(request),
+        ) as service:
             preview = await service.preview(provider_id)
             if preview.membership_complete:
                 changes = await service.preview_refresh(session, story_arc_id, preview)
@@ -430,7 +450,10 @@ async def story_arc_catalog_refresh(
     try:
         if not confirm_refresh:
             raise StoryArcValidationError("Confirm the refresh preview")
-        async with _catalog_service(session) as service:
+        async with _catalog_service(
+            session,
+            session_factory=get_request_session_factory(request),
+        ) as service:
             preview = await service.preview(provider_id)
             if preview.fingerprint != fingerprint:
                 code = "stale"

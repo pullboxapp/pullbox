@@ -6,11 +6,10 @@ from pullbox.services.story_arc_service import StoryArcValidationError
 
 
 class StoryArcCatalogAddForm(BaseModel):
-    """Require a reviewed order, canonical root and global file-defaults acknowledgement."""
+    """Validate the submitted order, canonical root and current file defaults."""
 
     fingerprint: str = Field(max_length=128)
     file_defaults_fingerprint: str = Field(default="", max_length=128)
-    order_reviewed: bool = False
     issue_provider_ids: list[str] = Field(default_factory=list, max_length=2000)
     reading_orders: list[int] = Field(default_factory=list, max_length=2000)
     skipped_issue_provider_ids: list[str] = Field(default_factory=list, max_length=2000)
@@ -21,8 +20,6 @@ class StoryArcCatalogAddForm(BaseModel):
 
     def reviewed_order(self) -> list[str]:
         """Every member must have one distinct positive position before adoption."""
-        if not self.order_reviewed:
-            raise StoryArcValidationError("Review and confirm the reading order before adding.")
         if (
             not self.issue_provider_ids
             or len(self.issue_provider_ids) != len(self.reading_orders)

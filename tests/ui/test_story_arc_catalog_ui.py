@@ -148,21 +148,49 @@ async def test_catalog_search_marks_already_added_and_does_not_create(
         assert len(list(await session.scalars(select(StoryArc)))) == 1
 
 
-async def test_catalog_preview_requires_order_review_and_separate_canonical_root(
+async def test_catalog_search_renders_provider_cover_and_missing_cover_fallback(
+    authenticated_client: AsyncClient,
+    catalog_provider: CatalogProvider,
+):
+    response = await authenticated_client.get(
+        "/story-arcs/add?q=event",
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert 'src="https://example.test/story-arcs/42.jpg"' in response.text
+    assert 'alt="Numbering Event"' in response.text
+    assert 'loading="lazy"' in response.text
+    assert response.text.count('class="add-series-result-cover-empty"') == 1
+
+
+async def test_catalog_preview_uses_review_workspace_and_separate_canonical_root(
     authenticated_client: AsyncClient, catalog_provider: CatalogProvider
 ):
     response = await authenticated_client.get("/story-arcs/catalog/42")
     assert response.status_code == 200
-    assert "Comic Vine response order — reading order unverified" in response.text
+    assert "Issues are listed in Comic Vine's returned order." in response.text
+    assert "Every issue needs a different positive position." not in response.text
+    assert "reading order unverified" not in response.text
     assert "1000000" in response.text and "1AU" in response.text
-    assert 'name="order_reviewed"' in response.text
-    assert 'name="reading_orders"' in response.text
+    assert 'name="order_reviewed"' not in response.text
+    assert "I reviewed the reading order" not in response.text
+    assert 'type="number"' not in response.text
+    assert "data-order-controls" in response.text
     assert "Library root for new series" in response.text
     assert 'name="library_root_id"' in response.text
     assert 'name="target_library_root_id"' not in response.text
     assert 'name="file_defaults_fingerprint"' in response.text
     assert "No separate folder" in response.text
     assert 'href="/settings?tab=media#story-arc-files"' in response.text
+    assert 'data-testid="story-arc-preview-table"' in response.text
+    assert 'data-testid="story-arc-preview-footer-dock"' in response.text
+    assert 'data-testid="story-arc-preview-page-size"' in response.text
+    assert 'aria-label="Breadcrumb"' in response.text
+    assert "<select " not in response.text
+    assert 'role="switch"' in response.text
+    assert 'class="btn-secondary"' not in response.text
+    assert '<main class="mx-auto' not in response.text
 
 
 async def test_catalog_preview_lists_only_managed_roots_with_default_first(
@@ -235,7 +263,7 @@ async def test_partial_catalog_blocks_add_and_retains_retry(
     response = await authenticated_client.get("/story-arcs/catalog/42")
     assert response.status_code == 200
     assert "Incomplete member list" in response.text
-    assert 'data-testid="story-arc-catalog-add-form"' not in response.text
+    assert 'data-preview-ready="false"' in response.text
     assert "Retry preview" in response.text
 
 
@@ -252,8 +280,8 @@ async def test_provider_failure_is_safe_and_retryable(
     assert 'role="alert"' in response.text
 
 
-@pytest.mark.parametrize("invalid", ["unreviewed", "stale", "duplicate-order", "missing-member"])
-async def test_add_rejects_unreviewed_stale_or_invalid_member_set(
+@pytest.mark.parametrize("invalid", ["empty-order", "stale", "duplicate-order", "missing-member"])
+async def test_add_rejects_empty_stale_or_invalid_member_set(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],
     catalog_provider: CatalogProvider,
@@ -267,13 +295,12 @@ async def test_add_rejects_unreviewed_stale_or_invalid_member_set(
     assert token is not None
     data = {
         "fingerprint": token.group(1),
-        "order_reviewed": "true",
         "library_root_id": str(root_id),
         "issue_provider_ids": ["101", "102"],
         "reading_orders": ["2", "1"],
     }
-    if invalid == "unreviewed":
-        data.pop("order_reviewed")
+    if invalid == "empty-order":
+        data.pop("reading_orders")
     elif invalid == "stale":
         data["fingerprint"] = "old"
     elif invalid == "duplicate-order":
@@ -320,7 +347,6 @@ async def test_add_persists_reviewed_order_and_independent_copy_settings(
         "/story-arcs/catalog/42",
         data={
             "fingerprint": token.group(1),
-            "order_reviewed": "true",
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["2", "1"],
@@ -366,7 +392,6 @@ async def test_changed_file_defaults_require_repreview_before_adding(
         data={
             "fingerprint": token.group(1),
             "file_defaults_fingerprint": defaults.group(1),
-            "order_reviewed": "true",
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["1", "2"],
@@ -398,7 +423,6 @@ async def test_failed_provider_cleanup_cannot_report_failure_after_committing_ad
         "/story-arcs/catalog/42",
         data={
             "fingerprint": token.group(1),
-            "order_reviewed": "true",
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["1", "2"],
@@ -448,7 +472,6 @@ async def test_add_auto_search_requires_monitoring_and_global_default_and_runs_a
         "/story-arcs/catalog/42",
         data={
             "fingerprint": token.group(1),
-            "order_reviewed": "true",
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["1", "2"],
@@ -653,7 +676,7 @@ async def test_empty_complete_provider_list_is_not_offered_as_addable(
     response = await authenticated_client.get("/story-arcs/catalog/42")
     assert response.status_code == 200
     assert "No members available" in response.text
-    assert 'data-testid="story-arc-catalog-add-form"' not in response.text
+    assert 'data-preview-ready="false"' in response.text
 
 
 async def test_add_runs_initial_copy_after_commit_even_when_future_sync_is_off(
@@ -700,7 +723,6 @@ async def test_add_runs_initial_copy_after_commit_even_when_future_sync_is_off(
         "/story-arcs/catalog/42",
         data={
             "fingerprint": token.group(1),
-            "order_reviewed": "true",
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["1", "2"],

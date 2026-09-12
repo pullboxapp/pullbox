@@ -1,5 +1,6 @@
 {#- Settings: Indexers tab -#}
 {% from "components/settings_shell.html" import field_note, section_card, section_header, settings_footer, settings_row %}
+{% from "components/order_chevrons.html" import order_chevrons %}
 {%- set indexer_accent_map = {
   'newznab': 'bg-pb-info-dim text-pb-info',
   'torznab': 'bg-pb-success-dim text-pb-success',
@@ -344,20 +345,11 @@
           <div class="flex items-center gap-3 rounded-xl border border-pb-border bg-pb-card px-4 py-3 hover:border-pb-border-hover hover:bg-pb-card-hover/20">
             <span class="w-5 text-center text-sm font-bold text-pb-text-dim" x-text="index + 1"></span>
 
-            <div class="flex flex-col gap-0.5">
-              <button type="button" @click="moveUp(index)" :disabled="index === 0"
-                      class="rounded p-0.5 text-pb-text-dim transition-colors hover:text-pb-text disabled:opacity-20">
-                <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5"/>
-                </svg>
-              </button>
-              <button type="button" @click="moveDown(index)" :disabled="index >= order.length - 1"
-                      class="rounded p-0.5 text-pb-text-dim transition-colors hover:text-pb-text disabled:opacity-20">
-                <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/>
-                </svg>
-              </button>
-            </div>
+            {{ order_chevrons(
+              up_action="moveUp(index)", down_action="moveDown(index)",
+              up_disabled="index === 0", down_disabled="index >= order.length - 1",
+              up_label="'Move ' + labels[item] + ' up'", down_label="'Move ' + labels[item] + ' down'"
+            ) }}
 
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
@@ -80,36 +81,34 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     page.goto(f"{seeded_server}/story-arcs/add", wait_until="domcontentloaded")
     query = page.get_by_label("Comic Vine arc name")
     query.fill("Numbering")
+    cover = page.get_by_role("img", name="Numbering Event")
+    expect(cover).to_be_visible()
+    expect(cover).to_have_attribute("src", "https://example.test/story-arcs/42.jpg")
     expect(page.get_by_role("link", name="Preview Numbering Event")).to_be_visible()
     query.press("Tab")
     page.get_by_role("link", name="Preview Numbering Event").focus()
     page.keyboard.press("Enter")
     page.wait_for_url("**/story-arcs/catalog/42")
     expect(
-        page.get_by_text("Comic Vine response order — reading order unverified.", exact=False)
+        page.get_by_text("Issues are listed in Comic Vine's returned order.", exact=False)
     ).to_be_visible()
     form = page.get_by_test_id("story-arc-catalog-add-form")
-    form.get_by_label("Order for #1000000", exact=True).fill("2")
-    form.get_by_label("Order for #1AU", exact=True).fill("1")
+    form.get_by_role("button", name="Move Exact Comics #1000000 down", exact=True).press("Enter")
+    expect(form.locator("[data-provider-issue-id]").first).to_have_attribute(
+        "data-provider-issue-id", "102"
+    )
     canonical_root = form.get_by_label("Library root for new series")
-    root_option = canonical_root.locator("option").nth(1)
-    root_id = root_option.get_attribute("value")
-    assert root_id is not None
-    canonical_root.select_option(root_id)
+    canonical_root.click()
+    page.get_by_role("option").nth(1).click()
     expect(form.get_by_label("Separate folder")).to_have_count(0)
     expect(form.get_by_test_id("story-arc-create-storage")).to_contain_text(
         "Copy issues into arc folders"
     )
-    form.get_by_role("button", name="Add reviewed Story Arc").click()
-    expect(page).to_have_url(re.compile(r"/story-arcs/catalog/42$"))
-    assert form.get_by_label("I reviewed the reading order").evaluate(
-        "element => !element.checkValidity()"
-    )
-    form.get_by_label("I reviewed the reading order").check()
+    expect(form.get_by_label("I reviewed the reading order")).to_have_count(0)
     assert_no_axe_violations(
         page, name="story-arc-catalog-review", include=["[data-testid='story-arc-catalog-preview']"]
     )
-    form.get_by_role("button", name="Add reviewed Story Arc").click()
+    form.get_by_role("button", name="Add Story Arc", exact=True).click()
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?notice=catalog-added$"))
     arc_url = page.url.split("?", 1)[0]
     expect(page.get_by_test_id("story-arc-edit-form")).to_have_count(0)
@@ -268,6 +267,65 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     assert errors == []
 
 
+def test_catalog_add_is_enabled_and_explains_missing_root(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+) -> None:
+    page = authed_page
+    submitted: list[str] = []
+    page.on(
+        "request",
+        lambda request: submitted.append(request.url) if request.method == "POST" else None,
+    )
+    page.goto(f"{seeded_server}/story-arcs/catalog/80")
+    form = page.get_by_test_id("story-arc-catalog-add-form")
+    add = form.locator('button[type="submit"]')
+    expect(add).to_be_enabled()
+    expect(add).to_have_text("Add Story Arc")
+    expect(form.get_by_label("I reviewed the reading order")).to_have_count(0)
+    add.click()
+    error = page.get_by_test_id("story-arc-preview-submit-error")
+    expect(error).to_have_text("Choose a library root for new series before adding this Story Arc.")
+    expect(error).to_be_focused()
+    assert submitted == []
+    expect(add).to_be_enabled()
+
+    page.get_by_label("Library root for new series").click()
+    page.get_by_role("option").nth(1).click()
+    expect(error).not_to_be_visible()
+    held: list[Route] = []
+    page.route("**/story-arcs/catalog/80", lambda route: held.append(route))
+    with page.expect_request("**/story-arcs/catalog/80"):
+        add.click()
+    expect(add).to_be_disabled()
+    expect(page.get_by_role("button", name="Retry preview")).to_be_disabled()
+    assert len(held) == 1
+    assert held[0].request.method == "POST"
+    held.pop().fulfill(status=503, body="Temporarily unavailable")
+    expect(add).to_be_enabled()
+
+
+def test_catalog_add_explains_no_available_roots(
+    authed_page: Page,
+    seeded_server: str,
+    catalog_provider: CatalogProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pullbox.ui.story_arc_catalog_routes.load_story_arc_placement_roots",
+        AsyncMock(return_value=((), False)),
+    )
+    page = authed_page
+    page.goto(f"{seeded_server}/story-arcs/catalog/81")
+    add = page.get_by_role("button", name="Add Story Arc", exact=True)
+    expect(add).to_be_enabled()
+    add.click()
+    error = page.get_by_test_id("story-arc-preview-submit-error")
+    expect(error).to_contain_text("No managed library root is available")
+    expect(error).to_contain_text("Settings > Media Management > Library roots")
+    expect(error).to_be_focused()
+    expect(add).to_be_enabled()
+
+
 def test_catalog_partial_failure_and_retry_are_visible(
     authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
 ) -> None:
@@ -277,18 +335,220 @@ def test_catalog_partial_failure_and_retry_are_visible(
     )
     page.goto(f"{seeded_server}/story-arcs/catalog/99")
     expect(page.get_by_role("alert")).to_contain_text("Incomplete member list")
-    expect(page.get_by_test_id("story-arc-catalog-add-form")).to_have_count(0)
+    add = page.get_by_role("button", name="Add Story Arc", exact=True)
+    expect(add).to_be_enabled()
+    submitted: list[str] = []
+    page.on(
+        "request",
+        lambda request: submitted.append(request.url) if request.method == "POST" else None,
+    )
+    add.click()
+    expect(page.get_by_test_id("story-arc-preview-submit-error")).to_contain_text(
+        "Retry preview to load all issues"
+    )
+    assert submitted == []
     catalog_provider.fail = True
-    page.get_by_role("link", name="Retry preview").click()
+    page.get_by_role("button", name="Retry preview").click()
+    expect(page.get_by_test_id("story-arc-preview-submit-error")).not_to_be_visible()
     expect(page.get_by_role("alert")).to_contain_text("couldn't load this arc")
     catalog_provider.fail = False
     catalog_provider.metadata = replace(
         catalog_provider.metadata, membership_complete=True, declared_issue_count=2
     )
-    page.get_by_role("link", name="Retry preview").click()
+    page.get_by_role("button", name="Retry preview").click()
     expect(page.get_by_test_id("story-arc-catalog-add-form")).to_be_visible()
     page.set_viewport_size({"width": 640, "height": 900})
     page.emulate_media(reduced_motion="reduce")
     assert_no_axe_violations(
         page, name="story-arc-catalog-narrow", include=["[data-testid='story-arc-catalog-preview']"]
     )
+
+
+def test_preview_pagination_retry_and_add_keep_all_page_choices(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+) -> None:
+    page = authed_page
+    catalog_provider.metadata = replace(
+        catalog_provider.metadata,
+        issue_provider_ids=tuple(str(number) for number in range(101, 152)),
+        declared_issue_count=51,
+        title="Paged Event",
+    )
+    errors: list[str] = []
+    requests: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("request", lambda request: requests.append(request.url))
+    page.goto(f"{seeded_server}/story-arcs/catalog/77")
+    workspace = page.get_by_test_id("story-arc-catalog-preview")
+    table = page.get_by_test_id("story-arc-preview-table")
+    expect(table.locator("tr[data-provider-issue-id]")).to_have_count(25)
+    workspace.evaluate("element => element.previewIdentity = 'preserved'")
+    expect(table.get_by_role("spinbutton")).to_have_count(0)
+    first = table.locator('[data-provider-issue-id="101"]')
+    expect(
+        first.get_by_role("button", name="Move Exact Comics #1000000 up", exact=True)
+    ).to_be_disabled()
+    first.get_by_role("button", name="Move Exact Comics #1000000 down", exact=True).press("Enter")
+    expect(first.locator("[data-reading-position]")).to_have_text("2")
+    expect(
+        first.get_by_role("button", name="Move Exact Comics #1000000 down", exact=True)
+    ).to_be_focused()
+    expect(table.locator("[data-provider-issue-id]").first).to_have_attribute(
+        "data-provider-issue-id", "102"
+    )
+    page.get_by_label("Skip #1AU in this arc", exact=True).check()
+    page.get_by_label("Library root for new series").click()
+    page.get_by_role("option").nth(1).click()
+    page.get_by_role("switch", name="Monitor this story arc").press("Space")
+    # The last visible row can move down across the page boundary. Follow it,
+    # retain keyboard focus, and allow moving straight back to the previous page.
+    boundary = table.locator('[data-provider-issue-id="125"]')
+    boundary.get_by_role("button", name="Move Exact Comics #24 down", exact=True).press("Enter")
+    expect(boundary.locator("[data-reading-position]")).to_have_text("26")
+    expect(
+        boundary.get_by_role("button", name="Move Exact Comics #24 down", exact=True)
+    ).to_be_focused()
+    expect(table.locator("[data-provider-issue-id]").first).to_have_attribute(
+        "data-provider-issue-id", "125"
+    )
+    boundary.get_by_role("button", name="Move Exact Comics #24 up", exact=True).press("Enter")
+    expect(boundary.locator("[data-reading-position]")).to_have_text("25")
+    expect(table.locator("[data-provider-issue-id]").last).to_have_attribute(
+        "data-provider-issue-id", "125"
+    )
+    boundary.get_by_role("button", name="Move Exact Comics #24 down", exact=True).click()
+    page.get_by_label("Skip #26 in this arc", exact=True).check()
+    page.get_by_test_id("series-pagination-prev").click()
+    expect(first.locator("[data-reading-position]")).to_have_text("2")
+    expect(page.get_by_label("Skip #1AU in this arc", exact=True)).to_be_checked()
+    # Paging is entirely local, without fetching the provider or replacing the shell.
+    assert sum(url.endswith("/story-arcs/catalog/77") for url in requests) == 1
+    assert workspace.evaluate("element => element.previewIdentity") == "preserved"
+
+    page.get_by_role("button", name="Retry preview").click()
+    expect(workspace.get_by_role("status")).to_contain_text(
+        "Your reading order, skips, and settings were kept"
+    )
+    expect(first.locator("[data-reading-position]")).to_have_text("2")
+    expect(page.get_by_role("switch", name="Monitor this story arc")).to_be_checked()
+    catalog_provider.fail = True
+    page.get_by_role("button", name="Retry preview").click()
+    expect(page.get_by_role("alert")).to_contain_text("couldn't load this arc")
+    expect(first.locator("[data-reading-position]")).to_have_text("2")
+    expect(page.get_by_role("button", name="Add Story Arc", exact=True)).to_be_enabled()
+    catalog_provider.fail = False
+    catalog_provider.metadata = replace(
+        catalog_provider.metadata,
+        issue_provider_ids=tuple(str(number) for number in range(101, 153) if number != 103),
+    )
+    page.get_by_role("button", name="Retry preview").click()
+    expect(workspace.get_by_role("status")).to_contain_text("1 added, 1 no longer listed")
+    expect(first.locator("[data-reading-position]")).to_have_text("2")
+    assert workspace.evaluate("element => element.previewIdentity") == "preserved"
+    page.get_by_label("Items per page").click()
+    page.get_by_role("option", name="100", exact=True).click()
+    expect(table.locator("tr[data-provider-issue-id]")).to_have_count(51)
+    expect(boundary.locator("[data-reading-position]")).to_have_text("25")
+    expect(page.get_by_label("Skip #26 in this arc", exact=True)).to_be_checked()
+    expect(table.locator('[data-provider-issue-id="152"] [data-reading-position]')).to_have_text(
+        "51"
+    )
+    expect(
+        page.get_by_role("button", name="Move Exact Comics #51 down", exact=True)
+    ).to_be_disabled()
+    expect(table.locator("[data-reading-position]")).to_have_text(
+        [str(number) for number in range(1, 52)]
+    )
+    expect(page.get_by_test_id("page-dock-pagination")).not_to_be_visible()
+    page.get_by_role("switch", name="Monitor this story arc").press("Space")
+    with page.expect_request(
+        lambda request: request.method == "POST" and "/story-arcs/catalog/77" in request.url
+    ) as submitted:
+        page.get_by_role("button", name="Add Story Arc", exact=True).click()
+    page.wait_for_url(re.compile(r"/story-arcs/\d+\?notice=catalog-added$"))
+    body = submitted.value.post_data or ""
+    assert body.count('name="issue_provider_ids"') == 51
+    assert body.count('name="skipped_issue_provider_ids"') == 2
+    submitted_ids = re.findall(r'name="issue_provider_ids"\r\n\r\n([^\r]+)', body)
+    assert submitted_ids[:2] == ["102", "101"]
+    assert submitted_ids[23:25] == ["126", "125"]
+    assert submitted_ids[-1] == "152" and "103" not in submitted_ids
+    assert re.findall(r'name="reading_orders"\r\n\r\n([^\r]+)', body) == [
+        str(number) for number in range(1, 52)
+    ]
+    assert re.findall(r'name="skipped_issue_provider_ids"\r\n\r\n([^\r]+)', body) == ["102", "127"]
+    assert 'name="order_reviewed"' not in body
+    assert errors == []
+
+
+def test_preview_reorder_single_member_and_pending_retry_are_disabled(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+) -> None:
+    page = authed_page
+    catalog_provider.metadata = replace(
+        catalog_provider.metadata, issue_provider_ids=("101",), declared_issue_count=1
+    )
+    page.goto(f"{seeded_server}/story-arcs/catalog/79")
+    controls = page.get_by_test_id("story-arc-preview-table").locator(
+        "[data-order-controls] button"
+    )
+    expect(controls).to_have_count(2)
+    expect(controls.nth(0)).to_be_disabled()
+    expect(controls.nth(1)).to_be_disabled()
+    catalog_provider.metadata = replace(
+        catalog_provider.metadata, issue_provider_ids=("101", "102"), declared_issue_count=2
+    )
+    retry = page.get_by_role("button", name="Retry preview", exact=True)
+    retry.click()
+    expect(controls).to_have_count(4)
+    expect(controls.nth(1)).to_be_enabled()
+    held: list[Route] = []
+    page.route("**/story-arcs/catalog/79", lambda route: held.append(route))
+    with page.expect_request("**/story-arcs/catalog/79"):
+        retry.click()
+    expect(retry).to_be_disabled()
+    for index in range(4):
+        expect(controls.nth(index)).to_be_disabled()
+    held.pop().continue_()
+    expect(retry).to_be_enabled()
+    expect(controls.nth(1)).to_be_enabled()
+
+
+def test_preview_workspace_layout_and_accessibility(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+) -> None:
+    page = authed_page
+    page.set_viewport_size({"width": 1440, "height": 1100})
+    page.goto(f"{seeded_server}/story-arcs/catalog/78")
+    workspace = page.get_by_test_id("story-arc-catalog-preview")
+    expect(page.get_by_test_id("story-arc-preview-footer-dock")).to_be_visible()
+    expect(page.locator("[data-provider-issue-id]")).to_have_count(2)
+    add = page.get_by_role("button", name="Add Story Arc", exact=True).bounding_box()
+    retry = page.get_by_role("button", name="Retry preview").bounding_box()
+    cancel = page.get_by_role("link", name="Cancel", exact=True).bounding_box()
+    assert add and retry and cancel
+    assert abs(add["y"] - retry["y"]) < 2 and abs(cancel["y"] - retry["y"]) < 2
+    assert add["x"] < retry["x"] < cancel["x"]
+    output = Path("test-results/story-arc-preview")
+    output.mkdir(parents=True, exist_ok=True)
+    for theme in ("dark", "light"):
+        toggle = page.get_by_test_id("header-theme-toggle")
+        target = f"Switch to {theme} mode"
+        if toggle.get_attribute("aria-label") != target:
+            toggle.click()
+        page.get_by_role("button", name=target, exact=True).click()
+        expect(page.locator("html")).to_have_attribute("data-theme", theme)
+        assert_no_axe_violations(
+            page, name=f"arc-preview-{theme}", include=["#content", "#page-footer-dock"]
+        )
+        page.screenshot(path=str(output / f"{theme}.png"), full_page=True)
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.emulate_media(reduced_motion="reduce")
+    assert page.locator("#content").evaluate(
+        "element => element.scrollWidth <= element.clientWidth"
+    )
+    expect(workspace.get_by_role("button", name="Retry preview")).to_be_visible()
+    assert_no_axe_violations(
+        page, name="arc-preview-mobile", include=["#content", "#page-footer-dock"]
+    )
+    page.screenshot(path=str(output / "mobile.png"), full_page=True)
