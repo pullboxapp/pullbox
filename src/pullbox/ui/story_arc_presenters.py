@@ -1295,6 +1295,13 @@ async def _load_sync_work_summary(
     )
 
 
+async def load_story_arc_placement_policy_view(
+    session: AsyncSession, story_arc_id: int
+) -> StoryArcPlacementPolicyView:
+    """Read saved file settings without probing placement files on page loads."""
+    return _placement_policy_view(await _placement_service.get_policy(session, story_arc_id))
+
+
 async def load_story_arc_placement_context(
     session: AsyncSession,
     *,

@@ -130,7 +130,7 @@ async def test_defaults_snapshot_is_stable_and_explicit_import_policy_wins(
         await session.commit()
     detail = await authenticated_client.get(f"/story-arcs/{old_id}")
     assert 'data-testid="story-arc-placement-policy-form"' not in detail.text
-    assert 'data-testid="story-arc-placement-state"' in detail.text
+    assert 'data-testid="story-arc-placement-state"' not in detail.text
     assert 'href="/settings?tab=media#story-arc-files"' in detail.text
     assert list(tmp_path.iterdir()) == []
 

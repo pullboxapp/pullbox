@@ -1,4 +1,5 @@
 {% from "components/comicvine_result_cover.html" import comicvine_result_cover %}
+{% from "components/comicvine_result_card.html" import comicvine_result_card, comicvine_in_library_badge %}
 {% set result_card_mode = result_card_mode|default("add") %}
 {% set result_card_is_add = result_card_mode == "add" %}
 {% set result_card_is_import_override = result_card_mode == "import_override" %}
@@ -12,17 +13,12 @@
 {% set result_already_added = r.already_added %}
 {% set result_library_series_id = r.library_series_id %}
 
-<article
-  id="cv-result-{{ result_id }}"
-  data-testid="{% if result_card_is_import_override %}import-collection-cv-result-{{ result_id }}{% elif result_card_is_orphaned %}import-orphaned-cv-result-{{ result_id }}{% else %}add-series-result-card{% endif %}"
-  class="add-series-result-card{% if result_card_is_add and result_already_added %} add-series-result-card-static{% endif %}"
->
-  {% set library_href = "/series/" ~ result_library_series_id if result_card_is_add and result_already_added and result_library_series_id else none %}
+{% set library_href = "/series/" ~ result_library_series_id if result_card_is_add and result_already_added and result_library_series_id else none %}
+{% set card_testid = "import-collection-cv-result-" ~ result_id if result_card_is_import_override else "import-orphaned-cv-result-" ~ result_id if result_card_is_orphaned else "add-series-result-card" %}
+{% call(slot) comicvine_result_card("cv-result-" ~ result_id, card_testid, is_static=result_card_is_add and result_already_added) %}
+{% if slot == "cover" %}
   {{ comicvine_result_cover(r.cover_url, result_title, href=library_href, link_testid="add-series-existing-cover-link" if library_href else none) }}
-
-  <div class="min-w-0 flex-1">
-    <div class="add-series-result-main">
-      <div class="min-w-0 flex-1">
+{% elif slot == "details" %}
         <h3 data-testid="add-series-result-title" class="add-series-result-title">
           {% if library_href %}
             <a
@@ -58,9 +54,7 @@
         {% if r.description %}
           <p class="add-series-result-description">{{ r.description|striptags|truncate(260) }}</p>
         {% endif %}
-      </div>
-
-      <div class="add-series-result-actions">
+{% elif slot == "actions" %}
         {% if result_card_is_import_override %}
           {% if result_already_added %}
             <span class="pill pill-success">In Library</span>
@@ -95,12 +89,7 @@
             Select
           </button>
         {% elif result_already_added %}
-          <span class="pill pill-success">
-            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
-            </svg>
-            In Library
-          </span>
+          {{ comicvine_in_library_badge() }}
         {% else %}
           <button
             type="button"
@@ -121,7 +110,5 @@
             Add
           </button>
         {% endif %}
-      </div>
-    </div>
-  </div>
-</article>
+{% endif %}
+{% endcall %}

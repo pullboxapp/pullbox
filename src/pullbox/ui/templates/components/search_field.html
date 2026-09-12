@@ -86,6 +86,7 @@
   <button
     type="button"
     data-search-field-clear
+    aria-label="Clear search"
     onclick="clearSearchField(this)"
     {% if clear_testid %}data-testid="{{ clear_testid }}"{% endif %}
     aria-hidden="{{ 'false' if mode == 'local' or value|default('', true) else 'true' }}"

@@ -141,7 +141,11 @@ async def test_catalog_search_marks_already_added_and_does_not_create(
     assert response.status_code == 200
     assert 'href="/story-arcs/catalog/42"' in response.text
     assert f'href="/story-arcs/{arc_id}"' in response.text
-    assert "Already added" in response.text
+    assert 'class="pill pill-success"' in response.text
+    assert "In Library" in response.text
+    assert 'data-testid="story-arc-existing-cover-link"' in response.text
+    assert 'data-testid="story-arc-existing-title-link"' in response.text
+    assert "Already added" not in response.text
     assert catalog_provider.searches == [("event", 20, 0)]
     assert catalog_provider.closed == 1
     async with sec_db() as session:

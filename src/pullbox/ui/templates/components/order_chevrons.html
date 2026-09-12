@@ -1,15 +1,17 @@
 {# Adjacent-row reordering. Actions and labels are Alpine expressions. #}
-{% macro order_chevrons(up_action, down_action, up_disabled, down_disabled, up_label, down_label) %}
+{% macro order_chevrons(up_action, down_action, up_disabled, down_disabled, up_label, down_label, dynamic_labels=true, up_blocked=false, down_blocked=false) %}
 <div class="flex flex-col gap-0.5" data-order-controls>
   <button type="button" @click="{{ up_action }}" :disabled="{{ up_disabled }}"
-          :aria-label="{{ up_label }}" data-order-direction="up"
+          data-order-blocked="{{ 'true' if up_blocked else 'false' }}" {% if up_blocked %}disabled{% endif %}
+          {{ ':' if dynamic_labels else '' }}aria-label="{{ up_label }}" data-order-direction="up"
           class="inline-flex h-6 w-6 items-center justify-center rounded text-pb-text-dim transition-colors hover:text-pb-text disabled:opacity-20">
     <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5"/>
     </svg>
   </button>
   <button type="button" @click="{{ down_action }}" :disabled="{{ down_disabled }}"
-          :aria-label="{{ down_label }}" data-order-direction="down"
+          data-order-blocked="{{ 'true' if down_blocked else 'false' }}" {% if down_blocked %}disabled{% endif %}
+          {{ ':' if dynamic_labels else '' }}aria-label="{{ down_label }}" data-order-direction="down"
           class="inline-flex h-6 w-6 items-center justify-center rounded text-pb-text-dim transition-colors hover:text-pb-text disabled:opacity-20">
     <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/>

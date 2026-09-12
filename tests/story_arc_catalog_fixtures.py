@@ -36,6 +36,8 @@ class CatalogProvider:
             StoryArcSearchResult(
                 provider_id="42",
                 title="Numbering Event",
+                description="<p>A test event across multiple comic series.</p>",
+                publisher="Fixture Publisher",
                 cover_url="https://example.test/story-arcs/42.jpg",
                 declared_issue_count=2,
             ),

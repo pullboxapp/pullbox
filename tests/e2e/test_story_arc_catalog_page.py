@@ -71,6 +71,54 @@ def test_catalog_search_uses_standard_comicvine_loading_popup(
     page.unroute("**/story-arcs/add**")
 
 
+def test_catalog_results_use_add_series_card_layout(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+) -> None:
+    page = authed_page
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    response = page.goto(f"{seeded_server}/story-arcs/add?q=event")
+    assert response is not None and response.status == 200
+    results = page.get_by_test_id("story-arc-catalog-results")
+    card = results.locator(".add-series-result-card").first
+    title = card.locator(".add-series-result-title").bounding_box()
+    meta = card.locator(".add-series-result-meta").bounding_box()
+    action = card.get_by_role("link", name="Preview Numbering Event").bounding_box()
+    bounds = card.bounding_box()
+    assert title and meta and action and bounds
+    assert meta["y"] >= title["y"] + title["height"], "Metadata belongs below the title"
+    assert abs(bounds["x"] + bounds["width"] - action["x"] - action["width"] - 15) < 2
+    expect(card.locator(".add-series-result-description")).to_have_text(
+        "A test event across multiple comic series."
+    )
+    expect(card).not_to_have_class(re.compile(r"add-series-result-card-static"))
+    expect(card.locator(".add-series-result-meta")).to_have_text("Fixture Publisher 2 issues")
+    expect(results.get_by_text("2 matching Story Arcs", exact=True)).to_have_count(0)
+    expect(results.locator("nav")).to_have_count(0)
+    unknown = results.locator(".add-series-result-card").nth(1)
+    expect(unknown).not_to_contain_text("Publisher unknown")
+    expect(unknown).not_to_contain_text("Unknown reported members")
+
+    output = Path("test-results/story-arc-search")
+    output.mkdir(parents=True, exist_ok=True)
+    for theme in ("dark", "light"):
+        toggle = page.get_by_test_id("header-theme-toggle")
+        target = f"Switch to {theme} mode"
+        if toggle.get_attribute("aria-label") != target:
+            toggle.click()
+        page.get_by_role("button", name=target, exact=True).click()
+        expect(page.locator("html")).to_have_attribute("data-theme", theme)
+        assert_no_axe_violations(page, name=f"arc-search-{theme}", include=["#content"])
+        page.screenshot(path=str(output / f"{theme}.png"), full_page=True)
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.emulate_media(reduced_motion="reduce")
+    assert page.locator("#content").evaluate(
+        "element => element.scrollWidth <= element.clientWidth"
+    )
+    expect(card.get_by_role("link", name="Preview Numbering Event")).to_be_visible()
+    assert_no_axe_violations(page, name="arc-search-mobile", include=["#content"])
+    page.screenshot(path=str(output / "mobile.png"), full_page=True)
+
+
 def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
 ) -> None:
@@ -111,6 +159,52 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     form.get_by_role("button", name="Add Story Arc", exact=True).click()
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?notice=catalog-added$"))
     arc_url = page.url.split("?", 1)[0]
+    page.goto(f"{arc_url}?per_page=1", wait_until="networkidle")
+    rows = page.locator('[data-testid="story-arc-reading-order-table"] tbody')
+    moved_id = rows.first.get_attribute("data-membership-id")
+    assert moved_id
+    held_moves: list[Route] = []
+    page.route("**/memberships/*/move", lambda route: held_moves.append(route))
+    page.evaluate(
+        "window.reorderShell = document.querySelector('#content'); window.reorderTable = document.querySelector('[data-testid=story-arc-reading-order-table]')"
+    )
+    down = rows.first.get_by_role("button", name="Move issue 1AU down", exact=True)
+    down.press("Enter")
+    expect(down).to_be_disabled()
+    expect(rows.first.get_by_role("button", name="Move issue 1AU up", exact=True)).to_be_disabled()
+    assert len(held_moves) == 1
+    held_moves[0].continue_()
+    page.unroute("**/memberships/*/move")
+    page.wait_for_url(re.compile(r"page=2"))
+    expect(rows.first).to_have_attribute("data-membership-id", moved_id)
+    up = rows.first.get_by_role("button", name="Move issue 1AU up", exact=True)
+    expect(up).to_be_focused()
+    expect(page.get_by_test_id("story-arc-reorder-preview")).to_have_count(0)
+    expect(page.get_by_test_id("story-arc-placement-preview")).to_have_count(0)
+    expect(page.get_by_test_id("story-arc-placement-state")).to_have_count(0)
+    assert page.evaluate(
+        "window.reorderShell === document.querySelector('#content') && window.reorderTable === document.querySelector('[data-testid=story-arc-reading-order-table]')"
+    )
+    with page.expect_response(re.compile(r"/memberships/\d+/move$")) as moved_back:
+        up.press("Enter")
+    assert moved_back.value.status == 200
+    page.wait_for_url(re.compile(r"[?&]page=1(&|$)"))
+    expect(rows.first).to_have_attribute("data-membership-id", moved_id)
+    expect(rows.first.get_by_role("button", name="Move issue 1AU down", exact=True)).to_be_focused()
+    page.route("**/memberships/*/move", lambda route: route.fulfill(status=503, body="Unavailable"))
+    rows.first.get_by_role("button", name="Move issue 1AU down", exact=True).click()
+    expect(
+        page.get_by_role("alert").filter(has_text="The new order could not be confirmed")
+    ).to_be_visible()
+    expect(rows.first.get_by_role("button", name="Move issue 1AU down", exact=True)).to_be_enabled()
+    expect(rows.first).to_have_attribute("data-membership-id", moved_id)
+    page.unroute("**/memberships/*/move")
+    assert_no_axe_violations(
+        page,
+        name="story-arc-saved-order",
+        include=["[data-testid='story-arc-detail-reading-order-section']"],
+    )
+    page.goto(arc_url, wait_until="networkidle")
     expect(page.get_by_test_id("story-arc-edit-form")).to_have_count(0)
     expect(page.get_by_test_id("story-arc-add-membership-form")).to_have_count(0)
     expect(page.locator('[data-testid^="story-arc-remove-membership-"]')).to_have_count(0)
@@ -261,9 +355,13 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     expect(page.get_by_role("button", name="Review issue 2 match")).to_have_count(0)
     page.goto(f"{seeded_server}/story-arcs/add")
     page.get_by_label("Comic Vine arc name").fill("Numbering")
-    expect(page.get_by_role("link", name="Already added — open arc")).to_have_attribute(
+    expect(page.get_by_test_id("story-arc-existing-title-link")).to_have_attribute(
         "href", arc_url.removeprefix(seeded_server)
     )
+    expect(page.get_by_test_id("story-arc-existing-cover-link")).to_have_attribute(
+        "href", arc_url.removeprefix(seeded_server)
+    )
+    expect(page.get_by_test_id("story-arc-result-card").first).to_contain_text("In Library")
     assert errors == []
 
 
