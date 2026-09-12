@@ -639,36 +639,46 @@ async def test_manual_arc_search_is_authenticated_csrf_protected_and_active_only
     assert missing.status_code == 404
 
 
-async def test_detail_shows_initial_copy_progress_and_explicit_retry(
-    authenticated_client: AsyncClient, sec_db: async_sessionmaker[AsyncSession]
+@pytest.mark.parametrize(
+    ("state", "completed", "failed", "pending"),
+    [("complete", 5, 0, 0), ("pending", 2, 0, 3), ("failed", 2, 1, 2)],
+)
+async def test_detail_omits_initial_copy_card_without_changing_diagnostics(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    state: str,
+    completed: int,
+    failed: int,
+    pending: int,
 ):
+    initial_placements = {
+        "schema_version": 1,
+        "state": state,
+        "total": 5,
+        "completed": completed,
+        "failed": failed,
+        "pending": pending,
+    }
     async with sec_db() as session:
         arc = StoryArc(
             name="Copy review",
             normalized_name="copy review",
             comicvine_id=42,
-            diagnostics={
-                "catalog_initial_placements": {
-                    "schema_version": 1,
-                    "state": "failed",
-                    "total": 5,
-                    "completed": 2,
-                    "failed": 1,
-                    "pending": 2,
-                }
-            },
+            diagnostics={"catalog_initial_placements": initial_placements},
         )
         session.add(arc)
         await session.commit()
         arc_id = arc.id
     response = await authenticated_client.get(f"/story-arcs/{arc_id}")
     assert response.status_code == 200
-    assert 'data-testid="story-arc-initial-placements"' in response.text
-    assert "2 completed" in response.text
-    assert "1 failed" in response.text
-    assert "2 pending" in response.text
-    assert f'action="/story-arcs/{arc_id}/initial-placements/retry"' in response.text
-    assert "Retry initial arc files" in response.text
+    assert 'data-testid="story-arc-initial-placements"' not in response.text
+    assert "Initial arc files" not in response.text
+    assert f'action="/story-arcs/{arc_id}/initial-placements/retry"' not in response.text
+    assert 'data-testid="story-arc-detail-reading-order-section"' in response.text
+    async with sec_db() as session:
+        arc = await session.get(StoryArc, arc_id)
+        assert arc is not None
+        assert arc.diagnostics["catalog_initial_placements"] == initial_placements
 
 
 async def test_empty_complete_provider_list_is_not_offered_as_addable(

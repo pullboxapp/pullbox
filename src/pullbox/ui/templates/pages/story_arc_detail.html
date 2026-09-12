@@ -187,19 +187,6 @@
     </section>
   {% endif %}
 
-  {% if story_arc.initial_placements %}
-    <section data-testid="story-arc-initial-placements" aria-labelledby="initial-placements-heading" class="space-y-3 rounded-lg border border-pb-border bg-pb-card p-4">
-      <h2 id="initial-placements-heading" class="text-lg font-semibold text-pb-text">Initial arc files</h2>
-      <p role="status" class="text-sm text-pb-text-sec">{{ story_arc.initial_placements.state|title }}: {{ story_arc.initial_placements.completed }} completed · {{ story_arc.initial_placements.failed }} failed · {{ story_arc.initial_placements.pending }} pending ({{ story_arc.initial_placements.total }} total)</p>
-      <p class="text-sm text-pb-text-sec">This is the storage chosen when adding the arc, independent of future synchronization. Canonical originals stay unchanged. Refresh this page for current counts.</p>
-      {% if story_arc.active and (story_arc.initial_placements.pending or story_arc.initial_placements.failed) %}
-        <form action="/story-arcs/{{ story_arc.id }}/initial-placements/retry" method="post">
-          <button type="submit" class="btn-secondary">Retry initial arc files</button>
-        </form>
-      {% endif %}
-    </section>
-  {% endif %}
-
   {% include "partials/story_arc_reading_order.html" %}
 
   <div class="space-y-6">
