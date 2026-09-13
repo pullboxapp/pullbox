@@ -86,6 +86,9 @@ async def execute_new_series(
 
     importable_files = await load_importable_files(session, item)
     if not importable_files:
+        if await retain_imported_series_outcome(session, item):
+            await session.flush()
+            return 0, 0, imported_count + 1, failed_count, True
         item.status = ImportSeriesStatus.FAILED
         item.error_message = "No eligible files available for import"
         failed_count += 1
@@ -312,6 +315,9 @@ async def execute_new_series(
             queue_or_schedule_catalog_hydration()
             await session.flush()
             return files_ok, files_err, imported_count, failed_count, True
+        if await retain_imported_series_outcome(session, item):
+            await session.flush()
+            return files_ok, files_err, imported_count + 1, failed_count, True
         item.status = ImportSeriesStatus.FAILED
         item.error_message = "No eligible files available for import"
         failed_count += 1
@@ -333,6 +339,30 @@ async def execute_new_series(
     imported_count += 1
     queue_or_schedule_catalog_hydration()
     return files_ok, files_err, imported_count, failed_count, True
+
+
+async def retain_imported_series_outcome(session: AsyncSession, item: ImportedSeries) -> bool:
+    """An exhausted retry must not erase an earlier successful partial import."""
+    if item.series_id is None:
+        return False
+    imported_file_id = await session.scalar(
+        sa_select(ImportedFile.id)
+        .where(
+            ImportedFile.import_series_id == item.id,
+            ImportedFile.status == ImportedFileStatus.IMPORTED,
+        )
+        .limit(1)
+    )
+    if imported_file_id is None:
+        return False
+    if item.error_message:
+        item.diagnostics = {
+            **dict(item.diagnostics or {}),
+            "previous_series_error": item.error_message,
+        }
+    item.status = ImportSeriesStatus.IMPORTED
+    item.error_message = None
+    return True
 
 
 async def has_safety_blocked_files(session: AsyncSession, imported_series_id: int) -> bool:

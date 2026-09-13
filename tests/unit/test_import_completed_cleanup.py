@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.import_job import (
@@ -507,6 +507,57 @@ async def _seed_mixed_folder_candidate(
         )
     await session.commit()
     return job, source_series, target_import_series, mixed_file, issue
+
+
+@pytest.mark.asyncio
+async def test_mixed_folder_lookup_bounds_large_library_parameters(
+    db_session: AsyncSession,
+) -> None:
+    job, source, _target, _mixed, issue = await _seed_mixed_folder_candidate(db_session)
+    root = await db_session.scalar(select(LibraryRoot))
+    assert root is not None
+    for index in range(510):
+        path = f"/comics/Fritzi Ritz/known-{index}.cbz"
+        library_file = LibraryFile(
+            issue_id=issue.id,
+            library_root_id=root.id,
+            storage_mode=LibraryFileStorageMode.REFERENCED,
+            file_path=path,
+            file_name=f"known-{index}.cbz",
+            file_size=1024,
+            file_format=FileFormat.CBZ,
+            file_modified_at=datetime.now(UTC),
+            match_confidence=MatchConfidence.HIGH,
+        )
+        db_session.add(library_file)
+        await db_session.flush()
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=source.id,
+                file_path=path,
+                file_name=library_file.file_name,
+                file_size=1024,
+                file_format="cbz",
+                status=ImportedFileStatus.IMPORTED,
+                library_file_id=library_file.id,
+                matched_issue_id=issue.id,
+            )
+        )
+    await db_session.commit()
+    connection = await db_session.connection()
+
+    def bounded_parameters(_conn, _cursor, _statement, parameters, _context, _many):
+        assert len(parameters) <= 500, "Recovery lookup expands an unbounded library ID list"
+
+    event.listen(connection.sync_connection, "before_cursor_execute", bounded_parameters)
+    try:
+        summary = await summarize_completed_import_cleanup_scope(
+            db_session, job.id, CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES
+        )
+        assert summary.affected_count == 0  # Multiple owners must remain ambiguous.
+    finally:
+        event.remove(connection.sync_connection, "before_cursor_execute", bounded_parameters)
 
 
 async def _seed_story_arc_entry_for_mixed_file(

@@ -753,6 +753,56 @@ async def test_recover_orphan_helper_requires_assign_without_existing_import(
         )
 
 
+async def test_retry_failed_repairs_exhausted_partial_success_without_reimport(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session, series_failed=1)
+    item = await _create_imported_series(
+        db_session, job, name="Hellblazer", status=ImportSeriesStatus.FAILED
+    )
+    series = Series(title="Hellblazer", sort_title="hellblazer", comicvine_id=4008)
+    db_session.add(series)
+    await db_session.flush()
+    item.series_id = series.id
+    item.cv_id = 4008
+    item.error_message = "No eligible files available for import"
+    for status in (ImportedFileStatus.IMPORTED, ImportedFileStatus.NO_MATCH):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=item.id,
+                file_path=f"/comics/{status.value}.cbz",
+                file_name=f"{status.value}.cbz",
+                file_size=1024,
+                file_format="cbz",
+                status=status,
+            )
+        )
+    await db_session.flush()
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+    assert count == 0
+    assert updated_job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.IMPORTED
+    assert item.files_imported == 1
+    assert item.files_no_match == 1
+    assert job.series_failed == 0
+    assert job.series_imported == 1
+    assert item.diagnostics["previous_series_error"] == "No eligible files available for import"
+
+
+async def test_retry_failed_does_not_requeue_unresolved_legacy_series_identity(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session, series_failed=1)
+    item = await _create_imported_series(
+        db_session, job, name="Batman", status=ImportSeriesStatus.FAILED
+    )
+    item.diagnostics = {"reason": "trusted_source_identity_conflict"}
+    await db_session.flush()
+    with pytest.raises(ValidationError, match="Recover known series"):
+        await service.retry_failed_series(db_session, job.id)
+    assert job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.FAILED
+
+
 async def test_retry_failed_series_resets_rows_and_job_counter(
     db_session: AsyncSession,
 ) -> None:

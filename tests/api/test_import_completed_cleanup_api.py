@@ -50,6 +50,81 @@ def _csrf_header_for(client: AsyncClient) -> dict[str, str]:
     return {"X-CSRF-Token": csrf}
 
 
+@pytest.mark.asyncio
+async def test_known_series_recovery_api_previews_then_queues_background_import(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with sec_db() as session:
+        job = ImportJob(
+            source_path="/imports/mylar.db",
+            source_type=ImportSourceType.MYLAR3,
+            status=ImportJobStatus.COMPLETED,
+        )
+        session.add(job)
+        await session.flush()
+        item = ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name="Batman",
+            raw_year=1940,
+            status=ImportSeriesStatus.NO_MATCH,
+            diagnostics={"reason": "trusted_source_identity_conflict"},
+        )
+        session.add(item)
+        await session.flush()
+        file = ImportedFile(
+            import_job_id=job.id,
+            import_series_id=item.id,
+            file_path="/comics/Batman/001.cbz",
+            file_name="Batman 001.cbz",
+            file_format="cbz",
+            file_size=1024,
+            status=ImportedFileStatus.NO_MATCH,
+            parsed_issue_number=1,
+            parsed_series="Batman",
+            comicvine_issue_id=1001,
+            diagnostics={
+                "kind": "series_no_match_file",
+                "comicvine_series_id": 796,
+                "metadata_signals": {
+                    "comicvine_series_id": "mylar3",
+                    "comicvine_issue_id": "mylar3",
+                },
+            },
+        )
+        session.add(file)
+        await session.commit()
+        job_id, file_id = job.id, file.id
+    triggered: list[int] = []
+    monkeypatch.setattr(
+        "pullbox.api.v1.import_completed_cleanup.trigger_import_execute", triggered.append
+    )
+    url = f"/api/v1/import/{job_id}/cleanup/recover_known_series"
+    preview = await authenticated_client.get(f"{url}/preview")
+    assert preview.status_code == 200
+    assert preview.json()["affected_file_count"] == 1
+    assert triggered == []
+    body = {"preview_token": preview.json()["preview_token"], "confirmation": "APPLY CLEANUP"}
+    response = await authenticated_client.post(
+        url, headers=_csrf_header_for(authenticated_client), json=body
+    )
+    assert response.status_code == 200
+    assert response.json()["requires_import_retry"] is True
+    assert triggered == [job_id]
+    async with sec_db() as session:
+        file = await session.get(ImportedFile, file_id)
+        assert file is not None and file.status is ImportedFileStatus.CONFIRMED
+        assert file.file_path == "/comics/Batman/001.cbz"
+        item = await session.get(ImportedSeries, file.import_series_id)
+        assert item is not None and item.cv_id == 796
+    replay = await authenticated_client.post(
+        url, headers=_csrf_header_for(authenticated_client), json=body
+    )
+    assert replay.status_code >= 400
+    assert triggered == [job_id]
+
+
 async def _seed_missing_reference(factory: async_sessionmaker[AsyncSession]) -> tuple[int, int]:
     async with factory() as session:
         job = ImportJob(
