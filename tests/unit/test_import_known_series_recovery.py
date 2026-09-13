@@ -174,6 +174,58 @@ async def test_known_series_recovery_leaves_duplicate_candidates_for_review(db_s
     assert await load_known_series_recovery(db_session, job.id) == ()
 
 
+@pytest.mark.parametrize(
+    "source_type,method",
+    [
+        (ImportSourceType.MYLAR3, "mylar3_cv_id"),
+        (ImportSourceType.FILESYSTEM, "comicinfo_cv_id"),
+    ],
+)
+@pytest.mark.parametrize("other_issue_id", [1001, 1002])
+@pytest.mark.parametrize("provider_id_type", [str, int])
+async def test_known_series_recovery_checks_issue_identity_across_series(
+    db_session, source_type, method, other_issue_id, provider_id_type
+):
+    job, series, file = await seed_recovery(db_session, source_type=source_type, method=method)
+    _, other_series, other_file = await seed_recovery(
+        db_session, source_type=source_type, method=method
+    )
+    other_series.import_job_id = job.id
+    other_series.raw_series_name = "Superman"
+    other_series.raw_year = 1939
+    other_series.diagnostics = {
+        **other_series.diagnostics,
+        "selected_candidate": {"cv_id": 999, "match_method": method, "title": "Superman"},
+    }
+    other_file.import_job_id = job.id
+    other_file.file_path = "/comics/Superman/001.cbz"
+    other_file.file_name = "Superman 001.cbz"
+    other_file.parsed_series = "Superman"
+    other_file.parsed_year = 1939
+    other_file.comicvine_issue_id = other_issue_id
+    other_file.matched_issue_cv_id = other_issue_id
+    other_file.diagnostics = {
+        **other_file.diagnostics,
+        "comicvine_series_id": 999,
+        "source_metadata": {"comicinfo": {"series": "Superman", "number": "1"}},
+        "target_issue_summary": {
+            **other_file.diagnostics["target_issue_summary"],
+            "provider_id": provider_id_type(other_issue_id),
+        },
+    }
+    await db_session.commit()
+
+    plans = await load_known_series_recovery(db_session, job.id)
+
+    expected_ids = [] if other_issue_id == file.comicvine_issue_id else [file.id, other_file.id]
+    assert [plan.file_id for plan in plans] == expected_ids
+    assert series.status is ImportSeriesStatus.NO_MATCH
+    assert other_series.status is ImportSeriesStatus.NO_MATCH
+    assert file.status is ImportedFileStatus.MATCHED
+    assert other_file.status is ImportedFileStatus.MATCHED
+    assert not db_session.dirty
+
+
 async def test_known_series_action_queues_only_previewed_files_and_preserves_conflicts(db_session):
     job, series, file = await seed_recovery(db_session)
     db_session.add(User(id=42, username="operator", password_hash="unused"))

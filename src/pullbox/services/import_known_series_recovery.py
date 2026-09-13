@@ -284,10 +284,11 @@ async def load_known_series_recovery(
             )
         ).all():
             local_targets[issue.comicvine_id] = (issue, series_cv_id, owned)
-    counts = Counter((plan.cv_id, plan.summary["provider_id"]) for plan in plans)
+    # Comic Vine issue IDs are globally unique, including across legacy series rows.
+    counts = Counter(int(plan.summary["provider_id"]) for plan in plans)
     result = []
     for plan in plans:
-        if counts[(plan.cv_id, plan.summary["provider_id"])] != 1:
+        if counts[int(plan.summary["provider_id"])] != 1:
             continue
         local = local_targets.get(int(plan.summary["provider_id"]))
         if local is not None:
