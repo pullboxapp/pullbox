@@ -126,6 +126,38 @@ class TestSidebarShellRouteContracts:
         assert 'data-sidebar-badge-endpoint="/htmx/intervention/count"' in response.text
         assert 'data-sidebar-badge-endpoint="/health/badge"' in response.text
         assert 'data-sidebar-badge-trigger="every 10s"' in response.text
+        assert 'data-testid="header-add-menu"' in response.text
+        assert 'data-split-action-menu="true"' in response.text
+        assert re.search(
+            r'data-testid="header-add-action"[^>]*type="button"[^>]*aria-label="Add Series"',
+            response.text,
+        )
+        assert re.search(r'data-testid="header-add-action"[^>]*>.*?Add', response.text, re.S)
+        assert re.search(
+            r'data-testid="header-add-menu-trigger"[^>]*aria-haspopup="menu"',
+            response.text,
+        )
+        assert re.search(
+            r'data-testid="header-add-menu-trigger"[^>]*>.*?x-text="selectedLabel"[^>]*>Series',
+            response.text,
+            re.S,
+        )
+        assert 'aria-controls="header-add-menu-panel"' in response.text
+        assert 'id="header-add-menu-panel"' in response.text
+        assert 'data-testid="header-add-menu-panel"' in response.text
+        assert 'role="menu"' in response.text
+        assert re.search(
+            r'data-testid="header-add-menu-series"[^>]*role="menuitemradio"',
+            response.text,
+        )
+        assert re.search(
+            r'data-testid="header-add-menu-story-arc"[^>]*role="menuitemradio"',
+            response.text,
+        )
+        assert 'data-testid="header-add-menu-cbl"' in response.text
+        assert 'aria-disabled="true"' in response.text
+        assert "CBL Reading List" in response.text
+        assert "Coming Soon" in response.text
         assert 'data-testid="header-support-link"' in response.text
         assert 'data-testid="header-donations-button"' in response.text
         assert 'aria-label="Support Pullbox"' in response.text

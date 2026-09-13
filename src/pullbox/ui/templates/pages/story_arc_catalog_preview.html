@@ -1,71 +1,171 @@
 {% extends "base.html" %}
+{% from "components/dropdown_select.html" import dropdown_select %}
+{% from "components/mission_control_table.html" import mission_control_table %}
+{% from "components/pagination.html" import local_pagination %}
+{% from "components/order_chevrons.html" import order_chevrons %}
+
+{% set can_add = preview and preview.membership_complete and members %}
+{% set preview_error = error_message %}
+{% if preview and not preview.membership_complete %}
+  {% set preview_error = "Incomplete member list. Comic Vine did not return every member. Nothing can be added until all members load; retry preview." %}
+{% elif preview and not members %}
+  {% set preview_error = "No members available. Nothing can be added yet; retry preview later." %}
+{% endif %}
+{% set root_options = [("", "Choose a library root")] %}
+{% for root in managed_roots %}{% set _ = root_options.append((root.id|string, root.name ~ " — " ~ root.path)) %}{% endfor %}
+{% set preview_data = {
+  "ready": true if can_add else false,
+  "title": preview.metadata.title if preview else "Review Story Arc",
+  "description": preview.metadata.description|striptags if preview else "",
+  "coverUrl": preview.metadata.cover_url if preview and preview.metadata.cover_url else "",
+  "members": members, "error": preview_error, "roots": root_options,
+  "fingerprint": preview.fingerprint if preview else "",
+  "fileDefaultsFingerprint": arc_file_defaults.fingerprint,
+  "fileSummary": arc_file_defaults.summary_label,
+  "fileExample": arc_file_defaults.destination ~ "/" ~ arc_file_defaults.naming_preview() if arc_file_defaults.enabled else "",
+} %}
+
 {% block title %}Review Story Arc — {{ instance_name() }}{% endblock %}
-{% block content_container_classes %}px-4 sm:px-6 py-5{% endblock %}
+{% block page_title %}Review reading order{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 pt-5 sm:pt-7{% endblock %}
+
 {% block content %}
-<main class="mx-auto max-w-5xl space-y-6" data-testid="story-arc-catalog-preview">
-  <a href="/story-arcs/add" class="text-sm text-pb-interactive hover:underline">Back to Add Story Arc</a>
-  <header>
-    <h1 class="text-2xl font-bold text-pb-text">{{ preview.metadata.title if preview else 'Review Story Arc' }}</h1>
-    {% if preview and preview.metadata.description %}<p class="mt-2 text-sm text-pb-text-sec">{{ preview.metadata.description|striptags }}</p>{% endif %}
+<div class="series-domain-page space-y-4" data-testid="story-arc-catalog-preview"
+     data-preview-ready="{{ 'true' if can_add else 'false' }}" :data-preview-ready="ready.toString()"
+     data-preview-url="/story-arcs/catalog/{{ provider_id }}" x-data="storyArcPreview()" hx-history="false"
+     @story-arc-preview-page.window="setPage($event.detail.page)"
+     @story-arc-preview-request-status.window="publish()">
+  <script type="application/json" data-preview-data>{{ preview_data|tojson }}</script>
+  <div class="series-domain-breadcrumb-row">
+    <a href="/story-arcs/add" class="series-domain-back-link">
+      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
+      Back to Add Story Arc
+    </a>
+    <nav class="series-domain-breadcrumbs" aria-label="Breadcrumb">
+      <a href="/story-arcs">All Story Arcs</a><span class="series-domain-breadcrumb-sep" aria-hidden="true">›</span>
+      <a href="/story-arcs/add">Add Story Arc</a><span class="series-domain-breadcrumb-sep" aria-hidden="true">›</span>
+      <span class="current" aria-current="page">Review reading order</span>
+    </nav>
+  </div>
+  <header class="series-registry-header flex items-start gap-4">
+    <div class="h-28 w-20 shrink-0 overflow-hidden rounded-md border border-pb-border bg-pb-card flex items-center justify-center">
+      <img x-show="coverUrl && !coverFailed" x-cloak :src="coverUrl || null" :alt="title" @error="coverFailed = true" class="h-full w-full object-cover">
+      <svg x-show="!coverUrl || coverFailed" class="h-8 w-8 text-pb-text-dim" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h4" /></svg>
+    </div>
+    <div class="min-w-0 flex-1">
+      <h1 class="series-registry-title">REVIEW <span>READING ORDER</span></h1>
+      <h2 class="mt-2 text-lg font-semibold text-pb-text break-words" x-text="title">{{ preview_data.title }}</h2>
+      <p x-show="description" x-text="description" class="mt-1 line-clamp-2 text-sm text-pb-text-sec"></p>
+      <details x-show="description.length > 180" class="mt-2 text-sm text-pb-text-sec">
+        <summary class="cursor-pointer font-medium text-pb-interactive">Full description</summary>
+        <p class="mt-2 whitespace-pre-line" x-text="description"></p>
+      </details>
+    </div>
   </header>
-  {% if error_message %}<p role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 p-4 text-sm text-pb-text">{{ error_message }}</p>{% endif %}
-  {% if preview %}
-    <p class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 p-4 text-sm text-pb-text" id="story-arc-order-warning">Comic Vine response order — reading order unverified. Set the order you want below; publication dates and issue numbers don't define it.</p>
-    {% if preview.membership_complete and members %}
-      <p class="text-sm text-pb-text-sec">Complete received member list: {{ members|length }} issues. This confirms all returned members loaded, not that Comic Vine's bibliography is exhaustive.</p>
-      <form action="/story-arcs/catalog/{{ provider_id }}" method="post" data-testid="story-arc-catalog-add-form" class="space-y-6">
-        <input type="hidden" name="fingerprint" value="{{ preview.fingerprint }}">
-        <section aria-labelledby="catalog-order-heading" class="space-y-3">
-          <h2 id="catalog-order-heading" class="text-lg font-semibold text-pb-text">Review reading order</h2>
-          <p class="text-sm text-pb-text-sec">Give every issue a different positive position. Skip applies only to this arc, not the canonical issue.</p>
-          <ol class="space-y-3">
-            {% for member in members %}
-              <li data-provider-issue-id="{{ member.provider_id }}" class="flex flex-col gap-3 rounded-lg border border-pb-border bg-pb-card p-4 sm:flex-row sm:items-center">
-                <div class="min-w-0 flex-1">
-                  <p class="font-medium text-pb-text">{{ member.series_name }} #{{ member.issue_number }}</p>
-                  <p class="text-sm text-pb-text-sec">{{ member.title }}</p>
-                </div>
-                <input type="hidden" name="issue_provider_ids" value="{{ member.provider_id }}">
-                <div>
-                  <label for="catalog-order-{{ member.provider_id }}" class="mb-1 block text-sm text-pb-text-sec">Order for #{{ member.issue_number }}</label>
-                  <input id="catalog-order-{{ member.provider_id }}" name="reading_orders" type="number" min="1" max="1000000" required value="{{ loop.index }}" class="input-pb w-28">
-                </div>
-                <label class="flex items-center gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="skipped_issue_provider_ids" value="{{ member.provider_id }}">Skip #{{ member.issue_number }} in this arc</label>
-              </li>
-            {% endfor %}
-          </ol>
-          <label class="flex items-start gap-2 text-sm font-medium text-pb-text"><input type="checkbox" name="order_reviewed" value="true" required aria-describedby="story-arc-order-warning" class="mt-0.5">I reviewed the reading order</label>
-        </section>
-        <section aria-labelledby="catalog-options-heading" class="space-y-4 rounded-lg border border-pb-border bg-pb-card p-5">
-          <h2 id="catalog-options-heading" class="text-lg font-semibold text-pb-text">Library and monitoring</h2>
-          <div>
-            <label for="catalog-library-root" class="mb-1 block text-sm font-medium text-pb-text">Library root for new series</label>
-            <select id="catalog-library-root" name="library_root_id" required class="input-pb w-full">
-              <option value="">Choose a library root</option>
-              {% for root in managed_roots %}<option value="{{ root.id }}">{{ root.name }} — {{ root.path }}</option>{% endfor %}
-            </select>
-            <p class="mt-1 text-sm text-pb-text-sec">New series and downloads use their normal series folders here, even with no separate arc folder. Existing series paths and monitoring don't change.</p>
-          </div>
-          {% if not managed_roots %}<p role="status" class="text-sm text-pb-text-sec">Configure an available managed library root in Settings before adding.</p>{% endif %}
-          <fieldset class="space-y-2">
-            <legend class="mb-2 text-sm font-medium text-pb-text">Independent arc monitoring</legend>
-            <label class="flex items-start gap-2 text-sm text-pb-text-sec"><input type="checkbox" name="monitored" value="true" class="mt-0.5">Monitor this story arc</label>
-            <p class="text-xs text-pb-text-sec">Monitoring checks Comic Vine daily for new members and searches missing issues when released. Your global search-on-add setting controls the initial search.</p>
-          </fieldset>
-          {% set arc_creation_has_members = true %}
-          {% include "partials/story_arc_create_storage.html" %}
-        </section>
-        <div class="flex flex-wrap gap-3">
-          <button type="submit" class="btn-primary"{% if not managed_roots %} disabled{% endif %}>Add reviewed Story Arc</button>
-          <a href="/story-arcs" class="btn-secondary">Cancel</a>
+  <p class="text-sm text-pb-text-sec">Issues are listed in Comic Vine's returned order. Reorder or skip issues if needed.</p>
+  <p x-show="error" x-text="error" role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 px-4 py-3 text-sm text-pb-text">{{ preview_error }}</p>
+  <p x-show="notice" x-text="notice" x-cloak role="status" class="rounded-lg border border-pb-border bg-pb-card px-4 py-3 text-sm text-pb-text-sec"></p>
+
+  <form action="/story-arcs/catalog/{{ provider_id }}" method="post" hx-boost="false" novalidate
+        @submit.prevent="submit($el)" data-testid="story-arc-catalog-add-form" class="space-y-4" :aria-busy="Boolean(busy).toString()">
+    <input type="hidden" name="fingerprint" value="{{ preview_data.fingerprint }}" :value="fingerprint">
+    <input type="hidden" name="file_defaults_fingerprint" value="{{ arc_file_defaults.fingerprint }}" :value="fileDefaultsFingerprint">
+    <div class="series-toolbar-shell">
+      <div class="series-toolbar-frame series-toolbar-body flex flex-wrap items-center justify-end gap-3">
+        <div class="flex items-center gap-2">
+          <label for="preview-page-size" class="text-sm text-pb-text-sec">Items per page</label>
+          {{ dropdown_select(name="preview_page_size", value="25", options=[("25", "25"), ("50", "50"), ("100", "100")], size="sm", trigger_id="preview-page-size", root_testid="story-arc-preview-page-size", local_model="perPage") }}
         </div>
-      </form>
-    {% elif preview.membership_complete %}
-      <p role="status" class="text-sm text-pb-text-sec">No members available. Retry later, or create an empty Story Arc yourself from the Story Arcs page.</p>
-    {% else %}
-      <p role="alert" class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 p-4 text-sm text-pb-text">Incomplete member list. Comic Vine reported {{ preview.metadata.declared_issue_count if preview.metadata.declared_issue_count is not none else 'an unknown number of' }} members but returned {{ preview.metadata.issue_provider_ids|length }}. Nothing can be added until all members load.</p>
-    {% endif %}
-  {% endif %}
-  <a href="/story-arcs/catalog/{{ provider_id }}" class="btn-secondary">Retry preview</a>
-</main>
+      </div>
+    </div>
+    <section class="series-mission-control-shell" aria-label="Reading order">
+      <p class="sr-only" aria-live="polite" aria-atomic="true" x-text="reorderAnnouncement"></p>
+      {% call mission_control_table(table_testid="story-arc-preview-table") %}
+        <caption class="sr-only">Story Arc reading order. Edits on every page are saved when you add the arc.</caption>
+        <thead><tr><th scope="col">Order</th><th scope="col">Series</th><th scope="col">Issue</th><th scope="col">Issue title</th><th scope="col" class="c">Skip</th></tr></thead>
+        <tbody>
+          <template x-for="member in visibleMembers" :key="member.provider_id">
+            <tr :data-provider-issue-id="member.provider_id">
+              <td>
+                <div class="flex items-center gap-3">
+                  <span class="w-8 text-right font-mono text-sm text-pb-text-sec" data-reading-position x-text="member.order"></span>
+                  {{ order_chevrons(
+                    up_action="moveMember(member.provider_id, -1)", down_action="moveMember(member.provider_id, 1)",
+                    up_disabled="Boolean(busy) || member.order === 1", down_disabled="Boolean(busy) || member.order === members.length",
+                    up_label="'Move ' + member.series_name + ' #' + member.issue_number + ' up'",
+                    down_label="'Move ' + member.series_name + ' #' + member.issue_number + ' down'"
+                  ) }}
+                </div>
+              </td>
+              <td class="font-medium text-pb-text" x-text="member.series_name"></td>
+              <td class="whitespace-nowrap" x-text="'#' + member.issue_number"></td>
+              <td x-text="member.title"></td>
+              <td class="c"><input type="checkbox" class="checkbox-pb" x-model="member.skipped" :disabled="Boolean(busy)" :aria-label="'Skip #' + member.issue_number + ' in this arc'"></td>
+            </tr>
+          </template>
+          <tr x-show="!members.length"><td colspan="5" class="py-8 text-center text-pb-text-sec">No issues available for review.</td></tr>
+        </tbody>
+      {% endcall %}
+    </section>
+    <section aria-labelledby="catalog-options-heading" class="series-domain-section-card space-y-4">
+      <h2 id="catalog-options-heading" class="series-domain-section-title">Library and monitoring</h2>
+      <div class="grid gap-5 lg:grid-cols-2">
+        <div class="min-w-0">
+          <label for="catalog-library-root" class="mb-2 block text-sm font-medium text-pb-text">Library root for new series</label>
+          {{ dropdown_select(name="library_root_id", trigger_id="catalog-library-root", options_expression="rootOptions", local_model="libraryRootId", disabled_expression="Boolean(busy) || rootOptions.length < 2", describedby="catalog-library-help", class_name="w-full", wrap_options=true) }}
+          <p id="catalog-library-help" class="mt-2 text-xs leading-5 text-pb-text-sec">New series and downloads use normal series folders here. Existing series paths and monitoring stay unchanged.</p>
+          <p x-show="rootOptions.length < 2" class="mt-2 text-sm text-pb-text-sec">Configure an available managed library root in Settings before adding.</p>
+          {% if placement_roots_truncated %}<p class="mt-2 text-sm text-pb-text-sec">Only the first library roots are shown. Check Settings if a root is missing.</p>{% endif %}
+        </div>
+        <div>
+          <div class="flex items-center justify-between gap-4">
+            <label for="catalog-monitored" class="text-sm font-medium text-pb-text">Monitor this story arc</label>
+            <label class="relative inline-flex shrink-0 items-center">
+              <input id="catalog-monitored" type="checkbox" role="switch" name="monitored" value="true" class="peer toggle-input" x-model="monitored" :disabled="Boolean(busy)">
+              <span class="toggle-switch"></span>
+            </label>
+          </div>
+          <p class="mt-2 text-xs leading-5 text-pb-text-sec">Checks Comic Vine daily for new members and searches missing issues when released. Your global search-on-add setting controls the initial search.</p>
+        </div>
+      </div>
+      <details class="border-t border-pb-border pt-4" data-testid="story-arc-create-storage">
+        <summary class="cursor-pointer text-sm font-medium text-pb-text">Story Arc file settings <span class="font-normal text-pb-text-sec" x-text="'· ' + fileSummary"></span></summary>
+        <div class="mt-3 space-y-2 text-sm text-pb-text-sec">
+          <p x-show="fileExample" x-text="fileExample" class="break-all font-mono text-xs"></p>
+          <p>Original files stay in their series folders. This arc saves the current defaults when added; later settings changes won't alter it.</p>
+          <a href="/settings?tab=media#story-arc-files" class="btn-ghost">Review import settings</a>
+        </div>
+      </details>
+    </section>
+    <p hidden :hidden="!submitError" x-text="submitError" role="alert" tabindex="-1" data-testid="story-arc-preview-submit-error"
+       class="rounded-lg border border-pb-error/40 bg-pb-error/10 px-4 py-3 text-sm text-pb-text"></p>
+    <div class="flex flex-wrap items-center justify-between gap-3" data-testid="story-arc-preview-form-actions">
+      <button type="submit" class="btn-primary" :disabled="Boolean(busy)">
+        <svg x-cloak x-show="busy === 'adding'" class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" stroke-dasharray="40 20" /></svg>
+        Add Story Arc
+      </button>
+      <div class="ml-auto flex flex-wrap justify-end gap-3" data-testid="story-arc-preview-actions">
+        <button type="button" class="btn-primary" @click="retry()" :disabled="Boolean(busy)" :aria-busy="(busy === 'retrying').toString()">
+          <svg x-cloak x-show="busy === 'retrying'" class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" stroke-dasharray="40 20" /></svg>
+          Retry preview
+        </button>
+        <a href="/story-arcs" class="btn-ghost">Cancel</a>
+      </div>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block footer_dock %}
+<div data-testid="story-arc-preview-footer-dock" x-data="storyArcPreviewFooter()"
+     @story-arc-preview-status.window="Object.assign($data, $event.detail)">
+  <div class="page-dock-inner" :class="{ 'page-dock-inner-status-only': totalPages <= 1 }" data-testid="page-dock-inner">
+    <div x-cloak x-show="totalPages > 1" class="page-dock-pagination" data-testid="page-dock-pagination">{{ local_pagination() }}</div>
+    <div class="page-dock-status" data-testid="page-dock-status">
+      <span class="page-dock-status-item"><span class="page-dock-status-label">Issues</span><strong class="page-dock-status-value" x-text="total"></strong></span>
+      <span class="page-dock-status-item"><span class="page-dock-status-label">Skipped</span><strong class="page-dock-status-value" x-text="skipped"></strong></span>
+      <span class="page-dock-status-item"><span class="page-dock-status-label">Status</span><strong class="page-dock-status-value" x-text="ready ? 'Ready to review' : 'Preview incomplete'"></strong></span>
+    </div>
+  </div>
+</div>
 {% endblock %}

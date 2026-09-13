@@ -1711,6 +1711,57 @@ async def test_execute_new_series_persists_ownership_link_before_file_cancellati
 
 
 @pytest.mark.asyncio
+async def test_execute_new_series_keeps_partial_success_when_retry_has_no_eligible_files(
+    db_session,
+) -> None:
+    job = ImportJob(source_path="/imports", source_type=ImportSourceType.MYLAR3)
+    series = Series(title="Hellblazer", sort_title="hellblazer", comicvine_id=4008)
+    db_session.add_all([job, series])
+    await db_session.flush()
+    item = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Hellblazer",
+        cv_id=4008,
+        series_id=series.id,
+        status=ImportSeriesStatus.CONFIRMED,
+        files_imported=0,
+    )
+    db_session.add(item)
+    await db_session.flush()
+    for status in (ImportedFileStatus.IMPORTED, ImportedFileStatus.NO_MATCH):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=item.id,
+                file_path=f"/comics/{status.value}.cbz",
+                file_name=f"{status.value}.cbz",
+                file_size=1024,
+                file_format="cbz",
+                status=status,
+            )
+        )
+    await db_session.flush()
+    process_files = AsyncMock()
+    provider = AsyncMock()
+    result = await _execute_new_series(
+        db_session,
+        job,
+        item,
+        imported_count=0,
+        failed_count=0,
+        series_service=provider,
+        process_series_files=process_files,
+        record_action=AsyncMock(),
+        log_event=AsyncMock(),
+    )
+    assert result == (0, 0, 1, 0, True)
+    assert item.status == ImportSeriesStatus.IMPORTED
+    assert item.error_message is None
+    process_files.assert_not_awaited()
+    provider.add_from_comicvine.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_execute_new_series_fails_when_no_files_are_eligible(db_session) -> None:
     job = ImportJob(
         source_path="/tmp/imports",

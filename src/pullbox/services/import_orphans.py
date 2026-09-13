@@ -23,6 +23,7 @@ from pullbox.services.import_file_resolution import load_issue_lookup_for_series
 from pullbox.services.import_job_actions import build_series_created_action_payload
 from pullbox.services.import_job_execution_items import (
     ensure_target_issue_summary_for_import_file,
+    retain_imported_series_outcome,
 )
 from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
@@ -539,7 +540,45 @@ async def retry_failed_series(
         job,
         file_ids=normalized_file_ids,
     )
+    repaired_series_ids: list[int] = []
+    if normalized_file_ids is None:
+        exhausted = await session.scalars(
+            sa_select(ImportedSeries).where(
+                ImportedSeries.import_job_id == job_id,
+                ImportedSeries.status == ImportSeriesStatus.FAILED,
+                ImportedSeries.error_message == "No eligible files available for import",
+                ~sa_select(ImportedFile.id)
+                .where(
+                    ImportedFile.import_series_id == ImportedSeries.id,
+                    ImportedFile.status.in_(
+                        (
+                            ImportedFileStatus.MATCHED,
+                            ImportedFileStatus.CONFIRMED,
+                            ImportedFileStatus.FAILED,
+                        )
+                    ),
+                )
+                .exists(),
+            )
+        )
+        for item in exhausted:
+            if await retain_imported_series_outcome(session, item):
+                repaired_series_ids.append(item.id)
+        if repaired_series_ids:
+            await recompute_file_counters(session, job, series_ids=repaired_series_ids)
+            await recompute_series_counters(session, job)
+            await log_event(
+                session,
+                job_id,
+                "INFO",
+                "import_partial_success_restored",
+                message=(
+                    "Restored successful series outcomes; unresolved files remain in Follow-up."
+                ),
+                repaired_series_count=len(repaired_series_ids),
+            )
 
+    identity_blocked_count = 0
     if normalized_file_ids is None:
         result = await session.execute(
             sa_select(ImportedSeries).where(
@@ -548,6 +587,17 @@ async def retry_failed_series(
             )
         )
         failed_items = list(result.scalars().all())
+        eligible_failed_items = [
+            item
+            for item in failed_items
+            if not (
+                item.cv_id is None
+                and item.user_selected_cv_id is None
+                and dict(item.diagnostics or {}).get("reason") == "trusted_source_identity_conflict"
+            )
+        ]
+        identity_blocked_count = len(failed_items) - len(eligible_failed_items)
+        failed_items = eligible_failed_items
 
         failed_file_result = await session.execute(
             sa_select(ImportedSeries, ImportedFile)
@@ -586,6 +636,14 @@ async def retry_failed_series(
     retry_items = list(retry_items_by_id.values())
 
     if not retry_items:
+        if repaired_series_ids:
+            await session.flush()
+            return job, 0
+        if identity_blocked_count:
+            raise ValidationError(
+                "These series still need identity review. Open Follow-up and use "
+                "Recover known series when available, or review their remaining conflicts."
+            )
         if source_recheck["files_checked"] > 0:
             await session.flush()
             await log_event(

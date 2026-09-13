@@ -285,7 +285,7 @@ class TestSeriesPage:
         assert series.footer.is_visible()
         assert not series.summary.is_visible()
         assert authed_page.locator("[data-testid='series-mission-control-footer']").count() == 0
-        add_series_box = authed_page.locator("[data-testid='header-add-series']").bounding_box()
+        add_series_box = authed_page.locator("[data-testid='header-add-action']").bounding_box()
         select_toggle_box = series.select_mode_toggle.bounding_box()
         assert add_series_box is not None
         assert select_toggle_box is not None

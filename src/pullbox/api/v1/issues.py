@@ -24,6 +24,7 @@ from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
 from pullbox.models.download import DownloadClientType, DownloadState
+from pullbox.models.indexer import IndexerConfig
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryFile, MatchConfidence
 from pullbox.models.search_log import SearchLog, SearchType
@@ -765,8 +766,19 @@ async def grab_release(
 
         raise ProviderError("download", "No download clients configured")
 
-    download_svc, indexer_configs = built
-    if body.indexer_id is not None and body.indexer_id not in indexer_configs:
+    download_svc, _health_configs = built
+    # Aggregated Prowlarr sources intentionally do not have per-indexer health entries.
+    if (
+        body.indexer_id is not None
+        and await session.scalar(
+            select(IndexerConfig.id).where(
+                IndexerConfig.id == body.indexer_id,
+                IndexerConfig.enabled.is_(True),
+                IndexerConfig.manager_available.is_(True),
+            )
+        )
+        is None
+    ):
         raise ValidationError(
             "The originating indexer is no longer available. Run the search again."
         )

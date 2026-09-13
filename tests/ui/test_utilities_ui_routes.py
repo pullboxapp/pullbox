@@ -438,7 +438,6 @@ class TestUtilitiesRouteContracts:
         assert "Clear all" not in response.text
         assert "Step 4" not in response.text
         assert "Rename to template" not in response.text
-        assert "Coming Soon" not in response.text
         assert "Queue the whole tracked library through the CBZ pipeline." not in response.text
         assert (
             "Switch to files when you want a per-file preview before queueing the job."

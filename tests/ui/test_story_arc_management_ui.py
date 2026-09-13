@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import event, select
@@ -67,6 +68,74 @@ def _csrf_header_for(client: AsyncClient) -> dict[str, str]:
     token = client.cookies.get(SESSION_COOKIE_NAME) or ""
     csrf = AuthService.get_csrf_token_from_session(token) or ""
     return {"X-CSRF-Token": csrf}
+
+
+@pytest.mark.parametrize("inline", [False, True])
+async def test_reorder_saves_once_without_confirmation(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    inline: bool,
+) -> None:
+    ids = await _seed_detail_arc(sec_db)
+    async with sec_db() as session:
+        arc = await session.get(StoryArc, ids["arc"])
+        assert arc is not None
+        revision = arc.revision
+    headers = _csrf_header_for(authenticated_client)
+    if inline:
+        headers.update({"HX-Request": "true", "HX-Target": "story-arc-detail-page"})
+    data = {"direction": "down", "expected_revision": revision, "return_per_page": 1}
+    url = f"/story-arcs/{ids['arc']}/memberships/{ids['million_membership']}/move"
+    response = await authenticated_client.post(
+        url, data=data, headers=headers, follow_redirects=False
+    )
+    async with sec_db() as session:
+        members = await StoryArcService().list_memberships(session, ids["arc"])
+        assert [member.id for member in members] == [
+            ids["annual_membership"],
+            ids["million_membership"],
+            ids["fractional_membership"],
+        ], "One click must persist the move without a confirmation round trip"
+        arc = await session.get(StoryArc, ids["arc"])
+        assert arc is not None and arc.revision == revision + 1
+    if inline:
+        assert response.status_code == 200
+        assert "HX-Redirect" not in response.headers
+        assert "page=2" in response.headers["HX-Replace-Url"]
+        assert 'data-testid="story-arc-reorder-preview"' not in response.text
+        assert 'data-testid="story-arc-placement-preview"' not in response.text
+        assert 'data-testid="story-arc-placement-state"' not in response.text
+        assert "story-arc-reordered" in response.headers["HX-Trigger-After-Settle"]
+    else:
+        assert response.status_code == 303
+        assert "notice=moved-down" in response.headers["location"]
+    # Replaying a stale page cannot accidentally move the issue a second time.
+    repeated = await authenticated_client.post(
+        url, data=data, headers=headers, follow_redirects=False
+    )
+    if inline:
+        assert repeated.status_code == 200
+        assert "HX-Redirect" not in repeated.headers
+        assert 'role="alert"' in repeated.text
+    else:
+        assert "error=conflict" in repeated.headers["location"]
+    async with sec_db() as session:
+        arc = await session.get(StoryArc, ids["arc"])
+        assert arc is not None and arc.revision == revision + 1
+
+
+async def test_detail_does_not_inspect_placement_files_for_removed_cards(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = await _seed_detail_arc(sec_db)
+    preview = AsyncMock(wraps=story_arc_routes.load_story_arc_placement_context)
+    monkeypatch.setattr(story_arc_routes, "load_story_arc_placement_context", preview)
+    response = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
+    assert response.status_code == 200
+    preview.assert_not_awaited()
+    assert "No separate folder" in response.text
 
 
 async def test_monitor_help_uses_shared_tooltip_and_screen_reader_description(
@@ -1186,26 +1255,21 @@ class TestStoryArcManagementUI:
         assert 'data-testid="story-arc-placement-policy-form"' not in response.text
         assert "No separate folder" in response.text
         assert 'href="/settings?tab=media#story-arc-files"' in response.text
-        assert 'data-testid="story-arc-placement-preview"' in response.text
-        assert 'data-classification="logical_only"' in response.text
+        assert 'data-testid="story-arc-placement-preview"' not in response.text
+        assert 'data-testid="story-arc-placement-state"' not in response.text
         assert 'data-exact-issue-number="1000000"' in response.text
-        assert 'scope="col">Effective target<' in response.text
-        assert 'scope="col">Method<' in response.text
-        assert 'scope="col">Ownership<' in response.text
-        assert 'scope="col">Collision<' in response.text
-        assert 'scope="col">Bytes<' in response.text
-        assert "Canonical library files are never moved by Story Arc placement." in response.text
-        assert (
-            "Referenced artifacts remain user-owned and are never overwritten or deleted."
-            in response.text
-        )
+        async with sec_db() as session:
+            context = await story_arc_presenters.load_story_arc_placement_context(
+                session, story_arc_id=ids["arc"], page=999
+            )
+        assert context.page == 1
+        assert all(item.classification == "logical_only" for item in context.preview.items)
 
         oversized_page = await authenticated_client.get(
             f"/story-arcs/{ids['arc']}?placement_page=999"
         )
         assert oversized_page.status_code == 200
-        assert 'data-placement-page="1"' in oversized_page.text
-        assert 'data-classification="logical_only"' in oversized_page.text
+        assert 'data-testid="story-arc-placement-preview"' not in oversized_page.text
 
     async def test_policy_preview_is_write_free_then_save_freezes_complete_policy(
         self,
@@ -1276,7 +1340,7 @@ class TestStoryArcManagementUI:
         assert str(ids["destination"]) in detail.text
         assert "Defaults for new arcs" in detail.text
 
-    async def test_managed_placement_state_can_sync_and_repair_from_detail(
+    async def test_managed_placement_actions_keep_working_without_diagnostic_cards(
         self,
         authenticated_client: AsyncClient,
         sec_db: async_sessionmaker[AsyncSession],
@@ -1299,8 +1363,12 @@ class TestStoryArcManagementUI:
 
         before = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
         assert before.status_code == 200
-        assert 'data-classification="will_materialize"' in before.text
-        assert 'data-testid="story-arc-placement-sync-' in before.text
+        assert 'data-testid="story-arc-placement-preview"' not in before.text
+        async with sec_db() as session:
+            preview = await placement_service.preview_arc(
+                session, int(ids["arc"]), limit=10, offset=0
+            )
+        assert preview.items[0].classification == "will_materialize"
 
         synced = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/memberships/{ids['membership']}/placement-sync",
@@ -1318,25 +1386,33 @@ class TestStoryArcManagementUI:
 
         current = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
         assert current.status_code == 200
-        assert 'data-testid="story-arc-placement-state"' in current.text
-        assert f'data-placement-id="{placement_id}"' in current.text
-        assert 'data-placement-state="current"' in current.text
-        assert "Managed" in current.text
-        assert 'data-classification="managed_current"' in current.text
+        assert 'data-testid="story-arc-placement-state"' not in current.text
+        async with sec_db() as session:
+            preview = await placement_service.preview_arc(
+                session, int(ids["arc"]), limit=10, offset=0
+            )
+        assert preview.items[0].classification == "managed_current"
 
         target.write_bytes(b"user replacement")
         drifted = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
         assert drifted.status_code == 200
-        assert 'data-classification="managed_drifted"' in drifted.text
+        async with sec_db() as session:
+            preview = await placement_service.preview_arc(
+                session, int(ids["arc"]), limit=10, offset=0
+            )
+        assert preview.items[0].classification == "managed_drifted"
         assert f'data-testid="story-arc-placement-repair-{placement_id}"' not in drifted.text
         assert target.read_bytes() == b"user replacement"
 
         target.unlink()
         missing = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
         assert missing.status_code == 200
-        assert 'data-classification="managed_missing"' in missing.text
-        assert f'data-testid="story-arc-placement-repair-{placement_id}"' in missing.text
-        assert "Canonical library files are never moved by Story Arc placement." in missing.text
+        async with sec_db() as session:
+            preview = await placement_service.preview_arc(
+                session, int(ids["arc"]), limit=10, offset=0
+            )
+        assert preview.items[0].classification == "managed_missing"
+        assert 'data-testid="story-arc-placement-preview"' not in missing.text
 
         repaired = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/placements/{placement_id}/repair",
@@ -1349,10 +1425,7 @@ class TestStoryArcManagementUI:
 
         removable = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
         assert removable.status_code == 200
-        assert f'data-testid="story-arc-placement-remove-{placement_id}"' in removable.text
-        assert 'name="confirm_managed_artifact_removal" value="true"' in removable.text
-        assert "Only the Pullbox-managed Story Arc copy will be removed." in removable.text
-        assert "The canonical library file will stay in place." in removable.text
+        assert 'data-testid="story-arc-placement-state"' not in removable.text
 
         unconfirmed = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/placements/{placement_id}/remove",
@@ -1411,13 +1484,17 @@ class TestStoryArcManagementUI:
         response = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
 
         assert response.status_code == 200
-        assert 'data-classification="managed_drifted"' in response.text
-        assert 'data-inspection-code="representation_changed"' in response.text
+        async with sec_db() as session:
+            preview = await placement_service.preview_arc(
+                session, int(ids["arc"]), limit=10, offset=0
+            )
+        assert preview.items[0].classification == "managed_drifted"
+        assert preview.items[0].inspection_code == "representation_changed"
         assert (
             f'data-testid="story-arc-placement-repair-{synchronized.placement.id}"'
             not in response.text
         )
-        assert "No write available" in response.text
+        assert 'data-testid="story-arc-placement-preview"' not in response.text
 
     async def test_blocked_managed_removal_disables_durable_actions_and_explains_safety(
         self,
@@ -1460,10 +1537,18 @@ class TestStoryArcManagementUI:
         response = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
 
         assert response.status_code == 200
-        assert f'data-placement-id="{synchronized.placement.id}"' in response.text
-        assert 'data-placement-state="drifted"' in response.text
-        assert 'data-testid="story-arc-placement-safety-blocked-' in response.text
-        assert "no longer matches its recorded ownership evidence" in response.text
+        assert 'data-testid="story-arc-placement-state"' not in response.text
+        async with sec_db() as session:
+            context = await story_arc_presenters.load_story_arc_placement_context(
+                session, story_arc_id=int(ids["arc"]), page=1
+            )
+        placement_view = context.placements.items[0]
+        assert placement_view.state == "drifted"
+        assert (
+            "no longer matches its recorded ownership evidence"
+            in placement_view.safety_block_reason
+        )
+        assert not placement_view.can_remove
         assert (
             f'data-testid="story-arc-placement-retry-{synchronized.placement.id}"'
             not in response.text
@@ -1508,9 +1593,12 @@ class TestStoryArcManagementUI:
 
         untracked = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
         assert untracked.status_code == 200
-        assert 'data-classification="untracked_identical"' in untracked.text
-        assert "User-owned (untracked)" in untracked.text
-        assert f'data-testid="story-arc-placement-adopt-{ids["membership"]}"' in untracked.text
+        assert 'data-testid="story-arc-placement-preview"' not in untracked.text
+        async with sec_db() as session:
+            preview = await placement_service.preview_arc(
+                session, int(ids["arc"]), limit=10, offset=0
+            )
+        assert preview.items[0].classification == "untracked_identical"
 
         adopted = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/memberships/{ids['membership']}/placement-sync",
@@ -1526,8 +1614,12 @@ class TestStoryArcManagementUI:
 
         referenced = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
         assert referenced.status_code == 200
-        assert 'data-classification="referenced_current"' in referenced.text
-        assert f'data-testid="story-arc-placement-forget-{placement_id}"' in referenced.text
+        assert 'data-testid="story-arc-placement-state"' not in referenced.text
+        async with sec_db() as session:
+            preview = await placement_service.preview_arc(
+                session, int(ids["arc"]), limit=10, offset=0
+            )
+        assert preview.items[0].classification == "referenced_current"
 
         forgotten = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/placements/{placement_id}/remove",
@@ -1540,7 +1632,7 @@ class TestStoryArcManagementUI:
         async with sec_db() as session:
             assert await session.get(StoryArcPlacement, placement_id) is None
 
-    async def test_detail_summarizes_durable_sync_work_with_one_bounded_aggregate(
+    async def test_durable_sync_work_survives_removing_the_diagnostic_cards(
         self,
         authenticated_client: AsyncClient,
         sec_db: async_sessionmaker[AsyncSession],
@@ -1552,13 +1644,17 @@ class TestStoryArcManagementUI:
         response = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
 
         assert response.status_code == 200
-        assert 'data-testid="story-arc-sync-work-summary"' in response.text
-        assert 'data-sync-state="queued">1<' in response.text
-        assert 'data-sync-state="running">1<' in response.text
-        assert 'data-sync-state="retry_wait">1<' in response.text
-        assert 'data-sync-state="failed">1<' in response.text
-        assert 'data-sync-state="completed">1<' in response.text
-        assert 'data-sync-state="cancelled">0<' in response.text
+        assert 'data-testid="story-arc-sync-work-summary"' not in response.text
+        async with sec_db() as session:
+            summary = await _load_sync_work_summary(session, story_arc_id=int(ids["arc"]))
+        assert (
+            summary.queued,
+            summary.running,
+            summary.retry_wait,
+            summary.failed,
+            summary.completed,
+            summary.cancelled,
+        ) == (1, 1, 1, 1, 1, 0)
 
     async def test_sync_work_summary_query_cardinality_is_constant_for_large_history(
         self,
@@ -1681,48 +1777,9 @@ class TestStoryArcManagementUI:
             arc = await session.get(StoryArc, ids["arc"])
             assert arc is not None
             revision = arc.revision
-        previewed = await authenticated_client.post(
-            f"/story-arcs/{ids['arc']}/memberships/{ids['million_membership']}/move",
-            data={"direction": "down", "expected_revision": revision},
-            headers=_csrf_header_for(authenticated_client),
-            follow_redirects=False,
-        )
-        assert previewed.status_code == 200
-        assert 'data-testid="story-arc-reorder-preview"' in previewed.text
-        assert "No reading order" in previewed.text
-        assert "Logical order only" in previewed.text
-        token_match = re.search(
-            r'name="preview_token" value="([^"]+)"',
-            previewed.text,
-        )
-        assert token_match is not None
-        preview_token = token_match.group(1)
-
-        async with sec_db() as session:
-            arc = await session.get(StoryArc, ids["arc"])
-            assert arc is not None and arc.revision == revision
-
-        not_confirmed = await authenticated_client.post(
-            f"/story-arcs/{ids['arc']}/memberships/{ids['million_membership']}/move",
-            data={
-                "direction": "down",
-                "expected_revision": revision,
-                "preview_token": preview_token,
-            },
-            headers=_csrf_header_for(authenticated_client),
-            follow_redirects=False,
-        )
-        assert not_confirmed.status_code == 303
-        assert not_confirmed.headers["location"].endswith("?error=reorder")
-
         moved = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/memberships/{ids['million_membership']}/move",
-            data={
-                "direction": "down",
-                "expected_revision": revision,
-                "preview_token": preview_token,
-                "confirm_reorder": "true",
-            },
+            data={"direction": "down", "expected_revision": revision},
             headers=_csrf_header_for(authenticated_client),
             follow_redirects=False,
         )
@@ -1789,11 +1846,13 @@ class TestStoryArcManagementUI:
             assert library_file is not None
             assert library_file.file_path == "/tmp/story-arc-ui/DC One Million 1000000.cbz"
 
-    async def test_managed_move_requires_preview_then_renames_only_arc_placements(
+    @pytest.mark.parametrize("interrupted", [False, True])
+    async def test_managed_move_renames_only_arc_placements_and_keeps_recovery(
         self,
         authenticated_client: AsyncClient,
         sec_db: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        interrupted: bool,
     ) -> None:
         ids = await _seed_placement_arc(sec_db, tmp_path)
         second_canonical = tmp_path / "library" / "DC One Million 2.cbz"
@@ -1866,30 +1925,16 @@ class TestStoryArcManagementUI:
             Path(second_sync.placement.placement_path),
         )
 
-        previewed = await authenticated_client.post(
-            f"/story-arcs/{ids['arc']}/memberships/{ids['membership']}/move",
-            data={"direction": "down", "expected_revision": policy.revision},
-            headers=_csrf_header_for(authenticated_client),
-            follow_redirects=False,
-        )
-        assert previewed.status_code == 200
-        assert "Managed renames" in previewed.text
-        assert ">2</dd>" in previewed.text
-        assert "Durable recovery checkpoint path" in previewed.text
-        assert "canonical file" in previewed.text
-        token_match = re.search(
-            r'name="preview_token" value="([^"]+)"',
-            previewed.text,
-        )
-        assert token_match is not None
-        preview_token = token_match.group(1)
-        preview = StoryArcManagedReorderService().inspect_preview_token(
-            story_arc_id=int(ids["arc"]),
-            membership_id=int(ids["membership"]),
-            direction="down",
-            expected_revision=policy.revision,
-            preview_token=preview_token,
-        )
+        async with sec_db() as session:
+            preview = await StoryArcManagedReorderService().preview_adjacent_move(
+                session,
+                int(ids["arc"]),
+                int(ids["membership"]),
+                direction="down",
+                expected_revision=policy.revision,
+            )
+        preview_token = preview.preview_token
+        assert preview.managed_rename_count == 2
         new_targets = tuple(
             Path(str(item.new_path)) for item in preview.items if item.action == "rename"
         )
@@ -1899,35 +1944,34 @@ class TestStoryArcManagementUI:
             b"second canonical story arc issue",
         ]
 
-        # Simulate request/process loss immediately after the durable prepare
-        # commit.  A normal fresh detail GET must rediscover the operation and
-        # mint a usable recovery confirmation without the browser-held token.
-        preparing_service = StoryArcManagedReorderService()
-        async with sec_db() as session:
-            await preparing_service._verify_and_prepare(
-                session,
-                preparing_service._decode_plan(preview_token),
+        move_data = {"direction": "down", "expected_revision": policy.revision}
+        if interrupted:
+            # Simulate request/process loss immediately after the durable prepare
+            # commit.  A normal fresh detail GET must rediscover the operation and
+            # mint a usable recovery confirmation without the browser-held token.
+            preparing_service = StoryArcManagedReorderService()
+            async with sec_db() as session:
+                await preparing_service._verify_and_prepare(
+                    session,
+                    preparing_service._decode_plan(preview_token),
+                )
+            recovered_page = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
+            assert recovered_page.status_code == 200
+            assert "Reorder recovery" in recovered_page.text
+            assert "interrupted request" in recovered_page.text
+            assert "Retry recovery" in recovered_page.text
+            recovered_token_match = re.search(
+                r'name="preview_token" value="([^"]+)"',
+                recovered_page.text,
             )
-        recovered_page = await authenticated_client.get(f"/story-arcs/{ids['arc']}")
-        assert recovered_page.status_code == 200
-        assert "Reorder recovery" in recovered_page.text
-        assert "interrupted request" in recovered_page.text
-        assert "Retry recovery" in recovered_page.text
-        recovered_token_match = re.search(
-            r'name="preview_token" value="([^"]+)"',
-            recovered_page.text,
-        )
-        assert recovered_token_match is not None
-        preview_token = recovered_token_match.group(1)
+            assert recovered_token_match is not None
+            preview_token = recovered_token_match.group(1)
+
+            move_data["preview_token"] = preview_token
 
         confirmed = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/memberships/{ids['membership']}/move",
-            data={
-                "direction": "down",
-                "expected_revision": policy.revision,
-                "preview_token": preview_token,
-                "confirm_reorder": "true",
-            },
+            data=move_data,
             headers=_csrf_header_for(authenticated_client),
             follow_redirects=False,
         )

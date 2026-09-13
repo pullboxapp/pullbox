@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from playwright.sync_api import Page, expect
 
 from pullbox.config import get_settings
 from pullbox.utilities.settings import resolve_utility_directory
@@ -17,6 +18,27 @@ pytestmark = pytest.mark.e2e
 
 class TestSettingsPage:
     """Behavior-first E2E checks for the settings shell."""
+
+    def test_search_priority_chevrons_swap_and_renumber_rows(
+        self, authed_page: Page, seeded_server: str
+    ) -> None:
+        page = authed_page
+        SettingsPage(page, seeded_server).goto("indexers")
+        card = page.get_by_test_id("settings-indexers-priority-card")
+        up = card.locator('[data-order-direction="up"]')
+        down = card.locator('[data-order-direction="down"]')
+        expect(up).to_have_count(4)
+        expect(up.first).to_be_disabled()
+        expect(down.last).to_be_disabled()
+        initial = [up.nth(index).get_attribute("aria-label") for index in range(4)]
+        assert initial[0] and initial[1]
+        down.first.press("Enter")
+        expect(up.first).to_have_attribute("aria-label", initial[1])
+        expect(up.nth(1)).to_have_attribute("aria-label", initial[0])
+        expect(card.locator('span[x-text="index + 1"]')).to_have_text(["1", "2", "3", "4"])
+        up.nth(1).press("Enter")
+        expect(up.first).to_have_attribute("aria-label", initial[0])
+        expect(up.nth(1)).to_have_attribute("aria-label", initial[1])
 
     @pytest.mark.parametrize("blocked", [False, True])
     def test_disabled_root_removal_preview_confirmation_and_cancel(

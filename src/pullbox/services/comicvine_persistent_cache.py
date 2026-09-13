@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.models.provider_cache import MetadataProviderCacheEntry
 from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesMetadata, SeriesSearchResult
+from pullbox.providers.story_arcs import StoryArcSearchResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -154,6 +155,37 @@ class PersistentComicVineCacheProvider:
             fetch,
             _global_series_search_results_to_payload,
             _global_series_search_results_from_payload,
+        )
+
+    async def search_story_arcs_page(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[StoryArcSearchResult], int]:
+        request = {
+            "query": NameMatcher.normalize(query),
+            "limit": int(limit),
+            "offset": int(offset),
+        }
+
+        async def fetch() -> tuple[list[StoryArcSearchResult], int]:
+            return cast(
+                "tuple[list[StoryArcSearchResult], int]",
+                await self._provider.search_story_arcs_page(
+                    query,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
+        return await self._get_or_fetch(
+            "search_story_arcs_page",
+            request,
+            fetch,
+            _story_arc_search_results_to_payload,
+            _story_arc_search_results_from_payload,
         )
 
     async def get_series(self, series_provider_id: str) -> SeriesMetadata:
@@ -730,6 +762,23 @@ def _global_series_search_results_from_payload(
     payload: dict[str, Any],
 ) -> tuple[list[SeriesSearchResult], int]:
     items = [SeriesSearchResult(**item) for item in payload.get("items", [])]
+    return items, int(payload.get("total_results") or len(items))
+
+
+def _story_arc_search_results_to_payload(
+    results: tuple[list[StoryArcSearchResult], int],
+) -> dict[str, Any]:
+    items, total_results = results
+    return {
+        "items": [asdict(result) for result in items],
+        "total_results": int(total_results),
+    }
+
+
+def _story_arc_search_results_from_payload(
+    payload: dict[str, Any],
+) -> tuple[list[StoryArcSearchResult], int]:
+    items = [StoryArcSearchResult(**item) for item in payload.get("items", [])]
     return items, int(payload.get("total_results") or len(items))
 
 

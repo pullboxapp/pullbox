@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+from itertools import batched
 from typing import TYPE_CHECKING, Any, Final
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -33,6 +34,7 @@ from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.models.series import Series
 from pullbox.services.audit_service import AuditService
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
+from pullbox.services.import_known_series_recovery import load_known_series_recovery
 from pullbox.services.import_review_actions import apply_safety_allow_once_to_file
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
 from pullbox.services.import_story_arc_resolution import (
@@ -41,6 +43,8 @@ from pullbox.services.import_story_arc_resolution import (
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from pullbox.services.import_known_series_recovery import KnownSeriesRecovery
 
 
 _PREVIEW_TOKEN_SALT: Final = "completed-import-cleanup-v1"
@@ -61,6 +65,7 @@ class CompletedImportCleanupAction(enum.StrEnum):
     NORMALIZE_ALREADY_OWNED = "normalize_already_owned"
     ACCEPT_RECOMMENDED_CONFLICTS = "accept_recommended_conflicts"
     RESOLVE_MIXED_FOLDER_FILES = "resolve_mixed_folder_files"
+    RECOVER_KNOWN_SERIES = "recover_known_series"
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,13 +386,33 @@ async def _load_mixed_folder_resolutions(
     job_id: int,
 ) -> tuple[_MixedFolderResolution, ...]:
     """Resolve exact local targets without provider calls or source-file access."""
+    series_signal = ImportedFile.diagnostics["metadata_signals"]["series_name"].as_string()
+    issue_signal = ImportedFile.diagnostics["metadata_signals"]["issue_number"].as_string()
+    source_title_expression = case(
+        (
+            series_signal == "comicinfo",
+            ImportedFile.diagnostics["source_metadata"]["comicinfo"]["series"].as_string(),
+        ),
+        else_=ImportedFile.parsed_series,
+    )
     source_rows = (
         await session.execute(
-            select(ImportedFile, ImportedSeries)
+            select(ImportedFile, ImportedSeries, LibraryFile)
             .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
+            .outerjoin(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
             .where(
                 ImportedFile.import_job_id == job_id,
                 ImportedFile.status.in_((ImportedFileStatus.NO_MATCH, ImportedFileStatus.IMPORTED)),
+                series_signal.in_(("comicinfo", "sidecar")),
+                issue_signal.in_(("comicinfo", "sidecar")),
+                func.lower(func.trim(source_title_expression))
+                != func.lower(
+                    func.trim(
+                        func.coalesce(
+                            func.nullif(ImportedSeries.cv_title, ""), ImportedSeries.raw_series_name
+                        )
+                    )
+                ),
             )
             .order_by(ImportedFile.id)
         )
@@ -396,39 +421,22 @@ async def _load_mixed_folder_resolutions(
         return ()
 
     current_library_by_file_id: dict[int, LibraryFile] = {}
-    imported_library_ids = {
-        int(imported_file.library_file_id)
-        for imported_file, _imported_series in source_rows
-        if imported_file.status is ImportedFileStatus.IMPORTED
-        and imported_file.library_file_id is not None
-    }
-    if imported_library_ids:
-        current_library_by_id = {
-            int(library_file.id): library_file
-            for library_file in (
-                await session.scalars(
-                    select(LibraryFile).where(LibraryFile.id.in_(imported_library_ids))
-                )
-            ).all()
-        }
-        for imported_file, _imported_series in source_rows:
-            if imported_file.library_file_id is None:
-                continue
-            library_file = current_library_by_id.get(int(imported_file.library_file_id))
-            if (
-                library_file is not None
-                and library_file.storage_mode is LibraryFileStorageMode.REFERENCED
-                and library_file.file_path == imported_file.file_path
-                and library_file.issue_id == imported_file.matched_issue_id
-            ):
-                current_library_by_file_id[int(imported_file.id)] = library_file
+    for imported_file, _imported_series, library_file in source_rows:
+        if (
+            imported_file.status is ImportedFileStatus.IMPORTED
+            and library_file is not None
+            and library_file.storage_mode is LibraryFileStorageMode.REFERENCED
+            and library_file.file_path == imported_file.file_path
+            and library_file.issue_id == imported_file.matched_issue_id
+        ):
+            current_library_by_file_id[int(imported_file.id)] = library_file
 
     source_candidates: list[
         tuple[ImportedFile, ImportedSeries, str, str, int | None, int | None, str]
     ] = []
     normalized_titles: set[str] = set()
     trusted_series_cv_ids: set[int] = set()
-    for imported_file, imported_series in source_rows:
+    for imported_file, imported_series, _library_file in source_rows:
         if (
             imported_file.status is ImportedFileStatus.IMPORTED
             and int(imported_file.id) not in current_library_by_file_id
@@ -513,13 +521,11 @@ async def _load_mixed_folder_resolutions(
     if not candidate_targets:
         return ()
 
-    target_issues = list(
-        (
-            await session.scalars(
-                select(Issue).where(Issue.series_id.in_(sorted(target_series_ids)))
-            )
-        ).all()
-    )
+    target_issues = [
+        issue
+        for ids in batched(sorted(target_series_ids), 400)
+        for issue in (await session.scalars(select(Issue).where(Issue.series_id.in_(ids)))).all()
+    ]
     issues_by_cv_id = {
         int(issue.comicvine_id): issue for issue in target_issues if issue.comicvine_id is not None
     }
@@ -564,15 +570,14 @@ async def _load_mixed_folder_resolutions(
 
     target_issue_ids = {int(item[5].id) for item in resolved_targets}
     owned_files_by_issue_id: dict[int, list[int]] = {}
-    for library_file in (
-        await session.scalars(
-            select(LibraryFile).where(LibraryFile.issue_id.in_(sorted(target_issue_ids)))
-        )
-    ).all():
-        if library_file.issue_id is not None:
-            owned_files_by_issue_id.setdefault(int(library_file.issue_id), []).append(
-                int(library_file.id)
-            )
+    for ids in batched(sorted(target_issue_ids), 400):
+        for library_file in (
+            await session.scalars(select(LibraryFile).where(LibraryFile.issue_id.in_(ids)))
+        ).all():
+            if library_file.issue_id is not None:
+                owned_files_by_issue_id.setdefault(int(library_file.issue_id), []).append(
+                    int(library_file.id)
+                )
     files_by_target_issue: dict[int, list[int]] = {}
     for imported_file, _series, _title, _source, _target_series, issue in resolved_targets:
         files_by_target_issue.setdefault(int(issue.id), []).append(int(imported_file.id))
@@ -654,6 +659,19 @@ async def _load_snapshot(
     job_id: int,
     action: CompletedImportCleanupAction,
 ) -> CompletedImportCleanupSnapshot:
+    if action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
+        plans = await load_known_series_recovery(session, job_id)
+        digest = sha256()
+        for plan in plans:
+            digest.update(f"{plan.file_id}|{plan.cv_id}|{plan.evidence_digest}\n".encode())
+        return CompletedImportCleanupSnapshot(
+            len(plans),
+            len(plans),
+            plans[0].file_id if plans else None,
+            plans[-1].file_id if plans else None,
+            None,
+            digest.hexdigest(),
+        )
     if action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
         resolutions = await _load_mixed_folder_resolutions(session, job_id)
         digest = sha256()
@@ -738,6 +756,9 @@ async def count_completed_import_cleanup_scope(
     action: CompletedImportCleanupAction,
 ) -> tuple[int, int]:
     """Return action and file counts without hashing the full preview scope."""
+    if action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
+        count = len(await load_known_series_recovery(session, job_id))
+        return count, count
     if action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
         count = len(await _load_mixed_folder_resolutions(session, job_id))
         return count, count
@@ -770,9 +791,11 @@ async def list_completed_import_cleanup_files(
     await _load_completed_job(session, job_id)
     normalized_page = max(1, int(page))
     normalized_page_size = min(max(1, int(page_size)), 100)
-    if action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
-        resolutions = await _load_mixed_folder_resolutions(session, job_id)
-        eligible_file_ids = [resolution.file_id for resolution in resolutions]
+    if action in {
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
+        CompletedImportCleanupAction.RECOVER_KNOWN_SERIES,
+    }:
+        eligible_file_ids = await _identity_recovery_file_ids(session, job_id, action)
         total = len(eligible_file_ids)
         total_pages = max(1, (total + normalized_page_size - 1) // normalized_page_size)
         normalized_page = min(normalized_page, total_pages)
@@ -827,9 +850,11 @@ async def list_completed_import_cleanup_examples(
     limit: int = _EXAMPLE_LIMIT,
 ) -> tuple[str, ...]:
     """Return sanitized example filenames without hydrating the full scope."""
-    if action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
-        resolutions = await _load_mixed_folder_resolutions(session, job_id)
-        file_ids = [resolution.file_id for resolution in resolutions[:limit]]
+    if action in {
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
+        CompletedImportCleanupAction.RECOVER_KNOWN_SERIES,
+    }:
+        file_ids = (await _identity_recovery_file_ids(session, job_id, action))[:limit]
         names_by_id = {
             int(file_id): file_name
             for file_id, file_name in (
@@ -861,7 +886,10 @@ async def summarize_completed_import_cleanup_scope(
 ) -> CompletedImportCleanupSummary:
     """Load a recovery-card summary without resolving mixed folders twice."""
     normalized_limit = min(max(1, int(example_limit)), 10)
-    if action is not CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
+    if action not in {
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
+        CompletedImportCleanupAction.RECOVER_KNOWN_SERIES,
+    }:
         affected_count, affected_file_count = await count_completed_import_cleanup_scope(
             session,
             job_id,
@@ -883,8 +911,8 @@ async def summarize_completed_import_cleanup_scope(
             examples=examples,
         )
 
-    resolutions = await _load_mixed_folder_resolutions(session, job_id)
-    file_ids = [resolution.file_id for resolution in resolutions[:normalized_limit]]
+    eligible_file_ids = await _identity_recovery_file_ids(session, job_id, action)
+    file_ids = eligible_file_ids[:normalized_limit]
     names_by_id = {
         int(file_id): file_name
         for file_id, file_name in (
@@ -894,10 +922,20 @@ async def summarize_completed_import_cleanup_scope(
         ).all()
     }
     return CompletedImportCleanupSummary(
-        affected_count=len(resolutions),
-        affected_file_count=len(resolutions),
+        affected_count=len(eligible_file_ids),
+        affected_file_count=len(eligible_file_ids),
         examples=tuple(_safe_example_name(names_by_id[file_id]) for file_id in file_ids),
     )
+
+
+async def _identity_recovery_file_ids(
+    session: AsyncSession,
+    job_id: int,
+    action: CompletedImportCleanupAction,
+) -> list[int]:
+    if action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
+        return [plan.file_id for plan in await load_known_series_recovery(session, job_id)]
+    return [plan.file_id for plan in await _load_mixed_folder_resolutions(session, job_id)]
 
 
 def _snapshot_payload(snapshot: CompletedImportCleanupSnapshot) -> dict[str, object]:
@@ -1425,6 +1463,85 @@ async def _prepare_series_for_retry(
     return True
 
 
+async def _apply_known_series_recovery(session: AsyncSession, job: ImportJob) -> set[int]:
+    plans = await load_known_series_recovery(session, job.id)
+    affected: set[int] = set()
+    for batch in batched(plans, 400):
+        items = {
+            item.id: item
+            for item in (
+                await session.scalars(
+                    select(ImportedSeries).where(
+                        ImportedSeries.id.in_({plan.series_id for plan in batch})
+                    )
+                )
+            ).all()
+        }
+        files = {
+            file.id: file
+            for file in (
+                await session.scalars(
+                    select(ImportedFile).where(
+                        ImportedFile.id.in_([plan.file_id for plan in batch])
+                    )
+                )
+            ).all()
+        }
+        for plan in batch:
+            item = items.get(plan.series_id)
+            file = files.get(plan.file_id)
+            if item is None or file is None:
+                raise ValidationError("Recovery evidence disappeared. Preview the action again.")
+            _apply_known_series_file(item, file, plan, affected)
+        await refresh_story_arc_entries_for_import_files(
+            session,
+            import_job_id=job.id,
+            import_file_ids=list(files),
+        )
+        await session.flush()
+    return affected
+
+
+def _apply_known_series_file(
+    item: ImportedSeries,
+    file: ImportedFile,
+    plan: KnownSeriesRecovery,
+    affected: set[int],
+) -> None:
+    if item.id not in affected:
+        candidate = dict(item.diagnostics or {}).get("selected_candidate")
+        candidate = candidate if isinstance(candidate, dict) else {}
+        item.cv_id = plan.cv_id
+        item.cv_match_method = plan.match_method
+        item.cv_match_score = 1.0
+        item.cv_title = item.raw_series_name
+        item.cv_year = item.raw_year
+        item.cv_issue_count = candidate.get("issue_count")
+        item.diagnostics = {
+            **dict(item.diagnostics or {}),
+            "previous_reason": "trusted_source_identity_conflict",
+            "reason": "known_series_recovered",
+            "file_identity_review_required": True,
+        }
+        affected.add(item.id)
+    file.status = ImportedFileStatus.CONFIRMED
+    file.include_in_import = True
+    file.matched_issue_cv_id = int(plan.summary["provider_id"])
+    file.match_confidence = "high"
+    file.match_method = "comicvine_id"
+    file.error_message = None
+    file.diagnostics = {
+        **dict(file.diagnostics or {}),
+        "target_issue_summary": plan.summary,
+        "completed_import_cleanup": {
+            "action": CompletedImportCleanupAction.RECOVER_KNOWN_SERIES.value,
+            "evidence_digest": plan.evidence_digest,
+            "source_preserved": True,
+            "resolved_at": datetime.now(UTC).isoformat(),
+        },
+    }
+
+
 async def apply_completed_import_cleanup(
     session: AsyncSession,
     job_id: int,
@@ -1447,9 +1564,13 @@ async def apply_completed_import_cleanup(
     if current_snapshot != preview_snapshot:
         raise ValidationError("The cleanup scope changed. Preview the action again.")
 
-    if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
-        affected_series_ids = await _apply_recommended_conflicts(session, job)
+    if action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
+        affected_series_ids = await _apply_known_series_recovery(session, job)
         affected_file_ids: tuple[int, ...] = ()
+        requires_import_retry = await _prepare_series_for_retry(session, job, affected_series_ids)
+    elif action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
+        affected_series_ids = await _apply_recommended_conflicts(session, job)
+        affected_file_ids = ()
         requires_import_retry = await _prepare_series_for_retry(session, job, affected_series_ids)
     elif action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
         affected_series_ids, retry_series_ids = await _apply_mixed_folder_resolutions(session, job)

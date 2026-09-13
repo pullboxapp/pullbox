@@ -143,6 +143,8 @@ async def register_indexers(
                 indexer_rankings=prowlarr_indexer_rankings,
             )
             registry.register_indexer(_PROWLARR_AGGREGATE_CONFIG_ID, aggregate)
+            for config_id, _priority in prowlarr_indexer_rankings.values():
+                registry.register_indexer_alias(config_id, _PROWLARR_AGGREGATE_CONFIG_ID)
             logger.debug(
                 "prowlarr_aggregate_registered",
                 indexer_count=len(prowlarr_torznab_ids),

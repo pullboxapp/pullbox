@@ -69,6 +69,23 @@ def test_authenticated_pages_have_no_wcag_aa_violations(
     )
 
 
+def test_header_add_menu_has_no_wcag_aa_violations(
+    authed_page,
+    seeded_server: str,  # type: ignore[no-untyped-def]
+) -> None:
+    authed_page.goto(f"{seeded_server}/")
+    authed_page.locator("[data-testid='dashboard-page']").wait_for(state="visible")
+    authed_page.locator("[data-testid='header-add-menu-trigger']").click()
+    authed_page.locator("[data-testid='header-add-menu-panel']").wait_for(state="visible")
+
+    assert_no_axe_violations(
+        authed_page,
+        name="header add menu",
+        include=["[data-testid='app-header']"],
+        exclude=[".htmx-indicator"],
+    )
+
+
 def test_settings_confirm_modal_has_no_wcag_aa_violations(
     authed_page,
     seeded_server: str,  # type: ignore[no-untyped-def]

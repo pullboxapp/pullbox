@@ -76,6 +76,29 @@ Available recovery actions are intentionally narrow:
   issue. Ambiguous titles, filename-only guesses, conflicting target files,
   stale references, and managed files remain review-only. The source path and
   source artifact are never changed.
+- **Recover known series** re-evaluates legacy series-level identity rejections
+  using saved evidence, without a new scan or provider requests. A unique Mylar
+  series ID, or a retained trusted folder/ComicInfo series match, can restore
+  only files whose saved series and issue identities agree. Existing catalog
+  ownership, issue numbers, per-file conflicts, manual decisions, skips, and
+  safety blocks are checked before an actor-bound preview is issued. Ambiguous
+  duplicate candidates and a series containing an unpreviewed ready file are
+  excluded. The confirmed scope runs through normal background Step 4 source
+  validation and import rules. Successful files and source paths are untouched;
+  unresolved files remain in Follow-up. This is not a blanket repair of stale
+  IDs or a replacement for manual review when trusted evidence disagrees.
+
+For older jobs, **Retry failed** also corrects the misleading series-level
+`No eligible files available for import` outcome when the series already has
+successful imported files and no failed or ready files remain. It retains the
+prior error in diagnostics, rebuilds the counters, and leaves unresolved file
+decisions visible. A status-only correction does not launch another import.
+
+Recovery queries must not expand an entire library into SQL bind parameters.
+Mixed-folder lookups join existing references and discard exact same-title
+rows before loading archive diagnostics; the final shared identity rules still
+decide eligibility. Known-series recovery batches catalog lookups and fails
+closed if saved or current ownership evidence changes after preview.
 
 During a Mylar scan, Pullbox can also reconcile one stale recorded path with a
 file found in another series folder when the embedded ComicInfo issue ID is an

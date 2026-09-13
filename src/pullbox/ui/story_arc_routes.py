@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Annotated, Literal
@@ -10,11 +11,15 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
-from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.api.deps import (
+    AuthenticatedUser,
+    DbSession,
+    get_request_session_factory,
+)
 from pullbox.config import get_settings
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
@@ -58,6 +63,7 @@ from pullbox.ui.story_arc_presenters import (
     load_story_arc_detail,
     load_story_arc_list_page,
     load_story_arc_placement_context,
+    load_story_arc_placement_policy_view,
 )
 
 router = APIRouter()
@@ -302,6 +308,7 @@ async def _render_story_arc_detail(
     placement_proposal: StoryArcPlacementPolicyInput | None = None,
     placement_message: str = "",
     reorder_preview: StoryArcReorderPreview | None = None,
+    reorder_message: str = "",
 ) -> Response:
     if reorder_preview is None:
         try:
@@ -322,17 +329,24 @@ async def _render_story_arc_detail(
     )
     if detail is None:
         raise HTTPException(status_code=404, detail="Story arc not found")
-    placement_ui = await load_story_arc_placement_context(
-        session,
-        story_arc_id=story_arc_id,
-        page=placement_page,
-        proposal=placement_proposal,
+    placement_ui = (
+        await load_story_arc_placement_context(
+            session, story_arc_id=story_arc_id, page=placement_page, proposal=placement_proposal
+        )
+        if placement_proposal is not None
+        else None
+    )
+    placement_policy = (
+        placement_ui.policy
+        if placement_ui is not None
+        else await load_story_arc_placement_policy_view(session, story_arc_id)
     )
     context = _ctx(
         request,
         _StoryArcTemplateUser(username=username),
         story_arc=detail,
         placement_ui=placement_ui,
+        placement_policy=placement_policy,
         pagination_base_url=f"/story-arcs/{story_arc_id}?{urlencode({'per_page': per_page})}",
         placement_pagination_base_url=(
             f"/story-arcs/{story_arc_id}?{urlencode({'page': page, 'per_page': per_page})}"
@@ -341,6 +355,8 @@ async def _render_story_arc_detail(
         error_message=error_message,
         placement_message=placement_message,
         reorder_preview=reorder_preview,
+        reorder_message=reorder_message,
+        show_placement_diagnostics=placement_proposal is not None,
     )
     return _templates().TemplateResponse(request, "pages/story_arc_detail.html", context)
 
@@ -455,19 +471,21 @@ async def story_arc_add(
     error: str | None = Query(None),
 ) -> Response:
     """Render provider-first Story Arc discovery on its own add page."""
+    template_user = _StoryArcTemplateUser(username=user.username)
     manual_create_enabled = get_settings().story_arc_manual_create_enabled
     search_context = await story_arc_catalog_routes.load_story_arc_catalog_search_context(
         session,
         q=q,
         page=page,
         base_url="/story-arcs/add",
+        session_factory=get_request_session_factory(request),
     )
     search_context["error_message"] = _ERROR_MESSAGES.get(error or "", "") or str(
         search_context["error_message"]
     )
     context = _ctx(
         request,
-        user,
+        template_user,
         **search_context,
         arc_file_defaults=await load_story_arc_file_defaults(session),
         story_arc_manual_create_enabled=manual_create_enabled,
@@ -843,117 +861,104 @@ async def story_arc_move_membership(
     return_page: Annotated[int | None, Form(ge=1)] = None,
     return_per_page: Annotated[int | None, Form(ge=1, le=100)] = None,
     preview_token: Annotated[str, Form(max_length=200_000)] = "",
-    confirm_reorder: bool = Form(False),
 ) -> Response:
-    """Preview, then confirm, one keyboard-accessible reading-order step."""
+    """Apply a chevron move through the same durable, source-preserving plan."""
+    username, user_id = user.username, user.id
+    inline = request.headers.get("HX-Target") == "story-arc-detail-page"
+    notice, error = "", ""
+    page, per_page = return_page or 1, return_per_page or 25
     try:
-        if preview_token:
-            if not confirm_reorder:
-                raise StoryArcManagedReorderError(
-                    "confirmation_required",
-                    "Review and explicitly confirm the reorder preview",
-                )
-            await _managed_reorder_service.confirm_adjacent_move(
+        if not preview_token:
+            preview = await _managed_reorder_service.preview_adjacent_move(
                 session,
-                story_arc_id=story_arc_id,
-                membership_id=membership_id,
+                story_arc_id,
+                membership_id,
                 direction=direction,
                 expected_revision=expected_revision,
-                preview_token=preview_token,
             )
-            return _redirect(
-                request,
-                _detail_url(
-                    story_arc_id,
-                    notice=f"moved-{direction}",
-                    page=return_page,
-                    per_page=return_per_page,
-                ),
-            )
-        preview = await _managed_reorder_service.preview_adjacent_move(
+            preview_token = preview.preview_token
+        await _managed_reorder_service.confirm_adjacent_move(
             session,
-            story_arc_id,
-            membership_id,
+            story_arc_id=story_arc_id,
+            membership_id=membership_id,
             direction=direction,
             expected_revision=expected_revision,
+            preview_token=preview_token,
         )
-        return await _render_story_arc_detail(
-            story_arc_id=story_arc_id,
-            request=request,
-            username=user.username,
-            user_id=user.id,
-            session=session,
-            page=return_page or 1,
-            per_page=return_per_page or 25,
-            placement_page=1,
-            reorder_preview=preview,
+        notice = f"moved-{direction}"
+        # Follow the moved member across a pagination boundary using saved order,
+        # not a client-supplied row number or potentially sparse sequence value.
+        ranked = (
+            select(
+                IssueStoryArc.id,
+                func.row_number()
+                .over(
+                    order_by=(
+                        IssueStoryArc.sequence_number,
+                        IssueStoryArc.source_ordinal,
+                        IssueStoryArc.id,
+                    )
+                )
+                .label("position"),
+            )
+            .where(IssueStoryArc.story_arc_id == story_arc_id)
+            .subquery()
         )
+        position = await session.scalar(
+            select(ranked.c.position).where(ranked.c.id == membership_id)
+        )
+        if position is not None:
+            page = (int(position) - 1) // per_page + 1
     except StoryArcManagedReorderError as exc:
         await session.rollback()
         if exc.code in {"already_first", "already_last"}:
-            return _redirect(
-                request,
-                _detail_url(
-                    story_arc_id,
-                    notice=exc.code.replace("_", "-"),
-                    page=return_page,
-                    per_page=return_per_page,
-                ),
+            notice = exc.code.replace("_", "-")
+        else:
+            error = (
+                "conflict"
+                if exc.category == "conflict"
+                else "not-found"
+                if exc.category == "not_found"
+                else "reorder-recovery"
+                if exc.category == "recovery"
+                else "reorder"
             )
-        if exc.category == "recovery" and preview_token:
-            try:
-                recovery_preview = _managed_reorder_service.inspect_preview_token(
-                    story_arc_id=story_arc_id,
-                    membership_id=membership_id,
-                    direction=direction,
-                    expected_revision=expected_revision,
-                    preview_token=preview_token,
-                    recovery_pending=True,
-                )
-            except StoryArcManagedReorderError:
-                recovery_preview = None
-            if recovery_preview is not None:
-                return await _render_story_arc_detail(
-                    story_arc_id=story_arc_id,
-                    request=request,
-                    username=user.username,
-                    user_id=user.id,
-                    session=session,
-                    page=return_page or 1,
-                    per_page=return_per_page or 25,
-                    placement_page=1,
-                    error_message=_ERROR_MESSAGES["reorder-recovery"],
-                    reorder_preview=recovery_preview,
-                )
-        error_code = (
-            "conflict"
-            if exc.category == "conflict"
-            else "not-found"
-            if exc.category == "not_found"
-            else "reorder-recovery"
-            if exc.category == "recovery"
-            else "reorder"
-        )
-        return _redirect(
-            request,
-            _detail_url(
-                story_arc_id,
-                error=error_code,
-                page=return_page,
-                per_page=return_per_page,
-            ),
-        )
     except IntegrityError:
         await session.rollback()
-        return _redirect(
-            request,
-            _detail_url(
-                story_arc_id,
-                error="conflict",
-                page=return_page,
-                per_page=return_per_page,
-            ),
-        )
+        error = "conflict"
+
+    url = _detail_url(
+        story_arc_id,
+        notice=notice or None,
+        error=error or None,
+        page=page if inline or return_page is not None or return_per_page is not None else None,
+        per_page=per_page if inline or return_per_page is not None else None,
+    )
+    if not inline:
+        return _redirect(request, url)
+    response = await _render_story_arc_detail(
+        story_arc_id=story_arc_id,
+        request=request,
+        username=username,
+        user_id=user_id,
+        session=session,
+        page=page,
+        per_page=per_page,
+        placement_page=1,
+        error_message=_ERROR_MESSAGES.get(error, ""),
+        reorder_message=_NOTICE_MESSAGES.get(notice, ""),
+    )
+    response.headers["HX-Replace-Url"] = _detail_url(story_arc_id, page=page, per_page=per_page)
+    response.headers["HX-Trigger-After-Settle"] = json.dumps(
+        {
+            "story-arc-reordered": {
+                "membershipId": membership_id,
+                "direction": direction,
+                "pageChanged": page != (return_page or 1),
+            }
+        }
+    )
+    return response
 
 
 @router.post(

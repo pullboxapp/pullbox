@@ -61,7 +61,7 @@ class TestSidebarShell:
         assert authed_page.locator("[data-testid='sidebar-footer-status']").count() == 0
         assert shell.section("library").is_visible()
         assert shell.section("admin").is_visible()
-        assert shell.add_series_button.is_visible()
+        assert shell.add_button.is_visible()
         assert shell.link("series").is_visible()
         assert shell.link("import").is_visible()
         assert shell.link("health").is_visible()
@@ -517,7 +517,7 @@ class TestSidebarShell:
         assert shell.badge("health").count() == 1
         assert requests == []
 
-    def test_header_add_series_action_stays_visible_across_navigation(
+    def test_header_add_action_stays_visible_across_navigation(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
@@ -525,22 +525,114 @@ class TestSidebarShell:
         shell = AppShellPage(authed_page, seeded_server)
         shell.goto("/")
 
-        assert shell.add_series_button.is_visible()
-        assert authed_page.locator("[data-testid='header-add-series']").count() == 1
+        assert shell.add_button.is_visible()
+        assert authed_page.locator("[data-testid='header-add-action']").count() == 1
 
         shell.link("series").click()
         wait_for_htmx(authed_page)
 
         assert "/series" in authed_page.url
-        assert shell.add_series_button.is_visible()
-        assert authed_page.locator("[data-testid='header-add-series']").count() == 1
+        assert shell.add_button.is_visible()
+        assert authed_page.locator("[data-testid='header-add-action']").count() == 1
 
         shell.link("downloads").click()
         wait_for_htmx(authed_page)
 
         assert "/downloads" in authed_page.url
-        assert shell.add_series_button.is_visible()
-        assert authed_page.locator("[data-testid='header-add-series']").count() == 1
+        assert shell.add_button.is_visible()
+        assert authed_page.locator("[data-testid='header-add-action']").count() == 1
+
+    def test_header_add_menu_supports_pointer_and_keyboard_navigation(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/")
+
+        menu_trigger = authed_page.locator("[data-testid='header-add-menu-trigger']")
+        menu_panel = authed_page.locator("[data-testid='header-add-menu-panel']")
+        add_action = authed_page.locator("[data-testid='header-add-action']")
+        series_option = authed_page.locator("[data-testid='header-add-menu-series']")
+        story_arc_option = authed_page.locator("[data-testid='header-add-menu-story-arc']")
+        cbl_option = authed_page.locator("[data-testid='header-add-menu-cbl']")
+
+        expect(add_action).to_have_text("Add")
+        expect(add_action).to_have_attribute("data-add-target", "/series/add")
+        expect(menu_trigger).to_contain_text("Series")
+        expect(series_option).to_have_attribute("aria-checked", "true")
+        expect(story_arc_option).to_have_attribute("aria-checked", "false")
+        expect(cbl_option).to_have_attribute("aria-disabled", "true")
+
+        support_link = authed_page.locator("[data-testid='header-support-link']")
+        support_link.focus()
+        authed_page.keyboard.press("Escape")
+        expect(support_link).to_be_focused()
+        expect(menu_panel).to_be_hidden()
+
+        menu_trigger.click()
+        assert menu_trigger.get_attribute("aria-expanded") == "true"
+        expect(menu_panel).to_be_visible()
+
+        authed_page.keyboard.press("Escape")
+        expect(menu_panel).to_be_hidden()
+        expect(menu_trigger).to_be_focused()
+
+        menu_trigger.press("ArrowDown")
+        expect(menu_panel).to_be_visible()
+        expect(series_option).to_be_focused()
+
+        authed_page.keyboard.press("ArrowDown")
+        expect(story_arc_option).to_be_focused()
+        original_url = authed_page.url
+        story_arc_option.press("Enter")
+        expect(authed_page).to_have_url(original_url)
+        expect(add_action).to_have_attribute("data-add-target", "/story-arcs/add")
+        expect(add_action).to_have_attribute("aria-label", "Add Story Arc")
+        expect(menu_trigger).to_contain_text("Story Arc")
+        expect(story_arc_option).to_have_attribute("aria-checked", "true")
+        expect(menu_panel).to_be_hidden()
+
+        add_action.click()
+        wait_for_htmx(authed_page)
+
+        assert "/story-arcs/add" in authed_page.url
+
+    def test_header_add_menu_remains_usable_on_mobile(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        authed_page.set_viewport_size({"width": 390, "height": 844})
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/")
+
+        primary_action = authed_page.locator("[data-testid='header-add-action']")
+        menu_trigger = authed_page.locator("[data-testid='header-add-menu-trigger']")
+        menu_panel = authed_page.locator("[data-testid='header-add-menu-panel']")
+
+        expect(primary_action).to_be_visible()
+        expect(primary_action.locator("span")).to_be_visible()
+        expect(primary_action).to_have_attribute("aria-label", "Add Series")
+        expect(menu_trigger).to_be_visible()
+        expect(menu_trigger).to_contain_text("Series")
+
+        primary_box = primary_action.bounding_box()
+        trigger_box = menu_trigger.bounding_box()
+        assert primary_box is not None
+        assert trigger_box is not None
+        assert abs(primary_box["height"] - trigger_box["height"]) <= 1
+
+        menu_trigger.click()
+        expect(menu_panel).to_be_visible()
+        expect(authed_page.locator("[data-testid='header-add-menu-series']")).to_be_visible()
+        expect(authed_page.locator("[data-testid='header-add-menu-story-arc']")).to_be_visible()
+        expect(authed_page.locator("[data-testid='header-add-menu-cbl']")).to_be_visible()
+
+        panel_box = menu_panel.bounding_box()
+        assert panel_box is not None
+        assert panel_box["x"] >= 0
+        assert panel_box["x"] + panel_box["width"] <= 390
 
     @pytest.mark.parametrize(
         ("import_tab", "destination", "destination_path", "destination_selector"),

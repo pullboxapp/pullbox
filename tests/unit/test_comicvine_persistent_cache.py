@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from pullbox.models.provider_cache import MetadataProviderCacheEntry
 from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesMetadata, SeriesSearchResult
+from pullbox.providers.story_arcs import StoryArcSearchResult
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 
 
@@ -20,6 +21,7 @@ class _ComicVineProviderDouble:
     def __init__(self) -> None:
         self.search_calls = 0
         self.global_search_calls = 0
+        self.story_arc_search_calls = 0
         self.series_calls = 0
         self.series_batch_calls: list[list[str]] = []
         self.issue_batch_calls: list[list[str]] = []
@@ -71,6 +73,24 @@ class _ComicVineProviderDouble:
             )
         ]
         return results[:max_results], len(results)
+
+    async def search_story_arcs_page(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[StoryArcSearchResult], int]:
+        self.story_arc_search_calls += 1
+        results = [
+            StoryArcSearchResult(
+                provider_id="55766",
+                title=query,
+                cover_url="https://example.test/story-arcs/55766.jpg",
+                declared_issue_count=86,
+            )
+        ]
+        return results[:limit], len(results)
 
     async def get_series(self, series_provider_id: str) -> SeriesMetadata:
         self.series_calls += 1
@@ -249,6 +269,24 @@ async def test_persistent_cache_reuses_global_search_results_across_wrappers(
     assert first_result == second_result
     assert provider.global_search_calls == 1
     assert second_cache.cache_metrics()["hits"] == {"search_series_globally": 1}
+
+
+async def test_persistent_cache_reuses_story_arc_search_results_across_wrappers(
+    async_engine: AsyncEngine,
+) -> None:
+    session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    provider = _ComicVineProviderDouble()
+
+    first_cache = PersistentComicVineCacheProvider(provider, session_factory)
+    first_result = await first_cache.search_story_arcs_page("Blackest Night", limit=20)
+
+    second_cache = PersistentComicVineCacheProvider(provider, session_factory)
+    second_result = await second_cache.search_story_arcs_page("blackest night", limit=20)
+
+    assert first_result == second_result
+    assert first_result[0][0].cover_url == "https://example.test/story-arcs/55766.jpg"
+    assert provider.story_arc_search_calls == 1
+    assert second_cache.cache_metrics()["hits"] == {"search_story_arcs_page": 1}
 
 
 async def test_persistent_cache_collapses_concurrent_global_search_misses(

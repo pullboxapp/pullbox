@@ -7,11 +7,16 @@
 {% block content_container_classes %}px-4 sm:px-6 pt-5 sm:pt-7{% endblock %}
 
 {% block content %}
+{# Keep the controller outside the morph target so retained rows share live saving state. #}
+<div x-data="storyArcDetail()"
+     @htmx:before-request="beginReorder($event)"
+     @htmx:after-request="reorderRequestFinished($event)"
+     @story-arc-reordered.window="finishReorder($event.detail)">
 <div
+  id="story-arc-detail-page"
   data-testid="story-arc-detail-page"
   class="series-domain-page space-y-4"
   hx-history="false"
-  x-data="{ coverModalOpen: false, coverModalUrl: '' }"
 >
   <div class="series-domain-breadcrumb-row">
     <a
@@ -60,7 +65,7 @@
     </p>
   {% endif %}
 
-  {% if reorder_preview %}
+  {% if reorder_preview and reorder_preview.recovery_pending %}
     <section
       aria-labelledby="story-arc-reorder-preview-heading"
       data-testid="story-arc-reorder-preview"
@@ -182,19 +187,6 @@
     </section>
   {% endif %}
 
-  {% if story_arc.initial_placements %}
-    <section data-testid="story-arc-initial-placements" aria-labelledby="initial-placements-heading" class="space-y-3 rounded-lg border border-pb-border bg-pb-card p-4">
-      <h2 id="initial-placements-heading" class="text-lg font-semibold text-pb-text">Initial arc files</h2>
-      <p role="status" class="text-sm text-pb-text-sec">{{ story_arc.initial_placements.state|title }}: {{ story_arc.initial_placements.completed }} completed · {{ story_arc.initial_placements.failed }} failed · {{ story_arc.initial_placements.pending }} pending ({{ story_arc.initial_placements.total }} total)</p>
-      <p class="text-sm text-pb-text-sec">This is the storage chosen when adding the arc, independent of future synchronization. Canonical originals stay unchanged. Refresh this page for current counts.</p>
-      {% if story_arc.active and (story_arc.initial_placements.pending or story_arc.initial_placements.failed) %}
-        <form action="/story-arcs/{{ story_arc.id }}/initial-placements/retry" method="post">
-          <button type="submit" class="btn-secondary">Retry initial arc files</button>
-        </form>
-      {% endif %}
-    </section>
-  {% endif %}
-
   {% include "partials/story_arc_reading_order.html" %}
 
   <div class="space-y-6">
@@ -265,233 +257,15 @@
         >{{ placement_message }}</div>
       {% endif %}
 
-      <section
-        data-testid="story-arc-placement-preview"
-        data-placement-page="{{ placement_ui.page }}"
-        aria-labelledby="story-arc-placement-preview-heading"
-        class="rounded-lg border border-pb-border bg-pb-card p-4"
-      >
-        <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h2 id="story-arc-placement-preview-heading" class="text-lg font-semibold text-pb-text">Representative placement preview</h2>
-            <p class="mt-1 text-sm text-pb-text-sec">
-              A read-only, bounded view of {{ placement_ui.preview.total }} entr{{ 'y' if placement_ui.preview.total == 1 else 'ies' }} under this arc's saved file policy.
-            </p>
-          </div>
-          {% if placement_ui.preview.total %}
-            <p class="text-sm text-pb-text-sec">Showing {{ placement_ui.preview.items|length }} of {{ placement_ui.preview.total }}</p>
-          {% endif %}
-        </div>
-
-        <p class="mt-3 text-sm text-pb-text-sec">Canonical library files are never moved by Story Arc placement. Referenced artifacts remain user-owned and are never overwritten or deleted.</p>
-
-        {% if placement_ui.preview.items %}
-          <div class="mt-4 overflow-x-auto">
-            <table class="w-full min-w-[54rem] text-left text-sm">
-              <thead class="border-b border-pb-border text-xs uppercase tracking-wide text-pb-text-dim">
-                <tr>
-                  <th scope="col">Issue</th>
-                  <th scope="col">Effective target</th>
-                  <th scope="col">Method</th>
-                  <th scope="col">Ownership</th>
-                  <th scope="col">Collision</th>
-                  <th scope="col">Bytes</th>
-                  <th scope="col">Action</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-pb-border">
-                {% for item in placement_ui.preview.items %}
-                  <tr
-                    data-classification="{{ item.classification }}"
-                    data-inspection-code="{{ item.inspection_code }}"
-                    data-exact-issue-number="{{ item.issue_number_text }}"
-                  >
-                    <td class="py-3 pr-4 align-top">
-                      <span class="font-mono font-semibold text-pb-text">{{ item.issue_number_text }}</span>
-                      <span class="mt-1 block text-xs text-pb-text-dim">Order {{ item.sequence_number }}</span>
-                    </td>
-                    <td class="max-w-md py-3 pr-4 align-top">
-                      <span class="break-all font-mono text-xs text-pb-text">{{ item.target_path }}</span>
-                      <span class="mt-1 block text-xs text-pb-text-sec">{{ item.state|replace('_', ' ')|title }}</span>
-                      {% if item.reason %}<span class="mt-1 block text-xs text-pb-text-dim">{{ item.reason }}</span>{% endif %}
-                    </td>
-                    <td class="py-3 pr-4 align-top text-pb-text">{{ item.method_label }}</td>
-                    <td class="py-3 pr-4 align-top text-pb-text">{{ item.ownership_label }}</td>
-                    <td class="py-3 pr-4 align-top text-pb-text">{{ item.collision|replace('_', ' ')|title }}</td>
-                    <td class="py-3 pr-4 align-top whitespace-nowrap text-pb-text">{{ item.required_bytes_label }}</td>
-                    <td class="py-3 align-top">
-                      {% if story_arc.active and item.classification == 'will_materialize' %}
-                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ item.membership_id }}/placement-sync" method="post" data-testid="story-arc-placement-sync-{{ item.membership_id }}">
-                          <button type="submit" class="btn-secondary btn-sm">Synchronize</button>
-                        </form>
-                      {% elif story_arc.active and item.classification == 'untracked_identical' %}
-                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ item.membership_id }}/placement-sync" method="post" data-testid="story-arc-placement-adopt-{{ item.membership_id }}" x-data="{}">
-                          <input type="hidden" name="adopt_identical_existing" value="true">
-                          <button
-                            type="button"
-                            class="btn-secondary btn-sm"
-                            @click="pbConfirm({ title: 'Reference identical artifact?', message: 'Pullbox will record this identical existing file as referenced. It remains user-owned, and the canonical library file will stay in place.', confirmLabel: 'Reference artifact' }).then((ok) => { if (ok) $el.form.requestSubmit() })"
-                          >
-                            Reference identical
-                          </button>
-                        </form>
-                      {% elif story_arc.active and item.placement_id and item.classification == 'managed_missing' %}
-                        <form action="/story-arcs/{{ story_arc.id }}/placements/{{ item.placement_id }}/repair" method="post" data-testid="story-arc-placement-repair-{{ item.placement_id }}">
-                          <button type="submit" class="btn-secondary btn-sm">Repair managed</button>
-                        </form>
-                      {% elif story_arc.active and item.placement_id and item.classification in ['referenced_missing', 'referenced_drifted'] %}
-                        <form action="/story-arcs/{{ story_arc.id }}/placements/{{ item.placement_id }}/retry" method="post" data-testid="story-arc-placement-retry-{{ item.placement_id }}">
-                          <button type="submit" class="btn-secondary btn-sm">Recheck reference</button>
-                        </form>
-                      {% else %}
-                        <span class="text-xs text-pb-text-dim">No write available</span>
-                      {% endif %}
-                    </td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-
-        {% else %}
-          <div class="mt-4 rounded-lg border border-dashed border-pb-border px-4 py-6 text-center text-sm text-pb-text-sec">
-            No Story Arc entries are available on this bounded preview page.
-          </div>
-        {% endif %}
-      </section>
-
-      <section
-        data-testid="story-arc-placement-state"
-        aria-labelledby="story-arc-placement-state-heading"
-        class="rounded-lg border border-pb-border bg-pb-card p-4"
-      >
-        <div>
-          <h2 id="story-arc-placement-state-heading" class="text-lg font-semibold text-pb-text">Durable placement state</h2>
-          <p class="mt-1 text-sm text-pb-text-sec">Saved ownership and lifecycle evidence for synchronized Story Arc artifacts.</p>
-        </div>
-
-        <section
-          data-testid="story-arc-sync-work-summary"
-          aria-labelledby="story-arc-sync-work-heading"
-          class="mt-4 rounded-lg border border-pb-border bg-pb-bg p-3"
-        >
-          <div class="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h3 id="story-arc-sync-work-heading" class="text-sm font-semibold text-pb-text">Automatic sync work</h3>
-              <p class="text-xs text-pb-text-dim">Fixed-size summary of durable background work; no unbounded work history is loaded.</p>
-            </div>
-            <p class="text-xs text-pb-text-sec">{{ placement_ui.sync_work.total }} total</p>
-          </div>
-          <dl class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-            <div class="rounded border border-pb-border px-2 py-2"><dt class="text-xs text-pb-text-dim">Queued</dt><dd data-sync-state="queued">{{ placement_ui.sync_work.queued }}</dd></div>
-            <div class="rounded border border-pb-border px-2 py-2"><dt class="text-xs text-pb-text-dim">Running</dt><dd data-sync-state="running">{{ placement_ui.sync_work.running }}</dd></div>
-            <div class="rounded border border-pb-border px-2 py-2"><dt class="text-xs text-pb-text-dim">Retry wait</dt><dd data-sync-state="retry_wait">{{ placement_ui.sync_work.retry_wait }}</dd></div>
-            <div class="rounded border border-pb-border px-2 py-2"><dt class="text-xs text-pb-text-dim">Failed</dt><dd class="{{ 'text-pb-error' if placement_ui.sync_work.failed else '' }}" data-sync-state="failed">{{ placement_ui.sync_work.failed }}</dd></div>
-            <div class="rounded border border-pb-border px-2 py-2"><dt class="text-xs text-pb-text-dim">Completed</dt><dd data-sync-state="completed">{{ placement_ui.sync_work.completed }}</dd></div>
-            <div class="rounded border border-pb-border px-2 py-2"><dt class="text-xs text-pb-text-dim">Cancelled</dt><dd data-sync-state="cancelled">{{ placement_ui.sync_work.cancelled }}</dd></div>
-          </dl>
-        </section>
-
-        {% if placement_ui.placements.items %}
-          <div class="mt-4 overflow-x-auto">
-            <table class="w-full min-w-[48rem] text-left text-sm">
-              <thead class="border-b border-pb-border text-xs uppercase tracking-wide text-pb-text-dim">
-                <tr>
-                  <th scope="col">Placement</th>
-                  <th scope="col">Method</th>
-                  <th scope="col">Ownership</th>
-                  <th scope="col">Saved state</th>
-                  <th scope="col">Last checked</th>
-                  <th scope="col">Action</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-pb-border">
-                {% for item in placement_ui.placements.items %}
-                  <tr data-placement-id="{{ item.id }}" data-placement-state="{{ item.state }}">
-                    <td class="max-w-md py-3 pr-4 align-top break-all font-mono text-xs text-pb-text">{{ item.placement_path }}</td>
-                    <td class="py-3 pr-4 align-top text-pb-text">{{ item.mode_label }}</td>
-                    <td class="py-3 pr-4 align-top text-pb-text">{{ item.ownership|replace('_', ' ')|title }}</td>
-                    <td class="py-3 pr-4 align-top text-pb-text">{{ item.state|replace('_', ' ')|title }}</td>
-                    <td class="py-3 pr-4 align-top whitespace-nowrap text-xs text-pb-text-sec">{{ item.last_checked_label }}</td>
-                    <td class="py-3 align-top">
-                      <div class="flex flex-col items-start gap-2">
-                        {% if item.safety_block_reason %}
-                          <p
-                            data-testid="story-arc-placement-safety-blocked-{{ item.id }}"
-                            role="status"
-                            class="max-w-sm text-xs text-pb-warning"
-                          >
-                            {{ item.safety_block_reason }}
-                          </p>
-                        {% else %}
-                          {% if story_arc.active and item.can_repair %}
-                            <form action="/story-arcs/{{ story_arc.id }}/placements/{{ item.id }}/repair" method="post" data-testid="story-arc-placement-repair-{{ item.id }}">
-                              <button type="submit" class="btn-secondary btn-sm">Repair managed</button>
-                            </form>
-                          {% elif story_arc.active and item.can_retry %}
-                            <form action="/story-arcs/{{ story_arc.id }}/placements/{{ item.id }}/retry" method="post" data-testid="story-arc-placement-retry-{{ item.id }}">
-                              <button type="submit" class="btn-secondary btn-sm">Retry</button>
-                            </form>
-                          {% else %}
-                            <span class="text-xs text-pb-text-dim">Current</span>
-                          {% endif %}
-
-                          {% if story_arc.active and item.can_remove and item.ownership == 'managed' %}
-                            <form
-                              action="/story-arcs/{{ story_arc.id }}/placements/{{ item.id }}/remove"
-                              method="post"
-                              data-testid="story-arc-placement-remove-{{ item.id }}"
-                              x-data="{}"
-                            >
-                              <input type="hidden" name="confirm_managed_artifact_removal" value="true">
-                              <button
-                                type="button"
-                                class="btn-secondary btn-sm text-pb-error"
-                                @click="pbConfirm({ title: 'Remove managed Story Arc artifact?', message: 'Only the Pullbox-managed Story Arc copy will be removed. The canonical library file will stay in place.', confirmLabel: 'Remove artifact', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })"
-                              >
-                                Remove managed copy
-                              </button>
-                            </form>
-                          {% elif story_arc.active and item.can_remove and item.ownership == 'referenced' %}
-                            <form
-                              action="/story-arcs/{{ story_arc.id }}/placements/{{ item.id }}/remove"
-                              method="post"
-                              data-testid="story-arc-placement-forget-{{ item.id }}"
-                              x-data="{}"
-                            >
-                              <button
-                                type="button"
-                                class="btn-secondary btn-sm"
-                                @click="pbConfirm({ title: 'Forget referenced artifact?', message: 'Pullbox will remove only its placement record. The referenced user-owned artifact and canonical library file will stay in place.', confirmLabel: 'Forget reference' }).then((ok) => { if (ok) $el.form.requestSubmit() })"
-                              >
-                                Forget reference
-                              </button>
-                            </form>
-                          {% endif %}
-                        {% endif %}
-                      </div>
-                    </td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-
-        {% else %}
-          <p class="mt-4 rounded-lg border border-dashed border-pb-border px-4 py-6 text-center text-sm text-pb-text-sec">
-            No durable placements have been recorded. Previewing a policy never creates one.
-          </p>
-        {% endif %}
-
-        <div data-testid="story-arc-placement-pagination" class="pt-4">
-          {{ pagination(placement_ui.page, placement_ui.total_pages, placement_pagination_base_url, page_param='placement_page') }}
-        </div>
-      </section>
+      {% if show_placement_diagnostics %}
+        {% include "partials/story_arc_placement_diagnostics.html" %}
+      {% endif %}
     </section>
 
   </div>
 
   {% include "components/cover_modal.html" %}
+</div>
 </div>
 {% endblock %}
 

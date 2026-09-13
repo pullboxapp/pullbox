@@ -285,18 +285,20 @@ async def test_grab_release_constructs_release_result(
     nzb_client.add_nzb.assert_called_once()
 
 
+@pytest.mark.parametrize("resolver_enabled", [False, True])
 @pytest.mark.asyncio
-async def test_grab_resolver_enabled_torznab_fetches_descriptor_inside_pullbox(
+async def test_grab_torznab_fetches_descriptor_inside_pullbox(
     _db_factory: async_sessionmaker[AsyncSession],
+    resolver_enabled: bool,
 ) -> None:
-    """A challenged Torznab descriptor is uploaded as bytes, not leaked to the client."""
+    """HTTP metadata stays in Pullbox independently of browser-resolver opt-in."""
     from pullbox.core.events import EventBus
     from pullbox.providers.indexer.torznab_transport import TorznabDescriptor
     from pullbox.services.download_service import DownloadService
 
     torrent_client = _mock_torrent_client()
     indexer = AsyncMock()
-    indexer.browser_resolver_enabled = True
+    indexer.browser_resolver_enabled = resolver_enabled
     indexer.fetch_torrent_descriptor = AsyncMock(
         return_value=TorznabDescriptor(content=b"torrent-bytes", magnet_url=None)
     )
@@ -315,7 +317,7 @@ async def test_grab_resolver_enabled_torznab_fetches_descriptor_inside_pullbox(
                 url="https://indexer.example",
                 api_key="encrypted",
                 enabled=True,
-                resolver_enabled=True,
+                resolver_enabled=resolver_enabled,
             )
         )
         await session.flush()
@@ -336,6 +338,51 @@ async def test_grab_resolver_enabled_torznab_fetches_descriptor_inside_pullbox(
     from pullbox.tasks.download_progress import clear_download_progress
 
     clear_download_progress(download.id)
+
+
+@pytest.mark.parametrize("enabled,manager_available", [(True, True), (False, True), (True, False)])
+@pytest.mark.asyncio
+async def test_grab_checks_prowlarr_availability_independently_of_health_map(
+    client: AsyncClient,
+    _db_factory: async_sessionmaker[AsyncSession],
+    enabled: bool,
+    manager_available: bool,
+) -> None:
+    issue_id = await _create_issue(_db_factory)
+    async with _db_factory() as session:
+        session.add(
+            IndexerConfig(
+                id=6,
+                name="Prowlarr torrent",
+                indexer_type=IndexerType.TORZNAB,
+                source=IndexerSource.PROWLARR,
+                prowlarr_indexer_id=4,
+                url="https://prowlarr.example/4",
+                api_key="encrypted",
+                enabled=enabled,
+                manager_available=manager_available,
+            )
+        )
+        await session.commit()
+    torrent_client = _mock_torrent_client()
+    registry = _mock_registry(torrent=torrent_client)
+    with patch(
+        "pullbox.composition.providers.build_registry",
+        new_callable=AsyncMock,
+        return_value=(registry, {}),
+    ):
+        response = await client.post(
+            f"/api/v1/issues/{issue_id}/grab",
+            json={**GRAB_BODY_TORRENT, "indexer_id": 6},
+        )
+    if enabled and manager_available:
+        assert response.status_code == 201
+        torrent_client.add_torrent.assert_awaited_once()
+    else:
+        assert response.status_code == 422
+        assert "originating indexer is no longer available" in response.text
+        torrent_client.add_torrent.assert_not_awaited()
+        torrent_client.add_torrent_data.assert_not_awaited()
 
 
 # ── API Tests ──────────────────────────────────────────────────────────

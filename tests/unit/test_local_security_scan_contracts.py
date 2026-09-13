@@ -152,7 +152,7 @@ def test_approved_glibc_exceptions_are_exact_version_and_package_scoped() -> Non
     config = yaml.safe_load((ROOT / ".grype.yaml").read_text())
     approved_cves = {"CVE-2026-5435", "CVE-2026-5450", "CVE-2026-5928"}
     entries = [entry for entry in config["ignore"] if entry["vulnerability"] in approved_cves]
-    assert len(entries) == 18
+    assert len(entries) == 19
     assert {
         (entry["vulnerability"], entry["package"]["name"], entry["package"]["version"])
         for entry in entries
@@ -161,5 +161,36 @@ def test_approved_glibc_exceptions_are_exact_version_and_package_scoped() -> Non
         for cve in approved_cves
         for package in ("libc6", "libc6-dev", "libc-dev-bin")
         for version in ("2.41-12+deb13u3+dhi1", "2.41-12+deb13u3+dhi2")
-    }
+    } | {("CVE-2026-5435", "libc6", "2.41-12+deb13u4")}
     assert all(entry["package"]["type"] == "deb" for entry in entries)
+
+
+def test_september_13_dhi_renewal_covers_only_eight_approved_matches() -> None:
+    config_text = (ROOT / ".grype.yaml").read_text()
+    config = yaml.safe_load(config_text)
+    versions = {"2.41-12+deb13u4", "2.8.3-1~deb13u1+dhi3", "2.41.5-0+deb13u1+dhi3"}
+    entries = [entry for entry in config["ignore"] if entry["package"]["version"] in versions]
+
+    assert len(entries) == 8
+    assert {
+        (
+            entry["vulnerability"],
+            entry["package"]["name"],
+            entry["package"]["version"],
+            entry["package"]["type"],
+        )
+        for entry in entries
+    } == {("CVE-2026-5435", "libc6", "2.41-12+deb13u4", "deb")} | {
+        (cve, "libexpat1", "2.8.3-1~deb13u1+dhi3", "deb")
+        for cve in ("CVE-2026-66046", "CVE-2026-76956", "CVE-2026-76957")
+    } | {
+        (cve, "libuuid1", "2.41.5-0+deb13u1+dhi3", "deb")
+        for cve in ("CVE-2026-76642", "CVE-2026-78408", "CVE-2026-78409", "CVE-2026-78410")
+    }
+    for entry in entries:
+        assert set(entry) == {"vulnerability", "package"}
+        assert set(entry["package"]) == {"name", "version", "type"}
+    for review_date in ("2026-09-30", "2026-10-04", "2026-10-07"):
+        assert review_date in config_text
+    assert "Renewed by Adam Hernandez on 2026-09-13" in config_text
+    assert "NOT fixes" in config_text

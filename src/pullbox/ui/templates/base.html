@@ -286,15 +286,8 @@
         </svg>
       </button>
 
-      {#- Global primary action -#}
-      <a data-testid="header-add-series"
-         href="/series/add"
-         class="btn-primary btn-sm inline-flex items-center gap-2 whitespace-nowrap">
-        <svg class="shrink-0" style="width:var(--pb-control-icon-size);height:var(--pb-control-icon-size);" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>
-        </svg>
-        <span class="hidden sm:inline">Add Series</span>
-      </a>
+      {#- Global catalog creation action -#}
+      {% include "components/header_add_menu.html" %}
 
       {#- Page-specific header actions -#}
       {% block header_actions %}{% endblock %}
@@ -988,6 +981,8 @@
   </script>
   <script src="/static/js/alpine.min.js?v={{ app_shell_asset_version|default('') }}" defer></script>
   <script src="/static/js/pullbox.js?v={{ app_shell_asset_version|default('') }}"></script>
+  <script src="/static/js/story-arc-preview.js?v={{ app_shell_asset_version|default('') }}"></script>
+  <script src="/static/js/story-arc-detail.js?v={{ app_shell_asset_version|default('') }}"></script>
 
 </body>
 </html>

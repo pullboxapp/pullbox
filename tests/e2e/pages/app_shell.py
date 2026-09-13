@@ -34,8 +34,8 @@ class AppShellPage(BasePage):
         return self.page.locator("[data-testid='app-header']").first
 
     @property
-    def add_series_button(self) -> Locator:
-        return self.page.locator("[data-testid='header-add-series']").first
+    def add_button(self) -> Locator:
+        return self.page.locator("[data-testid='header-add-action']").first
 
     @property
     def collapse_toggle(self) -> Locator:

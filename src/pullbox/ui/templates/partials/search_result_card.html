@@ -1,3 +1,5 @@
+{% from "components/comicvine_result_cover.html" import comicvine_result_cover %}
+{% from "components/comicvine_result_card.html" import comicvine_result_card, comicvine_in_library_badge %}
 {% set result_card_mode = result_card_mode|default("add") %}
 {% set result_card_is_add = result_card_mode == "add" %}
 {% set result_card_is_import_override = result_card_mode == "import_override" %}
@@ -11,42 +13,12 @@
 {% set result_already_added = r.already_added %}
 {% set result_library_series_id = r.library_series_id %}
 
-<article
-  id="cv-result-{{ result_id }}"
-  data-testid="{% if result_card_is_import_override %}import-collection-cv-result-{{ result_id }}{% elif result_card_is_orphaned %}import-orphaned-cv-result-{{ result_id }}{% else %}add-series-result-card{% endif %}"
-  class="add-series-result-card{% if result_card_is_add and result_already_added %} add-series-result-card-static{% endif %}"
->
-  <div class="add-series-result-cover">
-    {% set library_href = "/series/" ~ result_library_series_id if result_card_is_add and result_already_added and result_library_series_id else none %}
-    {% if library_href %}
-      <a
-        href="{{ library_href }}"
-        data-testid="add-series-existing-cover-link"
-        class="block h-full w-full transition-opacity hover:opacity-95"
-      >
-    {% endif %}
-    {% if r.cover_url %}
-      <img
-        src="{{ r.cover_url }}"
-        alt="{{ result_title }}"
-        class="h-full w-full object-cover"
-        loading="lazy"
-      >
-    {% else %}
-      <div class="add-series-result-cover-empty">
-        <svg class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
-        </svg>
-      </div>
-    {% endif %}
-    {% if library_href %}
-      </a>
-    {% endif %}
-  </div>
-
-  <div class="min-w-0 flex-1">
-    <div class="add-series-result-main">
-      <div class="min-w-0 flex-1">
+{% set library_href = "/series/" ~ result_library_series_id if result_card_is_add and result_already_added and result_library_series_id else none %}
+{% set card_testid = "import-collection-cv-result-" ~ result_id if result_card_is_import_override else "import-orphaned-cv-result-" ~ result_id if result_card_is_orphaned else "add-series-result-card" %}
+{% call(slot) comicvine_result_card("cv-result-" ~ result_id, card_testid, is_static=result_card_is_add and result_already_added) %}
+{% if slot == "cover" %}
+  {{ comicvine_result_cover(r.cover_url, result_title, href=library_href, link_testid="add-series-existing-cover-link" if library_href else none) }}
+{% elif slot == "details" %}
         <h3 data-testid="add-series-result-title" class="add-series-result-title">
           {% if library_href %}
             <a
@@ -82,9 +54,7 @@
         {% if r.description %}
           <p class="add-series-result-description">{{ r.description|striptags|truncate(260) }}</p>
         {% endif %}
-      </div>
-
-      <div class="add-series-result-actions">
+{% elif slot == "actions" %}
         {% if result_card_is_import_override %}
           {% if result_already_added %}
             <span class="pill pill-success">In Library</span>
@@ -119,12 +89,7 @@
             Select
           </button>
         {% elif result_already_added %}
-          <span class="pill pill-success">
-            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
-            </svg>
-            In Library
-          </span>
+          {{ comicvine_in_library_badge() }}
         {% else %}
           <button
             type="button"
@@ -145,7 +110,5 @@
             Add
           </button>
         {% endif %}
-      </div>
-    </div>
-  </div>
-</article>
+{% endif %}
+{% endcall %}

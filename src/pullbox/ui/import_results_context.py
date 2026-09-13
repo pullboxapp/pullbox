@@ -392,6 +392,16 @@ _CLEANUP_ACTION_PRESENTATION = {
         "button_label": "Resolve and retry",
         "tone": "warning",
     },
+    CompletedImportCleanupAction.RECOVER_KNOWN_SERIES: {
+        "label": "Recover known series",
+        "description": (
+            "Retry files with agreeing saved series and issue IDs from an older import. "
+            "Conflicting files, skips, and safety decisions stay in Follow-up. "
+            "Source files remain unchanged."
+        ),
+        "button_label": "Recover and retry",
+        "tone": "warning",
+    },
 }
 
 

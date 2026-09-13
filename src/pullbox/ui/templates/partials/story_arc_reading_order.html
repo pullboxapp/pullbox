@@ -1,4 +1,5 @@
 {% from "components/status_badge.html" import status_badge %}
+{% from "components/order_chevrons.html" import order_chevrons %}
 
 <section data-testid="story-arc-detail-reading-order-section" aria-labelledby="story-arc-order-heading" class="series-domain-issues-wrap">
   <div class="series-domain-section-card series-domain-issues-card">
@@ -15,6 +16,9 @@
       <p class="text-xs text-pb-text-sec">Issue numbers stay exactly as supplied by their source.</p>
     </div>
 
+    <p class="sr-only" role="status" aria-live="polite">{{ reorder_message }}</p>
+    <p hidden :hidden="!reorderError" x-text="reorderError" role="alert" class="px-4 py-2 text-sm text-pb-error"></p>
+
     {% if story_arc.membership_count %}
       <div data-testid="story-arc-reading-order-progress" class="series-domain-issues-progress">
         <div class="series-domain-issues-progress-track">
@@ -26,7 +30,7 @@
 
     {% if story_arc.memberships %}
       <div class="series-domain-issues-table-wrap">
-        <table data-testid="story-arc-reading-order-table" class="series-domain-issues-table">
+        <table id="story-arc-reading-order-table" data-testid="story-arc-reading-order-table" class="series-domain-issues-table" :aria-busy="reordering.toString()">
           <thead>
             <tr>
               <th class="table-head-cell table-head-cell-tight w-28">Order</th>
@@ -38,6 +42,7 @@
           </thead>
           {% for membership in story_arc.memberships %}
             <tbody
+              id="story-arc-membership-{{ membership.id }}"
               x-data="{ reviewOpen: false }"
               data-membership-id="{{ membership.id }}"
               data-exact-issue-number="{{ membership.exact_issue_number }}"
@@ -48,28 +53,26 @@
                   <div class="flex items-center gap-1.5">
                     <span class="inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-pb-bg px-2 text-xs font-semibold text-pb-text-sec">{{ membership.position }}</span>
                     {% if story_arc.active %}
-                      {% if not membership.is_first %}
-                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move" method="post">
-                          <input type="hidden" name="direction" value="up">
-                          <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
-                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                          <button type="submit" class="series-domain-issue-action-btn" aria-label="Move issue {{ membership.exact_issue_number }} up" data-tip="Preview move up" data-tip-pos="right">
-                            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7" /></svg>
-                          </button>
-                        </form>
-                      {% endif %}
-                      {% if not membership.is_last %}
-                        <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move" method="post">
-                          <input type="hidden" name="direction" value="down">
-                          <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
-                          <input type="hidden" name="return_page" value="{{ story_arc.page }}">
-                          <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
-                          <button type="submit" class="series-domain-issue-action-btn" aria-label="Move issue {{ membership.exact_issue_number }} down" data-tip="Preview move down" data-tip-pos="right">
-                            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
-                          </button>
-                        </form>
-                      {% endif %}
+                      <form action="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move" method="post"
+                            data-story-arc-move hx-post="/story-arcs/{{ story_arc.id }}/memberships/{{ membership.id }}/move"
+                            hx-target="#story-arc-detail-page" hx-select="#story-arc-detail-page"
+                            hx-select-oob="#page-footer-dock" hx-swap="morph:outerHTML"
+                            hx-sync="#story-arc-detail-page:drop" hx-boost="false"
+                            hx-request='{"timeout":120000}'>
+                        <input type="hidden" name="direction" value="up">
+                        <input type="hidden" name="expected_revision" value="{{ story_arc.revision }}">
+                        <input type="hidden" name="return_page" value="{{ story_arc.page }}">
+                        <input type="hidden" name="return_per_page" value="{{ story_arc.per_page }}">
+                        {{ order_chevrons(
+                          up_action="submitMove($el, 'up')", down_action="submitMove($el, 'down')",
+                          up_disabled="reordering || $el.dataset.orderBlocked === 'true'",
+                          down_disabled="reordering || $el.dataset.orderBlocked === 'true'",
+                          up_blocked=membership.is_first or (reorder_preview and reorder_preview.recovery_pending),
+                          down_blocked=membership.is_last or (reorder_preview and reorder_preview.recovery_pending),
+                          up_label="Move issue " ~ membership.exact_issue_number ~ " up",
+                          down_label="Move issue " ~ membership.exact_issue_number ~ " down", dynamic_labels=false
+                        ) }}
+                      </form>
                     {% endif %}
                   </div>
                 </td>
