@@ -13,6 +13,78 @@
 # stable Python 3.14 or Debian 13 packages become available upstream.
 
 ignore:
+  # Renewed by Adam Hernandez on 2026-09-13 for eight exact findings in the
+  # refreshed DHI runtime. These are accepted-risk exceptions, NOT fixes.
+  # Keep all other High findings blocking, including other package versions.
+  # Preserve the previous entries for cached images and the review dates below.
+  #
+  # Debian 13 still lists CVE-2026-5435 as vulnerable/no-DSA (TSIG printing).
+  # No direct Pullbox calls were found, but third-party reachability and DHI
+  # backport status remain unproven. Re-review by 2026-09-30 or the next base
+  # refresh, whichever comes first; remove when a fixed stable package ships.
+  # https://security-tracker.debian.org/tracker/CVE-2026-5435
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6
+      version: 2.41-12+deb13u4
+      type: deb
+
+  # Debian 13 still has no fixed stable Expat package for these findings.
+  # The libexpat1 copy supports Fontconfig/Poppler. The separate Python parser
+  # reports Expat 2.8.2: its >=2.8.1 runtime guard does NOT establish protection
+  # against these newer advisories. Do not interpret this renewal as proving
+  # either parser safe. No Python-binary or libexpat1-dev exception is added.
+  # Re-review by 2026-10-07 or the next base refresh, whichever comes first;
+  # remove as soon as a fixed stable package is available.
+  # https://security-tracker.debian.org/tracker/CVE-2026-66046
+  # https://security-tracker.debian.org/tracker/CVE-2026-76956
+  # https://security-tracker.debian.org/tracker/CVE-2026-76957
+  - vulnerability: CVE-2026-66046
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-76956
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-76957
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi3
+      type: deb
+
+  # These util-linux source-package findings attach to libuuid1, but concern
+  # privileged mount/nsenter helpers. The inspected ARM64 production image
+  # contains libuuid1 and neither executable. Other architectures still need
+  # their normal image validation. Re-review by 2026-10-04 or the next base
+  # refresh, whichever comes first; remove when fixed stable packages ship.
+  # https://security-tracker.debian.org/tracker/CVE-2026-76642
+  # https://security-tracker.debian.org/tracker/CVE-2026-78408
+  # https://security-tracker.debian.org/tracker/CVE-2026-78409
+  # https://security-tracker.debian.org/tracker/CVE-2026-78410
+  - vulnerability: CVE-2026-76642
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-78408
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-78409
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-78410
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi3
+      type: deb
+
   # Debian Trixie has postponed the OpenSSL 3.5 QUIC listener connection-limit
   # fix for CVE-2026-14456. Pullbox does not expose an OpenSSL QUIC listener;
   # retain this exact DHI base-image exception only until Debian ships a fix.

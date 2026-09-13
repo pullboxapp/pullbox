@@ -1009,6 +1009,7 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     } == {
         ("libexpat1", "2.8.3-1~deb13u1+dhi2", "deb"),
         ("libexpat1-dev", "2.8.3-1~deb13u1+dhi2", "deb"),
+        ("libexpat1", "2.8.3-1~deb13u1+dhi3", "deb"),
     }
 
     current_expat_exceptions = [
@@ -1026,8 +1027,9 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         )
         for entry in current_expat_exceptions
     } == {
-        (cve, "libexpat1", "2.8.3-1~deb13u1+dhi2", "deb")
+        (cve, "libexpat1", version, "deb")
         for cve in {"CVE-2026-76956", "CVE-2026-76957"}
+        for version in ("2.8.3-1~deb13u1+dhi2", "2.8.3-1~deb13u1+dhi3")
     }
 
 
@@ -1061,8 +1063,9 @@ def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() 
         )
         for package in ("zlib1g", "zlib1g-dev")
     } | {
-        (cve, "libuuid1", "2.41.5-0+deb13u1+dhi2", "deb")
+        (cve, "libuuid1", version, "deb")
         for cve in reviewed_cves - {"CVE-2026-85091"}
+        for version in ("2.41.5-0+deb13u1+dhi2", "2.41.5-0+deb13u1+dhi3")
     }
 
 
