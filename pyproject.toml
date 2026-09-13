@@ -46,6 +46,7 @@ dependencies = [
     "pillow~=12.3",
     "pdf2image~=1.17",
     "tzlocal~=5.3",
+    "zstandard>=0.25,<1.0",
 ]
 
 [project.optional-dependencies]

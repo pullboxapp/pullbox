@@ -5079,7 +5079,7 @@ class TestOverrideCvId:
             issue_count=85,
             comicvine_url="https://comicvine.gamespot.com/batman/4050-12345/",
         )
-        mock_metadata_service._provider.get_series = AsyncMock(return_value=meta)
+        mock_metadata_service.get_series_metadata = AsyncMock(return_value=meta)
 
         svc = ImportService(
             series_service=mock_series_service,
@@ -5104,6 +5104,7 @@ class TestOverrideCvId:
         assert updated.status == ImportSeriesStatus.MATCHED
         assert updated.cv_match_method == "user_override"
         assert updated.diagnostics == {}
+        mock_metadata_service.get_series_metadata.assert_awaited_once_with(12345)
 
     @pytest.mark.asyncio
     async def test_override_recomputes_pending_file_matches(
@@ -5129,7 +5130,7 @@ class TestOverrideCvId:
             issue_count=10,
             comicvine_url="https://comicvine.gamespot.com/absolute-martian-manhunter/4050-162966/",
         )
-        mock_metadata_service._provider.get_series = AsyncMock(return_value=meta)
+        mock_metadata_service.get_series_metadata = AsyncMock(return_value=meta)
         mock_metadata_service._provider.get_issues_for_series = AsyncMock(
             return_value=[
                 IssueSummary(
@@ -5199,7 +5200,7 @@ class TestOverrideCvId:
             issue_count=4,
             comicvine_url="https://comicvine.gamespot.com/chicken-devil/4050-139451/",
         )
-        mock_metadata_service._provider.get_series = AsyncMock(return_value=meta)
+        mock_metadata_service.get_series_metadata = AsyncMock(return_value=meta)
         mock_metadata_service._provider.get_issues_for_series = AsyncMock(
             return_value=[
                 IssueSummary(

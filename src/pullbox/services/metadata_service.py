@@ -36,6 +36,7 @@ from pullbox.models.series import (
 )
 from pullbox.providers.base import SeriesMetadata
 from pullbox.providers.metadata.comicvine import ComicVineError
+from pullbox.services.catalog.reader import CatalogIssueSummary, CatalogSeriesMetadata
 from pullbox.services.cover_cache_service import purge_series_cover_cache
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
     from pullbox.providers.base import IssueMetadata, IssueSummary
     from pullbox.providers.metadata.comicvine import ComicVineProvider
+    from pullbox.services.catalog.reader import CatalogReader
 
 logger = structlog.get_logger(__name__)
 
@@ -129,10 +131,13 @@ class MetadataService:
         provider: ComicVineProvider,
         covers_dir: Path,
         refresh_days: int = 30,
+        *,
+        catalog: CatalogReader | None = None,
     ) -> None:
         self._provider = provider
         self._covers_dir = covers_dir
         self._refresh_days = refresh_days
+        self._catalog = catalog
 
     async def fetch_series(
         self,
@@ -150,7 +155,7 @@ class MetadataService:
         log = logger.bind(comicvine_id=comicvine_id)
         log.debug("metadata_fetch_series")
 
-        meta = await self.get_series_metadata(comicvine_id)
+        meta = await self.get_series_metadata(comicvine_id, use_catalog=False)
         series = await self.upsert_series_metadata(
             session,
             comicvine_id,
@@ -176,6 +181,11 @@ class MetadataService:
         """
         log = logger.bind(comicvine_id=comicvine_id)
 
+        source = "pullbox_catalog" if isinstance(meta, CatalogSeriesMetadata) else "comicvine"
+        refreshed_at = (
+            meta.source_cutoff_at if isinstance(meta, CatalogSeriesMetadata) else datetime.now(UTC)
+        )
+
         publisher_id = None
         if meta.publisher:
             publisher_id = await self._ensure_publisher(session, meta.publisher)
@@ -184,6 +194,13 @@ class MetadataService:
             await session.execute(select(Series).where(Series.comicvine_id == comicvine_id))
         ).scalar_one_or_none()
 
+        if (
+            existing
+            and isinstance(meta, CatalogSeriesMetadata)
+            and existing.metadata_source == "comicvine"
+        ):
+            # Basic catalog hydration must never replace a completed full refresh.
+            return existing
         if existing:
             existing.title = meta.title
             existing.sort_title = meta.sort_title or meta.title
@@ -203,8 +220,8 @@ class MetadataService:
             existing.comicvine_url = meta.comicvine_url
             existing.cover_url = meta.cover_url
             existing.publisher_id = publisher_id
-            existing.metadata_last_refreshed = datetime.now(UTC)
-            existing.metadata_source = "comicvine"
+            existing.metadata_last_refreshed = refreshed_at
+            existing.metadata_source = source
             series = existing
             log.debug("metadata_series_updated", series_id=series.id)
         else:
@@ -220,8 +237,8 @@ class MetadataService:
                 comicvine_url=meta.comicvine_url,
                 cover_url=meta.cover_url,
                 publisher_id=publisher_id,
-                metadata_last_refreshed=datetime.now(UTC),
-                metadata_source="comicvine",
+                metadata_last_refreshed=refreshed_at,
+                metadata_source=source,
             )
             session.add(series)
             await session.flush()
@@ -239,10 +256,17 @@ class MetadataService:
     async def get_series_metadata(
         self,
         comicvine_id: int,
+        *,
+        use_catalog: bool = True,
     ) -> SeriesMetadata:
         """Fetch provider series metadata without creating or updating local rows."""
         log = logger.bind(comicvine_id=comicvine_id)
         log.debug("metadata_get_series_metadata")
+
+        if use_catalog and self._catalog is not None and self._catalog.available:
+            from pullbox.services.catalog.lookup import CatalogLookupService
+
+            return await CatalogLookupService(self._catalog).get_series(str(comicvine_id))
 
         try:
             return await self._provider.get_series(str(comicvine_id))
@@ -254,6 +278,10 @@ class MetadataService:
         comicvine_ids: list[int],
     ) -> dict[int, SeriesMetadata]:
         """Fetch multiple provider series profiles through the optional bulk contract."""
+        if self._catalog is not None and self._catalog.available:
+            return {
+                key: await self.get_series_metadata(key) for key in dict.fromkeys(comicvine_ids)
+            }
         batch_fetch = getattr(type(self._provider), "get_series_batch", None)
         try:
             if callable(batch_fetch):
@@ -274,6 +302,8 @@ class MetadataService:
         comicvine_id: int,
     ) -> SeriesMetadata | None:
         """Return fresh cached series metadata without starting a provider request."""
+        if self._catalog is not None and self._catalog.available:
+            return await self._catalog.series(comicvine_id)
         cached_lookup = getattr(type(self._provider), "get_series_cached", None)
         if cached_lookup is None:
             return None
@@ -283,10 +313,19 @@ class MetadataService:
     async def get_issue_summaries_for_series(
         self,
         comicvine_id: int,
+        *,
+        use_catalog: bool = True,
     ) -> list[IssueSummary]:
         """Fetch provider issue summaries for a series without touching local issues."""
         log = logger.bind(comicvine_id=comicvine_id)
         log.debug("metadata_get_issue_summaries_for_series")
+
+        if use_catalog and self._catalog is not None and self._catalog.available:
+            from pullbox.services.catalog.lookup import CatalogLookupService
+
+            return await CatalogLookupService(self._catalog).get_issues_for_series(
+                str(comicvine_id)
+            )
 
         try:
             return await self._provider.get_issues_for_series(str(comicvine_id))
@@ -298,6 +337,11 @@ class MetadataService:
         comicvine_ids: list[int],
     ) -> dict[int, list[IssueSummary]]:
         """Fetch multiple full issue catalogs through the optional bulk contract."""
+        if self._catalog is not None and self._catalog.available:
+            return {
+                key: await self.get_issue_summaries_for_series(key)
+                for key in dict.fromkeys(comicvine_ids)
+            }
         batch_fetch = getattr(type(self._provider), "get_issue_catalog_batch", None)
         try:
             if callable(batch_fetch):
@@ -637,7 +681,9 @@ class MetadataService:
         if not series or not series.comicvine_id:
             raise NotFoundError("Series", series_id)
 
-        summaries = await self.get_issue_summaries_for_series(series.comicvine_id)
+        summaries = await self.get_issue_summaries_for_series(
+            series.comicvine_id, use_catalog=False
+        )
         return await self.upsert_issue_summaries(
             session,
             series,
@@ -706,6 +752,7 @@ class MetadataService:
         }
         summary_evidence_types: list[IssueType] = []
         for summary in summaries:
+            source = "pullbox_catalog" if isinstance(summary, CatalogIssueSummary) else "comicvine"
             provider_issue_id = int(summary.provider_id)
             exact_issue_number_text = _exact_issue_number_text(
                 summary.issue_number,
@@ -727,6 +774,15 @@ class MetadataService:
                 )
                 existing_by_provider = None
                 assign_provider_issue_id = False
+            if (
+                source == "pullbox_catalog"
+                and existing_by_provider is not None
+                and existing_by_provider.metadata_source == "comicvine"
+            ):
+                # A basic snapshot cannot establish that live fields are stale.
+                # Keep its identity and fields, and do not infer parent type here.
+                summary_evidence_types.append(IssueType.ISSUE)
+                continue
             if existing_by_provider is not None and existing_by_provider is not existing:
                 if existing is None:
                     old_issue_number = existing_by_provider.issue_number
@@ -792,7 +848,8 @@ class MetadataService:
                 )
                 if not preserve_explicit_import_type:
                     existing.issue_type = detected_type
-                    existing.metadata_source = "comicvine"
+                    if source != "pullbox_catalog" or existing.metadata_source != "comicvine":
+                        existing.metadata_source = source
             else:
                 issue = Issue(
                     series_id=series_id,
@@ -803,7 +860,7 @@ class MetadataService:
                     release_date=_parse_date(summary.release_date),
                     cover_url=summary.cover_url,
                     issue_type=detected_type,
-                    metadata_source="comicvine",
+                    metadata_source=source,
                 )
                 session.add(issue)
                 created.append(issue)

@@ -1,4 +1,4 @@
-{% macro comicvine_search_loading(element_id, testid) -%}
+{% macro comicvine_search_loading(element_id, testid, local_catalog=false) -%}
   <div
     id="{{ element_id }}"
     data-testid="{{ testid }}"
@@ -13,7 +13,7 @@
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
       </svg>
       <div>
-        <p class="add-series-results-loading-title">Searching ComicVine</p>
+        <p class="add-series-results-loading-title">{{ 'Searching local catalog' if local_catalog else 'Searching ComicVine' }}</p>
         <p class="add-series-results-loading-copy">Large catalogs can take a moment.</p>
       </div>
     </div>

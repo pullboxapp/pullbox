@@ -868,7 +868,7 @@ class ImportService(
 
     async def _fetch_series_metadata_for_override(self, cv_id: int) -> SeriesMetadata:
         """Fetch ComicVine metadata for a manual imported-series override."""
-        return await self._metadata_service._provider.get_series(str(cv_id))
+        return await self._metadata_service.get_series_metadata(cv_id)
 
     async def rematch_imported_series_files(
         self,

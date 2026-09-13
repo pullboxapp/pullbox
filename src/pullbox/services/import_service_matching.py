@@ -493,9 +493,13 @@ class ImportServiceMatchingMixin:
 
     def _metadata_provider_for_job(self: ImportServiceMatchingContext, job_id: int) -> Any:
         """Return the job-scoped cached provider when Step 2 is actively scanning."""
+        from pullbox.services.catalog.lookup import catalog_or_provider
+
         if self._metadata_service is None:
             return None
-        return self._scan_provider_cache_by_job.get(job_id, self._metadata_service._provider)
+        return self._scan_provider_cache_by_job.get(
+            job_id, catalog_or_provider(self._metadata_service._provider)
+        )
 
     async def _record_duplicate_copy_cluster(
         self: ImportServiceMatchingContext,

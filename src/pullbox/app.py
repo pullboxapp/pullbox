@@ -808,6 +808,19 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                 exc_info=True,
             )
 
+    async def _startup_catalog_check() -> None:
+        from pullbox.services.catalog.contract import CatalogError
+        from pullbox.services.catalog.service import get_catalog_service
+
+        try:
+            await get_catalog_service().sync()
+        except CatalogError:
+            logger.warning("startup_catalog_check_failed")
+
+    catalog_startup_task = asyncio.create_task(_startup_catalog_check())
+    _startup_background_tasks.add(catalog_startup_task)
+    catalog_startup_task.add_done_callback(_startup_background_tasks.discard)
+
     if settings.startup_update_check_enabled:
         startup_update_task = asyncio.create_task(_startup_update_check())
         _startup_background_tasks.add(startup_update_task)
