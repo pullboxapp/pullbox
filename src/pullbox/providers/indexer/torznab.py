@@ -80,7 +80,7 @@ class TorznabIndexer(NewznabIndexer):
 
     @property
     def browser_resolver_enabled(self) -> bool:
-        """Whether descriptor handoff must stay inside Pullbox."""
+        """Whether this manual indexer opted into browser challenge resolution."""
         return self._browser_resolver_enabled
 
     @property

@@ -445,10 +445,20 @@ class DownloadService:
         indexer_id: int | None,
         download_id: int,
     ) -> str | None:
-        """Resolve opted-in Torznab descriptors before handing off to the client."""
-        indexer = self._registry.get_indexer(indexer_id) if indexer_id is not None else None
-        if indexer is None or not bool(getattr(indexer, "browser_resolver_enabled", False)):
+        """Fetch HTTP torrent metadata in Pullbox; only magnets go to clients as URLs."""
+        if url.lower().startswith("magnet:?"):
             return await client.add_torrent(url, title)
+        if not url.lower().startswith(("http://", "https://")):
+            raise ProviderError(
+                "download", "The torrent source URL must use HTTP, HTTPS, or magnet."
+            )
+        indexer = self._registry.get_indexer(indexer_id) if indexer_id is not None else None
+        if indexer is None:
+            raise ProviderError(
+                "download",
+                "The originating torrent indexer is unavailable. "
+                "Run the search again before retrying.",
+            )
 
         from pullbox.tasks.download_progress import (
             clear_download_progress,
@@ -457,7 +467,9 @@ class DownloadService:
 
         fetch_descriptor = getattr(indexer, "fetch_torrent_descriptor", None)
         if fetch_descriptor is None:
-            return await client.add_torrent(url, title)
+            raise ProviderError(
+                "download", "The originating indexer cannot retrieve torrent metadata."
+            )
         record_transient_download_stage(download_id, "Resolving torrent descriptor")
 
         async def on_attempt(event: object) -> None:

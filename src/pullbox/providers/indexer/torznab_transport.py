@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 import structlog
 
+from pullbox.core.torrent_metadata import torrent_info_hashes
 from pullbox.providers.direct.resolver import (
     DirectResolverCookie,
     DirectResolverError,
@@ -254,7 +255,7 @@ class TorznabTransport:
                 headers["cookie"] = cookie_header
         try:
             request = self._client.build_request("GET", url, params=params, headers=headers)
-            response = await self._client.send(request, stream=True)
+            response = await self._client.send(request, stream=True, follow_redirects=False)
             try:
                 declared_length = response.headers.get("content-length")
                 if declared_length is not None:
@@ -346,12 +347,11 @@ def _cookie_header(cookies: Sequence[DirectResolverCookie], url: str) -> str:
 
 
 def _looks_like_torrent(content: bytes) -> bool:
-    return (
-        len(content) >= 12
-        and content.startswith(b"d")
-        and content.endswith(b"e")
-        and b"4:info" in content
-    )
+    try:
+        torrent_info_hashes(content)
+    except ValueError:
+        return False
+    return True
 
 
 def _read_cached_material(

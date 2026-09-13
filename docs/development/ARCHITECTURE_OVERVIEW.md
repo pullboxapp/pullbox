@@ -316,7 +316,8 @@ session and WebSocket lifecycle are supervised per exact configured client.
 **Current repo nuances**
 
 - Prowlarr-synced Torznab indexers are aggregated through a single Prowlarr
-  search path.
+  search path. Persisted indexer IDs resolve to that aggregate for acquisition,
+  without duplicating searches or adding manager-owned per-indexer health checks.
 - Prowlarr-synced Newznab indexers are kept as individual Newznab proxy
   endpoints because the direct proxy behavior can produce better category and
   result fidelity.
@@ -326,6 +327,14 @@ session and WebSocket lifecycle are supervised per exact configured client.
   policy and retires missing manager rows instead of deleting their history.
 - Download clients may be cached across task cycles when config values have not
   changed.
+- HTTP torrent metadata is fetched and validated inside Pullbox, then uploaded
+  to the selected qBittorrent, Transmission, or Deluge client. This is independent
+  of browser-resolver opt-in and applies to manual grabs, automatic acquisition,
+  intervention approval, and retries. Magnets remain URL submissions. Descriptor
+  fetching is bounded by the configured indexer origin, redirect count, timeout,
+  response size, and shared bencode validation. A failed fetch never falls back
+  to forwarding the private indexer URL to a remote client. Legacy HTTP downloads
+  without an available originating indexer require a new search.
 - Pullbox Data is not a general metadata proxy. Installed clients default to
   the public `https://api.pullbox.app` release API, while deployments may use
   `PULLBOX_DATA_API_BASE_URL` for an intentional private-network override.

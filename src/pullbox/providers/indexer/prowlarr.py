@@ -24,6 +24,12 @@ from pullbox.providers.base import (
     SearchQuery,
 )
 from pullbox.providers.indexer.newznab import NewznabIndexer
+from pullbox.providers.indexer.torznab_transport import (
+    ResolverAttemptCallback,
+    TorznabDescriptor,
+    TorznabTransport,
+    TorznabTransportError,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -138,6 +144,25 @@ class ProwlarrIndexer:
         return response.text
 
     # -- Indexer implementation ---------------------------------------------
+
+    async def fetch_torrent_descriptor(
+        self,
+        url: str,
+        *,
+        on_attempt: ResolverAttemptCallback | None = None,
+    ) -> TorznabDescriptor:
+        """Fetch manager-hosted torrent metadata without exposing its URL to the client."""
+        transport = TorznabTransport(
+            http_client=self._client,
+            configured_base_url=self._base_url,
+            cache_namespace=f"prowlarr-descriptor:{self._base_url}",
+        )
+        try:
+            return await transport.fetch_descriptor(url, on_attempt=on_attempt)
+        except TorznabTransportError as exc:
+            raise ProwlarrError(
+                f"Could not retrieve torrent metadata from Prowlarr: {exc}"
+            ) from exc
 
     async def search(self, query: SearchQuery) -> list[ReleaseResult]:
         """Search across all Prowlarr indexers via the REST API."""

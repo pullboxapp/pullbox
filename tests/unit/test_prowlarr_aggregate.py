@@ -163,6 +163,11 @@ class TestRegisterIndexersAggregation:
             102: (2, 20),
             103: (3, 30),
         }
+        # Download lookup uses the persisted ID, without adding search fan-out.
+        assert registry.get_indexer(1) is indexer
+        assert registry.get_indexer(2) is indexer
+        assert registry.get_indexer(3) is indexer
+        assert registry.get_indexer(999) is None
 
     @pytest.mark.asyncio
     async def test_prowlarr_newznab_registered_individually(self) -> None:
