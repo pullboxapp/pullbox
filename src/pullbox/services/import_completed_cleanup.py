@@ -246,11 +246,18 @@ def _eligible_conflict_groups(job_id: int) -> Any:
 def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[Any, ...]:
     filters: list[Any] = [ImportedFile.import_job_id == job_id]
     if action is CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES:
-        filters.extend(
-            [
-                ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
-                _safety_filter(ImportSafetyCategory.SOURCE_MISSING),
-            ]
+        filters.append(
+            or_(
+                and_(
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                    _safety_filter(ImportSafetyCategory.SOURCE_MISSING),
+                ),
+                and_(
+                    ImportedFile.status == ImportedFileStatus.FAILED,
+                    _source_revalidation_category_expression()
+                    == ImportSafetyCategory.SOURCE_MISSING.value,
+                ),
+            )
         )
     elif action is CompletedImportCleanupAction.SKIP_PROBABLE_COVERS:
         filters.extend(
@@ -260,15 +267,24 @@ def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[An
             ]
         )
     elif action is CompletedImportCleanupAction.SKIP_UNUSABLE_FILES:
-        filters.extend(
-            [
-                ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
-                _safety_filter(
-                    ImportSafetyCategory.ZERO_BYTE,
-                    ImportSafetyCategory.ARCHIVE_NO_PAGES,
-                    ImportSafetyCategory.UNSUPPORTED_FILE_TYPE,
+        unusable_categories = (
+            ImportSafetyCategory.ZERO_BYTE,
+            ImportSafetyCategory.ARCHIVE_NO_PAGES,
+            ImportSafetyCategory.UNSUPPORTED_FILE_TYPE,
+        )
+        filters.append(
+            or_(
+                and_(
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                    _safety_filter(*unusable_categories),
                 ),
-            ]
+                and_(
+                    ImportedFile.status == ImportedFileStatus.FAILED,
+                    _source_revalidation_category_expression().in_(
+                        [category.value for category in unusable_categories]
+                    ),
+                ),
+            )
         )
     elif action is CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES:
         filters.extend(

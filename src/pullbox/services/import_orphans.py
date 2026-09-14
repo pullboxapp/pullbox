@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import and_, or_
@@ -17,14 +18,16 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
+from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
+from pullbox.services.import_file_issue_signals import (
+    candidate_issue_number,
+    candidate_issue_number_text,
+)
 from pullbox.services.import_file_resolution import load_issue_lookup_for_series
 from pullbox.services.import_job_actions import build_series_created_action_payload
-from pullbox.services.import_job_execution_items import (
-    ensure_target_issue_summary_for_import_file,
-    retain_imported_series_outcome,
-)
+from pullbox.services.import_job_execution_items import ensure_target_issue_summary_for_import_file
 from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
 from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
@@ -36,7 +39,6 @@ if TYPE_CHECKING:
     from sqlalchemy.sql import Select
     from sqlalchemy.sql.elements import ColumnElement
 
-    from pullbox.models.issue import Issue
     from pullbox.providers.base import SeriesMetadata
     from pullbox.schemas.import_job import OrphanRecoveryDecision, RecoverOrphanRequest
 
@@ -87,6 +89,198 @@ _ACTIVE_ORPHAN_STATUSES = (
     ImportSeriesStatus.NO_MATCH,
     ImportSeriesStatus.RECOVERY_PENDING,
 )
+_UNRESOLVED_TARGET_ERROR = "Could not resolve to a library issue"
+
+
+def requires_orphan_issue_decision(file: ImportedFile) -> bool:
+    """Return whether Follow-up should ask for an issue assignment or skip."""
+    return file.status in {
+        ImportedFileStatus.PENDING,
+        ImportedFileStatus.MATCHED,
+        ImportedFileStatus.CONFIRMED,
+        ImportedFileStatus.CONFLICT,
+        ImportedFileStatus.NO_MATCH,
+    }
+
+
+def _saved_target_provider_ids(file: ImportedFile) -> set[int]:
+    diagnostics = dict(file.diagnostics or {})
+    raw_summary = diagnostics.get("target_issue_summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    raw_values: tuple[object, ...] = (
+        file.matched_issue_cv_id,
+        file.comicvine_issue_id,
+        summary.get("provider_id"),
+    )
+    provider_ids: set[int] = set()
+    for raw_value in raw_values:
+        if raw_value is None:
+            continue
+        try:
+            provider_ids.add(int(str(raw_value)))
+        except ValueError:
+            provider_ids.add(-1)
+    return provider_ids
+
+
+async def _resolve_proven_failed_target(
+    session: AsyncSession,
+    item: ImportedSeries,
+    file: ImportedFile,
+    *,
+    cv_id_to_issue: dict[int, Issue],
+    exact_number_to_issue: dict[str, Issue],
+    number_to_issue: dict[float, Issue],
+) -> Issue | None:
+    """Resolve only an exact target inside the already identified local series."""
+    if item.series_id is None:
+        return None
+    if file.matched_issue_id is not None:
+        saved_issue = await session.get(Issue, file.matched_issue_id)
+        if saved_issue is not None and saved_issue.series_id == item.series_id:
+            return saved_issue
+        return None
+
+    provider_ids = _saved_target_provider_ids(file)
+    if provider_ids:
+        if len(provider_ids) != 1:
+            return None
+        return cv_id_to_issue.get(next(iter(provider_ids)))
+
+    exact_number = candidate_issue_number_text(file)
+    if exact_number is not None:
+        return exact_number_to_issue.get(exact_number)
+    issue_number = candidate_issue_number(file)
+    return number_to_issue.get(issue_number) if issue_number is not None else None
+
+
+def _prepare_exact_target_retry(file: ImportedFile, issue: Issue) -> None:
+    diagnostics = dict(file.diagnostics or {})
+    diagnostics["previous_import_error"] = file.error_message
+    diagnostics["completed_import_follow_up"] = {
+        "resolution": "exact_issue_target",
+        "resolved_at": datetime.now(UTC).isoformat(),
+        "source_preserved": True,
+    }
+    file.status = ImportedFileStatus.CONFIRMED
+    file.include_in_import = True
+    file.matched_issue_id = issue.id
+    file.matched_issue_cv_id = issue.comicvine_id
+    file.match_confidence = "high"
+    file.match_method = "completed_import_exact_target"
+    file.error_message = None
+    file.diagnostics = diagnostics
+
+
+def _defer_target_to_follow_up(file: ImportedFile) -> None:
+    diagnostics = dict(file.diagnostics or {})
+    diagnostics["previous_import_error"] = file.error_message
+    diagnostics["completed_import_follow_up"] = {
+        "resolution": "issue_decision_required",
+        "resolved_at": datetime.now(UTC).isoformat(),
+        "source_preserved": True,
+    }
+    file.status = ImportedFileStatus.NO_MATCH
+    file.include_in_import = False
+    file.matched_issue_id = None
+    file.error_message = "Choose the correct issue in Follow-up."
+    file.diagnostics = diagnostics
+
+
+async def _prepare_terminal_follow_up(
+    session: AsyncSession,
+    job: ImportJob,
+) -> tuple[set[int], set[int], int]:
+    """Repair legacy terminal outcomes before retrying only proven work."""
+    affected_series_ids: set[int] = set()
+    retry_series_ids: set[int] = set()
+    target_rows = list(
+        (
+            await session.execute(
+                sa_select(ImportedSeries, ImportedFile)
+                .join(ImportedFile, ImportedFile.import_series_id == ImportedSeries.id)
+                .where(
+                    ImportedSeries.import_job_id == job.id,
+                    ImportedFile.status == ImportedFileStatus.FAILED,
+                    ImportedFile.error_message == _UNRESOLVED_TARGET_ERROR,
+                )
+                .order_by(ImportedFile.id)
+            )
+        ).all()
+    )
+    issue_lookups: dict[int, tuple[dict[int, Issue], dict[str, Issue], dict[float, Issue]]] = {}
+    for item, file in target_rows:
+        if item.series_id is not None and item.series_id not in issue_lookups:
+            issue_lookups[item.series_id] = await load_issue_lookup_for_series(
+                session,
+                item.series_id,
+            )
+        lookup = issue_lookups.get(item.series_id or -1, ({}, {}, {}))
+        issue = await _resolve_proven_failed_target(
+            session,
+            item,
+            file,
+            cv_id_to_issue=lookup[0],
+            exact_number_to_issue=lookup[1],
+            number_to_issue=lookup[2],
+        )
+        if issue is None:
+            _defer_target_to_follow_up(file)
+        else:
+            _prepare_exact_target_retry(file, issue)
+            retry_series_ids.add(item.id)
+        affected_series_ids.add(item.id)
+
+    imported_series_ids = set(
+        await session.scalars(
+            sa_select(ImportedFile.import_series_id)
+            .where(
+                ImportedFile.import_job_id == job.id,
+                ImportedFile.status == ImportedFileStatus.IMPORTED,
+            )
+            .distinct()
+        )
+    )
+    failed_series = list(
+        await session.scalars(
+            sa_select(ImportedSeries).where(
+                ImportedSeries.import_job_id == job.id,
+                ImportedSeries.status == ImportSeriesStatus.FAILED,
+            )
+        )
+    )
+    normalized_series_count = 0
+    for item in failed_series:
+        previous_error = item.error_message
+        if item.id in imported_series_ids:
+            item.status = ImportSeriesStatus.IMPORTED
+        elif item.error_message == "No ComicVine ID available":
+            item.status = ImportSeriesStatus.NO_MATCH
+            item.selected_for_import = False
+        elif item.error_message == "No eligible files available for import" or (
+            item.id in affected_series_ids
+        ):
+            item.status = ImportSeriesStatus.RECOVERY_PENDING
+            item.selected_for_import = False
+        else:
+            continue
+        item.error_message = None
+        item.diagnostics = {
+            **dict(item.diagnostics or {}),
+            "previous_series_error": previous_error,
+            "completed_import_follow_up": {
+                "resolution": "series_status_repaired",
+                "resolved_at": datetime.now(UTC).isoformat(),
+                "source_preserved": True,
+            },
+        }
+        normalized_series_count += 1
+        affected_series_ids.add(item.id)
+
+    if affected_series_ids:
+        await recompute_file_counters(session, job, series_ids=sorted(affected_series_ids))
+        await recompute_series_counters(session, job)
+    return affected_series_ids, retry_series_ids, normalized_series_count
 
 
 def _active_issue_recovery_clause() -> ColumnElement[bool]:
@@ -231,11 +425,7 @@ async def recover_orphan(
         .order_by(ImportedFile.id.asc())
     )
     files = list(files_result.scalars().all())
-    active_files = [
-        imp_file
-        for imp_file in files
-        if imp_file.status not in {ImportedFileStatus.IMPORTED, ImportedFileStatus.SKIPPED}
-    ]
+    active_files = [imp_file for imp_file in files if requires_orphan_issue_decision(imp_file)]
     decision_by_id = {decision.imported_file_id: decision for decision in request.decisions}
 
     missing_ids = [imp_file.id for imp_file in active_files if imp_file.id not in decision_by_id]
@@ -544,42 +734,30 @@ async def retry_failed_series(
         job,
         file_ids=normalized_file_ids,
     )
-    repaired_series_ids: list[int] = []
+    repaired_series_ids: set[int] = set()
+    prepared_target_series_ids: set[int] = set()
+    normalized_series_count = 0
     if normalized_file_ids is None:
-        exhausted = await session.scalars(
-            sa_select(ImportedSeries).where(
-                ImportedSeries.import_job_id == job_id,
-                ImportedSeries.status == ImportSeriesStatus.FAILED,
-                ImportedSeries.error_message == "No eligible files available for import",
-                ~sa_select(ImportedFile.id)
-                .where(
-                    ImportedFile.import_series_id == ImportedSeries.id,
-                    ImportedFile.status.in_(
-                        (
-                            ImportedFileStatus.MATCHED,
-                            ImportedFileStatus.CONFIRMED,
-                            ImportedFileStatus.FAILED,
-                        )
-                    ),
-                )
-                .exists(),
-            )
+        (
+            repaired_series_ids,
+            prepared_target_series_ids,
+            normalized_series_count,
+        ) = await _prepare_terminal_follow_up(
+            session,
+            job,
         )
-        for item in exhausted:
-            if await retain_imported_series_outcome(session, item):
-                repaired_series_ids.append(item.id)
         if repaired_series_ids:
-            await recompute_file_counters(session, job, series_ids=repaired_series_ids)
-            await recompute_series_counters(session, job)
             await log_event(
                 session,
                 job_id,
                 "INFO",
-                "import_partial_success_restored",
+                "import_terminal_follow_up_prepared",
                 message=(
-                    "Restored successful series outcomes; unresolved files remain in Follow-up."
+                    "Restored successful outcomes and moved unresolved identities to Follow-up."
                 ),
-                repaired_series_count=len(repaired_series_ids),
+                repaired_series_count=normalized_series_count,
+                affected_series_count=len(repaired_series_ids),
+                retry_series_count=len(prepared_target_series_ids),
             )
 
     identity_blocked_count = 0
@@ -623,6 +801,11 @@ async def retry_failed_series(
             if not isinstance(dict(imp_file.diagnostics or {}).get("source_revalidation"), dict)
         ]
         retry_items_by_id = {item.id: item for item in [*failed_items, *failed_file_items]}
+        if prepared_target_series_ids:
+            prepared_items = await session.scalars(
+                sa_select(ImportedSeries).where(ImportedSeries.id.in_(prepared_target_series_ids))
+            )
+            retry_items_by_id.update({item.id: item for item in prepared_items})
     else:
         scoped_items = await session.execute(
             sa_select(ImportedSeries, ImportedFile)
@@ -664,7 +847,11 @@ async def retry_failed_series(
 
     retry_series_ids = [item.id for item in retry_items]
     for item in retry_items:
-        if item.status in {ImportSeriesStatus.FAILED, ImportSeriesStatus.IMPORTED}:
+        if item.status in {
+            ImportSeriesStatus.FAILED,
+            ImportSeriesStatus.IMPORTED,
+            ImportSeriesStatus.RECOVERY_PENDING,
+        }:
             item.status = ImportSeriesStatus.CONFIRMED
         item.error_message = None
 

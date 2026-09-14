@@ -19,7 +19,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
-from pullbox.services.import_orphans import is_active_orphan_row
+from pullbox.services.import_orphans import is_active_orphan_row, requires_orphan_issue_decision
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -186,10 +186,7 @@ def _build_recovery_file_rows(
         ):
             suggested_issue_cv_id = issue_number_to_cv_ids[imp_file.parsed_issue_number][0]
 
-        decision_locked = imp_file.status in {
-            ImportedFileStatus.IMPORTED,
-            ImportedFileStatus.SKIPPED,
-        }
+        decision_locked = not requires_orphan_issue_decision(imp_file)
         if decision_locked:
             files_completed += 1
         else:

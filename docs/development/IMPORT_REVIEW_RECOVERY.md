@@ -56,7 +56,8 @@ recovery action. An import that failed before durable completion remains
 ineligible.
 
 - **Dismiss stale Mylar references** marks missing database references skipped.
-  It does not delete a review record or touch Mylar's database.
+  This includes references confirmed missing by a later source recheck. It does
+  not delete a review record or touch Mylar's database.
 - **Skip one-page archives** excludes one-page image archives while leaving the
   source files intact. A one-page archive may be cover art, a damaged archive,
   or an intentional one-page comic, so Pullbox does not delete it automatically.
@@ -65,7 +66,8 @@ ineligible.
   uses a red warning modal and an actor-bound signed preview, and
   requires configured Trash plus source write permission. Reference-only Mylar
   roots cannot use it; the non-destructive skip remains available instead.
-- **Skip unusable files** excludes empty, unsupported, and page-less files.
+- **Skip unusable files** excludes empty, unsupported, and page-less files,
+  including those confirmed unusable by a later source recheck.
 - **Allow oversized files once** retries only decompression-size blocks marked
   overrideable. It does not change the global archive safety policy or approve
   dangerous archive content.
@@ -94,11 +96,21 @@ ineligible.
   unresolved files remain in Follow-up. This is not a blanket repair of stale
   IDs or a replacement for manual review when trusted evidence disagrees.
 
-For older jobs, **Retry failed** also corrects the misleading series-level
-`No eligible files available for import` outcome when the series already has
-successful imported files and no failed or ready files remain. It retains the
-prior error in diagnostics, rebuilds the counters, and leaves unresolved file
-decisions visible. A status-only correction does not launch another import.
+For older jobs, **Retry failed** first repairs terminal bookkeeping before it
+retries file work. A series with any successfully imported file retains its
+imported outcome even when another file failed. A series that failed because it
+has no ComicVine identity moves to Follow-up instead of being retried without a
+target. Files that previously failed to resolve to a library issue are retried
+only when their saved identity resolves to one unambiguous issue in the known
+Pullbox series; contradictory provider IDs fail closed. Every other unresolved
+target becomes an explicit Follow-up decision. Prior errors remain in
+diagnostics, counters are rebuilt, and source files remain unchanged. A
+status-only correction does not launch another import.
+
+A completed source recheck reports a file ready only after both archive safety
+and saved target identity checks pass. Missing, empty, or otherwise blocked
+sources are counted as blocked even when the archive-level inspection itself
+completed successfully.
 
 Recovery queries must not expand an entire library into SQL bind parameters.
 Mixed-folder lookups join existing references and discard exact same-title
