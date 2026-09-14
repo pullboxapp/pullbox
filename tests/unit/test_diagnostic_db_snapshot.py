@@ -14,6 +14,17 @@ def _create_snapshot_source(path) -> None:  # type: ignore[no-untyped-def]
             """
             CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
             CREATE TABLE api_keys (id INTEGER PRIMARY KEY, token TEXT);
+            CREATE TABLE issues (id INTEGER PRIMARY KEY);
+            CREATE TABLE audit_logs (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                detail TEXT
+            );
+            CREATE TABLE issue_reader_states (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE
+            );
             CREATE TABLE system_config (key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE download_client_configs (
                 id INTEGER PRIMARY KEY,
@@ -28,6 +39,9 @@ def _create_snapshot_source(path) -> None:  # type: ignore[no-untyped-def]
         )
         conn.execute("INSERT INTO users (username) VALUES ('admin')")
         conn.execute("INSERT INTO api_keys (token) VALUES ('tok-secret')")
+        conn.execute("INSERT INTO issues (id) VALUES (10)")
+        conn.execute("INSERT INTO audit_logs (user_id, detail) VALUES (1, 'preserve me')")
+        conn.execute("INSERT INTO issue_reader_states (user_id, issue_id) VALUES (1, 10)")
         conn.execute(
             "INSERT INTO system_config (key, value) VALUES (?, ?)",
             ("comicvine_api_key", "cv-secret"),
@@ -62,6 +76,12 @@ def test_create_sanitized_db_copy_removes_auth_rows_and_redacts_secrets(tmp_path
     try:
         assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM api_keys").fetchone()[0] == 0
+        assert conn.execute("SELECT user_id, detail FROM audit_logs").fetchone() == (
+            None,
+            "preserve me",
+        )
+        assert conn.execute("SELECT count(*) FROM issue_reader_states").fetchone()[0] == 0
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert (
             conn.execute(
                 "SELECT value FROM system_config WHERE key = 'comicvine_api_key'"

@@ -12,6 +12,14 @@ Archive page-name matching runs off the event loop and uses a bounded local
 cache for repeated page-title parsing. It still counts every page toward
 consensus and does not reuse safety decisions between scans.
 
+Completed-import source recovery inspects each bounded page before its database
+mutation phase, then commits before inspecting the next page. Slow files
+therefore do not hold SQLite's writer lock, and results do not accumulate in an
+unbounded in-memory collection.
+Deferred catalog recovery publishes live provider progress without rewriting
+the full recovery snapshot, then writes one JSON-safe checkpoint after each
+completed catalog.
+
 `PULLBOX_IMPORT_SCAN_WORKER_COUNT=0` selects automatic inspection concurrency,
 up to four workers. CPU affinity, cgroup v2 CPU quotas and parent limits,
 cgroup memory headroom, and OS available memory cap the budget. Common cgroup

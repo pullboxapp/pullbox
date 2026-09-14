@@ -118,6 +118,10 @@ candidates; membership in one catalog plus agreeing file evidence is required
 before staging a target. Completed catalog checks are checkpointed. A provider
 failure pauses the pass, and Resume continues without repeating completed
 checks. Network requests do not hold a database write transaction.
+Catalog summaries are converted to JSON-safe checkpoint payloads before they
+are stored. Live provider progress does not rewrite the full durable recovery
+snapshot; each completed catalog produces one durable checkpoint, so a worker
+restart resumes after the last completed catalog without replaying it.
 
 Recovered files run through normal Step 4 safety, current-source validation,
 ownership checks, and the original copy or keep-in-place settings. Only newly
@@ -143,6 +147,10 @@ A completed source recheck reports a file ready only after both archive safety
 and saved target identity checks pass. Missing, empty, or otherwise blocked
 sources are counted as blocked even when the archive-level inspection itself
 completed successfully.
+Completed-import source rechecks inspect one bounded page before writing its
+refreshed evidence, then commit that page before reading more archives. This
+keeps slow archive I/O outside SQLite's single-writer window, bounds memory, and
+leaves completed pages durable if a later source needs another attempt.
 
 Recovery queries must not expand an entire library into SQL bind parameters.
 Mixed-folder lookups join existing references and discard exact same-title

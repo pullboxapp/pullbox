@@ -29,6 +29,18 @@ def create_sanitized_db_copy(db_path: Path) -> bytes | None:
             src.backup(dst)
             src.close()
 
+            tables = {
+                str(row[0])
+                for row in dst.execute(
+                    "SELECT name FROM sqlite_schema WHERE type='table'"
+                ).fetchall()
+            }
+            if "audit_logs" in tables:
+                # Keep operational evidence while removing its private account link.
+                dst.execute("UPDATE audit_logs SET user_id = NULL")
+            if "issue_reader_states" in tables:
+                # Per-user reading state has no meaning once users are removed.
+                dst.execute("DELETE FROM issue_reader_states")
             dst.execute("DELETE FROM users")
             dst.execute("DELETE FROM api_keys")
 

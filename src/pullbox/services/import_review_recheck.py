@@ -547,6 +547,14 @@ async def prepare_completed_import_file_recheck(
         rows = list((await session.execute(query)).all())
         if not rows:
             break
+        inspected: list[
+            tuple[
+                int,
+                SourceMetadata,
+                dict[str, Any],
+                dict[str, int | str],
+            ]
+        ] = []
         for imported_file, imported_series in rows:
             cursor = int(imported_file.id)
             metadata, content, signature = await asyncio.to_thread(
@@ -562,13 +570,7 @@ async def prepare_completed_import_file_recheck(
             )
             report["files_checked"] += 1
             if apply:
-                ready_for_retry = _apply_completed_file_recheck(
-                    imported_file,
-                    metadata,
-                    content,
-                    signature,
-                    reviewed_series_cv_id=imported_series.cv_id,
-                )
+                inspected.append((int(imported_file.id), metadata, content, signature))
             else:
                 source = {**metadata.diagnostics, **content}
                 ready_for_retry = (
@@ -580,11 +582,62 @@ async def prepare_completed_import_file_recheck(
                     )
                     is None
                 )
-            blocked = not ready_for_retry
-            report["blocked_files"] += int(blocked)
-            report["files_prepared"] += int(not blocked)
+                blocked = not ready_for_retry
+                report["blocked_files"] += int(blocked)
+                report["files_prepared"] += int(not blocked)
+
         if apply:
-            await session.flush()
+            # Inspect the complete bounded page before taking SQLite's writer
+            # lock. Reload and lock the job and eligible rows so a concurrent
+            # retry cannot have its newer import evidence overwritten.
+            current_job = await session.scalar(
+                select(ImportJob)
+                .where(ImportJob.id == job_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if current_job is None:
+                raise NotFoundError("ImportJob", job_id)
+            if not allows_terminal_import_recovery(current_job):
+                raise ValidationError(
+                    "Job changed while failed sources were being inspected; retry the recheck"
+                )
+
+            inspected_by_id = {
+                file_id: (metadata, content, signature)
+                for file_id, metadata, content, signature in inspected
+            }
+            apply_query = (
+                select(ImportedFile, ImportedSeries)
+                .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
+                .where(
+                    *retryable_failed_source_filters(job_id),
+                    ImportedFile.id.in_(inspected_by_id),
+                )
+                .order_by(ImportedFile.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            current_rows = list((await session.execute(apply_query)).all())
+            report["skipped_files"] += len(inspected) - len(current_rows)
+            for imported_file, imported_series in current_rows:
+                metadata, content, signature = inspected_by_id[int(imported_file.id)]
+                ready_for_retry = _apply_completed_file_recheck(
+                    imported_file,
+                    metadata,
+                    content,
+                    signature,
+                    reviewed_series_cv_id=imported_series.cv_id,
+                )
+                blocked = not ready_for_retry
+                report["blocked_files"] += int(blocked)
+                report["files_prepared"] += int(not blocked)
+            # Commit before reading the next page of source files.
+            await session.commit()
+            rows.clear()
+            current_rows.clear()
+            inspected.clear()
+            inspected_by_id.clear()
 
     if apply and report["files_checked"]:
         session.add(
