@@ -377,6 +377,55 @@ async def test_cleanup_preview_counts_physical_paths_and_queues_without_inline_w
     assert all(file.status is ImportedFileStatus.NO_MATCH for file in files)
 
 
+async def test_cleanup_preview_signs_and_bounds_empty_stale_series(db_session):
+    from pullbox.models.import_job import ImportFileHandlingMode
+    from pullbox.models.user import User
+    from pullbox.services.import_completed_cleanup import (
+        CompletedImportCleanupAction,
+        apply_completed_import_cleanup,
+        preview_completed_import_cleanup,
+    )
+
+    db_session.add(User(id=42, username="recovery-test", password_hash="unused"))
+    job, item, _, _, _ = await seed(db_session)
+    job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+    job.move_to_library = False
+    await add_file(db_session, job, item)
+    stale = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Missing before preview",
+        status=ImportSeriesStatus.NO_MATCH,
+        diagnostics={"reason": "path_missing"},
+    )
+    db_session.add(stale)
+    await db_session.commit()
+
+    action = CompletedImportCleanupAction.RECHECK_DEFERRED_FILES
+    preview = await preview_completed_import_cleanup(db_session, job.id, action, actor_id=42)
+
+    assert preview.affected_count == 2
+    assert preview.affected_file_count == 1
+    result = await apply_completed_import_cleanup(
+        db_session, job.id, action, actor_id=42, preview_token=preview.preview_token
+    )
+    assert result.affected_count == 2
+    assert job.progress_snapshot["deferred_recovery"]["stale_series_ids"] == [stale.id]
+
+    late_stale = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Missing after preview",
+        status=ImportSeriesStatus.NO_MATCH,
+        diagnostics={"reason": "source_missing"},
+    )
+    db_session.add(late_stale)
+    await db_session.flush()
+
+    await apply_deferred_recovery(db_session, job, running=True)
+
+    assert stale.status is ImportSeriesStatus.SKIPPED
+    assert late_stale.status is ImportSeriesStatus.NO_MATCH
+
+
 async def test_active_import_is_not_changed_by_offline_recovery(db_session):
     job, item, _, _, _ = await seed(db_session)
     item.status = ImportSeriesStatus.NO_MATCH

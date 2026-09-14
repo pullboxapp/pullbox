@@ -34,6 +34,7 @@ from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.models.series import Series
 from pullbox.services.audit_service import AuditService
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
+from pullbox.services.import_deferred_recovery import load_empty_stale_series
 from pullbox.services.import_known_series_recovery import load_known_series_recovery
 from pullbox.services.import_review_actions import apply_safety_allow_once_to_file
 from pullbox.services.import_review_recheck import retryable_failed_source_filters
@@ -710,6 +711,11 @@ async def _load_snapshot(
             scope_digest=digest.hexdigest(),
         )
     filters = _file_filters(job_id, action)
+    stale_series = (
+        await load_empty_stale_series(session, job_id)
+        if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES
+        else []
+    )
     aggregate = (
         await session.execute(
             select(
@@ -721,50 +727,59 @@ async def _load_snapshot(
         )
     ).one()
     file_count = int(aggregate[0] or 0)
-    if file_count == 0:
+    if file_count == 0 and not stale_series:
         return CompletedImportCleanupSnapshot(0, 0, None, None, None, sha256().hexdigest())
 
     digest = sha256()
     group_ids: set[int] = set()
-    result = await session.stream(
-        select(
-            ImportedFile.id,
-            ImportedFile.conflict_group_id,
-            ImportedFile.updated_at,
+    if file_count:
+        result = await session.stream(
+            select(
+                ImportedFile.id,
+                ImportedFile.conflict_group_id,
+                ImportedFile.updated_at,
+            )
+            .where(*filters)
+            .order_by(ImportedFile.id)
+            .execution_options(yield_per=20_000)
         )
-        .where(*filters)
-        .order_by(ImportedFile.id)
-        .execution_options(yield_per=20_000)
-    )
-    try:
-        async for rows in result.partitions(20_000):
-            for file_id, conflict_group_id, updated_at in rows:
-                digest_line = (
-                    f"{int(file_id)}|{int(conflict_group_id or 0)}|{updated_at.isoformat()}\n"
-                )
-                digest.update(digest_line.encode())
-                if conflict_group_id is not None:
-                    group_ids.add(int(conflict_group_id))
-    finally:
-        await result.close()
+        try:
+            async for rows in result.partitions(20_000):
+                for file_id, conflict_group_id, updated_at in rows:
+                    digest_line = (
+                        f"file|{int(file_id)}|{int(conflict_group_id or 0)}|"
+                        f"{updated_at.isoformat()}\n"
+                    )
+                    digest.update(digest_line.encode())
+                    if conflict_group_id is not None:
+                        group_ids.add(int(conflict_group_id))
+        finally:
+            await result.close()
+    for item in stale_series:
+        digest.update(f"series|{int(item.id)}|{item.updated_at.isoformat()}\n".encode())
     affected_count = (
         len(group_ids)
         if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
         else file_count
     )
     if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
-        affected_count = int(
+        affected_count = len(stale_series) + int(
             await session.scalar(
                 select(func.count(func.distinct(ImportedFile.file_path))).where(*filters)
             )
             or 0
         )
+    updated_at_values = [
+        item.updated_at.isoformat(timespec="microseconds") for item in stale_series
+    ]
+    if aggregate[3] is not None:
+        updated_at_values.append(aggregate[3].isoformat(timespec="microseconds"))
     return CompletedImportCleanupSnapshot(
         affected_count=affected_count,
         affected_file_count=file_count,
-        min_file_id=int(aggregate[1]),
-        max_file_id=int(aggregate[2]),
-        max_updated_at=aggregate[3].isoformat(timespec="microseconds"),
+        min_file_id=int(aggregate[1]) if aggregate[1] is not None else None,
+        max_file_id=int(aggregate[2]) if aggregate[2] is not None else None,
+        max_updated_at=max(updated_at_values, default=None),
         scope_digest=digest.hexdigest(),
     )
 
@@ -792,7 +807,7 @@ async def count_completed_import_cleanup_scope(
             )
             or 0
         )
-        return paths, file_count
+        return paths + len(await load_empty_stale_series(session, job_id)), file_count
     if action is not CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
         return file_count, file_count
     group_count = int(
@@ -1608,12 +1623,14 @@ async def apply_completed_import_cleanup(
         from pullbox.services.import_retry_helpers import require_retained_import_destination
 
         require_retained_import_destination(job)
+        stale_series_ids = [int(item.id) for item in await load_empty_stale_series(session, job_id)]
         job.progress_snapshot = {
             **dict(job.progress_snapshot or {}),
             "deferred_recovery": {
                 "state": "queued",
                 "run_id": uuid4().hex,
                 "series_ids": [],
+                "stale_series_ids": stale_series_ids,
                 "actor_id": actor_id,
             },
             "mode": "import",
@@ -1663,7 +1680,11 @@ async def apply_completed_import_cleanup(
         ),
     )
     item_unit = (
-        "group" if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS else "file"
+        "group"
+        if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
+        else "follow-up item"
+        if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES
+        else "file"
     )
     session.add(
         ImportJobLog(

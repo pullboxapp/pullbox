@@ -979,6 +979,57 @@ async def test_retry_failed_does_not_use_issue_number_after_provider_id_conflict
     assert failed_file.include_in_import is False
 
 
+async def test_retry_failed_does_not_treat_volume_as_standard_issue_one(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    item = await _create_imported_series(
+        db_session, job, name="Aquaman", status=ImportSeriesStatus.IMPORTED
+    )
+    await _create_series_with_issue(
+        db_session,
+        series_id=160,
+        issue_id=3218,
+        title="Aquaman",
+        issue_number=1.0,
+    )
+    item.series_id = 160
+    item.cv_id = 91738
+    failed_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path="/comics/aquaman-volume-1.cbz",
+        file_name="Aquaman v01 - The Drowning.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        match_confidence="high",
+        match_method="issue_number",
+        error_message="Could not resolve to a library issue",
+        diagnostics={
+            "kind": "file_conflict",
+            "source_issue_type": IssueType.TPB.value,
+            "source_metadata": {
+                "filename_parse": {
+                    "issue_number": None,
+                    "issue_type": IssueType.TPB.value,
+                    "volume": "v01",
+                }
+            },
+        },
+    )
+    db_session.add(failed_file)
+    await db_session.flush()
+
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+
+    assert count == 0
+    assert updated_job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.IMPORTED
+    assert failed_file.status is ImportedFileStatus.NO_MATCH
+    assert failed_file.matched_issue_id is None
+    assert failed_file.include_in_import is False
+
+
 async def test_retry_failed_does_not_requeue_unresolved_legacy_series_identity(db_session):
     service = _make_service()
     job = await _create_job_row(db_session, series_failed=1)

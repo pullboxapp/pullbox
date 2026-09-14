@@ -30,6 +30,7 @@ from pullbox.services.import_terminal_recovery import allows_terminal_import_rec
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql import Select
 
 
 def positive_id(value: object) -> int | None:
@@ -552,7 +553,20 @@ async def apply_deferred_recovery(
         )
         await session.flush()
 
-    counts["stale_series"] = await archive_empty_stale_series(session, job.id)
+    stale_series_ids: tuple[int, ...] | None = None
+    if running:
+        state = dict(dict(job.progress_snapshot or {}).get("deferred_recovery") or {})
+        raw_ids = state.get("stale_series_ids")
+        stale_series_ids = (
+            tuple(int(value) for value in raw_ids)
+            if isinstance(raw_ids, list) and all(isinstance(value, int) for value in raw_ids)
+            else ()
+        )
+    counts["stale_series"] = await archive_empty_stale_series(
+        session,
+        job.id,
+        series_ids=stale_series_ids,
+    )
     await refresh_recovered_groups(session, job, affected)
     snapshot = dict(job.progress_snapshot or {})
     recovery = dict(snapshot.get("deferred_recovery") or {})
@@ -618,25 +632,38 @@ async def refresh_recovered_groups(
     await recompute_series_counters(session, job)
 
 
-async def archive_empty_stale_series(session: AsyncSession, job_id: int) -> int:
-    """Retain empty missing Mylar locations in history rather than active matching."""
-    items = list(
-        await session.scalars(
-            select(ImportedSeries).where(
-                ImportedSeries.import_job_id == job_id,
-                ImportedSeries.status.in_(
-                    (ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.RECOVERY_PENDING)
-                ),
-                ImportedSeries.user_selected_cv_id.is_(None),
-                ImportedSeries.diagnostics["reason"]
-                .as_string()
-                .in_(("path_missing", "source_missing")),
-                ~select(ImportedFile.id)
-                .where(ImportedFile.import_series_id == ImportedSeries.id)
-                .exists(),
-            )
-        )
+def empty_stale_series_query(job_id: int) -> Select[tuple[ImportedSeries]]:
+    """Return empty missing-location rows eligible for follow-up archival."""
+    return select(ImportedSeries).where(
+        ImportedSeries.import_job_id == job_id,
+        ImportedSeries.status.in_(
+            (ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.RECOVERY_PENDING)
+        ),
+        ImportedSeries.user_selected_cv_id.is_(None),
+        ImportedSeries.diagnostics["reason"].as_string().in_(("path_missing", "source_missing")),
+        ~select(ImportedFile.id).where(ImportedFile.import_series_id == ImportedSeries.id).exists(),
     )
+
+
+async def load_empty_stale_series(
+    session: AsyncSession,
+    job_id: int,
+) -> list[ImportedSeries]:
+    """Load empty stale series deterministically for signed cleanup previews."""
+    return list(await session.scalars(empty_stale_series_query(job_id).order_by(ImportedSeries.id)))
+
+
+async def archive_empty_stale_series(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    series_ids: tuple[int, ...] | None = None,
+) -> int:
+    """Retain empty missing Mylar locations in history rather than active matching."""
+    query = empty_stale_series_query(job_id)
+    if series_ids is not None:
+        query = query.where(ImportedSeries.id.in_(series_ids))
+    items = list(await session.scalars(query.order_by(ImportedSeries.id)))
     for item in items:
         item.status = ImportSeriesStatus.SKIPPED
         item.selected_for_import = False

@@ -437,6 +437,8 @@ async def _load_cleanup_action_summaries(
                 "item_unit": (
                     "group"
                     if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
+                    else "follow-up item"
+                    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES
                     else "file"
                 ),
                 "examples": summary.examples,

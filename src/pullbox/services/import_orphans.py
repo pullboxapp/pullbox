@@ -10,6 +10,7 @@ from sqlalchemy import func as sa_func
 from sqlalchemy import select as sa_select
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
+from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -18,12 +19,15 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
-from pullbox.models.issue import Issue
+from pullbox.models.issue import Issue, IssueType
 from pullbox.models.series import Series
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
 from pullbox.services.import_file_issue_signals import (
     candidate_issue_number,
     candidate_issue_number_text,
+    comicinfo_issue_number,
+    filename_issue_number,
+    volume_issue_number,
 )
 from pullbox.services.import_file_resolution import load_issue_lookup_for_series
 from pullbox.services.import_job_actions import build_series_created_action_payload
@@ -123,6 +127,37 @@ def _saved_target_provider_ids(file: ImportedFile) -> set[int]:
     return provider_ids
 
 
+def _source_issue_type_matches(file: ImportedFile, issue: Issue) -> bool:
+    diagnostics = dict(file.diagnostics or {})
+    source_metadata = diagnostics.get("source_metadata")
+    filename_parse = (
+        source_metadata.get("filename_parse") if isinstance(source_metadata, dict) else None
+    )
+    raw_issue_type = diagnostics.get("source_issue_type") or (
+        filename_parse.get("issue_type") if isinstance(filename_parse, dict) else None
+    )
+    if raw_issue_type:
+        try:
+            return IssueType(str(raw_issue_type)) is issue.issue_type
+        except ValueError:
+            return False
+    parsed = parse_release_title(file.file_name or "")
+    return parsed is None or parsed.issue_type is issue.issue_type
+
+
+def _failed_target_issue_number(file: ImportedFile) -> float | None:
+    """Return affirmative issue-number evidence without treating volume as issue."""
+    exact_number = candidate_issue_number_text(file)
+    if exact_number is not None:
+        return candidate_issue_number(file)
+    filename_number = filename_issue_number(file)
+    if filename_number is not None:
+        return filename_number
+    if file.parsed_issue_number is not None and volume_issue_number(file) is None:
+        return file.parsed_issue_number
+    return comicinfo_issue_number(file)
+
+
 async def _resolve_proven_failed_target(
     session: AsyncSession,
     item: ImportedSeries,
@@ -149,9 +184,11 @@ async def _resolve_proven_failed_target(
 
     exact_number = candidate_issue_number_text(file)
     if exact_number is not None:
-        return exact_number_to_issue.get(exact_number)
-    issue_number = candidate_issue_number(file)
-    return number_to_issue.get(issue_number) if issue_number is not None else None
+        issue = exact_number_to_issue.get(exact_number)
+    else:
+        issue_number = _failed_target_issue_number(file)
+        issue = number_to_issue.get(issue_number) if issue_number is not None else None
+    return issue if issue is not None and _source_issue_type_matches(file, issue) else None
 
 
 def _prepare_exact_target_retry(file: ImportedFile, issue: Issue) -> None:

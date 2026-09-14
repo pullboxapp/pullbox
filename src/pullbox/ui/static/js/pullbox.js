@@ -8606,7 +8606,12 @@ function importResultsData(config) {
         if (!previewResponse.ok) {
           throw new Error(preview.detail || "Could not preview this cleanup action.");
         }
-        var unit = preview.item_unit === "group" ? "conflict group" : "file";
+        var unit =
+          preview.item_unit === "group"
+            ? "conflict group"
+            : preview.item_unit === "follow-up item"
+              ? "follow-up item"
+              : "file";
         var count = Math.max(0, Number(preview.affected_count) || 0);
         var examples = Array.isArray(preview.examples) ? preview.examples.slice(0, 3) : [];
         var message =
@@ -8619,7 +8624,7 @@ function importResultsData(config) {
           ". Source files will remain unchanged.";
         if (action === "recheck_deferred_files") {
           message =
-            "Check " + count.toLocaleString() + " unique file paths in the background. " +
+            "Check " + count.toLocaleString() + " deferred file paths and stale series records in the background. " +
             "Pullbox will reconcile repeated records and import only proven matches using " +
             "this import's original file settings. Uncertain matches stay in Follow-up. " +
             "Source files will remain unchanged.";
