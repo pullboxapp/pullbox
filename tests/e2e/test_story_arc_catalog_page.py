@@ -579,6 +579,79 @@ def test_preview_pagination_retry_and_add_keep_all_page_choices(
     assert errors == []
 
 
+@pytest.mark.parametrize("provider_id, initial_position", [("124", 24), ("125", 25)])
+@pytest.mark.parametrize("next_control", ["up", "monitor"])
+def test_preview_reorder_does_not_override_new_keyboard_focus(
+    authed_page: Page,
+    seeded_server: str,
+    catalog_provider: CatalogProvider,
+    provider_id: str,
+    initial_position: int,
+    next_control: str,
+) -> None:
+    page = authed_page
+    catalog_provider.metadata = replace(
+        catalog_provider.metadata,
+        issue_provider_ids=tuple(str(number) for number in range(101, 152)),
+        declared_issue_count=51,
+    )
+    page.goto(f"{seeded_server}/story-arcs/catalog/177")
+    row = page.locator(f'[data-provider-issue-id="{provider_id}"]')
+    expect(row).to_be_visible()
+    expect(row.locator("[data-reading-position]")).to_have_text(str(initial_position))
+    next_selector = (
+        f'[data-provider-issue-id="{provider_id}"] [data-order-direction="up"]'
+        if next_control == "up"
+        else "#catalog-monitored"
+    )
+    # Put the user's next focus change between Alpine's DOM update and its
+    # deferred focus restoration, including a move across the page boundary.
+    rendered_position = row.evaluate(
+        """async (row, nextSelector) => {
+            const id = row.dataset.providerIssueId;
+            const down = row.querySelector('[data-order-direction="down"]');
+            down.focus();
+            down.click();
+            await Promise.resolve();
+            const moved = document.querySelector(`[data-provider-issue-id="${id}"]`);
+            document.querySelector(nextSelector).focus();
+            const position = moved.querySelector('[data-reading-position]').textContent;
+            await Alpine.nextTick();
+            return position;
+        }""",
+        next_selector,
+    )
+    assert rendered_position == str(initial_position + 1)
+    expect(page.locator(next_selector)).to_be_focused()
+    if next_control == "monitor":
+        page.keyboard.press("Space")
+        expect(page.get_by_role("switch", name="Monitor this story arc")).to_be_checked()
+        expect(row.locator("[data-reading-position]")).to_have_text(str(initial_position + 1))
+        return
+    page.keyboard.press("Enter")
+    expect(row.locator("[data-reading-position]")).to_have_text(str(initial_position))
+
+
+def test_preview_reorder_restores_focus_to_enabled_direction_at_list_ends(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+) -> None:
+    page = authed_page
+    page.goto(f"{seeded_server}/story-arcs/catalog/178")
+    row = page.locator('[data-provider-issue-id="101"]')
+    expect(row).to_be_visible()
+    down = row.locator('[data-order-direction="down"]')
+    up = row.locator('[data-order-direction="up"]')
+    expect(row.locator("[data-reading-position]")).to_have_text("1")
+    down.press("Enter")
+    expect(row.locator("[data-reading-position]")).to_have_text("2")
+    expect(down).to_be_disabled()
+    expect(up).to_be_focused()
+    page.keyboard.press("Enter")
+    expect(row.locator("[data-reading-position]")).to_have_text("1")
+    expect(up).to_be_disabled()
+    expect(down).to_be_focused()
+
+
 def test_preview_reorder_single_member_and_pending_retry_are_disabled(
     authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
 ) -> None:

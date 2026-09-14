@@ -41,6 +41,7 @@ function storyArcPreview() {
       const index = this.members.findIndex(member => member.provider_id === providerId);
       const target = index + direction;
       if (index < 0 || target < 0 || target >= this.members.length) return;
+      const previousFocus = document.activeElement;
       // Replace the array in one pass so keyed rows never see duplicate IDs.
       const reordered = [...this.members];
       [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
@@ -50,6 +51,9 @@ function storyArcPreview() {
       const moved = this.members[target];
       this.reorderAnnouncement = `${moved.series_name} #${moved.issue_number} moved to position ${target + 1}.`;
       this.$nextTick(() => {
+        // A newer keyboard/pointer focus choice takes precedence over restoring
+        // focus lost while Alpine moves or replaces the keyed row.
+        if (document.activeElement !== previousFocus && document.activeElement !== document.body) return;
         const row = this.$root.querySelector(`[data-provider-issue-id="${providerId}"]`);
         const button = row?.querySelector(`[data-order-direction="${direction < 0 ? 'up' : 'down'}"]`);
         const focusTarget = button?.disabled ? row.querySelector('[data-order-direction]:not(:disabled)') : button;
