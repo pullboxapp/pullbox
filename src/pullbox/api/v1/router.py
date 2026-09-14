@@ -6,6 +6,7 @@ from pullbox.api.v1.activity import router as activity_router
 from pullbox.api.v1.audit import router as audit_router
 from pullbox.api.v1.auth import router as auth_router
 from pullbox.api.v1.blocklist import router as blocklist_router
+from pullbox.api.v1.catalog import router as catalog_router
 from pullbox.api.v1.clients import router as clients_router
 from pullbox.api.v1.config import router as config_router
 from pullbox.api.v1.covers import router as covers_router
@@ -36,6 +37,7 @@ from pullbox.utilities.router import router as utilities_router
 v1_router = APIRouter(prefix="/api/v1")
 
 v1_router.include_router(activity_router)
+v1_router.include_router(catalog_router)
 v1_router.include_router(audit_router)
 v1_router.include_router(blocklist_router)
 v1_router.include_router(auth_router)

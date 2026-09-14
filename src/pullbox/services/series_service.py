@@ -275,7 +275,8 @@ class SeriesService:
         series.issue_catalog_error = None
         series.issue_catalog_last_synced_at = None
         series.issue_catalog_last_checked_at = None
-        series.metadata_source = "comicvine_partial"
+        if series.metadata_source != "pullbox_catalog":
+            series.metadata_source = "comicvine_partial"
 
         diagnostics = dict(import_series.diagnostics or {})
         diagnostics.pop("series_folder_ownership", None)

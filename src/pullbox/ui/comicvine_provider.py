@@ -22,9 +22,17 @@ async def open_comicvine_ui_provider(
     session: AsyncSession,
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    prefer_catalog: bool = False,
 ) -> AsyncIterator[Any]:
     """Open the configured Comic Vine provider for one UI operation."""
     from pullbox.core.comicvine_key import get_comicvine_api_key
+    from pullbox.services.catalog.lookup import CatalogLookupService
+    from pullbox.services.catalog.reader import get_catalog_reader
+
+    reader = get_catalog_reader()
+    if prefer_catalog and reader.available:
+        yield CatalogLookupService(reader)
+        return
 
     api_key = await get_comicvine_api_key(session)
     await session.rollback()

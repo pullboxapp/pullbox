@@ -1482,11 +1482,19 @@ async def import_cv_search(
     if query_text:
         parsed_query = parse_comicvine_series_query(query_text)
         api_key = await get_comicvine_api_key(session)
-        if api_key:
+        from pullbox.services.catalog.lookup import CatalogLookupService
+        from pullbox.services.catalog.reader import get_catalog_reader
+
+        catalog = get_catalog_reader()
+        if api_key or catalog.available:
             try:
-                provider = wrap_comicvine_provider_for_ui_cache(
-                    ComicVineProvider(api_key=api_key, rate_limit=10),
-                    request,
+                provider = (
+                    CatalogLookupService(catalog)
+                    if catalog.available
+                    else wrap_comicvine_provider_for_ui_cache(
+                        ComicVineProvider(api_key=api_key, rate_limit=10),
+                        request,
+                    )
                 )
                 cv_results, _total_results = await provider.search_series_globally(
                     parsed_query.title_query,

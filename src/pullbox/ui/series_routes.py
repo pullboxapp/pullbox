@@ -601,6 +601,9 @@ async def load_add_series_search_context(
     search_mode: str | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> dict[str, object]:
+    from pullbox.services.catalog.reader import get_catalog_reader
+
+    local_catalog = get_catalog_reader().available
     per_page = ADD_SERIES_PER_PAGE
     normalized_query = (query or "").strip()
     normalized_sort = normalize_add_series_sort(sort)
@@ -615,6 +618,7 @@ async def load_add_series_search_context(
     ) or 0
 
     base_context: dict[str, object] = {
+        "local_catalog": local_catalog,
         "search_query": normalized_query,
         "add_series_sort": normalized_sort,
         "is_preview_search": False,
@@ -661,6 +665,7 @@ async def load_add_series_search_context(
         async with open_comicvine_ui_provider(
             session,
             session_factory=session_factory,
+            prefer_catalog=True,
         ) as provider:
             if preview_mode:
                 cv_results, _total_results = await provider.search_series_page(
@@ -695,7 +700,11 @@ async def load_add_series_search_context(
         )
     except Exception:
         logger.exception("comicvine_search_failed", query=normalized_query)
-        base_context["search_error"] = "ComicVine search failed. Check your API key in settings."
+        base_context["search_error"] = (
+            "Local catalog search failed. Check its status in Metadata settings."
+            if local_catalog
+            else "ComicVine search failed. Check your API key in settings."
+        )
         return base_context
 
     in_library_count = sum(1 for item in search_results if bool(item.get("already_added")))

@@ -206,6 +206,8 @@ def _datanodes_login_failure(exc: Exception) -> ArtifactHostResolutionError:
 
 async def build_metadata_service(session: AsyncSession) -> MetadataService:
     """Construct a MetadataService using persisted ComicVine settings."""
+    from pullbox.services.catalog.reader import get_catalog_reader
+
     settings = get_settings()
     api_key = await get_comicvine_api_key(session)
     provider = ComicVineProvider(api_key=api_key)
@@ -215,6 +217,7 @@ async def build_metadata_service(session: AsyncSession) -> MetadataService:
         provider=provider,
         covers_dir=covers_dir,
         refresh_days=settings.metadata_refresh_days,
+        catalog=get_catalog_reader(),
     )
 
 
@@ -239,6 +242,8 @@ async def build_import_service(
     min_burst_limit: int | None = None,
 ) -> ImportService:
     """Construct an ImportService using persisted ComicVine settings."""
+    from pullbox.services.catalog.reader import get_catalog_reader
+
     settings = get_settings()
     api_key = await get_comicvine_api_key(session)
     persisted_rate_config = await session.get(SystemConfig, "comicvine_rate_limit_per_second")
@@ -271,6 +276,7 @@ async def build_import_service(
         provider,
         covers_dir=await resolve_covers_dir(session),
         refresh_days=settings.metadata_refresh_days,
+        catalog=get_catalog_reader(),
     )
     event_bus = build_scoped_event_bus()
     series_svc = SeriesService(metadata_svc, event_bus)

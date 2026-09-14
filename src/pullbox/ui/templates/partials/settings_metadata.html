@@ -79,6 +79,8 @@
     </form>
   {% endcall %}
 
+  {% include "partials/settings_catalog.html" %}
+
   {% call section_card(
     title="Refresh policy",
     eyebrow="Sync cadence",
@@ -89,14 +91,14 @@
       <div class="settings-rows settings-rows-align-end">
         {% call settings_row(label="Refresh Interval") %}
           <div class="flex items-center gap-2">
-            <input type="number" name="metadata_refresh_days" value="{{ configs.get('metadata_refresh_days', '7') }}" min="1" max="90" class="input-pb w-24">
+            <input type="number" name="metadata_refresh_days" aria-label="Refresh Interval" value="{{ configs.get('metadata_refresh_days', '7') }}" min="1" max="90" class="input-pb w-24">
             <span class="text-sm text-pb-text-sec">days</span>
           </div>
         {% endcall %}
 
         {% call settings_row(label="Import Match Burst", help="How aggressively bulk import matching may burst ComicVine requests before pacing them out. Lower is safer.") %}
           <div class="flex items-center gap-2">
-            <input type="number" name="comicvine_rate_limit_per_second" value="{{ configs.get('comicvine_rate_limit_per_second', '1') }}" min="1" max="10" class="input-pb w-24">
+            <input type="number" name="comicvine_rate_limit_per_second" aria-label="Import Match Burst" value="{{ configs.get('comicvine_rate_limit_per_second', '1') }}" min="1" max="10" class="input-pb w-24">
             <span class="text-sm text-pb-text-sec">requests</span>
           </div>
         {% endcall %}

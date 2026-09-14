@@ -5,7 +5,7 @@
   data-testid="add-series-results"
   class="add-series-results-shell space-y-3"
 >
-  {{ comicvine_search_loading("add-series-results-loading", "add-series-results-loading") }}
+  {{ comicvine_search_loading("add-series-results-loading", "add-series-results-loading", local_catalog) }}
 
   {% if is_preview_search and search_query %}
     <div
@@ -24,11 +24,11 @@
         <p class="add-series-preview-notice-title">Quick preview</p>
         <p class="add-series-preview-notice-copy">
           {% if search_shown_count %}
-            Showing {{ search_shown_count }} fast ComicVine match{% if search_shown_count != 1 %}es{% endif %}.
+            Showing {{ search_shown_count }} fast {{ 'local catalog' if local_catalog else 'ComicVine' }} match{% if search_shown_count != 1 %}es{% endif %}.
           {% else %}
             No quick matches were found in the fast preview.
           {% endif %}
-          Press Enter or search all results to load the full ComicVine result set.
+          Press Enter or search all results to load the full {{ 'local catalog' if local_catalog else 'ComicVine' }} result set.
         </p>
       </div>
       <a
@@ -42,7 +42,7 @@
         hx-indicator="#add-series-results-loading"
         class="btn-primary btn-sm add-series-preview-notice-action"
       >
-        Search all ComicVine results
+        Search all {{ 'local catalog' if local_catalog else 'ComicVine' }} results
       </a>
     </div>
   {% endif %}
@@ -66,9 +66,10 @@
       <svg class="mx-auto h-10 w-10 text-pb-text-dim" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
         <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
       </svg>
-      <p class="add-series-empty-title">No ComicVine matches</p>
+      <p class="add-series-empty-title">No {{ 'local catalog' if local_catalog else 'ComicVine' }} matches</p>
       <p class="add-series-empty-copy">
         Try the exact title, add the year, or remove punctuation and subtitles from the search.
+        {% if local_catalog %}You can also check for a catalog update in Metadata settings. No online search was made.{% endif %}
       </p>
     </div>
   {% else %}
@@ -76,7 +77,7 @@
       <svg class="mx-auto h-10 w-10 text-pb-text-dim" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
         <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
       </svg>
-      <p class="add-series-empty-title">Search ComicVine</p>
+      <p class="add-series-empty-title">{{ 'Search local catalog' if local_catalog else 'Search ComicVine' }}</p>
       <p class="add-series-empty-copy">
         Type a series name above to find and add it to your library.
       </p>

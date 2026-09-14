@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added an optional local Comic Vine catalog for series searches and import
+  matching without live metadata requests. Download it from Metadata settings
+  with progress, resumable transfers, signed verification, and daily updates.
+  Failed updates preserve the installed catalog; full metadata enrichment still
+  uses the user's Comic Vine API key.
 - Added import source-layout previews for series folders, publisher/series
   folders, and custom folder and issue naming patterns.
 - Added independent options to keep existing files in place and use an approved

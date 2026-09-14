@@ -7,7 +7,7 @@
     ADD <span>SERIES</span>
   </h2>
   <p data-testid="add-series-subtitle" class="series-registry-subtitle">
-    Search ComicVine · review · add to library
+    {{ 'Search local catalog' if local_catalog else 'Search ComicVine' }} · review · add to library
   </p>
 </div>
 

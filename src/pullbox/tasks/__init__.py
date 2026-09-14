@@ -6,6 +6,7 @@ run and populate the task registry at import time.
 
 from pullbox.tasks import backup_task as backup_task
 from pullbox.tasks import blocklist_task as blocklist_task
+from pullbox.tasks import catalog_task as catalog_task
 from pullbox.tasks import cover_backfill_task as cover_backfill_task
 from pullbox.tasks import dashboard_task as dashboard_task
 from pullbox.tasks import database_maintenance_task as database_maintenance_task

@@ -44,8 +44,10 @@ def build_import_scan_metadata_provider(
     provider: Any,
 ) -> CachedImportMetadataProvider:
     """Return the Step 2 provider stack: persistent cache, then per-job cache."""
+    from pullbox.services.catalog.lookup import catalog_or_provider
+
     return CachedImportMetadataProvider(
-        build_persistent_import_metadata_provider(session, provider)
+        catalog_or_provider(build_persistent_import_metadata_provider(session, provider))
     )
 
 
