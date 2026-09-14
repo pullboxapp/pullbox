@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import delete, select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, PendingRollbackError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.sqlite_lock import (
@@ -206,16 +206,22 @@ async def persist_health_outcomes(
                 await active_session.commit()
                 await session.commit()
             return
-        except OperationalError as exc:
+        except (OperationalError, PendingRollbackError) as exc:
             await active_session.rollback()
-            if not is_sqlite_locked_error(exc) or attempt == lock_retry_attempts:
+            recoverable = isinstance(exc, PendingRollbackError) or is_sqlite_locked_error(exc)
+            if not recoverable or attempt == lock_retry_attempts:
                 raise
             delay_seconds = retry_delay(attempt)
             logger.warning(
-                "health_result_persist_retrying_after_sqlite_lock",
+                (
+                    "health_result_persist_retrying_after_pending_rollback"
+                    if isinstance(exc, PendingRollbackError)
+                    else "health_result_persist_retrying_after_sqlite_lock"
+                ),
                 attempt=attempt,
                 max_attempts=lock_retry_attempts,
                 delay_seconds=delay_seconds,
+                failure_type=type(exc).__name__,
             )
         finally:
             if manage_commit:

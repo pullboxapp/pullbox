@@ -1,6 +1,7 @@
 """Legacy completed imports retain good files without overriding real conflicts."""
 
 from copy import deepcopy
+from datetime import UTC, datetime
 
 import pytest
 
@@ -277,6 +278,26 @@ async def test_known_series_action_is_visible_in_existing_follow_up_and_file_pre
         CompletedImportCleanupAction.RECOVER_KNOWN_SERIES,
     )
     assert [item.id for item in page.items] == [file.id]
+
+
+async def test_known_series_recovery_survives_post_completion_job_failure(db_session):
+    job, _series, file = await seed_recovery(db_session)
+    db_session.add(User(id=42, username="operator", password_hash="unused"))
+    job.status = ImportJobStatus.FAILED
+    job.import_completed_at = datetime.now(UTC)
+    job.error_message = "Optional follow-up failed after canonical import completed."
+    await db_session.commit()
+
+    plans = await load_known_series_recovery(db_session, job.id)
+    preview = await preview_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RECOVER_KNOWN_SERIES,
+        actor_id=42,
+    )
+
+    assert [plan.file_id for plan in plans] == [file.id]
+    assert preview.affected_file_count == 1
 
 
 async def test_known_series_action_rejects_changed_parent_evidence(db_session):

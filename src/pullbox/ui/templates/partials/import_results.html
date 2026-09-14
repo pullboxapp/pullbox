@@ -31,6 +31,7 @@
       - rollback_actions_rolled_back: int
 -#}
 {% from "components/settings_shell.html" import inline_alert %}
+{% set recovery_actions_available = recovery_actions_available|default(job.status.value == 'completed' and not job.archived_at) %}
 
 <div
   x-data="importResultsData({
@@ -49,7 +50,7 @@
   <div data-testid="import-follow-up-job-action-bar" class="rounded-xl border border-pb-border bg-pb-card/60 px-4 py-3">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <div class="flex flex-wrap items-center gap-2">
-        {% if (failed_count > 0 or files_failed > 0) and not job.removed_library_root_snapshot %}
+        {% if recovery_actions_available and (failed_count > 0 or files_failed > 0) and not job.removed_library_root_snapshot %}
         <button
           type="button"
           data-testid="import-results-retry-action"
@@ -300,7 +301,7 @@
   {% set safety_category_summaries = safety_category_summaries|default([]) %}
   {% set cleanup_safe_action_count = cleanup_safe_action_count|default(0) %}
   {% set cleanup_needs_review_count = cleanup_needs_review_count|default(0) %}
-  {% if job.status.value == 'completed' and not job.archived_at and (cleanup_action_summaries or cleanup_needs_review_count > 0) %}
+  {% if recovery_actions_available and (cleanup_action_summaries or cleanup_needs_review_count > 0) %}
   <section data-testid="import-results-recovery-dashboard" class="section-card overflow-hidden">
     <div class="section-header">
       <div class="section-header-copy">

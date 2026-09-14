@@ -20,7 +20,6 @@ from pullbox.core.issue_numbers import parse_issue_number_text
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.models.audit_log import AuditEventType
 from pullbox.models.import_job import (
-    ImportControlRequest,
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
@@ -40,6 +39,7 @@ from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
 from pullbox.services.import_story_arc_resolution import (
     refresh_story_arc_entries_for_import_files,
 )
+from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -638,12 +638,11 @@ async def _load_completed_job(session: AsyncSession, job_id: int) -> ImportJob:
     job = await session.get(ImportJob, job_id, populate_existing=True)
     if job is None:
         raise NotFoundError("ImportJob", job_id)
-    if job.status is not ImportJobStatus.COMPLETED:
-        raise ValidationError("Job must be in COMPLETED state for recovery cleanup")
-    if job.control_request is not ImportControlRequest.NONE:
-        raise ValidationError("The import job has a pending control request")
-    if job.archived_at is not None:
-        raise ValidationError("Archived import jobs must be restored before cleanup")
+    if not allows_terminal_import_recovery(job):
+        raise ValidationError(
+            "Job must have a COMPLETED canonical import with no pending control or rollback "
+            "work for recovery cleanup"
+        )
     return job
 
 

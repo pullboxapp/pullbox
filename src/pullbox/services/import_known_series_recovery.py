@@ -18,7 +18,6 @@ from pullbox.models.import_job import (
     ImportedFileStatus,
     ImportedSeries,
     ImportJob,
-    ImportJobStatus,
     ImportSeriesStatus,
     ImportSourceType,
 )
@@ -31,6 +30,7 @@ from pullbox.services.import_source_metadata import (
     build_import_metadata_conflict,
     source_metadata_for_import_file,
 )
+from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -213,14 +213,8 @@ async def load_known_series_recovery(
     job_id: int,
 ) -> tuple[KnownSeriesRecovery, ...]:
     """Return only exact recoverable file identities without modifying the session."""
-    job = (
-        await session.execute(
-            select(ImportJob.status, ImportJob.source_type).where(
-                ImportJob.id == job_id,
-            )
-        )
-    ).one_or_none()
-    if job is None or job.status is not ImportJobStatus.COMPLETED:
+    job = await session.get(ImportJob, job_id)
+    if job is None or not allows_terminal_import_recovery(job):
         return ()
     plans: list[KnownSeriesRecovery] = []
     matched_local_ids: dict[int, int | None] = {}

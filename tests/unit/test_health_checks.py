@@ -2541,6 +2541,29 @@ class TestCrossCutting:
         assert "boom" in outcomes[0].message.lower()
 
     @pytest.mark.asyncio
+    async def test_failed_check_always_rolls_back_before_persistence(
+        self,
+        settings: MagicMock,
+    ) -> None:
+        service = _make_service(settings)
+        session = MagicMock()
+        session.is_active = True
+        session.rollback = AsyncMock()
+
+        async def cancelled_database_check() -> CheckOutcome:
+            raise TimeoutError
+
+        outcomes = await service._safe_run(
+            cancelled_database_check(),
+            "database",
+            "connectivity",
+            session=session,
+        )
+
+        assert outcomes[0].status == HealthStatus.UNHEALTHY
+        session.rollback.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_actionable_guidance_present(self, db_session: AsyncSession) -> None:
         """Non-healthy outcomes should have non-empty guidance."""
         s = MagicMock()

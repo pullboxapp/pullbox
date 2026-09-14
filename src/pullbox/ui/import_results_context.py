@@ -45,6 +45,7 @@ from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
     import_safety_category_label,
 )
+from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
 from pullbox.services.import_workflow_state import import_control_state_for_job
 
 if TYPE_CHECKING:
@@ -996,10 +997,9 @@ async def load_import_results_context(
     safety_category_summaries = (
         await _load_safety_category_summaries(session, job_id) if files_safety_blocked > 0 else []
     )
+    recovery_actions_available = allows_terminal_import_recovery(job)
     cleanup_action_summaries = (
-        await _load_cleanup_action_summaries(session, job_id)
-        if job.status is ImportJobStatus.COMPLETED and job.archived_at is None
-        else []
+        await _load_cleanup_action_summaries(session, job_id) if recovery_actions_available else []
     )
     misplaced_source_restore_count = 0
     misplaced_source_duplicate_count = 0
@@ -1137,6 +1137,7 @@ async def load_import_results_context(
         ),
         "safety_category_summaries": safety_category_summaries,
         "cleanup_action_summaries": cleanup_action_summaries,
+        "recovery_actions_available": recovery_actions_available,
         "recommended_conflict_groups": recommended_conflict_groups,
         "recommended_conflict_files": recommended_conflict_files,
         "already_owned_conflict_files": already_owned_conflict_files,

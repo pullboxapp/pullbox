@@ -182,6 +182,51 @@ async def test_results_count_retryable_failed_inspection_as_safe_next_step(db_se
 
 
 @pytest.mark.asyncio
+async def test_results_keep_recovery_actions_for_post_completion_failure(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/tmp/comics",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.FAILED,
+        import_completed_at=datetime.now(UTC),
+        error_message="Optional follow-up failed after canonical import completed.",
+    )
+    db_session.add(job)
+    await db_session.flush()
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Recoverable import",
+        status=ImportSeriesStatus.IMPORTED,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    db_session.add(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imported_series.id,
+            file_path="/tmp/comics/missing.cbz",
+            file_name="missing.cbz",
+            file_size=1024,
+            file_format="cbz",
+            status=ImportedFileStatus.SAFETY_BLOCKED,
+            diagnostics={
+                "safety_block": build_import_safety_diagnostics(
+                    ImportSafetyCategory.SOURCE_MISSING.value,
+                    code=ImportSafetyCategory.SOURCE_MISSING.value,
+                )
+            },
+        )
+    )
+    await db_session.flush()
+
+    context = await load_import_results_context(db_session, job)
+
+    assert context["recovery_actions_available"] is True
+    assert context["cleanup_action_summaries"][0]["action"] == "dismiss_missing_references"
+
+
+@pytest.mark.asyncio
 async def test_load_import_results_context_reports_changed_sources_separately(
     db_session,
 ) -> None:  # type: ignore[no-untyped-def]
