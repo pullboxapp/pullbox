@@ -49,6 +49,12 @@ above-fold count and a direct link to that import's Follow-up workspace.
 
 Available recovery actions are intentionally narrow:
 
+A later task or optional Story Arc failure does not hide these actions after
+the canonical import has durably completed. Pullbox also requires the job to be
+unarchived, idle, and free of rollback work before exposing or applying any
+recovery action. An import that failed before durable completion remains
+ineligible.
+
 - **Dismiss stale Mylar references** marks missing database references skipped.
   It does not delete a review record or touch Mylar's database.
 - **Skip one-page archives** excludes one-page image archives while leaving the

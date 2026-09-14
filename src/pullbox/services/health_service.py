@@ -528,7 +528,7 @@ class HealthService:
     @staticmethod
     async def _rollback_failed_check_session(session: AsyncSession | None) -> None:
         """Restore a failed check transaction before later checks or persistence."""
-        if session is None or session.is_active:
+        if session is None:
             return
         try:
             await session.rollback()

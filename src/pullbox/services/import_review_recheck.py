@@ -41,6 +41,7 @@ from pullbox.services.import_content_inspection import inspect_import_content
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.services.import_series_match_state import clear_auto_cv_match_fields
 from pullbox.services.import_source_metadata import source_metadata_for_import_file
+from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -453,8 +454,11 @@ async def prepare_completed_import_file_recheck(
     job = await session.get(ImportJob, job_id)
     if job is None:
         raise NotFoundError("ImportJob", job_id)
-    if job.status != ImportJobStatus.COMPLETED or job.control_request != ImportControlRequest.NONE:
-        raise ValidationError("Job must be idle in COMPLETED before a failed-file recheck")
+    if not allows_terminal_import_recovery(job):
+        raise ValidationError(
+            "Job must have a COMPLETED canonical import with no pending control or rollback "
+            "work before a failed-file recheck"
+        )
     if not source_roots:
         raise ValidationError("At least one explicit source root is required")
     roots = [(path.expanduser().absolute(), resolve_preview_source(path)) for path in source_roots]

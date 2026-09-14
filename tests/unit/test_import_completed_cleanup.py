@@ -946,6 +946,24 @@ async def test_cleanup_rejects_non_completed_job(db_session: AsyncSession) -> No
 
 
 @pytest.mark.asyncio
+async def test_cleanup_rejects_failed_job_without_durable_completion(
+    db_session: AsyncSession,
+) -> None:
+    job, _imported_series = await _seed_job(db_session)
+    job.status = ImportJobStatus.FAILED
+    job.import_completed_at = None
+    await db_session.commit()
+
+    with pytest.raises(ValidationError, match=r"(?i)completed"):
+        await preview_completed_import_cleanup(
+            db_session,
+            job.id,
+            CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES,
+            actor_id=42,
+        )
+
+
+@pytest.mark.asyncio
 async def test_cleanup_file_review_is_bounded_and_paginated(
     db_session: AsyncSession,
 ) -> None:

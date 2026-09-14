@@ -1116,7 +1116,11 @@ class TestImportResultsPartial:
             diagnostics={"safety_block": {"overrideable": True, "reason": "Too large"}},
         )
         html = templates.env.get_template("partials/import_results.html").render(
-            job=SimpleNamespace(id=35, status=SimpleNamespace(value="failed")),
+            job=SimpleNamespace(
+                id=35,
+                status=SimpleNamespace(value="failed"),
+                archived_at=None,
+            ),
             can_rollback=False,
             imported_count=0,
             failed_count=1,
@@ -1142,6 +1146,23 @@ class TestImportResultsPartial:
             files_safety_blocked=105,
             safety_blocked_files=[blocked_file],
             safety_blocked_files_truncated=5,
+            recovery_actions_available=True,
+            cleanup_action_summaries=[
+                {
+                    "action": "dismiss_missing_references",
+                    "label": "Dismiss stale Mylar references",
+                    "description": "Clear stale references without deleting files.",
+                    "button_label": "Dismiss references",
+                    "tone": "neutral",
+                    "affected_count": 1,
+                    "affected_file_count": 1,
+                    "item_unit": "file",
+                    "examples": ("missing.cbz",),
+                }
+            ],
+            safety_category_summaries=[],
+            cleanup_safe_action_count=1,
+            cleanup_needs_review_count=0,
             resume_step=5,
             resume_job_id=35,
             resume_progress_snapshot={},
@@ -1152,6 +1173,8 @@ class TestImportResultsPartial:
         assert "large-tpb.cbz" in html
         assert "5 more safety exceptions are not shown" in html
         assert 'data-testid="import-results-safety-retry-91"' in html
+        assert 'data-testid="import-results-recovery-dashboard"' in html
+        assert "Dismiss stale Mylar references" in html
 
     def test_results_template_explains_changed_source_failures(self) -> None:
         from types import SimpleNamespace

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -953,11 +954,18 @@ async def test_retry_failed_series_resets_duplicate_file_failures(
     assert failed_file.error_message is None
 
 
+@pytest.mark.parametrize(
+    "job_status",
+    [ImportJobStatus.COMPLETED, ImportJobStatus.FAILED],
+)
 async def test_retry_failed_series_resets_partial_import_file_failures(
     db_session: AsyncSession,
+    job_status: ImportJobStatus,
 ) -> None:
     service = _make_service()
-    job = await _create_job_row(db_session)
+    job = await _create_job_row(db_session, status=job_status)
+    if job_status is ImportJobStatus.FAILED:
+        job.import_completed_at = datetime.now(UTC)
     imported = await _create_imported_series(
         db_session,
         job,

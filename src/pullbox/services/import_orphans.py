@@ -27,6 +27,7 @@ from pullbox.services.import_job_execution_items import (
 )
 from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
+from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -527,8 +528,11 @@ async def retry_failed_series(
     if job is None:
         raise NotFoundError("ImportJob", job_id)
 
-    if job.status != ImportJobStatus.COMPLETED:
-        raise ValidationError(f"Job must be in COMPLETED state to retry (current: {job.status})")
+    if not allows_terminal_import_recovery(job):
+        raise ValidationError(
+            "Job must have a COMPLETED canonical import with no pending control or rollback "
+            f"work to retry (current: {job.status})"
+        )
 
     require_retained_import_destination(job)
 
