@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -288,6 +289,149 @@ async def test_completed_recheck_repairs_only_changed_failed_sources(
     assert untouched.status is before_untouched["status"]
     assert untouched.source_signature == before_untouched["signature"]
     assert untouched.diagnostics == before_untouched["diagnostics"]
+
+
+async def test_completed_recheck_finishes_inspection_before_mutating_rows(
+    db_session,
+    tmp_path,
+    monkeypatch,
+):
+    from pullbox.services import import_review_recheck
+
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    item.status = ImportSeriesStatus.IMPORTED
+    changed_files = files[1:]
+    for changed in changed_files:
+        changed.status = ImportedFileStatus.FAILED
+        changed.include_in_import = False
+        changed.matched_issue_cv_id = 100000 + int(changed.parsed_issue_number or 0)
+        changed.match_method = "comicvine_issue_id"
+        changed.match_confidence = "high"
+        changed.diagnostics = {
+            **changed.diagnostics,
+            "target_issue_summary": {
+                "provider_id": str(changed.matched_issue_cv_id),
+                "issue_number": changed.parsed_issue_number,
+            },
+            "source_revalidation": {"code": "source_changed", "retryable": True},
+        }
+        path = Path(changed.file_path)
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                "ComicInfo.xml",
+                "<ComicInfo><Series>Firefly</Series>"
+                f"<Number>{int(changed.parsed_issue_number or 0)}</Number></ComicInfo>",
+            )
+            archive.writestr("1.jpg", b"replacement image")
+            archive.writestr("2.jpg", b"replacement image")
+    await db_session.flush()
+
+    original_inspect = import_review_recheck.inspect_review_source
+    inspected = 0
+
+    def inspect_before_write(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal inspected
+        if inspected:
+            assert "source_recheck" not in changed_files[0].diagnostics
+        result = original_inspect(*args, **kwargs)
+        inspected += 1
+        return result
+
+    monkeypatch.setattr(import_review_recheck, "inspect_review_source", inspect_before_write)
+
+    report = await prepare_completed_import_file_recheck(
+        db_session,
+        job.id,
+        source_roots=[tmp_path],
+        apply=True,
+        accept_replaced_files=True,
+    )
+
+    assert report["files_checked"] == 2
+    assert report["files_prepared"] == 2
+    assert all(
+        changed.diagnostics["source_recheck"]["ready_for_retry"] for changed in changed_files
+    )
+
+
+async def test_completed_recheck_keeps_loaded_file_rows_bounded(
+    db_session,
+    tmp_path,
+    monkeypatch,
+):
+    from pullbox.services import import_review_recheck
+
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    item.status = ImportSeriesStatus.IMPORTED
+    for index in range(248):
+        path = tmp_path / f"retry-{index:03d}.cbz"
+        files.append(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=item.id,
+                file_path=str(path),
+                file_name=path.name,
+                file_size=1024,
+                file_format="cbz",
+                status=ImportedFileStatus.FAILED,
+                parsed_series="Firefly",
+                parsed_issue_number=float(index + 10),
+                matched_issue_cv_id=200000 + index,
+                diagnostics={
+                    "target_issue_summary": {
+                        "provider_id": str(200000 + index),
+                        "issue_number": float(index + 10),
+                    },
+                    "source_revalidation": {"code": "source_changed", "retryable": True},
+                },
+            )
+        )
+    for imported_file in files[:3]:
+        imported_file.status = ImportedFileStatus.FAILED
+        imported_file.matched_issue_cv_id = 100000 + int(imported_file.parsed_issue_number or 0)
+        imported_file.diagnostics = {
+            **imported_file.diagnostics,
+            "target_issue_summary": {
+                "provider_id": str(imported_file.matched_issue_cv_id),
+                "issue_number": imported_file.parsed_issue_number,
+            },
+            "source_revalidation": {"code": "source_changed", "retryable": True},
+        }
+    db_session.add_all(files[3:])
+    await db_session.commit()
+    job_id = int(job.id)
+    db_session.expunge_all()
+
+    loaded_file_counts: list[int] = []
+
+    async def tracked_to_thread(function, *args, **kwargs):  # type: ignore[no-untyped-def]
+        gc.collect()
+        loaded_file_counts.append(
+            sum(isinstance(value, ImportedFile) for value in db_session.identity_map.values())
+        )
+        return function(*args, **kwargs)
+
+    def inspect_without_io(path, base, _signature, **_kwargs):  # type: ignore[no-untyped-def]
+        return base, {}, {"size": 1024, "mtime_ns": 1}
+
+    monkeypatch.setattr(import_review_recheck.asyncio, "to_thread", tracked_to_thread)
+    monkeypatch.setattr(import_review_recheck, "inspect_review_source", inspect_without_io)
+    monkeypatch.setattr(
+        import_review_recheck, "_apply_completed_file_recheck", lambda *a, **k: True
+    )
+
+    report = await prepare_completed_import_file_recheck(
+        db_session,
+        job_id,
+        source_roots=[tmp_path],
+        apply=True,
+        accept_replaced_files=True,
+    )
+
+    assert report["files_checked"] == 251
+    assert max(loaded_file_counts) <= 250
 
 
 async def test_completed_recheck_keeps_missing_source_blocked(db_session, tmp_path):

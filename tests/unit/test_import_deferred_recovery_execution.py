@@ -1,8 +1,10 @@
 """Recovery stages work without changing source files or reviving unrelated decisions."""
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import event
 
 from pullbox.core.exceptions import JobPausedError, ProviderError
 from pullbox.models.import_job import (
@@ -12,6 +14,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.providers.base import IssueSummary, SeriesMetadata
+from pullbox.services.catalog.reader import CatalogIssueSummary
 from pullbox.services.import_deferred_recovery import (
     apply_deferred_recovery,
     plan_deferred_recovery,
@@ -145,6 +148,105 @@ async def test_background_recovery_fetches_each_candidate_catalog_once_and_resum
     provider.get_series_metadata.assert_awaited_once_with(700)
     assert not await prepare_deferred_recovery(db_session, job.id, metadata_service=provider)
     assert provider.get_issue_summaries_for_series.await_count == 1
+
+
+async def test_catalog_checkpoint_serializes_local_catalog_cutoff(db_session):
+    job, item, _, _, _ = await seed(db_session)
+    item.series_id = None
+    item.cv_id = None
+    item.status = ImportSeriesStatus.NO_MATCH
+    await add_file(
+        db_session,
+        job,
+        item,
+        comicvine_issue_id=7001,
+        diagnostics={
+            "comicvine_series_id": 700,
+            "metadata_signals": {"comicvine_series_id": "mylar3"},
+        },
+    )
+    job.status = ImportJobStatus.IMPORTING
+    job.progress_snapshot = {"deferred_recovery": {"state": "queued"}}
+    provider = AsyncMock()
+    provider.get_series_metadata.return_value = SeriesMetadata(
+        provider_id="700",
+        title="Batman",
+        sort_title="batman",
+        year_start=2016,
+        year_end=None,
+        status=None,
+        publisher=None,
+        description=None,
+        cover_url=None,
+        issue_count=1,
+        comicvine_url=None,
+    )
+    provider.get_issue_summaries_for_series.return_value = [
+        CatalogIssueSummary(
+            provider_id="7001",
+            issue_number=104,
+            issue_number_text="104",
+            title=None,
+            release_date="2021-01-01",
+            cover_url=None,
+            issue_type="issue",
+            source_cutoff_at=datetime(2026, 9, 13, 5, tzinfo=UTC),
+        )
+    ]
+
+    assert await prepare_deferred_recovery(db_session, job.id, metadata_service=provider)
+
+    stored = job.progress_snapshot["deferred_recovery"]["matches"]["7001"][0]["summary"]
+    assert stored["source_cutoff_at"] == "2026-09-13T05:00:00+00:00"
+    await db_session.commit()
+
+
+async def test_catalog_recovery_does_not_write_checkpoint_before_provider_io(db_session):
+    job, _item, _, _, _ = await seed(db_session)
+    job.status = ImportJobStatus.IMPORTING
+    job.progress_snapshot = {
+        "deferred_recovery": {
+            "state": "catalogs",
+            "candidates": {"700": [7001]},
+            "completed": [],
+            "matches": {},
+            "series_ids": [],
+        }
+    }
+    await db_session.commit()
+
+    updates: list[str] = []
+    engine = db_session.bind.sync_engine
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("UPDATE IMPORT_JOBS"):
+            updates.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    provider = AsyncMock()
+
+    async def get_series(_cv_id):
+        assert updates == []
+        return SeriesMetadata(
+            provider_id="700",
+            title="Batman",
+            sort_title="batman",
+            year_start=2016,
+            year_end=None,
+            status=None,
+            publisher=None,
+            description=None,
+            cover_url=None,
+            issue_count=0,
+            comicvine_url=None,
+        )
+
+    provider.get_series_metadata.side_effect = get_series
+    provider.get_issue_summaries_for_series.return_value = []
+    try:
+        assert await prepare_deferred_recovery(db_session, job.id, metadata_service=provider)
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
 
 
 async def test_catalog_target_respects_strong_archive_number_evidence(db_session):

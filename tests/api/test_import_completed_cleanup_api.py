@@ -103,6 +103,95 @@ async def test_deferred_file_recheck_api_queues_only_after_signed_confirmation(
 
 
 @pytest.mark.asyncio
+async def test_retry_source_inspection_commits_cleanup_before_recheck(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from starlette.requests import Request
+
+    from pullbox.api.v1.import_completed_cleanup import apply_completed_import_cleanup_route
+    from pullbox.models.user import User
+    from pullbox.schemas.import_completed_cleanup import CompletedImportCleanupApplyRequest
+    from pullbox.services.import_completed_cleanup import (
+        CompletedImportCleanupAction,
+        preview_completed_import_cleanup,
+    )
+
+    user = User(id=42, username="recovery-test", password_hash="unused")
+    job = ImportJob(
+        source_path="/imports/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add_all([user, job])
+    await db_session.flush()
+    imported_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Temporarily unavailable",
+        status=ImportSeriesStatus.IMPORTED,
+    )
+    db_session.add(imported_series)
+    await db_session.flush()
+    block = build_import_safety_diagnostics(
+        ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED.value,
+        code=ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED.value,
+    )
+    db_session.add(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=imported_series.id,
+            file_path="/comics/temporarily-unavailable.cbz",
+            file_name="temporarily-unavailable.cbz",
+            file_size=1024,
+            file_format="cbz",
+            status=ImportedFileStatus.SAFETY_BLOCKED,
+            diagnostics={"safety_block": block},
+        )
+    )
+    await db_session.commit()
+    job_id = int(job.id)
+    action = CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION
+    preview = await preview_completed_import_cleanup(db_session, job_id, action, actor_id=user.id)
+
+    transaction_states: list[bool] = []
+
+    class RetryService:
+        async def retry_failed_series(
+            self,
+            session: AsyncSession,
+            requested_job_id: int,
+            *,
+            file_ids: list[int] | None = None,
+        ) -> tuple[ImportJob, int]:
+            transaction_states.append(session.in_transaction())
+            job = await session.get(ImportJob, requested_job_id)
+            assert job is not None
+            return job, 0
+
+    async def build_retry_service(_session: AsyncSession) -> RetryService:
+        return RetryService()
+
+    monkeypatch.setattr(
+        "pullbox.composition.services.build_import_service",
+        build_retry_service,
+    )
+    response = await apply_completed_import_cleanup_route(
+        job_id,
+        action,
+        CompletedImportCleanupApplyRequest(
+            preview_token=preview.preview_token,
+            confirmation="APPLY CLEANUP",
+        ),
+        Request({"type": "http", "client": ("127.0.0.1", 12345), "headers": []}),
+        user,
+        db_session,
+    )
+
+    assert response.requires_import_retry is False
+    assert transaction_states == [False]
+
+
+@pytest.mark.asyncio
 async def test_known_series_recovery_api_previews_then_queues_background_import(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],

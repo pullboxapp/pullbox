@@ -117,6 +117,9 @@ async def apply_completed_import_cleanup_route(
     )
 
     if action is CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION:
+        # Persist the signed cleanup transition before slow archive inspection.
+        # The recheck then starts without an existing SQLite writer lock.
+        await session.commit()
         service = await build_import_service(session)
         _job, retrying_count = await service.retry_failed_series(
             session,

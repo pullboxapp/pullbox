@@ -35,13 +35,18 @@ from pullbox.services.import_deferred_recovery import (
     refresh_recovered_groups,
 )
 from pullbox.services.import_source_metadata import source_metadata_for_import_file
-from pullbox.services.import_workflow_state import emit_progress, raise_if_job_cancelled
+from pullbox.services.import_workflow_state import (
+    emit_live_progress,
+    emit_progress,
+    raise_if_job_cancelled,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.providers.base import IssueSummary
     from pullbox.services.metadata_service import MetadataService
 
 
@@ -51,6 +56,15 @@ def recovery_state(job: ImportJob) -> dict[str, Any]:
 
 def save_recovery_state(job: ImportJob, state: dict[str, Any]) -> None:
     job.progress_snapshot = {**dict(job.progress_snapshot or {}), "deferred_recovery": state}
+
+
+def _catalog_summary_payload(summary: IssueSummary) -> dict[str, Any]:
+    """Return a durable JSON-safe catalog checkpoint payload."""
+    payload = asdict(summary)
+    source_cutoff_at = payload.get("source_cutoff_at")
+    if isinstance(source_cutoff_at, datetime):
+        payload["source_cutoff_at"] = source_cutoff_at.isoformat()
+    return payload
 
 
 async def cancel_deferred_preparation(session: AsyncSession, job: ImportJob) -> bool:
@@ -264,25 +278,49 @@ async def prepare_deferred_recovery(
     if job.status is not ImportJobStatus.IMPORTING:
         raise ValidationError("Deferred recovery must run inside the import worker.")
 
-    async def report(current: int, total: int, message: str) -> None:
-        await raise_if_job_cancelled(session, job_id)
-        await emit_progress(
-            session,
+    revision_state = {"value": int(job.progress_revision or 0)}
+
+    def progress_event(current: int, total: int, message: str) -> ImportProgressEvent:
+        return ImportProgressEvent(
+            job_id=job_id,
+            status=ImportJobStatus.IMPORTING,
+            mode="import",
+            phase="deferred_recovery",
+            progress=round(15 * current / max(total, 1)),
+            message=message,
+            current_file_stage="deferred_recovery",
+            current_file_progress_current=current,
+            current_file_progress_total=total,
+            current_file_progress_pct=round(100 * current / max(total, 1)),
+            current_file_progress_unit="catalogs",
+        )
+
+    async def report(
+        current: int,
+        total: int,
+        message: str,
+        *,
+        durable: bool = True,
+        check_control: bool = True,
+    ) -> None:
+        if check_control:
+            await raise_if_job_cancelled(session, job_id)
+        event = progress_event(current, total, message)
+        if durable:
+            event.progress_revision = revision_state["value"] + 1
+            await emit_progress(session, job, event, progress_callback)
+            revision_state["value"] = event.progress_revision
+            return
+        # A read-only control check still opens a transaction. Close it before
+        # provider I/O, then publish live progress without rewriting the large
+        # durable recovery checkpoint a second time.
+        await session.commit()
+        await emit_live_progress(
             job,
-            ImportProgressEvent(
-                job_id=job_id,
-                status=ImportJobStatus.IMPORTING,
-                mode="import",
-                phase="deferred_recovery",
-                progress=round(15 * current / max(total, 1)),
-                message=message,
-                current_file_stage="deferred_recovery",
-                current_file_progress_current=current,
-                current_file_progress_total=total,
-                current_file_progress_pct=round(100 * current / max(total, 1)),
-                current_file_progress_unit="catalogs",
-            ),
-            progress_callback,
+            event,
+            progress_callback=progress_callback,
+            revision_state=revision_state,
+            started_at=job.import_started_at,
         )
 
     if state.get("state") == "queued":
@@ -308,8 +346,9 @@ async def prepare_deferred_recovery(
             len(completed),
             len(candidates),
             f"Checking series catalog {len(completed) + 1} of {len(candidates)}...",
+            durable=False,
         )
-        # The progress commit releases the writer lock before provider I/O.
+        # The live progress report closes its read transaction before provider I/O.
         cv_id = int(cv_id_text)
         try:
             series = await metadata_service.get_series_metadata(cv_id)
@@ -335,13 +374,18 @@ async def prepare_deferred_recovery(
                         "cv_id": cv_id,
                         "title": series.title,
                         "year": series.year_start,
-                        "summary": asdict(summary),
+                        "summary": _catalog_summary_payload(summary),
                     }
                 )
         completed.add(cv_id_text)
         state["completed"] = sorted(completed)
         save_recovery_state(job, state)
-        await session.commit()
+        await report(
+            len(completed),
+            len(candidates),
+            f"Checked series catalog {len(completed)} of {len(candidates)}.",
+            check_control=False,
+        )
 
     await report(len(completed), max(len(candidates), 1), "Preparing verified files for import...")
     catalog_count = await _prepare_catalog_targets(session, job)

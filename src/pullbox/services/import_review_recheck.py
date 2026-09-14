@@ -547,6 +547,15 @@ async def prepare_completed_import_file_recheck(
         rows = list((await session.execute(query)).all())
         if not rows:
             break
+        inspected: list[
+            tuple[
+                ImportedFile,
+                ImportedSeries,
+                SourceMetadata,
+                dict[str, Any],
+                dict[str, int | str],
+            ]
+        ] = []
         for imported_file, imported_series in rows:
             cursor = int(imported_file.id)
             metadata, content, signature = await asyncio.to_thread(
@@ -562,13 +571,7 @@ async def prepare_completed_import_file_recheck(
             )
             report["files_checked"] += 1
             if apply:
-                ready_for_retry = _apply_completed_file_recheck(
-                    imported_file,
-                    metadata,
-                    content,
-                    signature,
-                    reviewed_series_cv_id=imported_series.cv_id,
-                )
+                inspected.append((imported_file, imported_series, metadata, content, signature))
             else:
                 source = {**metadata.diagnostics, **content}
                 ready_for_retry = (
@@ -580,11 +583,25 @@ async def prepare_completed_import_file_recheck(
                     )
                     is None
                 )
-            blocked = not ready_for_retry
-            report["blocked_files"] += int(blocked)
-            report["files_prepared"] += int(not blocked)
+                blocked = not ready_for_retry
+                report["blocked_files"] += int(blocked)
+                report["files_prepared"] += int(not blocked)
+
         if apply:
-            await session.flush()
+            # Inspect the complete bounded page before taking SQLite's writer
+            # lock, then commit before reading the next page of source files.
+            for imported_file, imported_series, metadata, content, signature in inspected:
+                ready_for_retry = _apply_completed_file_recheck(
+                    imported_file,
+                    metadata,
+                    content,
+                    signature,
+                    reviewed_series_cv_id=imported_series.cv_id,
+                )
+                blocked = not ready_for_retry
+                report["blocked_files"] += int(blocked)
+                report["files_prepared"] += int(not blocked)
+            await session.commit()
 
     if apply and report["files_checked"]:
         session.add(
