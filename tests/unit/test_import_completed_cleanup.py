@@ -1175,6 +1175,46 @@ async def test_retry_source_inspection_includes_failed_completed_rechecks(
     assert failed.diagnostics["source_revalidation"]["retryable"] is True
 
 
+@pytest.mark.parametrize(
+    "code",
+    ("source_identity_changed", "source_root_changed", "source_root_unconfirmed"),
+)
+async def test_retry_source_inspection_excludes_identity_and_root_drift(
+    db_session: AsyncSession,
+    code: str,
+) -> None:
+    job, imported_series = await _seed_job(db_session)
+    failed = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path=f"/comics/{code}.cbz",
+        file_name=f"{code}.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        diagnostics={
+            "source_revalidation": {
+                "category": ImportSafetyCategory.SOURCE_CHANGED.value,
+                "code": code,
+                "retryable": True,
+            }
+        },
+        error_message="The saved source identity changed.",
+    )
+    db_session.add(failed)
+    await db_session.commit()
+
+    summary = await summarize_completed_import_cleanup_scope(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+    )
+
+    assert summary.affected_count == 0
+    assert summary.affected_file_count == 0
+    assert summary.examples == ()
+
+
 @pytest.mark.asyncio
 async def test_cleanup_preview_cannot_be_reused_after_scope_changes(
     db_session: AsyncSession,

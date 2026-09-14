@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 
 from pullbox.core.name_matcher import NameMatcher
-from pullbox.core.release_parser import parse_release_title
+from pullbox.core.release_parser import normalize_issue_number, parse_release_title
 from pullbox.core.source_metadata import _extract_issue_id_from_notes, _extract_issue_id_from_web
 from pullbox.models.import_job import (
     ImportedFile,
@@ -140,17 +140,28 @@ def _titles(series: Series) -> set[str]:
     return {NameMatcher.normalize(name) for name in (series.title, *(series.alternate_names or []))}
 
 
-def _source_agrees(file: ImportedFile, item: ImportedSeries, series: Series, issue: Issue) -> bool:
+def _source_agrees(
+    file: ImportedFile,
+    item: ImportedSeries,
+    series: Series,
+    issue: Issue,
+    *,
+    require_issue_number: bool = True,
+) -> bool:
     metadata = source_metadata_for_import_file(item, file)
     if metadata.series_name and NameMatcher.normalize(metadata.series_name) not in _titles(series):
         return False
-    if metadata.issue_number is not None and metadata.issue_number != issue.issue_number:
-        return False
+    issue_numbers: list[float] = []
+    if metadata.issue_number is not None:
+        issue_numbers.append(metadata.issue_number)
     hint = metadata.diagnostics.get("archive_entry_issue_hint")
-    if (
-        isinstance(hint, dict)
-        and hint.get("confidence") == "strong"
-        and hint.get("issue_number") != issue.issue_number
+    if isinstance(hint, dict) and hint.get("confidence") == "strong":
+        hint_number = normalize_issue_number(hint.get("issue_number"))
+        if hint_number is None:
+            return False
+        issue_numbers.append(hint_number)
+    if (require_issue_number and not issue_numbers) or any(
+        number != issue.issue_number for number in issue_numbers
     ):
         return False
     # Type evidence from a release or ComicInfo must not turn an Annual into #1.
@@ -194,7 +205,7 @@ def strict_filename_target(
         or abs(issue.release_date.year - parsed.year) > 1
         or parsed.issue_type != issue.issue_type
         or (file.parsed_year is not None and abs(file.parsed_year - issue.release_date.year) > 1)
-        or not _source_agrees(file, item, series, issue)
+        or not _source_agrees(file, item, series, issue, require_issue_number=False)
     ):
         return None
     return issue

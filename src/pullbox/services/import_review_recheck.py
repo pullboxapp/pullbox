@@ -71,7 +71,7 @@ _TRANSIENT_SOURCE_RECHECK_CODES = (
 )
 
 
-def _retryable_failed_source_filters(job_id: int) -> tuple[Any, ...]:
+def retryable_failed_source_filters(job_id: int) -> tuple[Any, ...]:
     """Select only transient source failures that another inspection can resolve."""
     category = ImportedFile.diagnostics["source_revalidation"]["category"].as_string()
     code = ImportedFile.diagnostics["source_revalidation"]["code"].as_string()
@@ -417,7 +417,7 @@ async def _retry_source_roots(
     else:
         candidates.extend(Path(value) for value in dict(job.mylar3_path_map or {}).values())
         signature_query = select(ImportedFile.source_signature).where(
-            *_retryable_failed_source_filters(job.id)
+            *retryable_failed_source_filters(job.id)
         )
         if file_ids is not None:
             signature_query = signature_query.where(ImportedFile.id.in_(file_ids))
@@ -465,7 +465,7 @@ async def prepare_retryable_failed_sources_for_retry(
     file_ids: Sequence[int] | None = None,
 ) -> dict[str, int]:
     """Revalidate changed failed sources as part of the in-app retry action."""
-    retryable_filters = list(_retryable_failed_source_filters(job.id))
+    retryable_filters = list(retryable_failed_source_filters(job.id))
     if file_ids is not None:
         retryable_filters.append(ImportedFile.id.in_(file_ids))
     retryable_count = int(
@@ -534,7 +534,7 @@ async def prepare_completed_import_file_recheck(
             select(ImportedFile, ImportedSeries)
             .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
             .where(
-                *_retryable_failed_source_filters(job_id),
+                *retryable_failed_source_filters(job_id),
                 ImportedFile.id > cursor,
             )
             .order_by(ImportedFile.id)

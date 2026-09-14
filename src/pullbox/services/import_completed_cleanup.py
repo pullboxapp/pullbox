@@ -36,6 +36,7 @@ from pullbox.services.audit_service import AuditService
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
 from pullbox.services.import_known_series_recovery import load_known_series_recovery
 from pullbox.services.import_review_actions import apply_safety_allow_once_to_file
+from pullbox.services.import_review_recheck import retryable_failed_source_filters
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
 from pullbox.services.import_story_arc_resolution import (
     refresh_story_arc_entries_for_import_files,
@@ -163,10 +164,6 @@ def _overrideable_expression() -> Any:
 
 def _source_revalidation_category_expression() -> Any:
     return ImportedFile.diagnostics["source_revalidation"]["category"].as_string()
-
-
-def _source_revalidation_retryable_expression() -> Any:
-    return ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean()
 
 
 def _safety_filter(*categories: ImportSafetyCategory) -> Any:
@@ -313,11 +310,7 @@ def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[An
                     ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
                     _category_expression().in_(retryable_categories),
                 ),
-                and_(
-                    ImportedFile.status == ImportedFileStatus.FAILED,
-                    _source_revalidation_category_expression().in_(retryable_categories),
-                    _source_revalidation_retryable_expression().is_(True),
-                ),
+                and_(*retryable_failed_source_filters(job_id)),
             )
         )
     elif action is CompletedImportCleanupAction.NORMALIZE_ALREADY_OWNED:

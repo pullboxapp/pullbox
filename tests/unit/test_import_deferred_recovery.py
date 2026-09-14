@@ -159,6 +159,20 @@ async def test_distinct_variant_paths_are_left_for_one_duplicate_decision(db_ses
     assert [(p.file_id, p.action) for p in plans] == [(variant.id, "owned_variant")]
 
 
+async def test_stale_provider_id_without_issue_number_evidence_remains_deferred(db_session):
+    job, item, _, _, _ = await seed(db_session)
+    await add_file(
+        db_session,
+        job,
+        item,
+        file_name="Batman.cbz",
+        parsed_issue_number=None,
+        issue_number_raw=None,
+    )
+
+    assert await plan_deferred_recovery(db_session, job.id) == ()
+
+
 @pytest.mark.parametrize(
     "protection", ["safety", "manual", "skip", "conflicting_id", "wrong_title", "changed"]
 )
