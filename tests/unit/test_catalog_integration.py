@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock
 
+import pytest
 from sqlalchemy import select
 
 from pullbox.models.issue import Issue, IssueType
@@ -25,6 +26,18 @@ async def test_metadata_hydration_uses_catalog_without_provider_calls(tmp_path):
     assert len(issues) == 1
     live.get_series.assert_not_awaited()
     live.get_issues_for_series.assert_not_awaited()
+
+
+@pytest.mark.parametrize("ids", [[999, 10, 10], [10, 999]])
+async def test_catalog_profile_batch_preserves_matches_when_a_series_is_missing(tmp_path, ids):
+    live = AsyncMock()
+    service = MetadataService(live, tmp_path, catalog=installed_reader(tmp_path))
+
+    profiles = await service.get_series_metadata_batch(ids)
+
+    assert list(profiles) == [10]
+    assert profiles[10].title == "Batman"
+    assert live.mock_calls == []
 
 
 async def test_empty_local_search_does_not_retry_or_sleep(tmp_path, monkeypatch):

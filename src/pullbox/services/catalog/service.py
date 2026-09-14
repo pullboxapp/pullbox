@@ -97,14 +97,23 @@ class CatalogService:
             if self._state.phase in BUSY_PHASES:
                 self._state.phase = "interrupted"
                 self._state.error = "The previous download was interrupted. It can be resumed."
-            active = load_json(root / "active.json")
-            if active:
-                self._state.installed_version = str(active["version"])
-                self._state.source_cutoff_at = str(active["source_cutoff_at"])
-        except (CatalogError, ValidationError, KeyError):
+        except (CatalogError, ValidationError):
             self._state = CatalogStatus(
                 phase="failed", error="Catalog state could not be read. Check the data volume."
             )
+        # The active generation survives a missing or damaged optional status file.
+        try:
+            active = load_json(root / "active.json")
+            if active:
+                version, cutoff = str(active["version"]), str(active["source_cutoff_at"])
+                self._state.installed_version = version
+                self._state.source_cutoff_at = cutoff
+                self._state.requested = True
+                if self._state.phase == "not_downloaded":
+                    self._state.phase = "current"
+        except (CatalogError, KeyError):
+            self._state.phase = "failed"
+            self._state.error = "Catalog state could not be read. Check the data volume."
 
     def status(self) -> CatalogStatus:
         return self._state.model_copy(deep=True)

@@ -134,6 +134,46 @@ async def test_disabling_daily_updates_survives_process_restart(tmp_path):
     assert server.requests == []
 
 
+@pytest.mark.parametrize("saved_state", ["{", '{"requested": {}}', None])
+async def test_installed_catalog_survives_missing_or_invalid_status_state(tmp_path, saved_state):
+    server = Server(tmp_path)
+    service = server.service(tmp_path / "local")
+    await service.sync(manual=True)
+    installed = service.status()
+    active = (service.root / "active.json").read_bytes()
+    state_path = service.root / "state.json"
+    if saved_state is None:
+        state_path.unlink()
+    else:
+        state_path.write_text(saved_state)
+    server.requests.clear()
+
+    restored = server.service(service.root)
+
+    assert restored.status().installed_version == installed.installed_version
+    assert restored.status().source_cutoff_at == installed.source_cutoff_at
+    assert restored.status().requested is True
+    assert await restored.sync() is False  # Current generation needs no download.
+    assert [request.url.path for request in server.requests] == ["/api/v2/catalog/latest"]
+    assert restored.status().phase == "current"
+    assert restored.status().error is None
+    assert (service.root / "active.json").read_bytes() == active
+
+
+async def test_invalid_status_without_an_installed_catalog_does_not_opt_in(tmp_path):
+    server = Server(tmp_path)
+    root = tmp_path / "local"
+    root.mkdir()
+    (root / "state.json").write_text("{")
+
+    restored = server.service(root)
+
+    assert restored.status().requested is False
+    assert restored.status().installed_version is None
+    assert await restored.sync() is False
+    assert server.requests == []
+
+
 async def test_success_discards_compressed_downloads_and_stale_staging(tmp_path):
     server = Server(tmp_path)
     service = server.service(tmp_path / "local")

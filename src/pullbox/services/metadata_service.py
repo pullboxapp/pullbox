@@ -279,9 +279,12 @@ class MetadataService:
     ) -> dict[int, SeriesMetadata]:
         """Fetch multiple provider series profiles through the optional bulk contract."""
         if self._catalog is not None and self._catalog.available:
-            return {
-                key: await self.get_series_metadata(key) for key in dict.fromkeys(comicvine_ids)
-            }
+            profiles: dict[int, SeriesMetadata] = {}
+            for key in dict.fromkeys(comicvine_ids):
+                profile = await self._catalog.series(key)
+                if profile is not None:
+                    profiles[key] = profile
+            return profiles
         batch_fetch = getattr(type(self._provider), "get_series_batch", None)
         try:
             if callable(batch_fetch):

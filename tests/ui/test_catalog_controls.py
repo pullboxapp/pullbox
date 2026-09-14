@@ -65,6 +65,17 @@ async def test_metadata_settings_explains_local_storage_and_progress(authenticat
     assert "A download never moves or imports comics." in response.text
 
 
+@pytest.mark.parametrize("url", ["/settings?tab=metadata", "/htmx/settings/metadata"])
+async def test_metadata_settings_places_access_before_local_catalog(authenticated_client, url):
+    response = await authenticated_client.get(url)
+    assert response.status_code == 200
+    assert (
+        response.text.index("ComicVine access")
+        < response.text.index("Local Comic Vine catalog")
+        < response.text.index("Refresh policy")
+    )
+
+
 async def test_add_series_labels_local_search_without_api_key(
     authenticated_client, tmp_path, monkeypatch
 ):
