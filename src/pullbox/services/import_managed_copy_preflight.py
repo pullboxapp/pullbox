@@ -24,6 +24,7 @@ from pullbox.models.import_job import (
     ImportedFileStatus,
     ImportedSeries,
     ImportFileHandlingMode,
+    ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
 )
@@ -34,8 +35,6 @@ from pullbox.services.library_root_management import validate_managed_library_ro
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
-
-    from pullbox.models.import_job import ImportJob
 
 _ONE_GIB = 1024**3
 _CAPACITY_SNAPSHOT_KEY = "managed_copy_capacity"
@@ -166,6 +165,10 @@ async def selected_managed_copy_source_bytes(
     selected_duplicate_series = (
         ImportedSeries.status == ImportSeriesStatus.DUPLICATE
     ) & ImportedFile.include_in_import.is_(True)
+    from pullbox.services.import_workflow_state import deferred_recovery_scope
+
+    job = await session.get(ImportJob, job_id)
+    scope = deferred_recovery_scope(job) if job is not None else None
     total = await session.scalar(
         sa_select(sa_func.coalesce(sa_func.sum(ImportedFile.file_size), 0))
         .join(ImportedSeries, ImportedFile.import_series_id == ImportedSeries.id)
@@ -173,6 +176,7 @@ async def selected_managed_copy_source_bytes(
             ImportedFile.import_job_id == job_id,
             ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
             sa_or(selected_new_series, selected_duplicate_series),
+            *([ImportedSeries.id.in_(scope)] if scope is not None else []),
         )
     )
     return max(int(total or 0), 0)
@@ -381,6 +385,9 @@ async def estimate_conversion_workspace_source_bytes(
     selected_duplicate_series = (
         ImportedSeries.status == ImportSeriesStatus.DUPLICATE
     ) & ImportedFile.include_in_import.is_(True)
+    from pullbox.services.import_workflow_state import deferred_recovery_scope
+
+    scope = deferred_recovery_scope(job)
     sizes = list(
         (
             await session.scalars(
@@ -392,6 +399,7 @@ async def estimate_conversion_workspace_source_bytes(
                         [ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]
                     ),
                     sa_or(selected_new_series, selected_duplicate_series),
+                    *([ImportedSeries.id.in_(scope)] if scope is not None else []),
                     sa_func.lower(ImportedFile.file_format) != "cbz",
                 )
                 .order_by(ImportedFile.file_size.desc(), ImportedFile.id.asc())
@@ -418,7 +426,13 @@ async def validate_managed_copy_preflight(
         job_root = await _resolve_job_managed_root(session, job)
         selected_bytes_by_root[job_root.id] = selected_source_bytes
 
-    story_arc_bytes = await selected_story_arc_copy_source_bytes_by_root(session, job.id)
+    from pullbox.services.import_workflow_state import deferred_recovery_scope
+
+    story_arc_bytes = (
+        await selected_story_arc_copy_source_bytes_by_root(session, job.id)
+        if deferred_recovery_scope(job) is None
+        else {}
+    )
     for root_id, selected_source_bytes in story_arc_bytes.items():
         selected_bytes_by_root[root_id] = (
             selected_bytes_by_root.get(root_id, 0) + selected_source_bytes

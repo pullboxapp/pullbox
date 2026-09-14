@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from itertools import batched
 from typing import TYPE_CHECKING, Any, Final
+from uuid import uuid4
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy import and_, case, exists, func, or_, select, update
@@ -33,8 +34,10 @@ from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.models.series import Series
 from pullbox.services.audit_service import AuditService
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
+from pullbox.services.import_deferred_recovery import load_empty_stale_series
 from pullbox.services.import_known_series_recovery import load_known_series_recovery
 from pullbox.services.import_review_actions import apply_safety_allow_once_to_file
+from pullbox.services.import_review_recheck import retryable_failed_source_filters
 from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
 from pullbox.services.import_story_arc_resolution import (
     refresh_story_arc_entries_for_import_files,
@@ -66,6 +69,7 @@ class CompletedImportCleanupAction(enum.StrEnum):
     ACCEPT_RECOMMENDED_CONFLICTS = "accept_recommended_conflicts"
     RESOLVE_MIXED_FOLDER_FILES = "resolve_mixed_folder_files"
     RECOVER_KNOWN_SERIES = "recover_known_series"
+    RECHECK_DEFERRED_FILES = "recheck_deferred_files"
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,10 +167,6 @@ def _source_revalidation_category_expression() -> Any:
     return ImportedFile.diagnostics["source_revalidation"]["category"].as_string()
 
 
-def _source_revalidation_retryable_expression() -> Any:
-    return ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean()
-
-
 def _safety_filter(*categories: ImportSafetyCategory) -> Any:
     return _category_expression().in_([category.value for category in categories])
 
@@ -245,12 +245,21 @@ def _eligible_conflict_groups(job_id: int) -> Any:
 
 def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[Any, ...]:
     filters: list[Any] = [ImportedFile.import_job_id == job_id]
-    if action is CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES:
-        filters.extend(
-            [
-                ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
-                _safety_filter(ImportSafetyCategory.SOURCE_MISSING),
-            ]
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        filters.append(ImportedFile.status == ImportedFileStatus.NO_MATCH)
+    elif action is CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES:
+        filters.append(
+            or_(
+                and_(
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                    _safety_filter(ImportSafetyCategory.SOURCE_MISSING),
+                ),
+                and_(
+                    ImportedFile.status == ImportedFileStatus.FAILED,
+                    _source_revalidation_category_expression()
+                    == ImportSafetyCategory.SOURCE_MISSING.value,
+                ),
+            )
         )
     elif action is CompletedImportCleanupAction.SKIP_PROBABLE_COVERS:
         filters.extend(
@@ -260,15 +269,24 @@ def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[An
             ]
         )
     elif action is CompletedImportCleanupAction.SKIP_UNUSABLE_FILES:
-        filters.extend(
-            [
-                ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
-                _safety_filter(
-                    ImportSafetyCategory.ZERO_BYTE,
-                    ImportSafetyCategory.ARCHIVE_NO_PAGES,
-                    ImportSafetyCategory.UNSUPPORTED_FILE_TYPE,
+        unusable_categories = (
+            ImportSafetyCategory.ZERO_BYTE,
+            ImportSafetyCategory.ARCHIVE_NO_PAGES,
+            ImportSafetyCategory.UNSUPPORTED_FILE_TYPE,
+        )
+        filters.append(
+            or_(
+                and_(
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                    _safety_filter(*unusable_categories),
                 ),
-            ]
+                and_(
+                    ImportedFile.status == ImportedFileStatus.FAILED,
+                    _source_revalidation_category_expression().in_(
+                        [category.value for category in unusable_categories]
+                    ),
+                ),
+            )
         )
     elif action is CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES:
         filters.extend(
@@ -293,11 +311,7 @@ def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[An
                     ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
                     _category_expression().in_(retryable_categories),
                 ),
-                and_(
-                    ImportedFile.status == ImportedFileStatus.FAILED,
-                    _source_revalidation_category_expression().in_(retryable_categories),
-                    _source_revalidation_retryable_expression().is_(True),
-                ),
+                and_(*retryable_failed_source_filters(job_id)),
             )
         )
     elif action is CompletedImportCleanupAction.NORMALIZE_ALREADY_OWNED:
@@ -697,6 +711,11 @@ async def _load_snapshot(
             scope_digest=digest.hexdigest(),
         )
     filters = _file_filters(job_id, action)
+    stale_series = (
+        await load_empty_stale_series(session, job_id)
+        if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES
+        else []
+    )
     aggregate = (
         await session.execute(
             select(
@@ -708,43 +727,59 @@ async def _load_snapshot(
         )
     ).one()
     file_count = int(aggregate[0] or 0)
-    if file_count == 0:
+    if file_count == 0 and not stale_series:
         return CompletedImportCleanupSnapshot(0, 0, None, None, None, sha256().hexdigest())
 
     digest = sha256()
     group_ids: set[int] = set()
-    result = await session.stream(
-        select(
-            ImportedFile.id,
-            ImportedFile.conflict_group_id,
-            ImportedFile.updated_at,
+    if file_count:
+        result = await session.stream(
+            select(
+                ImportedFile.id,
+                ImportedFile.conflict_group_id,
+                ImportedFile.updated_at,
+            )
+            .where(*filters)
+            .order_by(ImportedFile.id)
+            .execution_options(yield_per=20_000)
         )
-        .where(*filters)
-        .order_by(ImportedFile.id)
-        .execution_options(yield_per=20_000)
-    )
-    try:
-        async for rows in result.partitions(20_000):
-            for file_id, conflict_group_id, updated_at in rows:
-                digest_line = (
-                    f"{int(file_id)}|{int(conflict_group_id or 0)}|{updated_at.isoformat()}\n"
-                )
-                digest.update(digest_line.encode())
-                if conflict_group_id is not None:
-                    group_ids.add(int(conflict_group_id))
-    finally:
-        await result.close()
+        try:
+            async for rows in result.partitions(20_000):
+                for file_id, conflict_group_id, updated_at in rows:
+                    digest_line = (
+                        f"file|{int(file_id)}|{int(conflict_group_id or 0)}|"
+                        f"{updated_at.isoformat()}\n"
+                    )
+                    digest.update(digest_line.encode())
+                    if conflict_group_id is not None:
+                        group_ids.add(int(conflict_group_id))
+        finally:
+            await result.close()
+    for item in stale_series:
+        digest.update(f"series|{int(item.id)}|{item.updated_at.isoformat()}\n".encode())
     affected_count = (
         len(group_ids)
         if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
         else file_count
     )
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        affected_count = len(stale_series) + int(
+            await session.scalar(
+                select(func.count(func.distinct(ImportedFile.file_path))).where(*filters)
+            )
+            or 0
+        )
+    updated_at_values = [
+        item.updated_at.isoformat(timespec="microseconds") for item in stale_series
+    ]
+    if aggregate[3] is not None:
+        updated_at_values.append(aggregate[3].isoformat(timespec="microseconds"))
     return CompletedImportCleanupSnapshot(
         affected_count=affected_count,
         affected_file_count=file_count,
-        min_file_id=int(aggregate[1]),
-        max_file_id=int(aggregate[2]),
-        max_updated_at=aggregate[3].isoformat(timespec="microseconds"),
+        min_file_id=int(aggregate[1]) if aggregate[1] is not None else None,
+        max_file_id=int(aggregate[2]) if aggregate[2] is not None else None,
+        max_updated_at=max(updated_at_values, default=None),
         scope_digest=digest.hexdigest(),
     )
 
@@ -765,6 +800,14 @@ async def count_completed_import_cleanup_scope(
     file_count = int(
         (await session.scalar(select(func.count(ImportedFile.id)).where(*filters))) or 0
     )
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        paths = int(
+            await session.scalar(
+                select(func.count(func.distinct(ImportedFile.file_path))).where(*filters)
+            )
+            or 0
+        )
+        return paths + len(await load_empty_stale_series(session, job_id)), file_count
     if action is not CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
         return file_count, file_count
     group_count = int(
@@ -818,6 +861,12 @@ async def list_completed_import_cleanup_files(
             total_pages=total_pages,
         )
     filters = _file_filters(job_id, action)
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        filters = (
+            ImportedFile.id.in_(
+                select(func.min(ImportedFile.id)).where(*filters).group_by(ImportedFile.file_path)
+            ),
+        )
     total = int((await session.scalar(select(func.count(ImportedFile.id)).where(*filters))) or 0)
     total_pages = max(1, (total + normalized_page_size - 1) // normalized_page_size)
     normalized_page = min(normalized_page, total_pages)
@@ -865,10 +914,17 @@ async def list_completed_import_cleanup_examples(
             ).all()
         }
         return tuple(_safe_example_name(names_by_id[file_id]) for file_id in file_ids)
+    filters = _file_filters(job_id, action)
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        filters = (
+            ImportedFile.id.in_(
+                select(func.min(ImportedFile.id)).where(*filters).group_by(ImportedFile.file_path)
+            ),
+        )
     names = (
         await session.scalars(
             select(ImportedFile.file_name)
-            .where(*_file_filters(job_id, action))
+            .where(*filters)
             .order_by(ImportedFile.id)
             .limit(min(max(1, int(limit)), 10))
         )
@@ -1563,9 +1619,33 @@ async def apply_completed_import_cleanup(
     if current_snapshot != preview_snapshot:
         raise ValidationError("The cleanup scope changed. Preview the action again.")
 
-    if action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
-        affected_series_ids = await _apply_known_series_recovery(session, job)
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        from pullbox.services.import_retry_helpers import require_retained_import_destination
+
+        require_retained_import_destination(job)
+        stale_series_ids = [int(item.id) for item in await load_empty_stale_series(session, job_id)]
+        job.progress_snapshot = {
+            **dict(job.progress_snapshot or {}),
+            "deferred_recovery": {
+                "state": "queued",
+                "run_id": uuid4().hex,
+                "series_ids": [],
+                "stale_series_ids": stale_series_ids,
+                "actor_id": actor_id,
+            },
+            "mode": "import",
+            "phase": "deferred_recovery",
+            "progress": 0,
+            "message": "Queued deferred file recovery...",
+        }
+        job.status = ImportJobStatus.IMPORTING
+        job.error_message = None
+        affected_series_ids = set()
         affected_file_ids: tuple[int, ...] = ()
+        requires_import_retry = True
+    elif action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
+        affected_series_ids = await _apply_known_series_recovery(session, job)
+        affected_file_ids = ()
         requires_import_retry = await _prepare_series_for_retry(session, job, affected_series_ids)
     elif action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
         affected_series_ids = await _apply_recommended_conflicts(session, job)
@@ -1584,8 +1664,9 @@ async def apply_completed_import_cleanup(
                 session, job, affected_series_ids
             )
 
-    await recompute_file_counters(session, job, series_ids=sorted(affected_series_ids))
-    await recompute_series_counters(session, job)
+    if action is not CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        await recompute_file_counters(session, job, series_ids=sorted(affected_series_ids))
+        await recompute_series_counters(session, job)
     result = CompletedImportCleanupResult(
         job_id=job.id,
         action=action,
@@ -1599,7 +1680,11 @@ async def apply_completed_import_cleanup(
         ),
     )
     item_unit = (
-        "group" if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS else "file"
+        "group"
+        if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
+        else "follow-up item"
+        if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES
+        else "file"
     )
     session.add(
         ImportJobLog(

@@ -35,12 +35,23 @@ SCAN_PROGRESS_FILE_MATCH_START = 80
 SCAN_PROGRESS_FILE_MATCH_END = 99
 WORKFLOW_SNAPSHOT_VERSION = 2
 _PERSISTENT_IMPORT_CONTEXT_KEYS = (
+    "deferred_recovery",
     "clean_library_adoption",
     "clean_library_adoption_prepared",
     "clean_library_source_snapshot",
     "source_import_job_id",
 )
 ImportProgressMode = Literal["scan", "import", "rollback"]
+
+
+def deferred_recovery_scope(job: ImportJob) -> tuple[int, ...] | None:
+    """A prepared follow-up authorizes only its own series groups, not the old review."""
+    state = dict(dict(job.progress_snapshot or {}).get("deferred_recovery") or {})
+    if state.get("state") != "prepared":
+        return None
+    return tuple(int(value) for value in state.get("series_ids", []))
+
+
 _INVENTORY_PROGRESS_THRESHOLDS: tuple[tuple[int, int], ...] = (
     (1, 1),
     (10, 2),

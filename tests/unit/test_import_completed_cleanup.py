@@ -137,6 +137,98 @@ async def test_missing_references_can_be_dismissed_without_deleting_records(
 
 
 @pytest.mark.asyncio
+async def test_rechecked_missing_references_use_the_existing_safe_cleanup(
+    db_session: AsyncSession,
+) -> None:
+    job, imported_series = await _seed_job(db_session)
+    failed = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path="/comics/stale-reference.cbz",
+        file_name="stale-reference.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        diagnostics={
+            "source_revalidation": {
+                "kind": "source_revalidation",
+                "category": ImportSafetyCategory.SOURCE_MISSING.value,
+                "code": ImportSafetyCategory.SOURCE_MISSING.value,
+                "reason": "The recorded file is missing.",
+                "retryable": True,
+            }
+        },
+        error_message="The recorded file is missing.",
+    )
+    db_session.add(failed)
+    await db_session.commit()
+
+    preview = await preview_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES,
+        actor_id=42,
+    )
+    await apply_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+
+    assert preview.affected_file_count == 1
+    assert failed.status is ImportedFileStatus.SKIPPED
+    assert failed.diagnostics["completed_import_cleanup"]["source_preserved"] is True
+
+
+@pytest.mark.asyncio
+async def test_rechecked_zero_byte_files_use_the_existing_safe_cleanup(
+    db_session: AsyncSession,
+) -> None:
+    job, imported_series = await _seed_job(db_session)
+    failed = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path="/comics/empty.cbz",
+        file_name="empty.cbz",
+        file_size=0,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        diagnostics={
+            "source_revalidation": {
+                "kind": "source_revalidation",
+                "category": ImportSafetyCategory.ZERO_BYTE.value,
+                "code": "zero_byte_file",
+                "reason": "The file is empty.",
+                "retryable": True,
+            }
+        },
+        error_message="The file is empty.",
+    )
+    db_session.add(failed)
+    await db_session.commit()
+
+    preview = await preview_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.SKIP_UNUSABLE_FILES,
+        actor_id=42,
+    )
+    await apply_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.SKIP_UNUSABLE_FILES,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+
+    assert preview.affected_file_count == 1
+    assert failed.status is ImportedFileStatus.SKIPPED
+    assert failed.diagnostics["completed_import_cleanup"]["source_preserved"] is True
+
+
+@pytest.mark.asyncio
 async def test_probable_covers_are_separate_from_oversized_files(
     db_session: AsyncSession,
 ) -> None:
@@ -1081,6 +1173,46 @@ async def test_retry_source_inspection_includes_failed_completed_rechecks(
     await db_session.refresh(failed)
     assert failed.status is ImportedFileStatus.FAILED
     assert failed.diagnostics["source_revalidation"]["retryable"] is True
+
+
+@pytest.mark.parametrize(
+    "code",
+    ("source_identity_changed", "source_root_changed", "source_root_unconfirmed"),
+)
+async def test_retry_source_inspection_excludes_identity_and_root_drift(
+    db_session: AsyncSession,
+    code: str,
+) -> None:
+    job, imported_series = await _seed_job(db_session)
+    failed = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=imported_series.id,
+        file_path=f"/comics/{code}.cbz",
+        file_name=f"{code}.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        diagnostics={
+            "source_revalidation": {
+                "category": ImportSafetyCategory.SOURCE_CHANGED.value,
+                "code": code,
+                "retryable": True,
+            }
+        },
+        error_message="The saved source identity changed.",
+    )
+    db_session.add(failed)
+    await db_session.commit()
+
+    summary = await summarize_completed_import_cleanup_scope(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+    )
+
+    assert summary.affected_count == 0
+    assert summary.affected_file_count == 0
+    assert summary.examples == ()
 
 
 @pytest.mark.asyncio

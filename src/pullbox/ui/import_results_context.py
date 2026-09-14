@@ -325,6 +325,16 @@ _SAFETY_ACTION_BY_CATEGORY = {
 }
 
 _CLEANUP_ACTION_PRESENTATION = {
+    CompletedImportCleanupAction.RECHECK_DEFERRED_FILES: {
+        "label": "Recheck deferred files",
+        "description": (
+            "Group repeated file records, recognize completed imports, and recover exact issue "
+            "matches. Missing series catalogs are checked in the background. "
+            "Files that still need a decision remain here."
+        ),
+        "button_label": "Recheck files",
+        "tone": "warning",
+    },
     CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES: {
         "label": "Dismiss stale Mylar references",
         "description": (
@@ -427,6 +437,8 @@ async def _load_cleanup_action_summaries(
                 "item_unit": (
                     "group"
                     if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
+                    else "follow-up item"
+                    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES
                     else "file"
                 ),
                 "examples": summary.examples,

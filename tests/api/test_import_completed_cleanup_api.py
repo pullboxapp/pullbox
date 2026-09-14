@@ -51,6 +51,58 @@ def _csrf_header_for(client: AsyncClient) -> dict[str, str]:
 
 
 @pytest.mark.asyncio
+async def test_deferred_file_recheck_api_queues_only_after_signed_confirmation(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pullbox.models.import_job import ImportFileHandlingMode
+    from tests.unit.test_import_deferred_recovery import add_file, seed
+
+    async with sec_db() as session:
+        job, item, _, _, _ = await seed(session)
+        job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+        job.move_to_library = False
+        await add_file(session, job, item)
+        await add_file(session, job, item)
+        await session.commit()
+        job_id = job.id
+    calls = []
+    monkeypatch.setattr(
+        "pullbox.api.v1.import_completed_cleanup.trigger_import_execute", calls.append
+    )
+    url = f"/api/v1/import/{job_id}/cleanup/recheck_deferred_files"
+    preview = await authenticated_client.get(url + "/preview")
+    assert preview.status_code == 200
+    assert preview.json()["affected_count"] == 1
+    assert calls == []
+    response = await authenticated_client.post(
+        url,
+        headers=_csrf_header_for(authenticated_client),
+        json={"preview_token": preview.json()["preview_token"], "confirmation": "APPLY CLEANUP"},
+    )
+    assert response.status_code == 200
+    assert response.json()["requires_import_retry"] is True
+    assert calls == [job_id]
+    async with sec_db() as session:
+        job = await session.get(ImportJob, job_id)
+        assert job is not None
+        assert job.status is ImportJobStatus.IMPORTING
+        assert job.progress_snapshot["deferred_recovery"]["state"] == "queued"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ImportedFile)
+                .where(
+                    ImportedFile.import_job_id == job_id,
+                    ImportedFile.status == ImportedFileStatus.NO_MATCH,
+                )
+            )
+            == 2
+        )
+
+
+@pytest.mark.asyncio
 async def test_known_series_recovery_api_previews_then_queues_background_import(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],

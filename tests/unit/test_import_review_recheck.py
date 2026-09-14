@@ -25,6 +25,7 @@ from pullbox.services.import_orphans import retry_failed_series
 from pullbox.services.import_review_recheck import (
     prepare_completed_import_file_recheck,
     prepare_import_recheck,
+    prepare_retryable_failed_sources_for_retry,
     prepare_review_recheck,
 )
 
@@ -298,7 +299,7 @@ async def test_completed_recheck_keeps_missing_source_blocked(db_session, tmp_pa
     missing.diagnostics = {
         **missing.diagnostics,
         "source_revalidation": {
-            "code": "source_missing",
+            "code": "source_changed",
             "retryable": True,
         },
     }
@@ -319,6 +320,48 @@ async def test_completed_recheck_keeps_missing_source_blocked(db_session, tmp_pa
     assert report["blocked_files"] == 1
     assert missing.status is ImportedFileStatus.FAILED
     assert missing.diagnostics["source_revalidation"]["code"] == "source_missing"
+
+
+@pytest.mark.parametrize(
+    "category",
+    (
+        "source_missing",
+        "zero_byte",
+        "archive_no_pages",
+        "unsupported_file_type",
+        "source_identity_changed",
+        "outside_approved_root",
+    ),
+)
+async def test_retry_failed_does_not_reinspect_terminal_source_failures(
+    db_session,
+    tmp_path,
+    category,
+):
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    item.status = ImportSeriesStatus.IMPORTED
+    failed = files[0]
+    failed.status = ImportedFileStatus.FAILED
+    failed.diagnostics = {
+        **failed.diagnostics,
+        "source_revalidation": {
+            "category": category,
+            "code": category,
+            "retryable": True,
+        },
+    }
+    await db_session.flush()
+
+    report = await prepare_retryable_failed_sources_for_retry(db_session, job)
+
+    assert report == {
+        "files_checked": 0,
+        "files_prepared": 0,
+        "blocked_files": 0,
+        "skipped_files": 0,
+    }
+    assert failed.status is ImportedFileStatus.FAILED
 
 
 @pytest.mark.parametrize(
@@ -550,6 +593,48 @@ async def test_retry_failed_rejects_changed_source_with_conflicting_identity(
     assert count == 0
     assert changed.status is ImportedFileStatus.FAILED
     assert changed.include_in_import is False
+    assert changed.diagnostics["source_revalidation"]["code"] == "source_identity_changed"
+
+
+async def test_completed_recheck_counts_identity_conflict_as_blocked(
+    db_session,
+    tmp_path,
+):
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    item.status = ImportSeriesStatus.IMPORTED
+    changed = files[1]
+    changed.status = ImportedFileStatus.FAILED
+    changed.include_in_import = False
+    changed.matched_issue_cv_id = 100008
+    changed.diagnostics = {
+        **changed.diagnostics,
+        "target_issue_summary": {"provider_id": "100008", "issue_number": 8.0},
+        "source_revalidation": {"code": "source_changed", "retryable": True},
+    }
+    (tmp_path / "Firefly (2018)" / "cvinfo").write_text(
+        "https://comicvine.gamespot.com/other/4050-123456/"
+    )
+    path = Path(changed.file_path)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("1.jpg", b"replacement image")
+        archive.writestr("2.jpg", b"replacement image")
+    await db_session.flush()
+
+    report = await prepare_completed_import_file_recheck(
+        db_session,
+        job.id,
+        source_roots=[tmp_path],
+        apply=True,
+        accept_replaced_files=True,
+    )
+
+    assert report == {
+        "files_checked": 1,
+        "files_prepared": 0,
+        "blocked_files": 1,
+        "skipped_files": 0,
+    }
     assert changed.diagnostics["source_revalidation"]["code"] == "source_identity_changed"
 
 

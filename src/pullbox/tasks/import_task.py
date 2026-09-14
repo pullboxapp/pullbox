@@ -27,6 +27,10 @@ from pullbox.models.import_job import (
 )
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_counters import job_stats
+from pullbox.services.import_deferred_recovery_execution import (
+    cancel_deferred_preparation,
+    prepare_deferred_recovery,
+)
 from pullbox.services.import_job_execution_progress import (
     reconcile_durable_import_execution_counters,
 )
@@ -573,6 +577,9 @@ class ImportRunner:
         job = await session.get(ImportJob, job_id)
         if job is None:
             return
+        if await cancel_deferred_preparation(session, job):
+            purge_import_runtime_state(job_id)
+            return
         if job.import_started_at is None:
             await session.delete(job)
             await session.commit()
@@ -696,6 +703,15 @@ class ImportRunner:
                     )
                     await session.commit()
                 elif job.status == ImportJobStatus.IMPORTING:
+                    if dict(job.progress_snapshot or {}).get("deferred_recovery"):
+                        await prepare_deferred_recovery(
+                            session,
+                            job_id,
+                            metadata_service=service._metadata_service,
+                            progress_callback=progress_callback,
+                        )
+                    if job.status != ImportJobStatus.IMPORTING:
+                        return
                     await prepare_clean_library_import(
                         session,
                         job_id,
@@ -815,6 +831,16 @@ async def _run_single_job_once(
                         progress_callback=progress_callback,
                     )
                 else:
+                    if dict(job.progress_snapshot or {}).get("deferred_recovery"):
+                        await prepare_deferred_recovery(
+                            session,
+                            job_id,
+                            metadata_service=service._metadata_service,
+                            progress_callback=progress_callback,
+                        )
+                    if job.status != ImportJobStatus.IMPORTING:
+                        await session.commit()
+                        return
                     await prepare_clean_library_import(
                         session,
                         job_id,
@@ -846,7 +872,9 @@ async def _run_single_job_once(
             await session.rollback()
             job = await session.get(ImportJob, job_id)
             if job is not None:
-                if job.import_started_at is None:
+                if await cancel_deferred_preparation(session, job):
+                    purge_import_runtime_state(job_id)
+                elif job.import_started_at is None:
                     terminal_event_override = ImportProgressEvent(
                         job_id=job_id,
                         status=ImportJobStatus.CANCELLED,
