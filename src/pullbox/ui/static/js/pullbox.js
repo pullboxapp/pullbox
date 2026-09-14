@@ -14887,6 +14887,9 @@ function dropdownSelectData(config) {
       this.currentLabel = option.label;
       this.syncInput();
       this.close(false);
+      if (this.$refs && this.$refs.trigger) {
+        this.$refs.trigger.focus();
+      }
 
       this.runChangeExpression();
 
@@ -14906,12 +14909,6 @@ function dropdownSelectData(config) {
         );
       }
 
-      var self = this;
-      this.$nextTick(function () {
-        if (self.$refs && self.$refs.trigger) {
-          self.$refs.trigger.focus();
-        }
-      });
     },
 
     selectActive: function () {

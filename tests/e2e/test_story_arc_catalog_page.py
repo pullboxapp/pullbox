@@ -652,6 +652,28 @@ def test_preview_reorder_restores_focus_to_enabled_direction_at_list_ends(
     expect(down).to_be_focused()
 
 
+def test_dropdown_selection_does_not_restore_focus_after_user_moves_on(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+) -> None:
+    page = authed_page
+    page.goto(f"{seeded_server}/story-arcs/catalog/179")
+    root = page.get_by_label("Library root for new series")
+    root.click()
+    option = page.locator("[data-dropdown-select-panel]:visible [data-dropdown-option]").nth(1)
+    move_down = page.locator('[data-provider-issue-id="101"] [data-order-direction="down"]')
+    option.evaluate(
+        """async (option, targetSelector) => {
+            option.click();
+            document.querySelector(targetSelector).focus();
+            await Alpine.nextTick();
+        }""",
+        '[data-provider-issue-id="101"] [data-order-direction="down"]',
+    )
+    expect(move_down).to_be_focused()
+    page.keyboard.press("Enter")
+    expect(page.locator('[data-provider-issue-id="101"] [data-reading-position]')).to_have_text("2")
+
+
 def test_preview_reorder_single_member_and_pending_retry_are_disabled(
     authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
 ) -> None:
