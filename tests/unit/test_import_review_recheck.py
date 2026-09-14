@@ -355,6 +355,70 @@ async def test_completed_recheck_finishes_inspection_before_mutating_rows(
     )
 
 
+async def test_completed_recheck_skips_file_completed_during_inspection(
+    db_session,
+    tmp_path,
+    monkeypatch,
+):
+    from pullbox.services import import_review_recheck
+
+    job, item, files = await _fixture(db_session, tmp_path, ImportSourceType.MYLAR3)
+    job.status = ImportJobStatus.COMPLETED
+    item.status = ImportSeriesStatus.IMPORTED
+    changed = files[1]
+    changed.status = ImportedFileStatus.FAILED
+    changed.include_in_import = False
+    changed.matched_issue_cv_id = 100008
+    changed.diagnostics = {
+        **changed.diagnostics,
+        "target_issue_summary": {"provider_id": "100008", "issue_number": 8.0},
+        "source_revalidation": {"code": "source_changed", "retryable": True},
+    }
+    path = Path(changed.file_path)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Firefly</Series><Number>8</Number></ComicInfo>",
+        )
+        archive.writestr("1.jpg", b"replacement image")
+        archive.writestr("2.jpg", b"replacement image")
+    await db_session.flush()
+
+    original_to_thread = import_review_recheck.asyncio.to_thread
+    transitioned = False
+
+    async def inspect_then_complete(function, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal transitioned
+        result = await original_to_thread(function, *args, **kwargs)
+        if not transitioned:
+            changed.status = ImportedFileStatus.IMPORTED
+            changed.error_message = None
+            changed.diagnostics = {"concurrent_import": {"completed": True}}
+            await db_session.flush()
+            transitioned = True
+        return result
+
+    monkeypatch.setattr(import_review_recheck.asyncio, "to_thread", inspect_then_complete)
+
+    report = await prepare_completed_import_file_recheck(
+        db_session,
+        job.id,
+        source_roots=[tmp_path],
+        apply=True,
+        accept_replaced_files=True,
+    )
+
+    assert report == {
+        "files_checked": 1,
+        "files_prepared": 0,
+        "blocked_files": 0,
+        "skipped_files": 1,
+    }
+    assert changed.status is ImportedFileStatus.IMPORTED
+    assert changed.error_message is None
+    assert changed.diagnostics == {"concurrent_import": {"completed": True}}
+
+
 async def test_completed_recheck_keeps_loaded_file_rows_bounded(
     db_session,
     tmp_path,
