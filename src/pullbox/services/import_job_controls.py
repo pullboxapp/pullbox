@@ -141,6 +141,8 @@ async def cancel_job(
     if (
         job.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED}
         and job.import_started_at is None
+        and dict(dict(job.progress_snapshot or {}).get("deferred_recovery") or {}).get("state")
+        not in {"queued", "catalogs", "prepared"}
     ):
         await discard_unpublished_import_story_arc_sync_work(session, (job_id,))
         await session.delete(job)
@@ -316,13 +318,19 @@ async def request_cancel(
     if (
         job.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED}
         and job.import_started_at is None
+        and dict(dict(job.progress_snapshot or {}).get("deferred_recovery") or {}).get("state")
+        not in {"queued", "catalogs", "prepared"}
     ):
         await session.delete(job)
         await session.flush()
         return job
 
     def _apply_cancel(target: ImportJob) -> None:
-        if _is_story_arc_placement_wait(target) or (
+        recovery = dict(dict(target.progress_snapshot or {}).get("deferred_recovery") or {})
+        if recovery.get("state") in {"queued", "catalogs", "prepared"}:
+            target.status = ImportJobStatus.CANCELLING
+            target.control_request = ImportControlRequest.CANCEL
+        elif _is_story_arc_placement_wait(target) or (
             target.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED}
             and target.import_started_at is not None
         ):

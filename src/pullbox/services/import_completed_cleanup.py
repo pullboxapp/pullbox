@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from itertools import batched
 from typing import TYPE_CHECKING, Any, Final
+from uuid import uuid4
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy import and_, case, exists, func, or_, select, update
@@ -66,6 +67,7 @@ class CompletedImportCleanupAction(enum.StrEnum):
     ACCEPT_RECOMMENDED_CONFLICTS = "accept_recommended_conflicts"
     RESOLVE_MIXED_FOLDER_FILES = "resolve_mixed_folder_files"
     RECOVER_KNOWN_SERIES = "recover_known_series"
+    RECHECK_DEFERRED_FILES = "recheck_deferred_files"
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +247,9 @@ def _eligible_conflict_groups(job_id: int) -> Any:
 
 def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[Any, ...]:
     filters: list[Any] = [ImportedFile.import_job_id == job_id]
-    if action is CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES:
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        filters.append(ImportedFile.status == ImportedFileStatus.NO_MATCH)
+    elif action is CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES:
         filters.append(
             or_(
                 and_(
@@ -755,6 +759,13 @@ async def _load_snapshot(
         if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
         else file_count
     )
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        affected_count = int(
+            await session.scalar(
+                select(func.count(func.distinct(ImportedFile.file_path))).where(*filters)
+            )
+            or 0
+        )
     return CompletedImportCleanupSnapshot(
         affected_count=affected_count,
         affected_file_count=file_count,
@@ -781,6 +792,14 @@ async def count_completed_import_cleanup_scope(
     file_count = int(
         (await session.scalar(select(func.count(ImportedFile.id)).where(*filters))) or 0
     )
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        paths = int(
+            await session.scalar(
+                select(func.count(func.distinct(ImportedFile.file_path))).where(*filters)
+            )
+            or 0
+        )
+        return paths, file_count
     if action is not CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
         return file_count, file_count
     group_count = int(
@@ -834,6 +853,12 @@ async def list_completed_import_cleanup_files(
             total_pages=total_pages,
         )
     filters = _file_filters(job_id, action)
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        filters = (
+            ImportedFile.id.in_(
+                select(func.min(ImportedFile.id)).where(*filters).group_by(ImportedFile.file_path)
+            ),
+        )
     total = int((await session.scalar(select(func.count(ImportedFile.id)).where(*filters))) or 0)
     total_pages = max(1, (total + normalized_page_size - 1) // normalized_page_size)
     normalized_page = min(normalized_page, total_pages)
@@ -881,10 +906,17 @@ async def list_completed_import_cleanup_examples(
             ).all()
         }
         return tuple(_safe_example_name(names_by_id[file_id]) for file_id in file_ids)
+    filters = _file_filters(job_id, action)
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        filters = (
+            ImportedFile.id.in_(
+                select(func.min(ImportedFile.id)).where(*filters).group_by(ImportedFile.file_path)
+            ),
+        )
     names = (
         await session.scalars(
             select(ImportedFile.file_name)
-            .where(*_file_filters(job_id, action))
+            .where(*filters)
             .order_by(ImportedFile.id)
             .limit(min(max(1, int(limit)), 10))
         )
@@ -1579,9 +1611,31 @@ async def apply_completed_import_cleanup(
     if current_snapshot != preview_snapshot:
         raise ValidationError("The cleanup scope changed. Preview the action again.")
 
-    if action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
-        affected_series_ids = await _apply_known_series_recovery(session, job)
+    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        from pullbox.services.import_retry_helpers import require_retained_import_destination
+
+        require_retained_import_destination(job)
+        job.progress_snapshot = {
+            **dict(job.progress_snapshot or {}),
+            "deferred_recovery": {
+                "state": "queued",
+                "run_id": uuid4().hex,
+                "series_ids": [],
+                "actor_id": actor_id,
+            },
+            "mode": "import",
+            "phase": "deferred_recovery",
+            "progress": 0,
+            "message": "Queued deferred file recovery...",
+        }
+        job.status = ImportJobStatus.IMPORTING
+        job.error_message = None
+        affected_series_ids = set()
         affected_file_ids: tuple[int, ...] = ()
+        requires_import_retry = True
+    elif action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
+        affected_series_ids = await _apply_known_series_recovery(session, job)
+        affected_file_ids = ()
         requires_import_retry = await _prepare_series_for_retry(session, job, affected_series_ids)
     elif action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
         affected_series_ids = await _apply_recommended_conflicts(session, job)
@@ -1600,8 +1654,9 @@ async def apply_completed_import_cleanup(
                 session, job, affected_series_ids
             )
 
-    await recompute_file_counters(session, job, series_ids=sorted(affected_series_ids))
-    await recompute_series_counters(session, job)
+    if action is not CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        await recompute_file_counters(session, job, series_ids=sorted(affected_series_ids))
+        await recompute_series_counters(session, job)
     result = CompletedImportCleanupResult(
         job_id=job.id,
         action=action,

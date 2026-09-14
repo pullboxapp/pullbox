@@ -8617,13 +8617,20 @@ function importResultsData(config) {
           unit +
           (count === 1 ? "" : "s") +
           ". Source files will remain unchanged.";
+        if (action === "recheck_deferred_files") {
+          message =
+            "Check " + count.toLocaleString() + " unique file paths in the background. " +
+            "Pullbox will reconcile repeated records and import only proven matches using " +
+            "this import's original file settings. Uncertain matches stay in Follow-up. " +
+            "Source files will remain unchanged.";
+        }
         if (examples.length) {
           message += " Examples: " + examples.join(", ") + ".";
         }
         var confirmed = await pbConfirm({
           title: label + "?",
           message: message,
-          confirmText: "Apply cleanup",
+          confirmText: action === "recheck_deferred_files" ? "Recheck files" : "Apply cleanup",
           destructive: false,
         });
         if (!confirmed) {

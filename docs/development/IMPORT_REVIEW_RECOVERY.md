@@ -95,6 +95,38 @@ ineligible.
   validation and import rules. Successful files and source paths are untouched;
   unresolved files remain in Follow-up. This is not a blanket repair of stale
   IDs or a replacement for manual review when trusted evidence disagrees.
+- **Recheck deferred files** checks the remaining unmatched files in a resumable
+  background pass. The preview counts distinct physical paths; its signed scope
+  still includes every underlying record. Repeated records are consolidated
+  only when their path, size, portable timestamp, and available content digests
+  agree. The retained record links back to every superseded record. Files already
+  registered at the same path and exact issue are recognized without importing
+  them again. A different file for an owned issue remains a review decision;
+  it is never automatically substituted for the owned copy.
+
+The deferred pass uses complete local catalogs first. Exact issue identity may
+correct stale Mylar ownership only when the file's title, issue number, type,
+and embedded identity agree with the target. Conflicting embedded IDs remain
+blocked. Filename-only recovery additionally requires an exact series title or
+alias, one issue target, matching issue type, a publication year within one year
+of the target issue date, and no pack, volume, or identity conflict. It does not
+relax the ordinary search matcher.
+
+Missing candidate catalogs are fetched once per candidate series per pass, not
+once per file. Only trusted saved Mylar, ComicInfo, and sidecar series IDs are
+candidates; membership in one catalog plus agreeing file evidence is required
+before staging a target. Completed catalog checks are checkpointed. A provider
+failure pauses the pass, and Resume continues without repeating completed
+checks. Network requests do not hold a database write transaction.
+
+Recovered files run through normal Step 4 safety, current-source validation,
+ownership checks, and the original copy or keep-in-place settings. Only newly
+prepared recovery groups execute, not unrelated ready files or Story Arcs.
+Cancellation stops this pass without rolling back the original import or
+completed recovery files. Manual choices, skips, ambiguous targets, and safety
+blocks remain protected. Empty missing-location groups with no file records
+are archived with their evidence retained. These rules are shared by Mylar and
+folder imports; no source file is moved, renamed, or deleted by reconciliation.
 
 For older jobs, **Retry failed** first repairs terminal bookkeeping before it
 retries file work. A series with any successfully imported file retains its

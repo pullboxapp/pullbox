@@ -113,6 +113,7 @@ from pullbox.services.import_story_arc_review import (
     auto_confirm_trusted_logical_story_arcs,
 )
 from pullbox.services.import_workflow_state import (
+    deferred_recovery_scope,
     emit_live_progress,
 )
 
@@ -285,6 +286,12 @@ async def execute_import_job(
         confirmed_ids={item.id for item in confirmed_items},
     )
     execution_items = _build_execution_item_plans(confirmed_items, duplicate_items)
+    recovery_scope = deferred_recovery_scope(job)
+    if recovery_scope is not None:
+        authorized_ids = set(recovery_scope)
+        confirmed_items = [item for item in confirmed_items if item.id in authorized_ids]
+        duplicate_items = [item for item in duplicate_items if item.id in authorized_ids]
+        execution_items = _build_execution_item_plans(confirmed_items, duplicate_items)
     await log_event(
         session,
         job_id,
@@ -682,6 +689,43 @@ async def execute_import_job(
     job.series_failed = failed_count
     job.total_files_imported = total_files_imported
     job.total_files_failed = total_files_failed
+    if recovery_scope is not None:
+        from pullbox.services.import_counters import (
+            recompute_file_counters,
+            recompute_series_counters,
+        )
+
+        await recompute_file_counters(session, job, series_ids=list(recovery_scope))
+        await recompute_series_counters(session, job)
+        snapshot = dict(job.progress_snapshot or {})
+        recovery = dict(snapshot.get("deferred_recovery") or {})
+        recovery["state"] = "completed"
+        job.status = ImportJobStatus.COMPLETED
+        job.progress_snapshot = {
+            **snapshot,
+            "deferred_recovery": recovery,
+            "status": "completed",
+            "phase": "done",
+            "progress": 100,
+            "message": "Deferred file recovery completed. Remaining decisions are in Follow-up.",
+        }
+        await log_event(
+            session,
+            job_id,
+            "INFO",
+            "import_deferred_recovery_completed",
+            message="Completed the scoped recovery without executing unrelated review groups.",
+            series_ids=list(recovery_scope),
+        )
+        for request in pending_catalog_hydrations:
+            _schedule_catalog_hydration(
+                session,
+                series_service=series_service,
+                series_id=request.series_id,
+                search_on_add=request.search_on_add,
+            )
+        await session.flush()
+        return
     job, story_arc_materialization = await _execute_story_arc_materialization(
         session,
         job,
