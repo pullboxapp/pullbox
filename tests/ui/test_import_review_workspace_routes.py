@@ -2,11 +2,33 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.ui.test_import_collection_shell_ui_routes import _seed_import_review_job
 
 pytest_plugins = ["conftest_security"]
+
+
+@pytest.mark.parametrize("lane", ["decide", "confirm", "fix_source", "blocked", "ready", "info"])
+async def test_review_lane_toolbar_uses_v2_rail_description_and_scoped_controls(
+    authenticated_client, sec_db, lane: str
+) -> None:  # type: ignore[no-untyped-def]
+    job_id = await _seed_import_review_job(sec_db)
+    response = await authenticated_client.get(f"/import/{job_id}/review-partial?status={lane}")
+    assert response.status_code == 200
+    toolbar = re.search(
+        r'<div class="downloads-toolbar[^"]*">(.*?)</div>', response.text, re.DOTALL
+    )
+    assert toolbar is not None
+    assert re.search(r"<h[1-6]\b", toolbar.group(1)) is None
+    assert f'data-testid="import-review-lane-{lane}"' in response.text
+    assert 'role="tablist"' in toolbar.group(1)
+    assert 'data-testid="import-review-lane-description"' in response.text
+    assert ("Select all ready" in response.text) == (lane == "ready")
+    if lane != "ready":
+        assert 'role="group" aria-label="Filter by reason"' in response.text
 
 
 @pytest.mark.asyncio
@@ -17,14 +39,14 @@ async def test_review_has_exclusive_lanes_and_a_clear_import_gate(
     response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=decide")
     assert response.status_code == 200
     html = response.text
-    for lane in ("decide", "confirm", "fix_source", "blocked", "ready", "info"):
+    for lane in ("decide", "confirm", "fix_source", "ready", "info"):
         assert f'data-testid="import-review-lane-{lane}"' in html
     assert 'data-testid="import-review-primary-action"' in html
     assert 'data-testid="import-review-gate"' in html
-    assert "Continue to import" in html
+    assert "ready series" in html
     assert "Follow-up" in html
     assert "Save conflict choices" not in html
-    assert 'role="progressbar"' not in html
+    assert 'data-testid="import-review-progress"' in html
     assert "Import all ready comics" not in html
 
 
@@ -62,7 +84,7 @@ async def test_series_candidate_rematch_keeps_polling_without_a_safety_file(
 async def test_existing_conflict_link_uses_immediate_choices(authenticated_client, sec_db):
     job_id = await _seed_import_review_job(sec_db)
     response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=conflicts")
-    assert 'data-testid="import-review-keep-copy"' in response.text
+    assert 'data-testid="import-review-keep-selected-copy"' in response.text
     assert "Save conflict choices" not in response.text
     assert "pendingResolutions" not in response.text
 

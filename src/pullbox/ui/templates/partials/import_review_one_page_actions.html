@@ -1,0 +1,11 @@
+{% for action in ('allow', 'skip') if one_page.get(action ~ '_token') %}
+            <form data-testid="import-review-one-page-{{ action }}" method="post"
+              action="/import/{{ job.id }}/series/{{ item.id }}/one-page/{{ action }}?status={{ active_review_view }}{% if active_reason %}&reason={{ active_reason }}{% endif %}&sort={{ sort }}&page={{ page }}"
+              hx-post="/import/{{ job.id }}/series/{{ item.id }}/one-page/{{ action }}?status={{ active_review_view }}{% if active_reason %}&reason={{ active_reason }}{% endif %}&sort={{ sort }}&page={{ page }}"
+              hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" hx-disabled-elt="find button">
+              <input type="hidden" name="token" value="{{ one_page[action ~ '_token'] }}">
+              <button type="submit" class="{{ 'btn-primary' if action == 'allow' else 'btn-ghost' }} btn-sm" {% if row.updating %}disabled{% endif %}>
+                {{ 'Allow All' if action == 'allow' else 'Skip All' }}
+              </button>
+            </form>
+            {% endfor %}

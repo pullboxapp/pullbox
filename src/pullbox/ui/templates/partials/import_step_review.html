@@ -13,7 +13,7 @@
     selectedItemCount: {{ review_summary.selected_items_total if review_summary else 0 }},
     importableItemCount: {{ review_summary.importable_items_total if review_summary else 0 }},
     selectedFilesCount: {{ review_summary.selected_files_total if review_summary else 0 }},
-    attentionFilesCount: {{ review_summary.needs_attention_files_total if review_summary else 0 }},
+    attentionFilesCount: {{ review_summary.review_files_open if review_summary else 0 }},
     resolvedConflictGroupCount: {{ review_summary.resolved_file_conflict_groups if review_summary else 0 }},
     conflictSeriesCount: {{ review_summary.series_conflicts_total if review_summary else 0 }},
     preferredRootId: {{ job.target_library_root_id|tojson }},
@@ -34,7 +34,7 @@
   <div id="import-review-state" data-import-review-region
     data-requires-preferred-root="{{ 'true' if split_series_review.requires_preferred_destination else 'false' }}"
     data-import-review-selected-files="{{ review_summary.selected_files_total }}"
-    data-import-review-attention-files="{{ review_summary.needs_attention_files_total }}"
+    data-import-review-attention-files="{{ review_summary.review_files_open }}"
     data-review-summary='{{ review_summary|tojson|forceescape }}'
     data-import-review-status-counts='{{ status_counts|tojson|forceescape }}'>
     <input type="hidden" name="review_status_filter" value="{{ active_review_view }}">
@@ -49,28 +49,7 @@
 
   <div id="import-review-header" data-import-review-region data-testid="import-review-action-bar"
     class="rounded-xl border border-pb-border bg-pb-card px-4 py-3">
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <div class="flex items-center gap-2">
-        <button type="button" data-testid="import-review-back" class="btn-ghost btn-sm"
-          @click="window.dispatchEvent(new CustomEvent('wizard:advance', { detail: { step: 2, jobStatus: 'review' } }))">Back</button>
-        <button type="button" data-testid="import-review-cancel" data-import-review-cancel-job-id="{{ job.id }}"
-          onclick="cancelImportReview(this)" class="btn-ghost btn-sm"><span data-import-review-cancel-label>Cancel</span></button>
-      </div>
-      <div class="flex flex-wrap items-center gap-3">
-        <span data-import-review-selection-summary class="text-sm text-pb-text-sec" x-text="importSelectionLabel()">{{ review_summary.selected_items_total }} series selected to import</span>
-        <button type="button" @click="openImportGate($event.currentTarget)"
-          :disabled="totalSelectionCount() === 0 || confirming || !hasRequiredPreferredRoot()"
-          data-import-review-import-button class="btn-primary btn-sm">
-          <span data-import-review-import-label>Continue to import</span>
-        </button>
-      </div>
-    </div>
-    <p class="mt-2 text-xs text-pb-text-dim">
-      {{ lane_counts.decide + lane_counts.confirm }} series need decisions
-      &middot; {{ lane_counts.fix_source }} series have source issues
-      &middot; {{ lane_counts.blocked }} series contain files that cannot import.
-      Ready files can import while you work through the rest.
-    </p>
+    {% include "partials/import_review_overview.html" %}
     <p role="alert" x-show="confirmError" x-cloak x-text="confirmError" class="mt-2 text-sm text-pb-error"></p>
   </div>
 
@@ -140,50 +119,9 @@
 
   </div>
 
-  <nav id="import-review-lanes" data-import-review-region aria-label="Import review lanes"
-    class="flex flex-wrap gap-2" data-testid="import-review-subtabs">
-    {% for lane, label in review_lanes.items() %}
-    <button type="button" data-testid="import-review-lane-{{ lane }}" data-import-review-nav-url="/import/{{ job.id }}/review-partial?status={{ lane }}"
-      data-import-review-view="{{ lane }}" hx-get="/import/{{ job.id }}/review-partial?status={{ lane }}"
-      hx-target="#import-step-review-shell" hx-swap="morph:outerHTML"
-      aria-pressed="{{ 'true' if active_review_view == lane else 'false' }}"
-      class="chip-btn chip-btn-sm {{ 'chip-btn-selected' if active_review_view == lane else 'chip-btn-neutral' }}">
-      {{ label }} <span class="count-badge count-badge-neutral">{{ lane_counts[lane] }}</span>
-    </button>
-    {% endfor %}
-    {% if review_summary.story_arcs_total %}
-    <button type="button" data-testid="import-review-tab-story-arcs"
-      hx-get="/import/{{ job.id }}/review-partial?status=story_arcs" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML"
-      class="chip-btn chip-btn-sm {{ 'chip-btn-selected' if active_review_view == 'story_arcs' else 'chip-btn-neutral' }}">
-      Story Arcs <span class="count-badge count-badge-neutral">{{ review_summary.story_arcs_total }}</span>
-      <span class="text-pb-text-dim">Optional</span>
-    </button>
-    {% endif %}
-  </nav>
-
   <div id="import-review-workspace" data-import-review-region class="downloads-table-wrap is-clipped">
-    <div class="downloads-toolbar flex-wrap gap-3">
-      <h3 class="text-sm font-semibold text-pb-text">{{ review_lanes.get(active_review_view, 'Review') }}</h3>
-      {% if active_lane %}
-      <div class="flex flex-wrap gap-2" role="group" aria-label="Filter by reason">
-        {% for key, count in reason_counts.items() if count and key not in ('ready', 'already_handled') %}
-        <button type="button" data-testid="import-review-reason-{{ key }}"
-          hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}{% if active_reason != key %}&reason={{ key }}{% endif %}&sort={{ sort }}"
-          hx-target="#import-step-review-shell" hx-swap="morph:outerHTML"
-          aria-pressed="{{ 'true' if active_reason == key else 'false' }}"
-          class="chip-btn chip-btn-sm {{ 'chip-btn-selected' if active_reason == key else 'chip-btn-neutral' }}">
-          {{ review_reasons[key][0] }} <span class="count-badge count-badge-neutral">{{ count }}</span>
-        </button>
-        {% endfor %}
-      </div>
-      {% endif %}
-      {% if active_review_view != 'story_arcs' %}
-      <div class="ml-auto flex flex-wrap items-center gap-2">
-        <button type="button" @click="selectAllImportable()" class="btn-ghost btn-sm">Select all ready</button>
-        <button type="button" @click="deselectAllImportable()" class="btn-ghost btn-sm">Deselect all</button>
-      </div>
-      {% endif %}
-    </div>
+    {% include "partials/import_review_lane_rail.html" %}
+    <div id="import-review-lane-panel" role="tabpanel" {% if active_review_view in review_lanes or active_review_view == 'story_arcs' %}aria-labelledby="import-review-tab-{{ active_review_view }}"{% else %}aria-label="Import review"{% endif %} tabindex="0">
     {% include "partials/import_review_safety_categories.html" %}
     {% if active_review_view == 'story_arcs' %}
       {% include "partials/import_story_arc_review_table.html" %}
@@ -195,6 +133,7 @@
     {% else %}
       {% include "partials/import_review_workspace_rows.html" %}
     {% endif %}
+    </div>
   </div>
   {% include "partials/import_review_gate.html" %}
 </div>

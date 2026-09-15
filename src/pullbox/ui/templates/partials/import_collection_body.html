@@ -23,4 +23,7 @@
 
   <div id="cv-search-modal" data-testid="import-collection-modal-host"></div>
   <div id="import-series-details-modal-host" data-testid="import-collection-series-details-modal-host"></div>
+  <div x-data="importFileReaderData()" @import:preview-file.window="previewImportFile($event.detail)">
+    {% with reader_preview=true %}{% include "components/reader_dialog.html" %}{% endwith %}
+  </div>
 </section>

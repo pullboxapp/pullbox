@@ -1,0 +1,44 @@
+<div data-testid="import-review-overview" class="flex flex-col gap-4">
+  <div class="flex flex-wrap items-start justify-between gap-x-8 gap-y-3">
+    <div class="min-w-0 flex-1 basis-[420px] space-y-2.5">
+      <h2 class="font-display text-[22px] font-bold leading-7 tracking-tight text-pb-text">
+        <span class="text-pb-success">{{ review_summary.ready_to_import_total }} series</span> ready to import
+        {% if review_summary.review_files_open %}<span class="text-pb-warning">&middot; {{ review_summary.review_files_open }} files need you</span>{% else %}<span class="text-pb-success">&middot; all decisions made</span>{% endif %}
+      </h2>
+      {% set settled = review_summary.review_files_settled %}
+      {% set file_total = review_summary.files_total %}
+      {% set percent = (100 * settled / file_total)|round(1) if file_total else 100 %}
+      <div class="max-w-[560px] space-y-2">
+        <div class="app-progress-track h-1.5" data-testid="import-review-progress" role="progressbar" aria-label="Files ready or handled" aria-valuemin="0" aria-valuemax="{{ file_total or 1 }}" aria-valuenow="{{ settled if file_total else 1 }}" aria-valuetext="{{ settled }} of {{ file_total }} files ready or handled">
+          <div class="app-progress-fill bg-pb-success" style="width:{{ percent }}%"></div>
+        </div>
+        <div class="flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-pb-text-sec">
+          <span><span class="text-pb-success" aria-hidden="true">&bull;</span> Ready or handled {{ settled }} of {{ file_total }} files</span>
+          <span><span class="text-pb-warning" aria-hidden="true">&bull;</span> Still open {{ review_summary.review_files_open }} files in {{ review_open_series }} series</span>
+          {% if lane_counts.blocked %}<span><span class="text-pb-error" aria-hidden="true">&bull;</span> Cannot import: {{ lane_counts.blocked }} series</span>{% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="flex flex-1 basis-[360px] flex-col items-end gap-1.5">
+      <div class="flex flex-wrap justify-end gap-2">
+        <button type="button" data-testid="import-review-back" class="btn-ghost btn-sm" @click="window.dispatchEvent(new CustomEvent('wizard:advance', { detail: { step: 2, jobStatus: 'review' } }))">Back</button>
+        <button type="button" data-testid="import-review-cancel" data-import-review-cancel-job-id="{{ job.id }}" onclick="cancelImportReview(this)" class="btn-ghost btn-sm"><span data-import-review-cancel-label>Cancel</span></button>
+        <button type="button" @click="openImportGate($event.currentTarget)" :disabled="totalSelectionCount() === 0 || confirming || !hasRequiredPreferredRoot()" data-import-review-import-button class="btn-primary btn-sm">
+          <span data-import-review-import-label x-text="importActionLabel()">Import {{ review_summary.selected_items_total }} ready series</span>
+        </button>
+      </div>
+      <p class="max-w-md text-right text-xs text-pb-text-dim">Ready files import while you work through the rest. Unresolved files stay in Follow-up.</p>
+      <span data-import-review-selection-summary class="sr-only" x-text="importSelectionLabel()"></span>
+    </div>
+  </div>
+  <div class="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
+    {% for lane, kicker in [('decide', 'Start here'), ('confirm', 'Then'), ('fix_source', 'Can wait'), ('blocked', 'Will not import')] if lane != 'blocked' or lane_counts.blocked %}
+    <button type="button" data-testid="import-review-attention-{{ lane }}" hx-get="/import/{{ job.id }}/review-partial?status={{ lane }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML"
+      class="rounded-lg border {{ 'border-pb-warning/40 bg-pb-warning/5' if lane == 'decide' and lane_counts[lane] else 'border-pb-border bg-pb-card' }} p-3 text-left hover:bg-pb-card-hover focus-visible:outline-2 focus-visible:outline-pb-interactive">
+      <span class="block text-[10px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ kicker }}</span>
+      <span class="mt-1 block text-sm font-semibold text-pb-text">{{ review_lanes[lane] }}</span>
+      <span class="mt-1 block text-xs {{ 'text-pb-warning' if lane_counts[lane] and lane != 'blocked' else 'text-pb-error' if lane_counts[lane] else 'text-pb-text-dim' }}">{% if lane_counts[lane] %}{{ lane_counts[lane] }} series &middot; {{ lane_file_counts[lane] }} {{ 'file' if lane_file_counts[lane] == 1 else 'files' }}{% else %}Done &middot; Nothing left here{% endif %}</span>
+    </button>
+    {% endfor %}
+  </div>
+</div>

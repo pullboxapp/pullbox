@@ -100,3 +100,38 @@ async def test_source_preview_does_not_scan_and_post_only_queues(
         file = await session.get(ImportedFile, 1)
         assert file.status is ImportedFileStatus.SAFETY_BLOCKED
         assert file.diagnostics["review_source_action"]["state"] == "pending"
+
+
+async def test_inline_issue_choices_are_bounded_and_use_the_same_scoped_assignment(
+    authenticated_client, sec_db, monkeypatch
+):
+    from pullbox.ui import import_review_file_routes as routes
+
+    metadata = AsyncMock()
+    metadata.get_series_metadata.return_value = SimpleNamespace(
+        provider_id="20", title="Second", year_start=2020
+    )
+    metadata.get_issue_summaries_for_series.return_value = [
+        IssueSummary(str(200 + i), i, f"Issue {i}", "2020-01-01", None, "issue")
+        for i in range(1, 32)
+    ]
+    monkeypatch.setattr(routes, "build_metadata_service", AsyncMock(return_value=metadata))
+    job_id = await _seed_import_review_job(sec_db)
+    url = f"/import/{job_id}/files/1/assign?cv_id=20&inline=true"
+    response = await authenticated_client.get(url)
+    assert response.status_code == 200
+    assert 'data-testid="import-review-issue-choices"' in response.text
+    assert response.text.count('data-testid="import-review-use-issue"') == 25
+    assert 'role="dialog"' not in response.text
+    assert "issue_page=2" in response.text
+    second = await authenticated_client.get(url + "&issue_page=2")
+    assert second.text.count('data-testid="import-review-use-issue"') == 6
+    filtered = await authenticated_client.get(url + "&q=Issue%2031")
+    assert filtered.text.count('data-testid="import-review-use-issue"') == 1
+    assert 'value="231"' in filtered.text
+    rejected = await authenticated_client.post(
+        f"/import/{job_id}/files/2/assign",
+        data={"token": token(filtered.text), "cv_id": 20, "issue_cv_id": 231},
+        headers=csrf(authenticated_client),
+    )
+    assert rejected.status_code == 422

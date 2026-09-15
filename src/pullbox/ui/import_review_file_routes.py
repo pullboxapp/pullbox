@@ -18,6 +18,111 @@ from pullbox.services.import_review_scope import (
 router = APIRouter()
 
 
+@router.get("/import/{job_id}/series/{series_id}/review-{action}", include_in_schema=False)
+async def preview_series_choice(
+    job_id: int,
+    series_id: int,
+    action: str,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    from fastapi import HTTPException
+
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.import_review_series_choice import series_choice_scope
+    from pullbox.ui.import_routes import _ctx, _templates
+
+    try:
+        job, series, scope = await series_choice_scope(session, job_id, series_id, action, user.id)
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    token = await sign_review_scope(session, scope)
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_review_series_choice.html",
+        _ctx(
+            request,
+            user,
+            job=job,
+            series=series,
+            action=action,
+            token=token,
+        ),
+    )
+
+
+@router.post("/import/{job_id}/series/{series_id}/review-{action}", include_in_schema=False)
+async def decide_series_choice(
+    job_id: int,
+    series_id: int,
+    action: str,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    token: Annotated[str, Form()],
+) -> Response:
+    from fastapi import HTTPException
+
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.import_review_series_choice import apply_series_choice
+
+    try:
+        await apply_series_choice(session, job_id, series_id, action, user.id, token)
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    await session.commit()
+    return JSONResponse(
+        {
+            "message": "Series skipped. Source files are unchanged."
+            if action == "skip"
+            else "Series returned to review. Check its selection before importing."
+        }
+    )
+
+
+@router.post("/import/{job_id}/series/{series_id}/one-page/{action}", include_in_schema=False)
+async def decide_one_page_archives(
+    job_id: int,
+    series_id: int,
+    action: str,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    token: Annotated[str, Form()],
+    status: str = Query("decide"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    from fastapi import HTTPException
+
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.import_review_one_page import decide_one_page_series
+    from pullbox.tasks.import_task import trigger_import_series_rematch
+    from pullbox.ui.import_routes import _render_import_review_partial
+
+    if action not in ("allow", "skip"):
+        raise HTTPException(status_code=404)
+    try:
+        series = await decide_one_page_series(
+            session,
+            job_id,
+            series_id,
+            actor_id=user.id,
+            action="allow" if action == "allow" else "skip",
+            token=token,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    await session.commit()
+    if action == "allow" and (series.diagnostics or {}).get("rematch_pending"):
+        trigger_import_series_rematch(job_id, series_id)
+    return await _render_import_review_partial(
+        job_id, request, user, session, status=status, page=page, sort=sort
+    )
+
+
 @router.get("/import/{job_id}/files/{file_id}/source", include_in_schema=False)
 async def preview_source_action(
     job_id: int, file_id: int, request: Request, user: InteractiveOperatorUser, session: DbSession
@@ -98,6 +203,9 @@ async def preview_file_assignment(
     user: InteractiveOperatorUser,
     session: DbSession,
     cv_id: int = Query(gt=0),
+    inline: bool = Query(False),
+    issue_page: int = Query(1, ge=1),
+    q: str = Query("", max_length=200),
 ) -> Response:
     from pullbox.ui.import_routes import _ctx, _templates
 
@@ -105,6 +213,14 @@ async def preview_file_assignment(
     service = await build_metadata_service(session)
     series = await service.get_series_metadata(cv_id)
     issues = await service.get_issue_summaries_for_series(cv_id)
+    query = q.strip().casefold()
+    filtered = [
+        issue
+        for issue in issues
+        if not query or query in f"{issue.issue_number} {issue.title or ''}".casefold()
+    ]
+    page_count = max(1, (len(filtered) + 24) // 25)
+    issue_page = min(issue_page, page_count)
     token = await sign_review_scope(
         session,
         {
@@ -116,14 +232,19 @@ async def preview_file_assignment(
     )
     return _templates().TemplateResponse(
         request,
-        "partials/import_review_file_action.html",
+        "partials/import_review_issue_choices.html"
+        if inline
+        else "partials/import_review_file_action.html",
         _ctx(
             request,
             user,
             job=job,
             file=file,
             series=series,
-            issues=issues,
+            issues=filtered[(issue_page - 1) * 25 : issue_page * 25] if inline else issues,
+            issue_page=issue_page,
+            issue_page_count=page_count,
+            query=q,
             token=token,
             action="assign",
         ),

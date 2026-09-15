@@ -1,0 +1,43 @@
+<div class="downloads-toolbar">
+  <nav id="import-review-lanes" role="tablist" aria-label="Import review lanes" class="downloads-tab-rail" data-testid="import-review-subtabs" onkeydown="handleImportReviewTabKey(event)">
+    {% for lane, label in review_lanes.items() if lane != 'blocked' or lane_counts.blocked or active_review_view == 'blocked' %}
+    <button type="button" id="import-review-tab-{{ lane }}" role="tab" tabindex="{{ '0' if active_review_view == lane else '-1' }}" aria-controls="import-review-lane-panel" aria-selected="{{ 'true' if active_review_view == lane else 'false' }}"
+      data-testid="import-review-lane-{{ lane }}" data-import-review-nav-url="/import/{{ job.id }}/review-partial?status={{ lane }}" data-import-review-view="{{ lane }}"
+      hx-get="/import/{{ job.id }}/review-partial?status={{ lane }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML"
+      class="downloads-tab-btn {{ 'is-active' if active_review_view == lane }} {{ 'border-l border-pb-border ml-2 pl-4' if lane == 'ready' }}">
+      {{ label }} <span class="font-mono text-xs {{ 'text-current' if active_review_view == lane else 'text-pb-success' if lane == 'ready' and lane_counts[lane] else 'text-pb-error' if lane == 'blocked' else 'text-pb-warning' if lane_counts[lane] and lane != 'info' else 'text-pb-text-dim' }}">{{ lane_counts[lane] }}</span>
+    </button>
+    {% endfor %}
+    {% if review_summary.story_arcs_total %}
+    <button type="button" id="import-review-tab-story_arcs" role="tab" tabindex="{{ '0' if active_review_view == 'story_arcs' else '-1' }}" aria-controls="import-review-lane-panel" aria-selected="{{ 'true' if active_review_view == 'story_arcs' else 'false' }}"
+      data-testid="import-review-tab-story-arcs" hx-get="/import/{{ job.id }}/review-partial?status=story_arcs" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" class="downloads-tab-btn {{ 'is-active' if active_review_view == 'story_arcs' }}">Story Arcs <span class="font-mono text-xs text-pb-text-dim">{{ review_summary.story_arcs_total }}</span></button>
+    {% endif %}
+  </nav>
+</div>
+<div class="downloads-toolbar flex-wrap gap-3 border-t border-pb-border px-4 py-2">
+  <div class="min-w-0 flex-1 space-y-2">
+    <p data-testid="import-review-lane-description" class="text-xs leading-5 text-pb-text-sec"><strong class="text-pb-text">{{ review_lanes.get(active_review_view, 'Story Arcs' if active_review_view == 'story_arcs' else 'Review') }}</strong> &middot; {{ lane_descriptions.get(active_review_view, 'Review the saved matches before importing.') }} <span class="ml-2 font-mono text-[11px] text-pb-text-dim">{{ total }} {{ 'story arcs' if active_review_view == 'story_arcs' else 'series' }}</span></p>
+    {% if active_lane and active_lane != 'ready' %}
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs" role="group" aria-label="Filter by reason">
+      <span class="text-pb-text-dim">Show:</span>
+      <button type="button" data-testid="import-review-reason-all" aria-pressed="{{ 'true' if not active_reason else 'false' }}" class="{{ 'text-pb-interactive underline underline-offset-4' if not active_reason else 'text-pb-text-sec hover:underline' }}" hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}&sort={{ sort }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">All &middot; {{ lane_counts[active_lane] }}</button>
+      {% for key, count in reason_counts.items() if count and key != 'ready' %}
+      <button type="button" data-testid="import-review-reason-{{ key }}" aria-pressed="{{ 'true' if active_reason == key else 'false' }}" class="{{ 'text-pb-interactive underline underline-offset-4' if active_reason == key else 'text-pb-text-sec hover:underline' }}" hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}&reason={{ key }}&sort={{ sort }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">{{ filter_labels.get(key, review_reasons[key][0]) }} &middot; {{ count }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% if active_review_view == 'ready' %}
+  <div class="flex flex-wrap items-center gap-2">
+    <button type="button" @click="selectAllImportable()" class="btn-ghost btn-sm">Select all ready</button>
+    <button type="button" @click="deselectAllImportable()" class="btn-ghost btn-sm">Deselect all</button>
+  </div>
+  {% endif %}
+  {% if active_review_view == 'confirm' %}
+  {% set suggested = namespace(items=[], seen=[]) %}
+  {% for groups in inline_conflicts.values() %}{% for group in groups if group.preferred_file_id and group.id not in suggested.seen %}
+  {% set suggested.items = suggested.items + [{'conflict_group_id': group.id, 'chosen_file_id': group.preferred_file_id}] %}{% set suggested.seen = suggested.seen + [group.id] %}
+  {% endfor %}{% endfor %}
+  {% if suggested.items %}<button type="button" class="btn-primary btn-sm" :disabled="reviewActionPending" @click='keepSuggestedCopies({{ suggested.items|tojson|forceescape }}, $event.currentTarget)'>Keep {{ suggested.items|length }} suggested on this page</button>{% endif %}
+  {% endif %}
+</div>

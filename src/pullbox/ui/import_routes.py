@@ -595,6 +595,13 @@ async def _render_import_review_partial(
 ) -> Response:
     """Render the canonical review partial with optional route-local state."""
 
+    from sqlalchemy import inspect
+
+    from pullbox.models.user import User
+
+    # Rollback expires ORM attributes, but the authenticated identity remains available.
+    identity = inspect(user).identity if isinstance(user, User) else None
+
     job = await session.get(ImportJob, job_id)
     if job is None:
         raise NotFoundError("ImportJob", job_id)
@@ -609,6 +616,7 @@ async def _render_import_review_partial(
         arc_entry_state=arc_entry_state,
         arc_entry_page=arc_entry_page,
         reason=request.query_params.get("reason"),
+        actor_id=int(identity[0]) if identity else None,
     )
     if extra_context:
         template_ctx.update(extra_context)

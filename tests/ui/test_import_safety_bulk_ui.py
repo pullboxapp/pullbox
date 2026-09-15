@@ -180,7 +180,7 @@ async def test_safety_review_only_offers_bulk_preview_for_backend_overrideable_c
     assert (
         'data-testid="import-review-safety-bulk-preview-decompression_size_limit"' in response.text
     )
-    assert "Trusted override available for eligible files" in response.text
+    assert "A one-time exception is available for eligible files" in response.text
     assert "2 of 3 files can be allowed once" in response.text
     assert (
         f'action="/import/{seeded["job_id"]}/safety/categories/'

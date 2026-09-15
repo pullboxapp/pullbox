@@ -1,0 +1,36 @@
+<section data-testid="import-review-one-page-files" aria-label="One-page files for {{ item.cv_title or item.raw_series_name }}" class="flex flex-col gap-3">
+  <div>
+    <p class="text-[11px] font-semibold uppercase tracking-[0.16em] text-pb-text-dim">One-page archives</p>
+    <p class="mt-1 text-pretty text-[13px] leading-5 text-pb-text-sec">Usually cover art or a damaged download; sometimes an intentional one-page comic. View the file, then allow it for this import or skip it.</p>
+  </div>
+  <div class="flex flex-col gap-2">
+  {% for file in one_page.files %}
+  {% set block = safety_block_context_by_file_id.get(file.id, {}) %}
+  {% set metadata = file.diagnostics or {} %}
+  {% set detected = metadata.get('archive_format', {}).get('detected') %}
+  {% set inspection = metadata.get('content_inspection', {}) %}
+  <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-pb-border-subtle bg-pb-card/70 px-3 py-2.5">
+    <div class="min-w-0">
+      <p class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ safety_file_display_name_by_file_id.get(file.id, 'File') }}</p>
+      <p class="mt-1 text-xs text-pb-text-sec">{{ file.file_size|filesize }} &middot; 1 page{% if inspection.get('member_count') %} &middot; {{ inspection.member_count }} members{% endif %}{% if detected %} &middot; {{ {'cbz': 'ZIP', 'cbr': 'RAR', 'cb7': '7z', 'cbt': 'TAR'}.get(detected, detected|upper) }}{% endif %}</p>
+    </div>
+    <div class="flex shrink-0 flex-wrap items-center gap-2">
+      {% if file.status.value != 'safety_blocked' %}
+      <span data-import-review-file-outcome="{{ file.id }}" class="pill {{ 'pill-neutral' if file.status.value == 'skipped' else 'pill-success' }}">{{ 'Skipped' if file.status.value == 'skipped' else 'Allowed' if metadata.get('safety_exception', {}).get('allowed_once') else 'Matched' }}</span>
+      {% else %}
+      <button type="button" class="btn-ghost btn-sm" data-testid="import-review-view-file"
+        @click="$dispatch('import:preview-file', {jobId: {{ job.id }}, fileId: {{ file.id }}, opener: $event.currentTarget})" {% if row.updating %}disabled{% endif %}>View File</button>
+      {% if block.get('overrideable') is sameas true %}
+      <button type="button" class="btn-primary btn-sm" data-testid="import-review-allow-safety-file"
+        hx-post="/import/{{ job.id }}/files/{{ file.id }}/safety/allow-once?status={{ active_review_view }}{% if active_reason %}&reason={{ active_reason }}{% endif %}&sort={{ sort }}&page={{ page }}"
+        hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" hx-disabled-elt="this" {% if row.updating %}disabled{% endif %}>Allow</button>
+      {% endif %}
+      <button type="button" class="btn-ghost btn-sm" data-testid="import-review-skip-safety-file"
+        hx-post="/import/{{ job.id }}/files/{{ file.id }}/safety/skip?status={{ active_review_view }}{% if active_reason %}&reason={{ active_reason }}{% endif %}&sort={{ sort }}&page={{ page }}"
+        hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" hx-disabled-elt="this" {% if row.updating %}disabled{% endif %}>Skip</button>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  </div>
+</section>

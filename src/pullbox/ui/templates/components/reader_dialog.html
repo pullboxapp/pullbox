@@ -29,6 +29,7 @@
         <h2 id="comic-reader-title" x-text="readerTitle || 'Comic reader'">Comic reader</h2>
         <p x-text="readerIssueLabel"></p>
       </div>
+      {% if not reader_preview|default(false) %}
       <nav class="comic-reader__issue-navigation" aria-label="Issue navigation">
         <button
           type="button"
@@ -53,6 +54,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6" /></svg>
         </button>
       </nav>
+      {% endif %}
       <div class="comic-reader__top-actions">
         <button
           type="button"
@@ -118,16 +120,16 @@
         <span x-text="readerErrorMessage"></span>
         <div class="comic-reader__state-actions">
           <button type="button" data-testid="comic-reader-retry" class="comic-reader__button" @click="retryReaderPage()">Retry</button>
-          <a
+          {% if not reader_preview|default(false) %}<a
             data-testid="comic-reader-active-download"
             :href="readerManifest && readerManifest.download_url ? readerManifest.download_url : '#'"
             download
             class="comic-reader__button"
-          >Download</a>
+          >Download</a>{% endif %}
           <button type="button" class="comic-reader__button" @click="closeReader()">Close</button>
         </div>
       </div>
-      <section
+      {% if not reader_preview|default(false) %}<section
         x-show="readerCompletionVisible"
         x-cloak
         data-testid="comic-reader-completion"
@@ -153,7 +155,7 @@
             :disabled="readerCompletionUpdating"
           >Mark unread</button>
         </div>
-      </section>
+      </section>{% endif %}
       <aside
         x-show="readerHelpVisible"
         x-cloak

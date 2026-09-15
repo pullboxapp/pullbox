@@ -1,9 +1,9 @@
 {% from "components/dropdown_select.html" import dropdown_select %}
-<div class="modal-shell" x-data='importReviewFileActionData({jobId: {{ job.id }}, fileId: {{ file.id }}, action: {{ action|tojson }}})' x-show="open" @keydown.escape.window="close()" data-testid="import-review-file-action">
+<div class="modal-shell" x-data='importReviewFileActionData({jobId: {{ job.id }}, fileId: {{ file.id }}, action: {{ action|tojson }}})' x-show="open" x-init="$nextTick(() => $refs.fileDialog.focus())" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.fileDialog)" data-testid="import-review-file-action">
   <div class="modal-backdrop" @click="close()"></div>
-  <form class="modal-panel max-w-xl" hx-boost="false" @submit.prevent="submit($el)" @click.outside="if (!$event.target.closest('[data-dropdown-select-panel]')) close()">
+  <form class="modal-panel max-w-xl" x-ref="fileDialog" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="review-file-action-title" hx-boost="false" @submit.prevent="submit($el)" @click.outside="if (!$event.target.closest('[data-dropdown-select-panel]')) close()">
     <div class="modal-header">
-      <h3 class="text-base font-semibold text-pb-text">{% if action == 'assign' %}Choose the correct issue{% else %}Recheck source{% endif %}</h3>
+      <h3 id="review-file-action-title" class="text-base font-semibold text-pb-text">{% if action == 'assign' %}Choose the correct issue{% else %}Recheck source{% endif %}</h3>
       <button type="button" class="icon-btn icon-btn-sm" aria-label="Close dialog" @click="close()" :disabled="selecting">&times;</button>
     </div>
     <div class="modal-body space-y-4 p-5">

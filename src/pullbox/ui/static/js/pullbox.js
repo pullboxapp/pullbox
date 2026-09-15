@@ -1125,7 +1125,7 @@ function captureImportReviewViewport(shell, preferredElement) {
   }
 
   var capturedRowKeys = Object.create(null);
-  var captureRow = function (row) {
+  var captureRow = function (row, keepAnchor) {
     if (!row || !shell.contains(row)) {
       return;
     }
@@ -1134,10 +1134,12 @@ function captureImportReviewViewport(shell, preferredElement) {
       return;
     }
     capturedRowKeys[rowKey] = true;
-    state.anchors.push({
-      key: rowKey,
-      top: row.getBoundingClientRect().top,
-    });
+    if (keepAnchor !== false) {
+      state.anchors.push({
+        key: rowKey,
+        top: row.getBoundingClientRect().top,
+      });
+    }
     if (row.querySelector("[data-import-review-expand-action][aria-expanded='true']")) {
       state.expandedRows.push({
         key: rowKey,
@@ -1157,10 +1159,8 @@ function captureImportReviewViewport(shell, preferredElement) {
   var rows = shell.querySelectorAll("[data-import-review-series-row]");
   for (var i = 0; i < rows.length; i += 1) {
     var rect = rows[i].getBoundingClientRect();
-    if (rect.bottom < 0 || rect.top > viewportHeight) {
-      continue;
-    }
-    captureRow(rows[i]);
+    // A dialog can cover or scroll past an expanded row; keep its disclosure state.
+    captureRow(rows[i], !(rect.bottom < 0 || rect.top > viewportHeight));
   }
   return state;
 }
@@ -2168,6 +2168,49 @@ function toggleImportReviewRow(button) {
 
 window.toggleImportReviewRow = toggleImportReviewRow;
 
+function handleImportReviewTabKey(event) {
+  var tabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]'));
+  var index = tabs.indexOf(event.target);
+  if (index < 0) { return; }
+  if (event.key === 'ArrowRight') { index = (index + 1) % tabs.length; }
+  else if (event.key === 'ArrowLeft') { index = (index + tabs.length - 1) % tabs.length; }
+  else if (event.key === 'Home') { index = 0; }
+  else if (event.key === 'End') { index = tabs.length - 1; }
+  else { return; }
+  event.preventDefault();
+  tabs[index].focus({ preventScroll: true });
+  tabs[index].click();
+}
+
+function positionImportReviewMenu(menu, event) {
+  if (event.newState !== 'open') { return; }
+  var trigger = document.querySelector('[popovertarget="' + menu.id + '"]');
+  if (!trigger) { return; }
+  var rect = trigger.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - 232, rect.right - 224)) + 'px';
+  menu.style.top = Math.max(8, Math.min(window.innerHeight - 190, rect.bottom + 4)) + 'px';
+}
+
+window.handleImportReviewTabKey = handleImportReviewTabKey;
+window.positionImportReviewMenu = positionImportReviewMenu;
+
+function trapImportReviewDialog(event, dialog) {
+  var controls = Array.from(dialog.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), [tabindex="0"]')).filter(function (el) { return el.getClientRects().length; });
+  if (!controls.length) { event.preventDefault(); dialog.focus(); return; }
+  var first = controls[0], last = controls[controls.length - 1];
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
+
+function closeImportReviewPreview() {
+  var shell = document.getElementById('import-step-review-shell');
+  var data = shell && window.Alpine ? Alpine.$data(shell) : null;
+  if (data) { data.refreshSeriesReview(); }
+}
+
+window.trapImportReviewDialog = trapImportReviewDialog;
+window.closeImportReviewPreview = closeImportReviewPreview;
+
 function readImportConflictCommitState(jobId) {
   function normalizeCommittedPages(pages) {
     if (!pages || typeof pages !== "object" || Array.isArray(pages)) {
@@ -2677,12 +2720,15 @@ function importReviewFileActionData(config) {
     this.selecting = true;
     this.error = "";
     try {
-      var response = await fetch("/import/" + config.jobId + "/files/" + config.fileId + "/" + config.action, {
+      var url = config.seriesChoice
+        ? "/import/" + config.jobId + "/series/" + config.seriesId + "/review-" + config.action
+        : "/import/" + config.jobId + "/files/" + config.fileId + "/" + config.action;
+      var response = await fetch(url, {
         method: "POST", headers: { "X-CSRF-Token": readCsrfTokenFromBody() }, body: new FormData(form),
       });
       var result = await response.json();
       if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : (result.error && result.error.message) || "The file changed. Reopen this action and try again.");
-      this.close(true);
+      if (!config.inline) this.close(true);
       await this.refreshReview();
       var review = this.reviewPanelData();
       if (review && review.refreshReviewSummary) await review.refreshReviewSummary();
@@ -2692,6 +2738,10 @@ function importReviewFileActionData(config) {
     } finally { this.selecting = false; }
   };
   return state;
+}
+
+function importReviewSeriesChoiceData(config) {
+  return importReviewFileActionData(Object.assign({}, config, { seriesChoice: true }));
 }
 
 function renderImportCvSearchLoadingModal(config) {
@@ -7448,6 +7498,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     importGateTrigger: null,
     reviewActionPending: false,
     reviewSameComicGroups: [],
+    reviewCopyChoices: {},
     confirmError: "",
     jobId: cfg.jobId,
     currentView: cfg.currentView || "series",
@@ -7533,7 +7584,8 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     },
 
     importActionLabel: function () {
-      return "Continue to import";
+      var count = this.totalSelectionCount();
+      return count ? "Import " + count + " ready series" : "Nothing ready to import";
     },
 
     toolbarSelectionLabel: function (overallTotal) {
@@ -8208,7 +8260,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     applyReviewSummary: function (summary) {
       this.selectedFilesCount = Number(summary.selected_files_total) || 0;
-      this.attentionFilesCount = Number(summary.needs_attention_files_total) || 0;
+      this.attentionFilesCount = Number(summary.review_files_open == null ? summary.needs_attention_files_total : summary.review_files_open) || 0;
       this.matchedSelectedCount = Number(summary.matched_series_selected) || 0;
       this.duplicateSelectedCount = Number(summary.duplicate_series_selected) || 0;
       this.selectedItemCount = Number(summary.selected_items_total) || 0;
@@ -8248,8 +8300,35 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       return this.applyReviewAction("/api/v1/import/" + this.jobId + "/series/" + seriesId + "/override", "POST", { cv_id: cvId }, button);
     },
 
+    selectReviewPage: async function (checked, checkbox) {
+      checkbox.disabled = true;
+      try {
+        var root = document.getElementById('import-step-review-shell');
+        var controls = Array.from(root.querySelectorAll('[data-import-review-selectable], [data-import-review-duplicate-selectable]'));
+        var choices = controls.map(function (control) {
+          return { id: Number(control.getAttribute('data-import-review-selectable') || control.getAttribute('data-import-review-duplicate-selectable')), duplicate: control.hasAttribute('data-import-review-duplicate-selectable'), checked: control.checked };
+        });
+        for (var choice of choices) {
+          if (choice.checked === checked) { continue; }
+          if (choice.duplicate) { await this.toggleDuplicateSeriesFiles(choice.id, checked); }
+          else { await this.toggleSelection(choice.id, checked); }
+        }
+        await this.refreshSeriesReview();
+      } finally {
+        if (checkbox.isConnected) { checkbox.disabled = false; }
+      }
+    },
+
     resolveReviewConflict: function (groupId, fileId, button) {
       return this.applyReviewAction("/api/v1/import/" + this.jobId + "/conflicts/" + groupId + "/resolve", "PUT", { chosen_file_id: fileId }, button);
+    },
+
+    skipReviewFile: function (seriesId, fileId, button) {
+      return this.applyReviewAction("/api/v1/import/" + this.jobId + "/series/" + seriesId + "/reconcile", "POST", { decisions: [{ imported_file_id: fileId, action: "skip" }] }, button);
+    },
+
+    keepSuggestedCopies: function (resolutions, button) {
+      return this.applyReviewAction("/api/v1/import/" + this.jobId + "/conflicts/resolve-bulk", "POST", { resolutions: resolutions }, button);
     },
 
     toggleReviewFileSelection: async function (fileId, checked, checkbox) {
@@ -17951,6 +18030,18 @@ function orphanedRecoveryModal(config) {
   };
 }
 
+function importFileReaderData() {
+  var config = { previewOnly: true };
+  return Object.assign(readerMixin(config), {
+    previewImportFile: function (detail) {
+      if (!detail || this.readerOpen) return;
+      config.readerManifestUrl = "/api/v1/reader/imports/" + Number(detail.jobId) +
+        "/files/" + Number(detail.fileId) + "/manifest";
+      this.openReader({ currentTarget: detail.opener });
+    },
+  });
+}
+
 function readerMixin(config) {
   var cfg = config || {};
   var zoomSteps = [50, 67, 80, 100, 125, 150, 200, 300];
@@ -18375,7 +18466,9 @@ function readerMixin(config) {
           self.readerFailedPageIndex = nextIndex;
           self.readerErrorTitle = "Page " + (nextIndex + 1) + " could not be displayed.";
           self.readerErrorMessage =
-            "Try this page again, navigate to another page, or download the original comic.";
+            cfg.previewOnly
+              ? "This file could not be displayed. It may be damaged or no longer available. Close the reader to retry View File or choose Skip."
+              : "Try this page again, navigate to another page, or download the original comic.";
           self.showReaderControls();
           resolve(false);
         };

@@ -1,0 +1,33 @@
+{% for group in inline_conflicts.get(item.id, []) %}
+<section id="import-review-conflict-{{ item.id }}-{{ group.id }}" class="space-y-3" data-testid="import-review-conflict-card">
+  <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ 'Duplicate copies' if group.recommended else 'Same comic?' }}</h3>
+  <p class="text-xs text-pb-text-sec">{{ group.description }}</p>
+  {% if not group.recommended %}
+  <p class="rounded-lg border border-pb-warning/30 bg-pb-warning/5 p-3 text-xs text-pb-warning">Do these files belong to the same comic? Their saved identity disagrees.</p>
+  <div class="grid gap-3 lg:grid-cols-2">
+    {% for file in group.files %}<div class="rounded-lg border border-pb-border bg-pb-card p-3">
+      <p class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</p>
+      <p class="mt-2 text-xs text-pb-text-sec">{{ file.file_size|filesize }}{% if file.parsed_year %} &middot; {{ file.parsed_year }}{% endif %}{% if file.has_comicinfo %} &middot; ComicInfo present{% endif %}</p>
+      <button type="button" class="btn-ghost btn-sm mt-3" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ file.import_series_id }}/cv-search?file_id={{ file.id }}&q={{ (file.parsed_series or item.raw_series_name)|urlencode }}" hx-target="#cv-search-modal" hx-swap="innerHTML">It's a different comic</button>
+    </div>{% endfor %}
+  </div>
+  <button type="button" class="text-xs text-pb-interactive hover:underline" @click="reviewSameComicGroups = reviewSameComicGroups.includes({{ group.id }}) ? reviewSameComicGroups.filter(id => id !== {{ group.id }}) : reviewSameComicGroups.concat({{ group.id }})" :aria-expanded="reviewSameComicGroups.includes({{ group.id }})">They're the same &mdash; choose one to keep</button>
+  {% endif %}
+  <div class="overflow-x-auto rounded-lg border border-pb-border" {% if not group.recommended %}x-show="reviewSameComicGroups.includes({{ group.id }})" x-cloak{% endif %}>
+    <table class="downloads-table text-xs"><thead><tr><th>Keep</th><th>File</th><th>Size</th><th>Container</th><th>ComicInfo</th><th>Pages</th><th>Why</th></tr></thead><tbody>
+      {% for file in group.files %}<tr>
+        {% set metadata = file.diagnostics or {} %}{% set source = metadata.get('source_metadata') or {} %}
+        {% set detected = metadata.get('archive_format', source.get('archive_format', {})).get('detected') %}
+        {% set inspection = metadata.get('content_inspection', source.get('content_inspection', {})) %}
+        {% set copy_reasons = metadata.get('preferred_reasons', []) if file.is_preferred and group.recommended else metadata.get('why_not_selected', []) %}
+        <td><input type="radio" class="checkbox-pb !rounded-full" name="keep-copy-{{ item.id }}-{{ group.id }}" data-testid="import-review-copy-choice" aria-label="Keep {{ file.file_name }}" :checked="Number(reviewCopyChoices[{{ group.id }}] || {{ group.preferred_file_id or 0 }}) === {{ file.id }}" :disabled="reviewActionPending" @change="reviewCopyChoices[{{ group.id }}] = {{ file.id }}"></td>
+        <td class="font-mono [overflow-wrap:anywhere]">{{ file.file_name }}</td><td>{{ file.file_size|filesize }}</td><td>{% if detected %}{{ {'cbz': 'ZIP', 'cbr': 'RAR', 'cb7': '7z', 'cbt': 'TAR'}.get(detected, detected|upper) }} (detected){% else %}{{ file.file_name.rsplit('.', 1)[-1]|upper }} (filename){% endif %}</td><td>{{ 'Present' if file.has_comicinfo else 'Not found' }}</td><td>{{ inspection.get('page_count', 'Unknown') }}</td><td>{% if file.is_preferred and group.recommended %}<span class="text-pb-success">Suggested copy</span>{% endif %}{% if copy_reasons %}<span class="block text-pb-text-dim">{{ copy_reasons|join('; ') }}</span>{% elif not file.is_preferred %}Your choice{% endif %}</td>
+      </tr>{% endfor %}
+    </tbody></table>
+  </div>
+  <div class="flex items-center gap-2" {% if not group.recommended %}x-show="reviewSameComicGroups.includes({{ group.id }})" x-cloak{% endif %}>
+    <button type="button" class="btn-primary btn-sm" data-testid="import-review-keep-selected-copy" :disabled="reviewActionPending || !(reviewCopyChoices[{{ group.id }}] || {{ group.preferred_file_id or 0 }})" @click="resolveReviewConflict({{ group.id }}, Number(reviewCopyChoices[{{ group.id }}] || {{ group.preferred_file_id or 0 }}), $event.currentTarget)">Keep selected copy</button>
+    {% if not group.recommended %}<button type="button" class="btn-ghost btn-sm" @click="reviewSameComicGroups = reviewSameComicGroups.filter(id => id !== {{ group.id }}); delete reviewCopyChoices[{{ group.id }}]">Cancel</button>{% endif %}
+  </div>
+</section>
+{% endfor %}

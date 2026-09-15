@@ -256,8 +256,12 @@ async def _load_safety_blocked_files_by_series_id(
         .where(
             ImportedFile.import_job_id == job_id,
             ImportedFile.import_series_id.in_(visible_series_ids),
-            ImportedFile.status.in_(
-                [ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED]
+            or_(
+                ImportedFile.status.in_(
+                    [ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED]
+                ),
+                ImportedFile.diagnostics["safety_block"]["category"].as_string().is_not(None),
+                ImportedFile.diagnostics["safety_exception"]["allowed_once"].as_boolean().is_(True),
             ),
         )
         .order_by(ImportedFile.import_series_id.asc(), ImportedFile.id.asc())
@@ -281,6 +285,8 @@ def _build_safety_block_context_by_file_id(
             if not isinstance(diagnostics, Mapping):
                 continue
             safety_block = diagnostics.get("safety_block")
+            if not isinstance(safety_block, Mapping):
+                safety_block = dict(diagnostics.get("safety_exception") or {}).get("previous_block")
             if isinstance(safety_block, Mapping):
                 result[imp_file.id] = normalize_import_safety_diagnostics(safety_block)
     return result
@@ -341,6 +347,9 @@ async def _load_inline_conflicts(
             "id": group_id,
             "files": members,
             "recommended": not disagreement,
+            "preferred_file_id": next((file.id for file in members if file.is_preferred), None)
+            if not disagreement and sum(file.is_preferred for file in members) == 1
+            else None,
             "label": "Do these files belong to the same comic?"
             if disagreement
             else "Choose a copy",
@@ -367,6 +376,7 @@ async def load_import_review_context(
     arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
     arc_entry_page: int = 1,
     reason: str | None = None,
+    actor_id: int | None = None,
 ) -> dict[str, object]:
     """Load the template context for the Step 3 review table."""
     job_id = int(job.id)
@@ -528,6 +538,38 @@ async def load_import_review_context(
     )
     safety_rematch_pending = any(row.updating for row in review_rows.values())
     safety_failure_summary = await load_import_safety_failure_summary(session, job)
+    from pullbox.services.import_review_one_page import one_page_files, one_page_scope
+    from pullbox.services.import_review_scope import sign_review_scope
+
+    safety_context = _build_safety_block_context_by_file_id(safety_blocked_files_by_series_id)
+    one_page_review: dict[int, dict[str, object]] = {}
+    for item in series_items:
+        files = one_page_files(safety_blocked_files_by_series_id.get(item.id, []))
+        if not files:
+            continue
+        entry: dict[str, object] = {
+            "files": [
+                file
+                for file in safety_blocked_files_by_series_id.get(item.id, [])
+                if safety_context.get(file.id, {}).get("category") == "single_page_comic"
+            ],
+            "count": len(files),
+        }
+        if actor_id is not None:
+            entry["skip_token"] = await sign_review_scope(
+                session, one_page_scope(job, item, files, actor_id=actor_id, action="skip")
+            )
+            if all(
+                normalize_import_safety_diagnostics(file.diagnostics["safety_block"])[
+                    "overrideable"
+                ]
+                is True
+                for file in files
+            ):
+                entry["allow_token"] = await sign_review_scope(
+                    session, one_page_scope(job, item, files, actor_id=actor_id, action="allow")
+                )
+        one_page_review[item.id] = entry
     managed_library_root_options: list[dict[str, Any]] = []
     if split_series_review.requires_preferred_destination:
         managed_library_root_options = [
@@ -540,9 +582,22 @@ async def load_import_review_context(
             and bool(root["writable"])
         ]
 
+    from pullbox.ui.import_review_presentation import (
+        FILTER_LABELS,
+        LANE_DESCRIPTIONS,
+        REASON_DESCRIPTIONS,
+    )
+
     template_ctx: dict[str, object] = {
+        "lane_descriptions": LANE_DESCRIPTIONS,
+        "filter_labels": FILTER_LABELS,
+        "reason_descriptions": REASON_DESCRIPTIONS,
         "job": job,
+        "one_page_review": one_page_review,
         "review_rows": review_rows,
+        "review_open_series": sum(
+            row.attention_files > 0 or row.updating for row in review_rows.values()
+        ),
         "inline_conflicts": await _load_inline_conflicts(
             session, job_id, [item.id for item in series_items]
         ),
@@ -550,6 +605,10 @@ async def load_import_review_context(
         "review_lanes": LANES,
         "review_reasons": REASONS,
         "lane_counts": lane_counts,
+        "lane_file_counts": {
+            lane: sum(row.attention_files for row in review_rows.values() if row.lane == lane)
+            for lane in LANES
+        },
         "reason_counts": reason_counts,
         "active_reason": active_reason,
         "active_lane": active_lane,
@@ -589,9 +648,7 @@ async def load_import_review_context(
             job_id,
         ),
         "safety_blocked_files_by_series_id": safety_blocked_files_by_series_id,
-        "safety_block_context_by_file_id": _build_safety_block_context_by_file_id(
-            safety_blocked_files_by_series_id
-        ),
+        "safety_block_context_by_file_id": safety_context,
         "safety_file_display_name_by_file_id": _build_safety_file_display_name_by_file_id(
             safety_blocked_files_by_series_id
         ),

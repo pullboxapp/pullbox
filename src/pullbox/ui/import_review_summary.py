@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
@@ -59,14 +60,25 @@ async def load_import_review_summary(
     }
 
     file_counts_result = await session.execute(
-        select(ImportedFile.status, func.count(ImportedFile.id))
+        select(ImportedFile.status, ImportedSeries.status, func.count(ImportedFile.id))
+        .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
         .where(ImportedFile.import_job_id == job.id)
-        .group_by(ImportedFile.status)
+        .group_by(ImportedFile.status, ImportedSeries.status)
     )
-    file_counts = {
-        status.value if hasattr(status, "value") else str(status): count
-        for status, count in file_counts_result.all()
+    file_counts: Counter[str] = Counter()
+    settled_count = 0
+    settled_file_statuses = {
+        ImportedFileStatus.MATCHED,
+        ImportedFileStatus.CONFIRMED,
+        ImportedFileStatus.SKIPPED,
+        ImportedFileStatus.DUPLICATE_FILE,
+        ImportedFileStatus.ALREADY_OWNED,
+        ImportedFileStatus.IMPORTED,
     }
+    for status, parent_status, count in file_counts_result.all():
+        file_counts[status.value] += count
+        if status in settled_file_statuses or parent_status == ImportSeriesStatus.SKIPPED:
+            settled_count += count
 
     duplicate_file_counts_result = await session.execute(
         select(ImportedFile.status, func.count(ImportedFile.id))
@@ -196,6 +208,8 @@ async def load_import_review_summary(
     )
 
     row_summary = {
+        "review_files_settled": settled_count,
+        "review_files_open": sum(file_counts.values()) - settled_count,
         "series_total": sum(series_counts.values()),
         "series_in_library": series_counts.get(ImportSeriesStatus.DUPLICATE.value, 0),
         "series_matched": series_counts.get(ImportSeriesStatus.MATCHED.value, 0),
@@ -342,6 +356,7 @@ async def load_import_safety_failure_summary(
 
     accumulator = ImportSafetyFailureSummaryAccumulator()
     bulk_overrideable_counts: dict[str, int] = {}
+    series_by_category: dict[str, set[int]] = {}
     # Avoid rescanning/sorting failures for every page or loading their source metadata.
     result = await session.stream(
         select(
@@ -349,6 +364,7 @@ async def load_import_safety_failure_summary(
             ImportedFile.diagnostics["safety_block"].label("safety_block"),
             ImportedFile.diagnostics["source_revalidation"].label("source_revalidation"),
             ImportedFile.status,
+            ImportedFile.import_series_id,
         )
         .where(
             ImportedFile.import_job_id == job.id,
@@ -359,11 +375,12 @@ async def load_import_safety_failure_summary(
     )
     try:
         async for rows in result.partitions(page_size):
-            for file_name, safety_block, source_revalidation, status in rows:
+            for file_name, safety_block, source_revalidation, status, series_id in rows:
                 if isinstance(safety_block, Mapping):
                     accumulator.add(str(file_name), safety_block)
                     normalized = normalize_import_safety_diagnostics(safety_block)
                     category = str(normalized["category"])
+                    series_by_category.setdefault(category, set()).add(series_id)
                     if (
                         status == ImportedFileStatus.SAFETY_BLOCKED
                         and category == ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT.value
@@ -375,12 +392,15 @@ async def load_import_safety_failure_summary(
                     continue
                 if isinstance(source_revalidation, Mapping):
                     accumulator.add(str(file_name), source_revalidation)
+                    normalized = normalize_import_safety_diagnostics(source_revalidation)
+                    series_by_category.setdefault(str(normalized["category"]), set()).add(series_id)
     finally:
         await result.close()
 
     summaries = accumulator.summaries()
     for summary in summaries:
         category = str(summary["category"])
+        summary["series_count"] = len(series_by_category.get(category, set()))
         bulk_overrideable_count = bulk_overrideable_counts.get(category, 0)
         summary["bulk_overrideable_count"] = bulk_overrideable_count
         summary["bulk_overrideable"] = bulk_overrideable_count > 0

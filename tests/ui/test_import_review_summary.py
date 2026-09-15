@@ -148,6 +148,7 @@ async def test_load_import_review_summary_uses_persisted_review_rows(
             "bulk_overrideable_count": 1,
             "bulk_overrideable": True,
             "examples": ["Crossed Annual.cbz"],
+            "series_count": 1,
         }
     ]
     assert "/mnt/user/private" not in str(safety_summary)
@@ -234,6 +235,7 @@ async def test_load_import_safety_failure_summary_classifies_source_revalidation
             "bulk_overrideable_count": 0,
             "bulk_overrideable": False,
             "examples": ["Changed Source 001.cbz"],
+            "series_count": 1,
         }
     ]
     assert "/mnt/private" not in str(summary)
