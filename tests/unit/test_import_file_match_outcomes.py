@@ -97,6 +97,36 @@ def test_apply_matched_file_outcome_preserves_cross_folder_cleanup_evidence() ->
     assert imp_file.diagnostics["mylar3_cross_folder_reconciliation"] == evidence
 
 
+@pytest.mark.parametrize("duplicate_series", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+def test_rematching_preserves_source_work_and_explicit_selection(duplicate_series, selected):
+    work = {"state": "matching", "action": "recheck", "scope": "preview"}
+    imp_file = ImportedFile(
+        file_name="Example 1.cbz",
+        parsed_issue_number=1.0,
+        diagnostics={"review_source_action": work, "review_selection": selected},
+    )
+    imp_series = ImportedSeries(raw_series_name="Example")
+    issue = Issue(
+        id=1,
+        series_id=1,
+        comicvine_id=1001,
+        issue_number=1,
+        status=IssueStatus.WANTED,
+        issue_type=IssueType.ISSUE,
+    )
+    apply_matched_file_outcome(
+        imp_file,
+        imp_series,
+        _candidate(issue),
+        duplicate_series=duplicate_series,
+        duplicate_target_state=duplicate_target_state,
+    )
+    assert imp_file.diagnostics.get("review_source_action") == work
+    assert imp_file.diagnostics.get("review_selection") is selected
+    assert imp_file.include_in_import is selected
+
+
 def test_apply_matched_file_outcome_preserves_exact_suffix_issue_number() -> None:
     imp_file = ImportedFile(
         file_name="The Amazing Spider-Man 54.LR.cbz",

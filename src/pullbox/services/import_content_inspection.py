@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from pullbox.core.archive import ArchiveError, ArchiveReader
+from pullbox.core.archive_format import archive_format
 from pullbox.core.file_safety import FileSafetyError
 from pullbox.core.page_sources.base import canonical_page_names
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
@@ -53,6 +54,11 @@ def inspect_import_content(path: Path, inspection: FileSafetyInspection) -> dict
         )
     diagnostics: dict[str, object] = {
         "content_inspection": {"version": 1, "page_count": page_count},
+        "archive_format": {
+            "declared": path.suffix.lower().lstrip("."),
+            "detected": archive_format(path),
+            "mismatch": path.suffix.lower().lstrip(".") != archive_format(path),
+        },
     }
     if page_count < 2:
         code = "archive_no_pages" if page_count == 0 else "single_page_comic"

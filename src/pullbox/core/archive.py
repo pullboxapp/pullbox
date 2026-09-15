@@ -1,7 +1,7 @@
 """Archive reader for comic book files (CBZ, CBR, CB7, CBT).
 
 Provides a unified interface for reading comic book archives regardless
-of underlying format.  Auto-detects the format from the file extension.
+of underlying format. Detects recognized container headers before the suffix.
 All archive operations run synchronously — callers should use a thread
 pool executor for CPU-bound work.
 """
@@ -17,6 +17,7 @@ from stat import S_ISLNK
 
 import structlog
 
+from pullbox.core.archive_format import archive_format
 from pullbox.core.comicinfo import ComicInfoData, parse_comicinfo
 from pullbox.core.rar_backend import RarBackendUnavailableError, configure_rarfile_backend
 
@@ -64,7 +65,7 @@ class ArchiveReader:
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._extension = path.suffix.lower()
+        self._extension = "." + archive_format(path)
 
     @property
     def path(self) -> Path:
@@ -72,7 +73,7 @@ class ArchiveReader:
 
     @property
     def format(self) -> str:
-        """Return the archive format based on file extension."""
+        """Return the detected comic container format."""
         return self._extension.lstrip(".")
 
     def list_files(self) -> list[str]:

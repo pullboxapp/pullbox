@@ -30,6 +30,7 @@ from pullbox.services.import_file_issue_signals import (
     volume_issue_number,
 )
 from pullbox.services.import_file_resolution import load_issue_lookup_for_series
+from pullbox.services.import_file_selection import set_review_file_selection
 from pullbox.services.import_job_actions import build_series_created_action_payload
 from pullbox.services.import_job_execution_items import ensure_target_issue_summary_for_import_file
 from pullbox.services.import_retry_helpers import require_retained_import_destination
@@ -399,6 +400,7 @@ def apply_orphan_recovery_decisions(
             "kind": "orphan_recovery",
             "resolution": "assigned",
         }
+        set_review_file_selection(imp_file, True)
 
 
 def summarize_orphan_recovery_result(

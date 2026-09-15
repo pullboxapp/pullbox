@@ -42,18 +42,24 @@
   {% endif %}
 
   {% for group in inline_conflicts.get(item.id, []) %}
-  <section class="rounded-lg border border-pb-border bg-pb-card p-3" data-testid="import-review-conflict-card">
+  <section id="import-review-conflict-{{ group.id }}" class="rounded-lg border border-pb-border bg-pb-card p-3" data-testid="import-review-conflict-card">
     <h4 class="text-sm font-semibold text-pb-text">{{ group.label }}</h4>
     <p class="mt-1 text-xs text-pb-text-sec">{{ group.description }}</p>
+    {% if not group.recommended %}<button type="button" class="btn-ghost btn-sm mt-2" @click="reviewSameComicGroups = reviewSameComicGroups.includes({{ group.id }}) ? reviewSameComicGroups.filter(id => id !== {{ group.id }}) : reviewSameComicGroups.concat({{ group.id }})" :aria-expanded="reviewSameComicGroups.includes({{ group.id }})">These are the same comic: choose a copy</button>{% endif %}
     {% for file in group.files %}
     <div class="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-pb-border-subtle pt-3">
       <div class="min-w-0"><p class="break-words text-sm text-pb-text">{{ file.file_name }}</p>
         <p class="mt-1 text-xs text-pb-text-dim">{{ file.file_size|filesize }}{% if file.parsed_year %} &middot; {{ file.parsed_year }}{% endif %}{% if file.has_comicinfo %} &middot; ComicInfo{% endif %}</p>
         {% if file.is_preferred and group.recommended %}<p class="mt-1 text-xs text-pb-success">Suggested copy</p>{% endif %}
       </div>
-      <button type="button" class="btn-ghost btn-sm" data-testid="import-review-keep-copy"
+      <div class="flex flex-wrap gap-2">
+      <button type="button" class="btn-primary btn-sm" data-testid="import-review-reassign-file"
+        hx-get="/import/{{ job.id }}/series/{{ file.import_series_id }}/cv-search?file_id={{ file.id }}&q={{ (file.parsed_series or item.raw_series_name)|urlencode }}"
+        hx-target="#cv-search-modal" hx-swap="innerHTML">Find correct issue</button>
+      <button type="button" class="btn-ghost btn-sm" data-testid="import-review-keep-copy" x-show="{{ 'true' if group.recommended else 'false' }} || reviewSameComicGroups.includes({{ group.id }})" x-cloak
         :disabled="reviewActionPending"
         @click="resolveReviewConflict({{ group.id }}, {{ file.id }}, $event.currentTarget)">Keep this copy</button>
+      </div>
     </div>
     {% endfor %}
   </section>
@@ -61,6 +67,7 @@
 
   {% for file in safety_blocked_files_by_series_id.get(item.id, []) %}
   {% set block = safety_block_context_by_file_id.get(file.id, {}) %}
+  {% set source_work = (file.diagnostics or {}).get('review_source_action', {}) %}
   <section class="rounded-lg border border-pb-border bg-pb-card p-3">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0 flex-1">
@@ -71,10 +78,15 @@
         {% if block.get('category') == 'outside_approved_root' %}<button type="button" class="btn-ghost btn-sm mt-2" @click="window.dispatchEvent(new CustomEvent('wizard:advance', {detail: {step: 1}}))">Review import setup</button>{% endif %}
       </div>
       <div class="flex flex-wrap gap-2">
-        {% if file.status.value == 'safety_approved' %}
+        {% if source_work.get('state') in ('pending', 'matching') %}
+          <div class="w-48 space-y-2" role="status"><span class="text-xs text-pb-text-sec">Verifying source</span><div class="app-progress-track" role="progressbar" aria-label="Verifying source"><div class="app-progress-fill is-indeterminate" style="width:35%"></div></div></div>
+        {% elif file.status.value == 'safety_approved' %}
           {% if row.updating %}<span class="pill pill-info" title="Preparing this file for matching"><svg data-testid="import-review-safety-rematch-spinner" class="h-3 w-3 animate-spin motion-reduce:animate-none" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2"/></svg>Preparing match</span>
           {% else %}<span class="pill pill-info">Approved &middot; match needed</span>{% endif %}
         {% else %}
+          {% if block.get('category') in ('permission_unreadable', 'archive_inspection_failed', 'zero_byte', 'archive_no_pages', 'source_changed', 'source_missing') %}
+          <button type="button" class="btn-primary btn-sm" data-testid="import-review-recheck-source" hx-get="/import/{{ job.id }}/files/{{ file.id }}/source" hx-target="#cv-search-modal" hx-swap="innerHTML">Recheck source</button>
+          {% endif %}
           {% if block.get('overrideable') is sameas true %}
           <button type="button" class="btn-primary btn-sm" data-testid="import-review-allow-safety-file"
             hx-post="/import/{{ job.id }}/files/{{ file.id }}/safety/allow-once?status={{ active_review_view }}{% if active_reason %}&reason={{ active_reason }}{% endif %}&sort={{ sort }}&page={{ page }}"
@@ -86,6 +98,7 @@
         {% endif %}
       </div>
     </div>
+    {% if source_work.get('state') == 'failed' %}<p class="mt-2 text-xs text-pb-warning">{{ source_work.get('error') }}</p>{% endif %}
   </section>
   {% endfor %}
 
@@ -98,10 +111,10 @@
     <ul class="mt-2 divide-y divide-pb-border-subtle">
       {% for file in group.rows %}
       <li class="flex flex-wrap items-center justify-between gap-3 py-2">
-        {% if duplicate_selectable and file.status == 'matched' %}
+        {% if (duplicate_selectable or item.status.value == 'matched') and file.status in ('matched', 'confirmed') %}
         <label class="flex min-w-0 flex-1 items-center gap-2">
           <input type="checkbox" class="checkbox-pb" data-testid="import-review-file-select"
-            {% if file.include_in_import %}checked{% endif %} :disabled="reviewActionPending"
+            {% if (duplicate_selectable and file.include_in_import) or (not duplicate_selectable and file.review_selected) %}checked{% endif %} :disabled="reviewActionPending"
             @change="toggleReviewFileSelection({{ file.id }}, $event.target.checked, $event.target)">
           <span class="break-words text-xs text-pb-text">{{ file.file_name }}</span>
         </label>
@@ -109,6 +122,10 @@
         <span class="break-words text-xs text-pb-text">{{ file.file_name }}</span>
         {% endif %}
         <span class="text-xs text-pb-text-dim">{{ file.matched_issue_label or file.duplicate_reason_label or '' }}</span>
+        {% if file.get('archive_format', {}).get('mismatch') %}<span class="text-xs text-pb-text-dim">Detected {{ {'cbz': 'ZIP', 'cbr': 'RAR', 'cb7': '7z', 'cbt': 'TAR'}.get(file.archive_format.detected, file.archive_format.detected|upper) }} content; .{{ file.archive_format.declared }} filename</span>{% endif %}
+        {% if file.status in ('matched', 'confirmed', 'no_match') %}
+        <button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Change issue</button>
+        {% endif %}
       </li>
       {% endfor %}
     </ul>

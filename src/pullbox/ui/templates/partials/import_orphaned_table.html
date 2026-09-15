@@ -55,7 +55,7 @@
           <th class="hidden lg:table-cell">Source Folder</th>
           <th class="w-[84px]">Job</th>
           <th class="w-[112px]">Status</th>
-          <th class="is-right w-[168px]"></th>
+          <th class="is-right">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -92,11 +92,11 @@
               {% if item.status.value == 'skipped' %}
                 <span class="pill pill-neutral inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Dismissed</span>
               {% elif direct_issue_recovery %}
-                <span class="pill pill-info inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Issue unresolved</span>
+        <span class="pill pill-info inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Needs an issue match</span>
               {% elif item.status.value == 'recovery_pending' %}
-                <span class="pill pill-info inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Series identified</span>
+        <span class="pill pill-info inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Review suggestions</span>
               {% else %}
-                <span class="pill pill-warning inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Needs match</span>
+        <span class="pill pill-warning inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Needs a series match</span>
               {% endif %}
             </td>
             <td class="is-right">
@@ -104,13 +104,13 @@
                 <div class="downloads-action-group justify-end">
                   <button
                     type="button"
-                    class="downloads-action-btn is-warn"
+        class="btn-primary btn-sm"
                     data-testid="import-orphaned-recover-{{ item.id }}"
                     @click="openRecovery({{ item.id }})"
                     data-tip="Resolve files"
                     data-tip-pos="left"
-                    aria-label="Resolve unresolved files for {{ item.raw_series_name }}"
-                  >
+        aria-label="Resolve unresolved files for {{ item.raw_series_name }}"
+      ><span>Match issues</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12l-7.5 7.5M3 12h17.25"/>
                     </svg>
@@ -121,14 +121,14 @@
                   <button
                     type="button"
                     data-testid="import-orphaned-search-{{ item.id }}"
-                    class="downloads-action-btn"
+                    class="btn-ghost btn-sm"
                     hx-get="/import/orphaned/{{ item.id }}/cv-search?q={{ item.raw_series_name|urlencode }}"
                     hx-target="#cv-search-modal"
                     hx-swap="innerHTML"
                     data-tip="Search ComicVine"
                     data-tip-pos="left"
-                    aria-label="Search ComicVine for {{ item.raw_series_name }}"
-                  >
+        aria-label="Search ComicVine for {{ item.raw_series_name }}"
+      ><span>Find series</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z"/>
                     </svg>
@@ -152,13 +152,13 @@
                 <div class="downloads-action-group justify-end">
                   <button
                     type="button"
-                    class="downloads-action-btn is-warn"
+        class="btn-primary btn-sm"
                     data-testid="import-orphaned-recover-{{ item.id }}"
                     @click="openRecovery({{ item.id }})"
                     data-tip="Continue recovery"
                     data-tip-pos="left"
-                    aria-label="Continue recovery for {{ item.raw_series_name }}"
-                  >
+        aria-label="Continue recovery for {{ item.raw_series_name }}"
+      ><span>Review suggestions</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12l-7.5 7.5M3 12h17.25"/>
                     </svg>
@@ -166,14 +166,14 @@
                   <button
                     type="button"
                     data-testid="import-orphaned-search-{{ item.id }}"
-                    class="downloads-action-btn"
+                    class="btn-ghost btn-sm"
                     hx-get="/import/orphaned/{{ item.id }}/cv-search?q={{ (item.cv_title or item.raw_series_name)|urlencode }}"
                     hx-target="#cv-search-modal"
                     hx-swap="innerHTML"
                     data-tip="Change ComicVine match"
                     data-tip-pos="left"
-                    aria-label="Change ComicVine match for {{ item.raw_series_name }}"
-                  >
+        aria-label="Change ComicVine match for {{ item.raw_series_name }}"
+      ><span>Change series</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z"/>
                     </svg>

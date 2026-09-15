@@ -1,0 +1,41 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+<div class="modal-shell" x-data='importReviewFileActionData({jobId: {{ job.id }}, fileId: {{ file.id }}, action: {{ action|tojson }}})' x-show="open" @keydown.escape.window="close()" data-testid="import-review-file-action">
+  <div class="modal-backdrop" @click="close()"></div>
+  <form class="modal-panel max-w-xl" hx-boost="false" @submit.prevent="submit($el)" @click.outside="if (!$event.target.closest('[data-dropdown-select-panel]')) close()">
+    <div class="modal-header">
+      <h3 class="text-base font-semibold text-pb-text">{% if action == 'assign' %}Choose the correct issue{% else %}Recheck source{% endif %}</h3>
+      <button type="button" class="icon-btn icon-btn-sm" aria-label="Close dialog" @click="close()" :disabled="selecting">&times;</button>
+    </div>
+    <div class="modal-body space-y-4 p-5">
+      <p class="break-words text-sm font-medium text-pb-text">{{ file.file_name }}</p>
+      <input type="hidden" name="token" value="{{ token }}">
+      {% if action == 'assign' %}
+      <p class="text-sm text-pb-text-sec">{{ series.title }}{% if series.year_start %} ({{ series.year_start }}){% endif %}. Only this file's import match changes. Its source folder stays unchanged.</p>
+      <input type="hidden" name="cv_id" value="{{ series.provider_id }}">
+      {% set choices = namespace(options=[["", "Choose an issue"]]) %}
+      {% for issue in issues %}{% set choices.options = choices.options + [[issue.provider_id, '#' ~ (issue.issue_number|issue_num) ~ (' - ' ~ issue.title if issue.title else '')]] %}{% endfor %}
+      <label for="review-file-issue-dropdown-trigger" class="block text-sm text-pb-text">Issue</label>
+      {{ dropdown_select(name="issue_cv_id", trigger_id="review-file-issue-dropdown-trigger", options=choices.options, local_model="issueId", class_name="w-full") }}
+      {% else %}
+      <input type="hidden" name="source_action" value="{{ source_action }}">
+      {% if candidate %}
+      <p class="text-sm text-pb-text-sec">A possible replacement has the same exact ComicVine issue identity:</p>
+      <p class="break-words text-sm text-pb-text">{{ candidate.file_name }}</p>
+      <p class="text-sm text-pb-text-sec">Pullbox will verify that the old file is absent and the replacement is unchanged, safe, and the same issue before pairing them. Nothing is moved, deleted, or silently skipped.</p>
+      {% else %}
+      <p class="text-sm text-pb-text-sec">After you repair access or replace the file at its recorded location, Pullbox will inspect it again in the background. A changed file must pass fresh safety and matching checks. This does not grant a safety exception or skip the file.</p>
+      {% endif %}
+      <p class="text-xs text-pb-text-dim">You can continue reviewing other series while this runs. The row updates when verification finishes.</p>
+      {% endif %}
+      <p x-cloak x-show="error" x-text="error" role="alert" class="text-sm text-pb-danger"></p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn-ghost" @click="close()" :disabled="selecting">Cancel</button>
+      {% if action == 'assign' %}
+      <button type="submit" class="btn-primary" :disabled="selecting || !issueId" x-text="selecting ? 'Assigning...' : 'Assign issue'">Assign issue</button>
+      {% else %}
+      <button type="submit" class="btn-primary" :disabled="selecting">{{ 'Verify and pair' if candidate else 'Recheck source' }}</button>
+      {% endif %}
+    </div>
+  </form>
+</div>

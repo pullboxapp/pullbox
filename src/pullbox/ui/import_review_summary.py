@@ -16,6 +16,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.story_arc import ImportedStoryArcStatus, StoryArcResolutionState
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.services.import_file_selection import not_excluded_from_review
 from pullbox.services.import_review_selection import load_import_review_selection_state
 from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
@@ -103,6 +104,7 @@ async def load_import_review_summary(
                 ImportedSeries.selected_for_import.is_(True),
                 ImportedSeries.files_matched > 0,
                 ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
+                not_excluded_from_review(),
             )
         )
         or 0

@@ -355,6 +355,7 @@ def _build_import_review_file_detail_row(
 ) -> dict[str, object]:
     """Build the inline Step 3 file-detail payload used by review dropdowns."""
     diagnostics = dict(imp_file.diagnostics or {})
+    source = diagnostics.get("source_metadata") or {}
     return {
         "id": imp_file.id,
         "file_name": imp_file.file_name,
@@ -362,13 +363,20 @@ def _build_import_review_file_detail_row(
         "has_comicinfo": imp_file.has_comicinfo,
         "status": imp_file.status.value,
         "include_in_import": imp_file.include_in_import,
+        "review_selected": dict(imp_file.diagnostics or {}).get("review_selection", True),
+        "archive_format": diagnostics.get("archive_format", source.get("archive_format", {})),
+        "page_count": diagnostics.get(
+            "content_inspection", source.get("content_inspection", {})
+        ).get("page_count"),
         "match_confidence": imp_file.match_confidence,
         "matched_issue_label": _import_review_matched_issue_label(imp_file, issue_map),
         "duplicate_reason_label": _import_review_duplicate_reason_label(
             diagnostics.get("duplicate_reason")
             if isinstance(diagnostics.get("duplicate_reason"), str)
             else None
-        ),
+        )
+        if imp_file.status is ImportedFileStatus.DUPLICATE_FILE
+        else None,
         "duplicate_keep_label": diagnostics.get("representative_file_name"),
     }
 

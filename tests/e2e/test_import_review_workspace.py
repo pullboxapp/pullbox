@@ -2,10 +2,58 @@
 
 from pathlib import Path
 
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from playwright.sync_api import expect
 
+from pullbox.ui.formatters import format_issue_number
 from tests.e2e.pages.import_page import ImportPage
 from tests.e2e.test_import_collection_page import TestImportCollectionTab as _ImportBaseline
+
+
+def test_review_file_modal_submits_without_boosted_navigation(authed_page, seeded_server):
+    page = authed_page
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    _ImportBaseline()._goto_review_step(ImportPage(page, seeded_server), page, seeded_server)
+    templates = Environment(
+        loader=FileSystemLoader("src/pullbox/ui/templates"), autoescape=select_autoescape()
+    )
+    templates.filters["issue_num"] = format_issue_number
+    html = templates.get_template("partials/import_review_file_action.html").render(
+        job={"id": 1},
+        file={"id": 1, "file_name": "Recheck source.cbz"},
+        token="test-preview",
+        action="source",
+        source_action="recheck",
+        candidate=None,
+    )
+    page.route(
+        "**/import/1/files/1/source",
+        lambda route: route.fulfill(json={"message": "Source verification queued."}),
+    )
+    page.evaluate(
+        """html => {
+        window.reviewShellBeforeSubmit = document.getElementById('import-step-review-shell');
+        window.reviewBoostedSubmits = 0;
+        document.addEventListener('htmx:beforeRequest', event => {
+            if (event.detail.requestConfig.boosted) window.reviewBoostedSubmits++;
+        });
+        const host = document.getElementById('cv-search-modal');
+        host.innerHTML = html;
+        htmx.process(host);
+    }""",
+        html,
+    )
+    modal = page.get_by_test_id("import-review-file-action")
+    expect(modal).to_be_visible()
+    modal.get_by_role("button", name="Recheck source", exact=True).click()
+    expect(modal).not_to_be_visible()
+    expect(page.get_by_test_id("import-review-lane-ready")).to_be_visible()
+    assert page.evaluate("window.reviewBoostedSubmits") == 0
+    assert page.evaluate(
+        "window.reviewShellBeforeSubmit === document.getElementById('import-step-review-shell')"
+    )
+    assert errors == []
 
 
 def test_review_lanes_and_refresh_preserve_controls(authed_page, seeded_server, browser_name):

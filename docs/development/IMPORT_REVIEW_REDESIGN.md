@@ -1,6 +1,6 @@
 # Import Review Redesign
 
-Status: first implementation checkpoint, not release-ready.
+Status: redesign implemented for local acceptance; release gates remain below.
 
 ## Boundary
 
@@ -9,7 +9,7 @@ The established matching, source ownership, safety, and recovery rules remain
 authoritative. The design prototype is a presentation reference, not permission
 to replace those rules with weaker heuristics.
 
-This checkpoint does not migrate the database or rewrite saved jobs on page load.
+This redesign does not migrate the database or rewrite saved jobs on page load.
 It does not change Step 4 execution, Step 5 receipts, job-specific Follow-up,
 completed-import recovery, library organization, or Story Arc handling.
 
@@ -35,34 +35,45 @@ completed-import recovery, library organization, or Story Arc handling.
 - Source details, matched issue IDs, Mylar diagnostics, and safety codes remain
   available in expandable details.
 
-## Still Required Before Completing The Redesign
+## Completed Decision Paths
 
-1. General individual file exclusion for newly matched series. The existing
-   `include_in_import` field defaults differently for old matched and duplicate
-   rows; applying it globally would break saved imports. Add an explicit,
-   backward-compatible selection contract and confirmation/Follow-up tests first.
-2. Per-file reassignment for mixed-comic conflict groups, rather than treating
-   every group as a choice between copies. Preserve target identity validation
-   and source references throughout reassignment.
-3. Live, bounded source reinspection and proven stale-reference pairing actions.
-   The existing offline recheck command cannot simply be exposed as a web action:
-   root validation, job-state races, signed scopes, and background progress must
-   remain intact. A repair action must never silently mean skip.
-4. Shared signature-based archive identification with the existing safety
-   inspection path. A suffix mismatch must not bypass member checks or turn an
-   unsafe archive into a trusted one.
-5. Review vocabulary alignment in the existing job-specific Follow-up view,
-   without replacing its recovery actions or redesigning Step 5.
-6. Finish the interaction audit against the prototype, including per-file actions,
-   small-screen layout, and a recovery replay against a representative copied
-   diagnostic database. The saved-state projection check below is not a replay.
+1. Ready files have individual persisted checkboxes for both new and duplicate
+   series. An explicit diagnostics marker preserves legacy matched-file defaults.
+   Confirmation imports only selected files. Excluded files retain target evidence
+   in Follow-up, where a subsequent explicit assignment re-enables their import.
+2. Mixed-comic conflicts offer Find correct issue for each file. Series search
+   leads to a shared issue dropdown. The provider's issue list validates ownership;
+   exact embedded identity cannot be contradicted. Reassignment changes only the
+   staged file target, not source files or sibling choices. A collision creates a
+   copy decision instead of silently selecting a keeper or overwriting ownership.
+3. Recheck source queues one durable background inspection. It keeps the existing
+   approved-root and safety rules, revalidates the saved review, and resumes across
+   a restart between inspection and matching. Errors terminate progress and leave
+   evidence for another decision. Unknown/dangerous content cannot be overridden.
+4. A stale Mylar reference can be paired with one independently identified actual
+   file in the same folder. Signed previews bind actor, file and candidate scope.
+   Verification requires exact IDs, absence of the old path, an unchanged actual
+   file and fresh safety checks. Resolving the redundant reference is recorded as
+   verified pairing, not a guessed match or an unlabeled Skip. Sources stay intact.
+5. Archive reading, conversion and safety use shared bounded header detection.
+   ZIP content under a CBR filename is supported without bypassing member/path,
+   payload, link, resource-limit or minimum-page checks. Detected mismatches are
+   shown unobtrusively beside the file. Unknown formats retain normal parser errors.
+6. Existing Follow-up actions use Find series, Match issues and Review suggestions
+   labels. Completed-import retries, mixed-folder recovery, library organization,
+   ownership receipts and Story Arc recovery remain the established workflows.
+
+The prototype guides hierarchy and interaction, not weaker metadata or safety
+policy. Repair actions are deliberately scoped, not an indiscriminate Fix all.
+Preserved Step 5 and completed-recovery surfaces remain part of acceptance testing.
 
 ## Regression Gates
 
 - Mylar and folder imports retain the same applicable identity and safety rules.
 - Partial series import only matched files; conflicting, missing, unsafe, and
   unresolved files retain their evidence and remain recoverable.
-- No source writes, moves, deletions, scans, or provider calls on a review GET.
+- No source writes, moves, deletions, scans, or provider calls on review page loads.
+  Explicit series/issue search previews can fetch metadata but never inspect files.
 - No downgrade of exact ComicVine identity or target-summary requirements.
 - Existing completed jobs, retries, mixed-folder recovery, duplicate handling,
   in-place references, and Story Arc recovery remain usable.
@@ -89,6 +100,9 @@ scan/import throughput or full browser rendering on a production database.
 
 ## Checkpoint Evidence
 
+The initial checkpoint is preserved in commit `cfe8ee7`. The evidence in this
+section predates the remaining decision paths and is not their validation record.
+
 - Import-focused unit suite: 1,932 passed.
 - Import UI, API, and integration suites: 627 passed. These include the review
   projection, signed safety approvals, Story Arc review, and completed-import
@@ -112,3 +126,30 @@ That completed/failed historical job grouped as 20,691 Info, 770 Needs a decisio
 records, not newly imported files or a claim that those rows can be retried
 without the existing recovery checks. No archives, provider requests, recovery
 actions, or import execution were exercised by this measurement.
+
+## Completion Evidence
+
+The remaining decision paths were developed after the no-validation checkpoint.
+Regression runs and live acceptance drills include:
+
+- Import, archive, safety and converter unit/regression suite: 1,810 passed.
+- Import API/UI/integration: 633 passed.
+- Chromium and Firefox import/Follow-up browser suite: 122 passed, 2 skipped.
+- Strict type checking: all 691 application source files passed. Focused lint,
+  formatting, JavaScript syntax and whitespace checks passed.
+- An isolated real-file lab exercises persisted selection, individual reassignment,
+  exact stale-reference pairing and ZIP content under a CBR name. Source verification
+  must finish both its file decision and its global activity record. Normal
+  rematching retains the durable work marker and the user's explicit selection.
+- Eleven live previews cover all ten existing completed-recovery action types.
+  Five representative recovery actions were applied successfully. Physical cleanup
+  previews and moves/Trash were rerun against clones with content hashes preserved
+  and stale approvals rejected.
+- Browser-discovered regressions have targeted coverage: modal submission must not
+  trigger boosted page navigation; ready files must not carry duplicate-exclusion
+  text; rechecked archives display format evidence from their source diagnostics.
+- Filesystem root resolution as well as archive inspection runs off the event loop.
+
+The private lab, originals and primary development instance remain separate.
+Its manual checklist has 214 checks, not 214 claimed passes. Full CI, full-library
+acceptance runs and production-style recovery replay remain release gates.

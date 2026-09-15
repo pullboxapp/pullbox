@@ -16,6 +16,7 @@
      x-data="importCvSearchModalData({
        jobId: {{ job_id }},
        seriesId: {{ series_id }},
+       fileId: {{ (file_id or none)|tojson }},
        query: {{ query|tojson|forceescape }}
      })"
      x-show="open"
@@ -40,7 +41,7 @@
       <div class="space-y-1">
         <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-brand">Series override</p>
         <h3 class="text-base font-semibold text-pb-text">Search ComicVine</h3>
-        <p class="text-xs leading-5 text-pb-text-dim">Search for the correct series, then apply the match to this import entry.</p>
+        <p class="text-xs leading-5 text-pb-text-dim">{% if file_id %}Choose the correct series for this file, then choose its issue. Other files and source folders will not change.{% else %}Search for the correct series, then apply the match to this import entry.{% endif %}</p>
       </div>
       <button @click="close()"
               class="icon-btn icon-btn-sm"

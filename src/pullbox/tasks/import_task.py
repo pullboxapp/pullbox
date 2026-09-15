@@ -432,6 +432,7 @@ class ImportRunner:
     async def recover_and_dispatch(self) -> int:
         """Recover interrupted imports and resume any runnable job."""
         recovered = await recover_stuck_import_jobs(self._session_factory)
+        await recover_pending_review_source_actions(self._session_factory)
         await self._dispatch_recovered_job()
         return recovered
 
@@ -1054,6 +1055,55 @@ async def _run_import_series_rematch_task(job_id: int, imported_series_id: int) 
                     imported_series_id=imported_series_id,
                 )
                 await session.rollback()
+
+
+async def run_import_review_source_action(job_id: int, file_id: int) -> None:
+    from pullbox.services.import_review_source_actions import (
+        finish_source_action,
+        process_source_action,
+    )
+
+    lock = _review_rematch_locks.setdefault(job_id, asyncio.Lock())
+    async with lock:
+        try:
+            series_id = await process_source_action(get_session_factory(), job_id, file_id)
+            if series_id is not None:
+                await _run_import_series_rematch_task(job_id, series_id)
+            await finish_source_action(get_session_factory(), job_id, file_id)
+        except Exception:
+            logger.exception("import_review_source_action_failed", job_id=job_id, file_id=file_id)
+            await finish_source_action(get_session_factory(), job_id, file_id, failed=True)
+
+
+def trigger_import_review_source_action(job_id: int, file_id: int) -> None:
+    _fire_and_forget(run_import_review_source_action(job_id, file_id))
+
+
+async def recover_pending_review_source_actions(factory: async_sessionmaker[AsyncSession]) -> None:
+    async def recover() -> None:
+        cursor = 0
+        while True:
+            async with factory() as session:
+                rows = (
+                    await session.execute(
+                        sa_select(ImportedFile.import_job_id, ImportedFile.id)
+                        .where(
+                            ImportedFile.id > cursor,
+                            ImportedFile.diagnostics["review_source_action"]["state"]
+                            .as_string()
+                            .in_(["pending", "matching"]),
+                        )
+                        .order_by(ImportedFile.id)
+                        .limit(50)
+                    )
+                ).all()
+            if not rows:
+                return
+            for job_id, file_id in rows:
+                await run_import_review_source_action(job_id, file_id)
+                cursor = file_id
+
+    _fire_and_forget(recover())
 
 
 def trigger_import_scan(job_id: int) -> None:

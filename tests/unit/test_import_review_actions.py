@@ -105,6 +105,86 @@ def _make_file(
     )
 
 
+async def test_new_series_file_choices_preserve_legacy_defaults(db_session: AsyncSession) -> None:
+    from pullbox.services.import_file_resolution import load_importable_files
+
+    job = await _create_job_row(db_session)
+    parent = await _create_imported_series(db_session, job, selected_for_import=True)
+    parent.files_matched = 2
+    legacy = _make_file(job, parent, name="legacy.cbz", include_in_import=False)
+    chosen = _make_file(job, parent, name="choice.cbz")
+    db_session.add_all([legacy, chosen])
+    await db_session.flush()
+    await update_file_selection(db_session, job.id, chosen.id, include_in_import=False)
+    assert chosen.diagnostics["review_selection"] is False
+    assert chosen.status is ImportedFileStatus.MATCHED
+    assert [f.id for f in await load_importable_files(db_session, parent)] == [legacy.id]
+    await update_file_selection(db_session, job.id, chosen.id, include_in_import=True)
+    assert {f.id for f in await load_importable_files(db_session, parent)} == {legacy.id, chosen.id}
+
+
+async def test_confirmed_keeper_can_be_excluded_without_resetting_conflict(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job_row(db_session)
+    parent = await _create_imported_series(db_session, job)
+    keeper = _make_file(job, parent, name="keeper.cbz", status=ImportedFileStatus.CONFIRMED)
+    db_session.add(keeper)
+    await db_session.flush()
+    await update_file_selection(db_session, job.id, keeper.id, include_in_import=False)
+    assert keeper.status is ImportedFileStatus.CONFIRMED
+    assert keeper.diagnostics["review_selection"] is False
+
+
+async def test_excluding_every_file_closes_gate_and_preserves_followup(
+    db_session: AsyncSession,
+) -> None:
+    from pullbox.schemas.import_job import ConfirmImportRequest
+    from pullbox.services.import_confirmation import _confirm_matched_files, _load_confirmed_series
+    from pullbox.services.import_review_selection import load_import_review_selection_state
+
+    job = await _create_job_row(db_session)
+    parent = await _create_imported_series(db_session, job, selected_for_import=True)
+    parent.files_matched = 1
+    file = _make_file(job, parent, name="later.cbz")
+    db_session.add(file)
+    await db_session.flush()
+    await update_file_selection(db_session, job.id, file.id, include_in_import=False)
+    state = await load_import_review_selection_state(db_session, job.id)
+    assert state["selected_item_count"] == 0
+    assert state["importable_item_count"] == 1
+    items = await _load_confirmed_series(
+        db_session, job.id, ConfirmImportRequest(series_ids=[parent.id])
+    )
+    assert items == []
+    await _confirm_matched_files(db_session, [parent], set())
+    assert file.status is ImportedFileStatus.MATCHED
+    assert file.diagnostics["review_selection"] is False
+
+
+async def test_excluded_files_are_available_after_import_in_followup(db_session):
+    from pullbox.services.import_file_selection import defer_excluded_review_files
+    from pullbox.services.import_orphans import get_orphaned_series
+
+    job = await _create_job_row(db_session)
+    parent = await _create_imported_series(db_session, job, selected_for_import=True)
+    parent.cv_id = 160294
+    file = _make_file(job, parent, name="later.cbz")
+    file.matched_issue_cv_id = 100
+    db_session.add(file)
+    await db_session.flush()
+    await update_file_selection(db_session, job.id, file.id, include_in_import=False)
+    await defer_excluded_review_files(db_session, job.id)
+    job.status = ImportJobStatus.COMPLETED
+    await db_session.flush()
+    rows, total = await get_orphaned_series(db_session, job_id=job.id)
+    assert total == 1
+    assert rows[0].id == parent.id
+    assert file.status is ImportedFileStatus.NO_MATCH
+    assert file.matched_issue_cv_id == 100
+    assert file.diagnostics["review_deferred"] is True
+
+
 async def test_resolve_conflict_selects_chosen_file_and_recomputes(
     db_session: AsyncSession,
 ) -> None:

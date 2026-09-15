@@ -2254,6 +2254,7 @@ function importCvSearchModalData(config) {
     query: cfg.query || "",
     jobId: cfg.jobId,
     seriesId: cfg.seriesId,
+    fileId: cfg.fileId || null,
     selecting: false,
 
     close: function (force) {
@@ -2284,7 +2285,7 @@ function importCvSearchModalData(config) {
               "/series/" +
               this.seriesId +
               "/cv-search?q=" +
-              encodeURIComponent(this.query || ""),
+              encodeURIComponent(this.query || "") + (this.fileId ? "&file_id=" + this.fileId : ""),
             {
               target: "#cv-search-modal",
               swap: "innerHTML",
@@ -2580,6 +2581,12 @@ function importCvSearchModalData(config) {
         return;
       }
 
+      if (self.fileId) {
+        self.selecting = true;
+        return htmx.ajax("GET", "/import/" + self.jobId + "/files/" + self.fileId + "/assign?cv_id=" + cvId,
+          { target: "#cv-search-modal", swap: "innerHTML" }).finally(function () { self.selecting = false; });
+      }
+
       self.selecting = true;
       var activeReviewView = null;
       var reviewData = self.reviewPanelData();
@@ -2659,6 +2666,32 @@ function importCvSearchModalData(config) {
         });
     },
   };
+}
+
+function importReviewFileActionData(config) {
+  var state = importCvSearchModalData(config);
+  state.issueId = "";
+  state.error = "";
+  state.submit = async function (form) {
+    if (this.selecting) return;
+    this.selecting = true;
+    this.error = "";
+    try {
+      var response = await fetch("/import/" + config.jobId + "/files/" + config.fileId + "/" + config.action, {
+        method: "POST", headers: { "X-CSRF-Token": readCsrfTokenFromBody() }, body: new FormData(form),
+      });
+      var result = await response.json();
+      if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : (result.error && result.error.message) || "The file changed. Reopen this action and try again.");
+      this.close(true);
+      await this.refreshReview();
+      var review = this.reviewPanelData();
+      if (review && review.refreshReviewSummary) await review.refreshReviewSummary();
+      showToast({ message: result.message, level: "success" });
+    } catch (error) {
+      this.error = error.message || "The action could not be completed.";
+    } finally { this.selecting = false; }
+  };
+  return state;
 }
 
 function renderImportCvSearchLoadingModal(config) {
@@ -7414,6 +7447,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     importGateOpen: false,
     importGateTrigger: null,
     reviewActionPending: false,
+    reviewSameComicGroups: [],
     confirmError: "",
     jobId: cfg.jobId,
     currentView: cfg.currentView || "series",
