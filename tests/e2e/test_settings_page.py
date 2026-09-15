@@ -1287,6 +1287,36 @@ class TestSettingsPage:
         assert settings.dropdown_value("settings-utilities-log-level-select") == "ERROR"
         assert settings.dropdown_label("settings-utilities-log-level-select") == "Error"
 
+    def test_settings_tab_settle_preserves_new_dropdown_interaction(
+        self, authed_page: Page, seeded_server: str
+    ) -> None:
+        settings = SettingsPage(authed_page, seeded_server)
+        settings.goto("ui")
+        authed_page.evaluate(
+            """() => {
+                htmx.config.defaultSettleDelay = 1000;
+                window.settingsTabSettled = false;
+                document.addEventListener("htmx:afterSettle", (event) => {
+                    if (event.detail.target?.id === "settings-content") {
+                        window.settingsTabSettled = true;
+                    }
+                });
+            }"""
+        )
+        settings.switch_tab("utilities")
+        settings.dropdown("settings-utilities-log-level-select").locator(
+            "[data-dropdown-select-trigger]"
+        ).click()
+        option = authed_page.locator(
+            '[data-dropdown-select-panel]:visible [data-dropdown-option][data-value="ERROR"]'
+        )
+        expect(option).to_be_visible()
+        authed_page.wait_for_function("() => window.settingsTabSettled === true")
+
+        expect(option).to_be_in_viewport()
+        option.click()
+        assert settings.dropdown_value("settings-utilities-log-level-select") == "ERROR"
+
     def test_settings_search_language_dropdown_selects_and_resets(
         self,
         authed_page,

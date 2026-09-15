@@ -21399,6 +21399,10 @@ document.addEventListener("htmx:afterSwap", function (e) {
   }
 
   if (e.detail.target && e.detail.target.id === "settings-content") {
+    // Reset before the new controls can be used, not after a delayed settle.
+    if (_shouldScrollSettingsContent(e)) {
+      _scrollSettingsContentToTop();
+    }
     syncSettingsWorkspaceNav(document);
   }
 
@@ -22339,7 +22343,6 @@ document.addEventListener("htmx:afterSettle", function (e) {
   }
 
   if (_shouldScrollSettingsContent(e)) {
-    _scrollSettingsContentToTop();
     syncSettingsWorkspaceNav(document);
   }
 

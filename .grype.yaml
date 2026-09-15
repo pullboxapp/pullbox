@@ -13,6 +13,19 @@
 # stable Python 3.14 or Debian 13 packages become available upstream.
 
 ignore:
+  # Renewed by Adam Hernandez on 2026-09-14 only for this DHI libc6 revision.
+  # Accepted risk, NOT a fix: Debian 13 still lists this TSIG-printing issue
+  # as vulnerable/no-DSA. Direct Pullbox callers were not found, but dependency
+  # reachability and DHI backport status remain unproven. Re-review by
+  # 2026-09-30 or the next base refresh, whichever comes first; remove when
+  # a fixed stable package ships. All other High findings remain blocking.
+  # https://security-tracker.debian.org/tracker/CVE-2026-5435
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6
+      version: 2.41-12+deb13u4+dhi0
+      type: deb
+
   # Renewed by Adam Hernandez on 2026-09-13 for eight exact findings in the
   # refreshed DHI runtime. These are accepted-risk exceptions, NOT fixes.
   # Keep all other High findings blocking, including other package versions.

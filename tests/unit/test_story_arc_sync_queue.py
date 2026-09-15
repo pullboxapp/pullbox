@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -1078,6 +1078,7 @@ async def test_discrepancy_detects_source_signature_only_change_after_missed_enq
     async with db_factory() as session:
         library_file = await session.get(LibraryFile, library_file_id)
         assert library_file is not None
+        library_file.updated_at = datetime(2020, 1, 1, tzinfo=UTC)
         await enqueue_story_arc_sync_work(session, library_file)
         original_updated_at = library_file.updated_at
         await session.commit()
@@ -1085,8 +1086,15 @@ async def test_discrepancy_detects_source_signature_only_change_after_missed_enq
     async with db_factory() as session:
         library_file = await session.get(LibraryFile, library_file_id)
         assert library_file is not None
-        library_file.source_signature = {"size": library_file.file_size, "mtime_ns": 2}
-        library_file.updated_at = original_updated_at
+        # Explicit SQL preserves the timestamp instead of triggering ORM onupdate.
+        await session.execute(
+            update(LibraryFile)
+            .where(LibraryFile.id == library_file_id)
+            .values(
+                source_signature={"size": library_file.file_size, "mtime_ns": 2},
+                updated_at=original_updated_at,
+            )
+        )
         await session.commit()
 
     async with db_factory() as session:

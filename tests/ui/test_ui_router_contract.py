@@ -99,6 +99,30 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
         ),
         ("/library/matching", ("GET",), "matching_queue", "matching_queue"),
         ("/library", ("GET",), "library", "library"),
+        (
+            "/import/{job_id}/files/{file_id}/source",
+            ("GET",),
+            "preview_source_action",
+            "preview_source_action",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/source",
+            ("POST",),
+            "apply_source_action",
+            "apply_source_action",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/assign",
+            ("GET",),
+            "preview_file_assignment",
+            "preview_file_assignment",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/assign",
+            ("POST",),
+            "apply_file_assignment",
+            "apply_file_assignment",
+        ),
         ("/import", ("GET",), "import_page", "import_page"),
         (
             "/import/{job_id}/progress-partial",
