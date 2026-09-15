@@ -1,0 +1,70 @@
+{% from "components/settings_shell.html" import ui_icon %}
+<div class="overflow-x-auto">
+  <table class="downloads-table min-w-[760px] text-sm" data-testid="import-review-workspace-table">
+    <thead><tr>
+      <th class="w-8"><span class="sr-only">Select</span></th>
+      <th>
+        <button type="button" class="downloads-sort-btn" hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}&sort={{ '-found_series' if sort == 'found_series' else 'found_series' }}{% if active_reason %}&reason={{ active_reason }}{% endif %}"
+          hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">Series</button>
+      </th>
+      <th>Files</th><th>What needs attention</th><th class="is-right">Action</th>
+    </tr></thead>
+    {% for item in series_items %}
+    {% set row = review_rows[item.id] %}
+    {% set series_diagnostics = item.diagnostics or {} %}
+    {% set known_series_target = item.cv_id or item.user_selected_cv_id or item.series_id %}
+    {% set series_selectable = item.status.value == 'matched' and item.files_matched > 0 %}
+    {% set duplicate_selectable = item.id in actionable_duplicate_ids and item.files_matched > 0 %}
+    {% set duplicate_selected_files = duplicate_selected_file_counts.get(item.id, 0) %}
+    <tbody id="import-review-series-row-{{ active_review_view }}-{{ item.id }}"
+      data-import-review-series-row="{{ item.id }}" data-import-review-row-key="{{ active_review_view }}:{{ item.id }}"
+      data-import-review-row-status="{{ item.status.value }}" data-import-review-state="{{ row.lane }}"
+      data-import-review-reasons="{{ row.reasons|join(' ') }}" data-import-review-pending-subitems="{{ row.attention_files }}">
+      <tr>
+        <td>
+          {% if duplicate_selectable %}
+          <input type="checkbox" class="checkbox-pb" {% if duplicate_selected_files > 0 %}checked{% endif %}
+            data-import-review-duplicate-selectable="{{ item.id }}" data-testid="import-review-duplicate-select"
+            @change="toggleDuplicateSeriesFiles({{ item.id }}, $event.target.checked, $event.target)"
+            aria-label="Import ready files for {{ item.raw_series_name }}">
+          {% elif series_selectable %}
+          <input type="checkbox" class="checkbox-pb" {% if item.selected_for_import %}checked{% endif %}
+            data-import-review-selectable="{{ item.id }}" @change="toggleSelection({{ item.id }}, $event.target.checked)"
+            aria-label="Select {{ item.raw_series_name }} for import">
+          {% endif %}
+        </td>
+        <td>
+          <p class="font-semibold text-pb-text">{{ item.cv_title or item.raw_series_name }}</p>
+          <p class="mt-1 text-xs text-pb-text-dim">{{ item.cv_year or item.raw_year or 'Year unknown' }}{% if item.cv_publisher or item.raw_publisher %} &middot; {{ item.cv_publisher or item.raw_publisher }}{% endif %}</p>
+        </td>
+        <td>
+          <span class="text-pb-success">{{ row.ready_files }} ready</span>
+          {% if row.attention_files %}<p class="mt-1 text-xs text-pb-text-dim">{{ row.attention_files }} need review</p>{% endif %}
+          {% if item.files_already_owned %}<p class="mt-1 text-xs text-pb-text-dim">{{ item.files_already_owned }} already owned</p>{% endif %}
+        </td>
+        <td>
+          <p class="text-pb-text-sec">{{ row.label }}</p>
+          {% if row.reasons|length > 1 %}<p class="mt-1 text-xs text-pb-text-dim">{{ row.reasons|length - 1 }} other reason{{ 's' if row.reasons|length > 2 else '' }} in details</p>{% endif %}
+          {% if row.updating %}<span class="pill pill-info">Updating match</span>{% endif %}
+        </td>
+        <td class="text-right">
+          <button type="button" class="btn-ghost btn-sm inline-flex items-center gap-2"
+            data-testid="import-review-primary-action" data-import-review-expand-action
+            onclick="toggleImportReviewRow(this)" aria-expanded="false" aria-controls="import-review-detail-{{ item.id }}"
+            {% if row.updating %}disabled{% endif %}>
+            {{ row.action }}
+            <svg data-import-review-expand-icon class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </td>
+      </tr>
+      <tr id="import-review-detail-{{ item.id }}" hidden data-import-review-detail-row class="table-detail-row">
+        <td colspan="5" class="bg-pb-card-hover/40 px-4 py-4">
+          {% include "partials/import_review_workspace_detail.html" %}
+        </td>
+      </tr>
+    </tbody>
+    {% else %}
+    <tbody><tr><td colspan="5" class="px-4 py-10 text-center text-pb-text-dim">Nothing to review in this lane.</td></tr></tbody>
+    {% endfor %}
+  </table>
+</div>

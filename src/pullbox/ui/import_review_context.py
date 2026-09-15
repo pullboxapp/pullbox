@@ -6,7 +6,7 @@ import contextlib
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from pullbox.models.import_job import (
     ImportedFile,
@@ -15,6 +15,8 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.library import LibraryRoot
+from pullbox.services.import_duplicates import duplicate_merge_is_actionable
+from pullbox.services.import_file_conflicts import classify_conflict_group
 from pullbox.services.import_review_selection import load_import_review_selection_state
 from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
 from pullbox.services.import_split_series import load_selected_split_series_review
@@ -24,6 +26,7 @@ from pullbox.services.import_story_arc_review import (
 )
 from pullbox.services.library_root_management import list_library_roots
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
+from pullbox.ui.import_review_lanes import LANES, REASONS, load_review_rows
 from pullbox.ui.import_review_summary import (
     load_import_review_summary,
     load_import_safety_failure_summary,
@@ -61,7 +64,7 @@ def _resolve_review_view(status: str | None) -> tuple[str, ImportSeriesStatus | 
     requested_series_status: ImportSeriesStatus | None = None
     current_view = "series"
     if status == "conflicts":
-        current_view = "conflicts"
+        current_view = "conflict_rows"
     elif status in {"needs_series", "needs_issue", "safety_blocked", "story_arcs"}:
         current_view = status
     elif status:
@@ -78,7 +81,14 @@ def _review_filters(
     requested_series_status: ImportSeriesStatus | None,
 ) -> list[Any]:
     filters: list[Any] = [ImportedSeries.import_job_id == job_id]
-    if current_view == "needs_issue":
+    if current_view == "conflict_rows":
+        filters.append(
+            or_(
+                ImportedSeries.files_conflict > 0,
+                ImportedSeries.diagnostics["kind"].as_string() == "series_conflict",
+            )
+        )
+    elif current_view == "needs_issue":
         filters.append(_needs_issue_match_filter())
     elif current_view == "needs_series":
         filters.append(_needs_series_match_filter())
@@ -103,7 +113,7 @@ async def _load_selected_review_series_ids(
         .where(
             ImportedSeries.import_job_id == job_id,
             ImportedSeries.status == ImportSeriesStatus.MATCHED,
-            ImportedSeries.files_conflict == 0,
+            ImportedSeries.files_matched > 0,
             ImportedSeries.selected_for_import.is_(True),
         )
         .order_by(ImportedSeries.id.asc())
@@ -215,6 +225,21 @@ async def has_pending_import_safety_rematch(session: AsyncSession, job_id: int) 
     return pending_file_id is not None
 
 
+async def has_pending_import_review_rematch(session: AsyncSession, job_id: int) -> bool:
+    """Series choices and safety approvals use the same completion poll."""
+    return (
+        await session.scalar(
+            select(ImportedSeries.id)
+            .where(
+                ImportedSeries.import_job_id == job_id,
+                ImportedSeries.diagnostics["rematch_pending"].as_boolean().is_(True),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 async def _load_safety_blocked_files_by_series_id(
     session: AsyncSession,
     job_id: int,
@@ -277,6 +302,60 @@ def _build_safety_file_display_name_by_file_id(
     return result
 
 
+async def _load_inline_conflicts(
+    session: AsyncSession, job_id: int, series_ids: list[int]
+) -> dict[int, list[dict[str, object]]]:
+    """Use saved metadata to review whole conflict groups, including shared folders."""
+    if not series_ids:
+        return {}
+    group_ids = (
+        select(ImportedFile.conflict_group_id)
+        .where(
+            ImportedFile.import_job_id == job_id,
+            ImportedFile.import_series_id.in_(series_ids),
+            ImportedFile.status == ImportedFileStatus.CONFLICT,
+            ImportedFile.conflict_group_id.is_not(None),
+        )
+        .distinct()
+    )
+    files = (
+        await session.scalars(
+            select(ImportedFile)
+            .where(
+                ImportedFile.import_job_id == job_id,
+                ImportedFile.status == ImportedFileStatus.CONFLICT,
+                ImportedFile.conflict_group_id.in_(group_ids),
+            )
+            .order_by(ImportedFile.conflict_group_id, ImportedFile.id)
+        )
+    ).all()
+    groups: dict[int, list[ImportedFile]] = {}
+    for file in files:
+        if file.conflict_group_id is not None:
+            groups.setdefault(file.conflict_group_id, []).append(file)
+    result: dict[int, list[dict[str, object]]] = {}
+    for group_id, members in groups.items():
+        classification = classify_conflict_group(members)
+        disagreement = classification in {"series_mismatch", "year_disagreement"}
+        group: dict[str, object] = {
+            "id": group_id,
+            "files": members,
+            "recommended": not disagreement,
+            "label": "Do these files belong to the same comic?"
+            if disagreement
+            else "Choose a copy",
+            "description": (
+                "The titles or years disagree. Check the issue matches before keeping one copy."
+                if disagreement
+                else "Keep one copy for this issue. Other copies are excluded from this import; "
+                "source files stay untouched."
+            ),
+        }
+        for series_id in {file.import_series_id for file in members}.intersection(series_ids):
+            result.setdefault(series_id, []).append(group)
+    return result
+
+
 async def load_import_review_context(
     session: AsyncSession,
     job: ImportJob,
@@ -287,10 +366,24 @@ async def load_import_review_context(
     story_arc_id: int | None = None,
     arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
     arc_entry_page: int = 1,
+    reason: str | None = None,
 ) -> dict[str, object]:
     """Load the template context for the Step 3 review table."""
     job_id = int(job.id)
     current_view, requested_series_status = _resolve_review_view(status)
+    review_rows = await load_review_rows(session, job_id)
+    lane_counts = {lane: sum(row.lane == lane for row in review_rows.values()) for lane in LANES}
+    if status in LANES or not status:
+        current_view = status or next(
+            (lane for lane, count in lane_counts.items() if count), "ready"
+        )
+        requested_series_status = None
+    active_lane = current_view if current_view in LANES else ""
+    active_reason = reason if reason in REASONS else None
+    reason_counts = {
+        key: sum(row.lane == active_lane and key in row.reasons for row in review_rows.values())
+        for key in REASONS
+    }
     page_size = 25
     normalized_sort = _normalize_import_review_series_sort(sort)
     total = 0
@@ -373,14 +466,37 @@ async def load_import_review_context(
             current_view=current_view,
             requested_series_status=requested_series_status,
         )
-        count_result = await session.execute(select(func.count(ImportedSeries.id)).where(*filters))
-        total = count_result.scalar_one()
+        if active_lane:
+            ordered_ids = (
+                await session.scalars(
+                    select(ImportedSeries.id)
+                    .where(ImportedSeries.import_job_id == job_id)
+                    .order_by(*_get_import_review_series_order_by(normalized_sort))
+                )
+            ).all()
+            matching_ids = [
+                series_id
+                for series_id in ordered_ids
+                if review_rows[series_id].lane == active_lane
+                and (not active_reason or active_reason in review_rows[series_id].reasons)
+            ]
+            total = len(matching_ids)
+            page = min(page, max(1, (total + page_size - 1) // page_size))
+            # Only a page of IDs enters SQL, even for a 50,000-series library.
+            filters.append(
+                ImportedSeries.id.in_(matching_ids[(page - 1) * page_size : page * page_size])
+            )
+        else:
+            count_result = await session.execute(
+                select(func.count(ImportedSeries.id)).where(*filters)
+            )
+            total = count_result.scalar_one()
 
         series_result = await session.execute(
             select(ImportedSeries)
             .where(*filters)
             .order_by(*_get_import_review_series_order_by(normalized_sort))
-            .offset((page - 1) * page_size)
+            .offset(0 if active_lane else (page - 1) * page_size)
             .limit(page_size)
         )
         series_items = list(series_result.scalars().all())
@@ -410,7 +526,8 @@ async def load_import_review_context(
     safety_review_series_count, safety_review_file_count = await _load_safety_review_counts(
         session, job_id
     )
-    safety_rematch_pending = await has_pending_import_safety_rematch(session, job_id)
+    safety_rematch_pending = any(row.updating for row in review_rows.values())
+    safety_failure_summary = await load_import_safety_failure_summary(session, job)
     managed_library_root_options: list[dict[str, Any]] = []
     if split_series_review.requires_preferred_destination:
         managed_library_root_options = [
@@ -425,7 +542,21 @@ async def load_import_review_context(
 
     template_ctx: dict[str, object] = {
         "job": job,
+        "review_rows": review_rows,
+        "inline_conflicts": await _load_inline_conflicts(
+            session, job_id, [item.id for item in series_items]
+        ),
+        "safety_reason_keys": {str(item["category"]) for item in safety_failure_summary},
+        "review_lanes": LANES,
+        "review_reasons": REASONS,
+        "lane_counts": lane_counts,
+        "reason_counts": reason_counts,
+        "active_reason": active_reason,
+        "active_lane": active_lane,
         "series_items": series_items,
+        "actionable_duplicate_ids": {
+            item.id for item in series_items if duplicate_merge_is_actionable(item)
+        },
         "story_arc_items": story_arc_items,
         "story_arc_total": story_arc_total,
         "story_arc_selected_item": story_arc_selected_item,
@@ -451,7 +582,7 @@ async def load_import_review_context(
         "review_summary": await load_import_review_summary(session, job),
         "split_series_review": split_series_review,
         "managed_library_root_options": managed_library_root_options,
-        "safety_failure_summary": await load_import_safety_failure_summary(session, job),
+        "safety_failure_summary": safety_failure_summary,
         "selected_series_ids": await _load_selected_review_series_ids(session, job_id),
         "duplicate_selected_file_counts": await _load_duplicate_selected_file_counts(
             session,

@@ -1024,7 +1024,8 @@ function readImportReviewStatusCounts(shell) {
   if (!shell || typeof shell.getAttribute !== "function") {
     return {};
   }
-  var raw = shell.getAttribute("data-import-review-status-counts") || "{}";
+  var countSource = shell.querySelector("#import-review-state") || shell;
+  var raw = countSource.getAttribute("data-import-review-status-counts") || "{}";
   try {
     var parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? parsed : {};
@@ -1224,6 +1225,11 @@ var pendingImportReviewViewportState = null;
 document.body.addEventListener("htmx:beforeSwap", function (event) {
   var target = event && event.detail ? event.detail.target : null;
   if (target && target.id === "import-step-review-shell") {
+    if (target.hasAttribute("data-import-review-workspace") && !event.detail.isError) {
+      event.detail.shouldSwap = false;
+      applyImportReviewWorkspace(event.detail.xhr.responseText, target);
+      return;
+    }
     var requestElement =
       event.detail.requestConfig && event.detail.requestConfig.elt
         ? event.detail.requestConfig.elt
@@ -1231,6 +1237,49 @@ document.body.addEventListener("htmx:beforeSwap", function (event) {
     pendingImportReviewViewportState = captureImportReviewViewport(target, requestElement);
   }
 });
+
+function applyImportReviewWorkspace(html, shell) {
+  var wrapper = document.createElement("div");
+  wrapper.innerHTML = html.trim();
+  var nextShell = wrapper.querySelector("#import-step-review-shell");
+  if (!nextShell || !nextShell.hasAttribute("data-import-review-workspace")) {
+    throw new Error("Import review refresh returned an unexpected response.");
+  }
+  var state = captureImportReviewViewport(shell, document.activeElement);
+  restoreImportReviewExpansionState(state, nextShell);
+  var regions = nextShell.querySelectorAll("[data-import-review-region]");
+  var update = function () {
+    for (var i = 0; i < regions.length; i += 1) {
+      var current = document.getElementById(regions[i].id);
+      if (!current || !shell.contains(current)) { continue; }
+      Idiomorph.morph(current, regions[i], {
+        morphStyle: "outerHTML",
+        callbacks: {
+          beforeNodeMorphed: function (before, after) {
+            return !before.isEqualNode(after);
+          },
+          beforeNodeRemoved: function (node) {
+            if (window.Alpine && node.nodeType === 1) { Alpine.destroyTree(node); }
+            return true;
+          },
+        },
+      });
+    }
+    if (window.Alpine) { Alpine.initTree(shell); }
+  };
+  if (window.Alpine) { Alpine.mutateDom(update); } else { update(); }
+  htmx.process(shell);
+  var data = window.Alpine ? Alpine.$data(shell) : null;
+  var nextState = shell.querySelector("#import-review-state");
+  if (data && nextState) {
+    data.splitSeriesRequiresPreferredRoot = nextState.getAttribute("data-requires-preferred-root") === "true";
+    data.applyReviewSummary(JSON.parse(nextState.getAttribute("data-review-summary") || "{}"));
+    data.rehydrateAfterShellSwap();
+  }
+  _syncFooterDockFromResponse(html);
+  restoreImportReviewViewport(state, shell);
+  return shell;
+}
 
 function loadImportReviewShell(url) {
   var shell = document.getElementById("import-step-review-shell");
@@ -1274,6 +1323,9 @@ function loadImportReviewShell(url) {
 
       if (typeof Idiomorph === "undefined" || typeof Idiomorph.morph !== "function") {
         throw new Error("Import review refresh is unavailable.");
+      }
+      if (currentShell.hasAttribute("data-import-review-workspace")) {
+        return applyImportReviewWorkspace(html, currentShell);
       }
       var viewportState = captureImportReviewViewport(currentShell);
       destroyAlpineTree(currentShell);
@@ -2339,6 +2391,15 @@ function importCvSearchModalData(config) {
       var rematchPending = diagnostics.rematch_pending === true;
       var hasKnownSeriesTarget =
         !!result && !!(result.cv_id || result.user_selected_cv_id || result.series_id);
+
+      if (document.querySelector("[data-import-review-workspace]")) {
+        return {
+          message: rematchPending
+            ? "ComicVine match applied. Pullbox is updating the file matches in the background."
+            : "ComicVine match updated. Ready files and remaining decisions are shown in the review lanes.",
+          level: rematchPending ? "info" : "success",
+        };
+      }
 
       if (rematchPending) {
         return {
@@ -7344,10 +7405,15 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       Number(cfg.selectedItemCount) ||
       (Number(cfg.matchedSelectedCount) || 0) + (Number(cfg.duplicateSelectedCount) || 0),
     importableItemCount: Number(cfg.importableItemCount) || 0,
+    selectedFilesCount: Number(cfg.selectedFilesCount) || 0,
+    attentionFilesCount: Number(cfg.attentionFilesCount) || 0,
     resolvedConflictGroupCount: Number(cfg.resolvedConflictGroupCount) || 0,
     conflictSeriesCount: Number(cfg.conflictSeriesCount) || 0,
     visibleFileConflictGroupCount: 0,
     confirming: false,
+    importGateOpen: false,
+    importGateTrigger: null,
+    reviewActionPending: false,
     confirmError: "",
     jobId: cfg.jobId,
     currentView: cfg.currentView || "series",
@@ -7429,12 +7495,11 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     importSelectionLabel: function () {
       var total = this.totalSelectionCount();
-      return total + " items selected for import";
+      return total + " series selected to import";
     },
 
     importActionLabel: function () {
-      var total = this.totalSelectionCount();
-      return "Import " + total + " items";
+      return "Continue to import";
     },
 
     toolbarSelectionLabel: function (overallTotal) {
@@ -8086,6 +8151,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       );
       var sortInput = document.querySelector("#import-step-review-shell input[name='review_sort']");
       var pageInput = document.querySelector("#import-step-review-shell input[name='review_page']");
+      var reasonInput = document.querySelector("#import-step-review-shell input[name='review_reason']");
 
       if (statusInput && statusInput.value) {
         params.set("status", statusInput.value);
@@ -8096,6 +8162,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       if (pageInput && pageInput.value) {
         params.set("page", pageInput.value);
       }
+      if (reasonInput && reasonInput.value) { params.set("reason", reasonInput.value); }
 
       var query = params.toString();
       return query ? url + "?" + query : url;
@@ -8103,6 +8170,85 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     refreshSeriesReview: function () {
       return loadImportReviewShell(this.buildReviewUrl());
+    },
+
+    applyReviewSummary: function (summary) {
+      this.selectedFilesCount = Number(summary.selected_files_total) || 0;
+      this.attentionFilesCount = Number(summary.needs_attention_files_total) || 0;
+      this.matchedSelectedCount = Number(summary.matched_series_selected) || 0;
+      this.duplicateSelectedCount = Number(summary.duplicate_series_selected) || 0;
+      this.selectedItemCount = Number(summary.selected_items_total) || 0;
+      this.importableItemCount = Number(summary.importable_items_total) || 0;
+      this.duplicateImportableCount = Number(summary.duplicate_series_importable) || 0;
+      this.resolvedConflictGroupCount = Number(summary.resolved_file_conflict_groups) || 0;
+      this.conflictSeriesCount = Number(summary.series_conflicts_total) || 0;
+      this.syncSelectionSummaryUi();
+    },
+
+    applyReviewAction: async function (url, method, payload, button) {
+      if (button.disabled || this.reviewActionPending) { return; }
+      this.reviewActionPending = true;
+      button.disabled = true;
+      try {
+        var response = await fetch(url, {
+          method: method,
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": readCsrfTokenFromBody() },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          var error = await response.json().catch(function () { return {}; });
+          throw new Error(typeof error.detail === "string" ? error.detail : "Unable to apply this decision.");
+        }
+        await this.refreshSeriesReview();
+        return true;
+      } catch (error) {
+        showToast({ message: error.message || "Unable to apply this decision.", level: "error" });
+        return false;
+      } finally {
+        this.reviewActionPending = false;
+        if (button.isConnected) { button.disabled = false; }
+      }
+    },
+
+    applyReviewCandidate: function (seriesId, cvId, button) {
+      return this.applyReviewAction("/api/v1/import/" + this.jobId + "/series/" + seriesId + "/override", "POST", { cv_id: cvId }, button);
+    },
+
+    resolveReviewConflict: function (groupId, fileId, button) {
+      return this.applyReviewAction("/api/v1/import/" + this.jobId + "/conflicts/" + groupId + "/resolve", "PUT", { chosen_file_id: fileId }, button);
+    },
+
+    toggleReviewFileSelection: async function (fileId, checked, checkbox) {
+      var applied = await this.applyReviewAction("/api/v1/import/" + this.jobId + "/files/" + fileId + "/selection", "PUT", { include_in_import: checked }, checkbox);
+      if (!applied) { await this.refreshSeriesReviewQuietly(); }
+    },
+
+    openImportGate: async function (trigger) {
+      await this.refreshReviewSummary();
+      if (!this.totalSelectionCount() || !this.hasRequiredPreferredRoot()) { return; }
+      this.importGateTrigger = trigger;
+      this.importGateOpen = true;
+      this.$nextTick(function () { this.$refs.importGateDialog.focus(); }.bind(this));
+    },
+
+    closeImportGate: function () {
+      if (!this.importGateOpen || this.confirming) { return; }
+      this.importGateOpen = false;
+      if (this.importGateTrigger && this.importGateTrigger.isConnected) {
+        this.importGateTrigger.focus({ preventScroll: true });
+      }
+    },
+
+    trapImportGateFocus: function (event) {
+      var controls = this.$refs.importGateDialog.querySelectorAll("button:not([disabled]), [href], input:not([disabled])");
+      if (!controls.length) { event.preventDefault(); return; }
+      var first = controls[0];
+      var last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === this.$refs.importGateDialog)) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
     },
 
     refreshSeriesReviewQuietly: function () {
@@ -8146,6 +8292,8 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
           return;
         }
 
+        this.selectedFilesCount = Number(summary.selected_files_total) || 0;
+        this.attentionFilesCount = Number(summary.needs_attention_files_total) || 0;
         this.duplicateSelectedCount =
           Number(summary.duplicate_series_selected) ||
           Number(summary.duplicate_files_selected) ||
@@ -8223,6 +8371,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         }
 
         clearImportConflictCommitState(this.jobId);
+        this.importGateOpen = false;
         dispatchImportWizardAdvance({ step: 4, jobStatus: "importing" });
       } catch (err) {
         this.confirmError = err && err.message ? err.message : "Failed to confirm import.";

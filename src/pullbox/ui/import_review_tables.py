@@ -361,6 +361,7 @@ def _build_import_review_file_detail_row(
         "file_size": imp_file.file_size,
         "has_comicinfo": imp_file.has_comicinfo,
         "status": imp_file.status.value,
+        "include_in_import": imp_file.include_in_import,
         "match_confidence": imp_file.match_confidence,
         "matched_issue_label": _import_review_matched_issue_label(imp_file, issue_map),
         "duplicate_reason_label": _import_review_duplicate_reason_label(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, select
 
 from pullbox.models.import_job import (
     ImportedFile,
@@ -30,7 +30,6 @@ async def load_import_review_selection_state(
         .where(
             ImportedSeries.import_job_id == job_id,
             ImportedSeries.status == ImportSeriesStatus.MATCHED,
-            or_(ImportedSeries.files_conflict.is_(None), ImportedSeries.files_conflict == 0),
             ImportedSeries.files_matched > 0,
         )
         .order_by(ImportedSeries.id.asc())
@@ -42,7 +41,6 @@ async def load_import_review_selection_state(
         .where(
             ImportedSeries.import_job_id == job_id,
             ImportedSeries.status == ImportSeriesStatus.MATCHED,
-            or_(ImportedSeries.files_conflict.is_(None), ImportedSeries.files_conflict == 0),
             ImportedSeries.files_matched > 0,
             ImportedSeries.selected_for_import.is_(True),
         )

@@ -73,7 +73,7 @@ from pullbox.ui.import_history import (
 from pullbox.ui.import_progress_snapshot import build_import_progress_snapshot
 from pullbox.ui.import_results_context import load_import_results_context
 from pullbox.ui.import_review_context import (
-    has_pending_import_safety_rematch,
+    has_pending_import_review_rematch,
     load_import_review_context,
 )
 from pullbox.ui.import_review_summary import load_import_review_summary
@@ -563,7 +563,7 @@ async def import_review_rematch_status(
     if job is None:
         raise NotFoundError("ImportJob", job_id)
 
-    pending = await has_pending_import_safety_rematch(session, job_id)
+    pending = await has_pending_import_review_rematch(session, job_id)
     if pending:
         escaped_job_id = escape(str(job_id), quote=True)
         return HTMLResponse(
@@ -607,6 +607,7 @@ async def _render_import_review_partial(
         story_arc_id=story_arc_id,
         arc_entry_state=arc_entry_state,
         arc_entry_page=arc_entry_page,
+        reason=request.query_params.get("reason"),
     )
     if extra_context:
         template_ctx.update(extra_context)

@@ -49,6 +49,7 @@
   {% set review_pagination_params = [] %}
   {% if status_filter %}{% set _ = review_pagination_params.append("status=" ~ status_filter) %}{% endif %}
   {% if sort %}{% set _ = review_pagination_params.append("sort=" ~ sort) %}{% endif %}
+  {% if active_reason %}{% set _ = review_pagination_params.append("reason=" ~ active_reason) %}{% endif %}
   {% set review_pagination_base_url = "/import/" ~ job.id ~ "/review-partial" ~ ("?" ~ review_pagination_params|join("&") if review_pagination_params else "") %}
   <div data-testid="import-review-pagination" class="px-4 sm:px-6">
     {{ page_dock(

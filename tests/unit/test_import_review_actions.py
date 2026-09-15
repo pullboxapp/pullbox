@@ -301,6 +301,53 @@ async def test_update_series_selection_toggles_matched_series(
     assert updated.selected_for_import is True
 
 
+@pytest.mark.parametrize("bulk", [False, True])
+async def test_review_can_select_matched_files_without_resolving_other_conflicts(
+    db_session: AsyncSession,
+    bulk: bool,
+) -> None:
+    from pullbox.services.import_review_selection import load_import_review_selection_state
+    from pullbox.ui.import_review_context import _load_selected_review_series_ids
+
+    job = await _create_job_row(db_session)
+    imported = await _create_imported_series(db_session, job)
+    imported.cv_id = 160294
+    imported.files_matched = 1
+    imported.files_conflict = 2
+    ready = _make_file(job, imported, name="issue-2.cbz")
+    conflict = _make_file(
+        job,
+        imported,
+        name="issue-1.cbz",
+        status=ImportedFileStatus.CONFLICT,
+        conflict_group_id=42,
+        include_in_import=False,
+    )
+    blocked = _make_file(
+        job,
+        imported,
+        name="unsafe.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+        include_in_import=False,
+    )
+    db_session.add_all([ready, conflict, blocked])
+    await db_session.flush()
+
+    if bulk:
+        await bulk_update_series_selection(db_session, job.id, include_in_import=True)
+    else:
+        await update_series_selection(db_session, job.id, imported.id, include_in_import=True)
+
+    state = await load_import_review_selection_state(db_session, job.id)
+    assert state["selected_series_ids"] == [imported.id]
+    assert await _load_selected_review_series_ids(db_session, job.id) == [imported.id]
+    assert ready.status == ImportedFileStatus.MATCHED
+    assert conflict.status == ImportedFileStatus.CONFLICT
+    assert conflict.conflict_group_id == 42
+    assert blocked.status == ImportedFileStatus.SAFETY_BLOCKED
+    assert not conflict.include_in_import and not blocked.include_in_import
+
+
 async def test_unmatch_series_match_returns_matched_row_to_series_review(
     db_session: AsyncSession,
 ) -> None:

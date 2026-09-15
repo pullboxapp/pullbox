@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 
-from sqlalchemy import or_
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -301,8 +300,6 @@ async def update_series_selection(
         raise NotFoundError("ImportedSeries", imported_series_id)
     if imported_series.status != ImportSeriesStatus.MATCHED:
         raise ValidationError("Only matched series can be selected for import")
-    if (imported_series.files_conflict or 0) > 0:
-        raise ValidationError("Resolve file conflicts before selecting this series")
     if include_in_import and (imported_series.files_matched or 0) <= 0:
         raise ValidationError("This series has no importable files to select")
 
@@ -644,10 +641,6 @@ async def bulk_update_series_selection(
             filters.extend(
                 [
                     ImportedSeries.status == ImportSeriesStatus.MATCHED,
-                    or_(
-                        ImportedSeries.files_conflict.is_(None),
-                        ImportedSeries.files_conflict == 0,
-                    ),
                     ImportedSeries.files_matched > 0,
                 ]
             )
@@ -680,15 +673,6 @@ async def bulk_update_series_selection(
         raise ValidationError(
             "Only matched series can be selected for import; "
             f"resolve or exclude these items first: {invalid}"
-        )
-
-    unresolved_conflicts = {
-        item.id: item.files_conflict for item in items if (item.files_conflict or 0) > 0
-    }
-    if unresolved_conflicts:
-        raise ValidationError(
-            "Resolve file conflicts before selecting import series; "
-            f"conflicted series: {unresolved_conflicts}"
         )
 
     empty_matches = {

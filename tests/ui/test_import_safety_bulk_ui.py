@@ -195,6 +195,25 @@ async def test_safety_review_only_offers_bulk_preview_for_backend_overrideable_c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("view", ["decide", "decide&reason=decompression_size_limit"])
+async def test_safety_details_preserve_path_redaction_in_review_lanes(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    view: str,
+) -> None:
+    seeded = await _seed_bulk_safety_job(sec_db)
+
+    response = await authenticated_client.get(
+        f"/import/{seeded['job_id']}/review-partial?status={view}"
+    )
+
+    assert response.status_code == 200
+    assert "Oversize One.cbz" in response.text
+    assert "/private/import" not in response.text
+    assert r"C:\Users\Adam" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_bulk_safety_preview_is_signed_exact_sanitized_and_read_only(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],

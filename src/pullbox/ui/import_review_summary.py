@@ -93,6 +93,20 @@ async def load_import_review_summary(
     )
     selection_state = await load_import_review_selection_state(session, job.id)
     duplicate_selected_count = _object_to_int(selection_state["duplicate_files_selected"])
+    matched_selected_file_count = int(
+        await session.scalar(
+            select(func.count(ImportedFile.id))
+            .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
+            .where(
+                ImportedFile.import_job_id == job.id,
+                ImportedSeries.status == ImportSeriesStatus.MATCHED,
+                ImportedSeries.selected_for_import.is_(True),
+                ImportedSeries.files_matched > 0,
+                ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
+            )
+        )
+        or 0
+    )
     duplicate_selected_series_count = _object_to_int(selection_state["duplicate_series_selected"])
     matched_selected_series_count = _object_to_int(selection_state["matched_series_selected"])
     duplicate_importable_series_count = _object_to_int(
@@ -211,6 +225,7 @@ async def load_import_review_summary(
         "selected_series_total": matched_selected_series_count + duplicate_selected_series_count,
         # Story Arcs are optional follow-up work, not canonical import items.
         "selected_items_total": _object_to_int(selection_state["selected_item_count"]),
+        "selected_files_total": matched_selected_file_count + duplicate_selected_count,
         "importable_items_total": _object_to_int(selection_state["importable_item_count"]),
         "ready_to_import_total": _object_to_int(selection_state["importable_item_count"]),
         "needs_attention_total": needs_attention_series_total,
