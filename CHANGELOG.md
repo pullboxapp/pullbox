@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-15
+
+Minor release adding Story Arc management, an optional local Comic Vine catalog,
+multi-root and in-place library imports, and substantial large-library import
+performance and recovery improvements.
+
 ### Added
 
 - Added an optional local Comic Vine catalog for series searches and import
@@ -25,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-owned arc references.
 - Added category-scoped bulk import safety review with bounded previews and
   audit evidence.
+- Added a dedicated import Follow-up workspace for remaining matching, recovery,
+  and cleanup decisions without restarting a completed import.
+- Added previewed clean-library builds with background progress, configurable
+  naming and conversion, and explicit safeguards for source files and destinations.
+- Added safe removal of disabled library roots with dependency checks before
+  deleting their configuration.
 - Added Comic Vine Story Arc discovery, reviewed member ordering, canonical
   series/issue reuse, provider-change review, and arc-scoped missing-issue search.
 - Added Mylar in-place adoption and original-filename arc copies with optional
@@ -33,8 +45,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a guarded, manually published signed development-image channel for
   isolated testing without a general-availability release.
 
+### Changed
+
+- Grouped Mylar library-access problems by their underlying root and offered
+  explicit resolution, skip, or detailed repair actions instead of presenting
+  every affected series as a separate configuration problem.
+- Unified Comic Vine series and Story Arc discovery, added a selectable header
+  Add action, and simplified Story Arc reading-order review and reordering.
+- Centralized library naming and Story Arc file policies, including independent
+  permissions for referenced existing files and managed library destinations.
+
 ### Fixed
 
+- Improved completed-import recovery for trusted legacy identities, misplaced
+  files, and deferred outcomes. Bounded retries preserve successful imports,
+  revalidate changed sources and approved roots, and resume interrupted work
+  without losing matching evidence or repeating completed actions.
+- Reconciled stale Mylar issue identifiers, renamed files, and unqualified volume
+  identities when independent evidence proves the target. Mixed folders no longer
+  require treating every file as belonging to the folder's series.
+- Restored actionable recovery controls on completed jobs and kept safety-approved
+  items, archived history, background activity, and import counters consistent.
+- Preserved file ownership and dependent records during in-place adoption and
+  clean-library execution, and corrected folder imports' reference-root setup.
+- Sent torrent metadata through Pullbox to download clients rather than requiring
+  remote clients to fetch private Prowlarr or indexer download URLs themselves.
+- Corrected reader progress display for large compendiums.
 - Improved Mylar and folder scan throughput with resource-capped archive
   inspection, batched review inserts, and fewer unnecessary duplicate checks.
   Corrected current-item scan progress and unknown time estimates, and bounded
@@ -105,6 +141,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- Prioritized visible catalog hydration after import while keeping ComicInfo
+  writes in separate background work. Improved restart recovery and progress
+  reporting, and prevented duplicate manual refreshes during initial metadata sync.
+- Reduced large-library scan and review overhead with bounded worker budgets,
+  compact projections, and batched database work. Import, rollback, and hydration
+  progress now use clearer phase-aware completion and time estimates.
 - Streamed complete import-review safety summaries using one narrow-field query
   instead of repeatedly scanning and sorting blocked files for every batch.
   Category counts, examples, and bulk-approval eligibility remain unchanged.
