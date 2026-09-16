@@ -1972,7 +1972,7 @@ class TestImportShellRouteContracts:
         assert "Issue 4" in response.text
         assert "Issue 1" in response.text
 
-    async def test_import_review_needs_series_dropdown_renders_file_details(
+    async def test_import_review_needs_series_keeps_files_in_read_only_inventory(
         self,
         authenticated_client,
         sec_db,
@@ -2021,12 +2021,17 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-series-file-details"' in response.text
-        assert 'data-testid="import-review-series-file-group-no_match"' in response.text
-        assert "Files in this folder" in response.text
-        assert "Review Series 11 #1.cbz" in response.text
-        assert "No Match" in response.text
-        assert "Review Series 11 #1.cbz" in response.text
+        assert 'data-testid="import-review-series-file-details"' not in response.text
+        assert 'data-testid="import-review-series-file-group-no_match"' not in response.text
+        assert "Files in this folder" not in response.text
+        assert "Review Series 11 #1.cbz" not in response.text
+        inventory = await authenticated_client.get(
+            f"/import/{job_id}/series/{needs_series.id}/files"
+        )
+        assert inventory.status_code == 200
+        assert "Review Series 11 #1.cbz" in inventory.text
+        assert "/tmp/review-11" in inventory.text
+        assert "Change issue" not in inventory.text
         assert "Files tied to this unresolved series row" not in response.text
         assert "/tmp/review-11/file-1.cbz" not in response.text
         assert "Parsed From File Name" not in response.text

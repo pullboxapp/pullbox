@@ -216,11 +216,13 @@ async def test_resolved_copy_children_remain_while_the_series_has_unmatched_file
 ):
     from sqlalchemy import select
 
-    from pullbox.models.import_job import ImportedFile, ImportedFileStatus
+    from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
     from tests.ui.test_import_safety_bulk_ui import _csrf_header_for
 
     job_id = await _seed_import_review_job(sec_db)
     async with sec_db() as session:
+        # This is issue review within an identified series, not a series-match decision.
+        (await session.get(ImportedSeries, 7)).cv_id = 700
         files = (
             await session.scalars(
                 select(ImportedFile)

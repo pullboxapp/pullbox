@@ -18,6 +18,27 @@ from pullbox.services.import_review_scope import (
 router = APIRouter()
 
 
+@router.get("/import/{job_id}/series/{series_id}/files", include_in_schema=False)
+async def view_series_files(
+    job_id: int,
+    series_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    files_page: int = Query(1, ge=1),
+) -> Response:
+    from pullbox.ui.import_review_files import load_series_file_inventory
+    from pullbox.ui.import_routes import _ctx, _templates
+
+    inventory = await load_series_file_inventory(session, job_id, series_id, files_page)
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_review_files_inventory.html",
+        _ctx(request, user, inventory=inventory, job_id=job_id),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/import/{job_id}/series/{series_id}/review-{action}", include_in_schema=False)
 async def preview_series_choice(
     job_id: int,

@@ -54,6 +54,7 @@
   </div>
   {% endif %}
   {% if series_diagnostics.get('kind') == 'source_layout_review' %}<p data-testid="import-review-layout-review" class="text-sm text-pb-warning">Layout review: {{ series_diagnostics.get('source_layout_review_files', 1) }} {{ 'files do' if series_diagnostics.get('source_layout_review_files', 1) != 1 else 'file does' }} not fit the selected source layout and will not be matched automatically. {{ series_diagnostics.get('rejection_reason', '') }}</p>{% elif series_diagnostics.get('kind') == 'mylar3_path_incompatible' %}<p data-testid="import-review-mylar-path-review" class="text-sm text-pb-warning">Mylar path review: {{ series_diagnostics.get('rejection_reason', '') }} Correct the Mylar path mapping and retry this import.</p>{% endif %}
+  {% if reason_key != 'needs_series' %}
   {% include "partials/import_review_copy_choices.html" %}
   {% for file in safety_blocked_files_by_series_id.get(item.id, []) %}
   {% set block = safety_block_context_by_file_id.get(file.id, {}) %}
@@ -96,7 +97,7 @@
 
 
   {% if reason_key != 'needs_issue' or row.ready_files %}
-  {% if reason_key in ('needs_series', 'series_conflict') %}<details><summary class="text-xs text-pb-interactive cursor-pointer">Files in this folder</summary>{% endif %}
+  {% if reason_key == 'series_conflict' %}<details><summary class="text-xs text-pb-interactive cursor-pointer">Files in this folder</summary>{% endif %}
   {% if item.status.value == 'duplicate' %}<p class="text-xs text-pb-text-dim">Already in library. Only missing issues can be added.</p>{% endif %}
   <div data-testid="import-review-series-file-details" class="space-y-3">
 
@@ -130,7 +131,8 @@
   </section>
   {% endfor %}
   </div>
-  {% if reason_key in ('needs_series', 'series_conflict') %}</details>{% endif %}
+  {% if reason_key == 'series_conflict' %}</details>{% endif %}
+  {% endif %}
   {% endif %}
   {% endif %}
 </div>

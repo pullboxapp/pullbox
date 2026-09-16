@@ -1,0 +1,41 @@
+{% from "components/pagination.html" import pagination %}
+<div class="modal-shell" data-testid="import-review-files-modal"
+     x-data="importReviewFilesData({seriesId: {{ inventory.series.id }}})"
+     x-init="$nextTick(() => $refs.filesDialog.focus())"
+     @keydown.escape.window="close()"
+     @keydown.tab="trapImportReviewDialog($event, $refs.filesDialog)"
+     @htmx:after-settle="if ($event.detail.target.id === 'import-review-files-page') $refs.filesDialog.focus()">
+  <div class="modal-backdrop" @click="close()"></div>
+  <section class="modal-panel max-w-3xl max-h-[calc(100dvh-6rem)] min-h-0" x-ref="filesDialog" tabindex="-1"
+           role="dialog" aria-modal="true" aria-labelledby="import-review-files-title">
+    <div class="modal-header shrink-0">
+      <h2 id="import-review-files-title" class="text-base font-semibold text-pb-text">Files recorded for {{ inventory.series.raw_series_name }}</h2>
+    </div>
+    <div class="modal-body min-h-0 space-y-3 p-5">
+      {% if inventory.series.source_folder %}<p class="font-mono text-xs text-pb-text-sec [overflow-wrap:anywhere]">{{ inventory.series.source_folder }}</p>{% endif %}
+      <p class="text-xs text-pb-text-dim">Recorded during the scan. This view does not recheck or change files.</p>
+      <div id="import-review-files-page" class="space-y-3">
+        <div class="overflow-x-auto rounded-lg border border-pb-border">
+          <table class="downloads-table w-full table-fixed text-xs">
+            <thead><tr><th>Filename</th><th class="w-24">Size</th></tr></thead>
+            <tbody>
+              {% for file in inventory.files %}
+              <tr data-import-review-inventory-file="{{ file.id }}">
+                <td class="[overflow-wrap:anywhere]">
+                  <p class="font-mono">{{ file.name }}</p>
+                  {% if file.folder != (inventory.series.source_folder or '').replace('\\', '/').rstrip('/') %}<p class="mt-1 font-mono text-pb-text-dim">{{ file.folder }}</p>{% endif %}
+                  {% if file.missing_reference %}<span class="pill pill-warning mt-1">Missing reference</span>{% endif %}
+                </td>
+                <td>{{ file.size|filesize }}</td>
+              </tr>
+              {% else %}<tr><td colspan="2" class="py-6 text-center text-pb-text-sec">No files were recorded for this series.</td></tr>{% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="text-xs text-pb-text-dim" role="status">{{ inventory.total }} {{ 'file' if inventory.total == 1 else 'files' }} &middot; Page {{ inventory.page }} of {{ inventory.total_pages }}</p>
+        {{ pagination(inventory.page, inventory.total_pages, '/import/' ~ job_id ~ '/series/' ~ inventory.series.id ~ '/files', hx_target='#import-review-files-page', hx_swap='morph:outerHTML', hx_select='#import-review-files-page', page_param='files_page', hx_push_url='false', hx_sync='#import-review-files-page:replace', id_prefix='import-files-') }}
+      </div>
+    </div>
+    <div class="modal-footer justify-end"><button type="button" class="btn-ghost btn-sm" @click="close()">Close</button></div>
+  </section>
+</div>

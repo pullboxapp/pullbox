@@ -10,6 +10,84 @@ from tests.e2e.pages.import_page import ImportPage
 from tests.e2e.test_import_collection_page import TestImportCollectionTab as _ImportBaseline
 
 
+def test_series_file_inventory_preserves_review_and_focus(authed_page, seeded_server, browser_name):
+    from pullbox.database import get_session_factory
+    from tests.e2e.conftest import _run_async_blocking
+    from tests.ui.test_import_review_files_inventory import _seed_inventory
+
+    job_id, series_id = _run_async_blocking(_seed_inventory(get_session_factory()))
+    page = authed_page
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
+    page.get_by_test_id("import-review-lane-decide").click()
+    page.get_by_test_id("import-review-reason-needs_series").click()
+    row = page.locator(f'[data-import-review-series-row="{series_id}"]')
+    expander = row.locator("td:last-child > [data-import-review-expand-action]")
+    expander.click()
+    expect(row.get_by_text("Files in this folder", exact=True)).to_have_count(0)
+    expect(row.get_by_test_id("import-review-series-file-details")).to_have_count(0)
+    page.evaluate("""() => {
+        window.inventoryShell = document.getElementById('import-step-review-shell');
+        window.inventoryUrl = window.location.href;
+        window.inventoryScroll = document.getElementById('content')?.scrollTop || 0;
+    }""")
+    trigger = row.get_by_test_id("import-review-more-actions")
+    trigger.click()
+    menu = page.locator("[popover]:popover-open")
+    expect(menu.get_by_role("button")).to_have_text(["View files"])
+    menu.get_by_role("button", name="View files", exact=True).click()
+    modal = page.get_by_test_id("import-review-files-modal")
+    dialog = modal.get_by_role("dialog", name="Files recorded for Unknown Series")
+    expect(dialog).to_be_visible()
+    expect(dialog).to_be_focused()
+    expect(dialog.locator("[data-import-review-inventory-file]")).to_have_count(25)
+    expect(dialog).to_contain_text("Missing reference")
+    page.evaluate(
+        "window.inventoryDialog = document.querySelector('[data-testid=import-review-files-modal]')"
+    )
+    dialog.get_by_test_id("series-pagination-next").click()
+    expect(dialog.locator("[data-import-review-inventory-file]")).to_have_count(2)
+    assert page.evaluate(
+        "window.inventoryDialog === document.querySelector('[data-testid=import-review-files-modal]')"
+    )
+    expect(dialog).to_be_focused()
+    close = dialog.get_by_role("button", name="Close", exact=True)
+    assert close.evaluate(
+        "el => parseFloat(getComputedStyle(el).borderTopWidth) >= 1 && el.getBoundingClientRect().height >= 28"
+    )
+    close.focus()
+    page.keyboard.press("Tab")
+    expect(dialog.get_by_test_id("series-pagination-prev")).to_be_focused()
+    page.keyboard.press("Shift+Tab")
+    expect(close).to_be_focused()
+    for theme in ("light", "dark"):
+        page.evaluate("theme => applyTheme(theme)", theme)
+        page.add_script_tag(path="node_modules/axe-core/axe.min.js")
+        assert (
+            page.evaluate("""async () => (await axe.run('[data-testid=import-review-files-modal]', {
+            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa'] }
+        })).violations.map(v => v.id)""")
+            == []
+        )
+    close.click()
+    expect(modal).to_have_count(0)
+    expect(trigger).to_be_focused()
+    expect(expander).to_have_attribute("aria-expanded", "true")
+    assert page.evaluate("""() => window.inventoryShell === document.getElementById('import-step-review-shell') &&
+        window.inventoryUrl === window.location.href &&
+        window.inventoryScroll === (document.getElementById('content')?.scrollTop || 0)""")
+    page.set_viewport_size({"width": 390, "height": 844})
+    trigger.click()
+    page.locator("[popover]:popover-open").get_by_role("button", name="View files").click()
+    expect(modal).to_be_visible()
+    assert dialog.evaluate("el => el.getBoundingClientRect().right <= window.innerWidth")
+    page.keyboard.press("Escape")
+    expect(modal).to_have_count(0)
+    expect(trigger).to_be_focused()
+    assert errors == []
+
+
 def test_one_page_review_shortcuts_and_file_decisions_preserve_the_row(
     authed_page, seeded_server, browser_name
 ):
@@ -52,8 +130,8 @@ def test_one_page_review_shortcuts_and_file_decisions_preserve_the_row(
     assert detection and actions and helper and skip
     assert actions["y"] > detection["y"] + detection["height"]
     assert helper["y"] + helper["height"] < skip["y"]
-    assert abs(helper["x"] + helper["width"] - skip["x"] - skip["width"]) < 2
-    assert abs(detection["x"] + detection["width"] - skip["x"] - skip["width"]) < 2
+    assert abs(helper["x"] - skip["x"]) < 2
+    assert abs(detection["x"] - skip["x"]) < 2
     expander = page.locator("td:last-child > [data-import-review-one-page-expand]")
     expect(expander.locator("xpath=..")).not_to_contain_text("Allow All")
     page.evaluate("""() => {

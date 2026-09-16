@@ -2744,6 +2744,17 @@ function importReviewSeriesChoiceData(config) {
   return importReviewFileActionData(Object.assign({}, config, { seriesChoice: true }));
 }
 
+function importReviewFilesData(config) {
+  return {
+    close: function () {
+      var opener = document.getElementById("import-review-menu-trigger-" + config.seriesId);
+      var host = document.getElementById("cv-search-modal");
+      if (host) host.innerHTML = "";
+      if (opener) opener.focus({ preventScroll: true });
+    },
+  };
+}
+
 function renderImportCvSearchLoadingModal(config) {
   var cfg = config || {};
   var query = typeof cfg.query === "string" ? cfg.query : "";

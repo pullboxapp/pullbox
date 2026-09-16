@@ -100,6 +100,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
         ("/library/matching", ("GET",), "matching_queue", "matching_queue"),
         ("/library", ("GET",), "library", "library"),
         (
+            "/import/{job_id}/series/{series_id}/files",
+            ("GET",),
+            "view_series_files",
+            "view_series_files",
+        ),
+        (
             "/import/{job_id}/series/{series_id}/review-{action}",
             ("GET",),
             "preview_series_choice",

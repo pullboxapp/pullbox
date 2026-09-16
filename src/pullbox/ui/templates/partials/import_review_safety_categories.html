@@ -13,10 +13,10 @@
             </div>
             <p class="mt-1 text-xs leading-[18px] text-pb-text-sec">Usually cover art or a damaged download; sometimes an intentional one-page comic.</p>
             <p class="mt-2 font-mono text-[11px] leading-4 text-pb-text-dim" data-testid="import-review-one-page-detection">Detected: 1 image page</p>
-            <div class="mt-2 flex flex-col items-end gap-2 text-right">
+            <div class="mt-2 flex flex-col items-start gap-2 text-left">
               <p class="text-xs leading-[18px] text-pb-text" data-testid="import-review-one-page-helper">Skip them all, or allow them one by one.</p>
               {% if not bulk_preview_for_category %}
-              <div class="flex justify-end" data-testid="import-review-one-page-category-actions">
+              <div class="flex justify-start" data-testid="import-review-one-page-category-actions">
                 <form method="get" action="/import/{{ job.id }}/safety/categories/single_page_comic/skip-preview"
                   hx-get="/import/{{ job.id }}/safety/categories/single_page_comic/skip-preview"
                   hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">
