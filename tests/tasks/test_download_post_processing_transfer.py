@@ -77,7 +77,7 @@ async def test_transfer_and_register_tracks_progress_and_final_state(
         assert source_path == source
         assert confidence.value == "high"
         assert move_to_library is True
-        assert library_root_id == 12
+        assert library_root_id == 22
         assert replace_existing_library_file is False
         assert replacement_trash_dir is None
         assert callable(transfer_progress_callback)
@@ -105,7 +105,7 @@ async def test_transfer_and_register_tracks_progress_and_final_state(
         session=object(),
         comic_file=source,
         issue=SimpleNamespace(id=1),
-        series=SimpleNamespace(library_root_id=12),
+        series=SimpleNamespace(library_root_id=12, preferred_library_root_id=22),
         download=SimpleNamespace(id=44, download_client="sabnzbd"),
         ingest_policy=SimpleNamespace(post_processing_method="move"),
         trace=trace,

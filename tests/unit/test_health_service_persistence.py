@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, PendingRollbackError
 
 from pullbox.models.health import HealthStatus
 from pullbox.services import health_service
@@ -59,6 +59,29 @@ class _FakeExecuteResult:
         return []
 
 
+class _PendingRollbackHealthSession(_FakeHealthSession):
+    async def execute(self, _stmt):  # type: ignore[no-untyped-def]
+        factory = self._factory
+        assert isinstance(factory, _PendingRollbackHealthSessionFactory)
+        factory.execute_attempts += 1
+        if factory.execute_attempts == 1:
+            raise PendingRollbackError("connection invalidated during the health check")
+        return _FakeExecuteResult()
+
+    async def flush(self) -> None:
+        self._factory.flush_attempts += 1
+
+
+class _PendingRollbackHealthSessionFactory(_FakeHealthSessionFactory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.execute_attempts = 0
+
+    def __call__(self) -> _PendingRollbackHealthSession:
+        self.session_count += 1
+        return _PendingRollbackHealthSession(self)
+
+
 @pytest.mark.asyncio
 async def test_health_persist_outcomes_retries_with_fresh_sessions(monkeypatch) -> None:
     """Locked writes should reopen a fresh session before retrying."""
@@ -82,4 +105,27 @@ async def test_health_persist_outcomes_retries_with_fresh_sessions(monkeypatch) 
     assert factory.session_count == 2
     assert factory.flush_attempts == 2
     assert factory.rollback_attempts == 1
+    assert factory.commit_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_health_persist_outcomes_recovers_from_pending_rollback(monkeypatch) -> None:
+    factory = _PendingRollbackHealthSessionFactory()
+    monkeypatch.setattr(health_service, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(health_service, "sqlite_lock_retry_delay", lambda _attempt: 0.0)
+    outcomes = [
+        CheckOutcome(
+            component="database",
+            check_name="connectivity",
+            status=HealthStatus.UNHEALTHY,
+            message="Check timed out",
+        )
+    ]
+    initial_session = factory()
+
+    await HealthService._persist_outcomes(initial_session, outcomes)
+
+    assert factory.session_count == 2
+    assert factory.rollback_attempts == 1
+    assert factory.flush_attempts == 1
     assert factory.commit_attempts == 2

@@ -258,6 +258,19 @@ async def load_settings_tab(request: Request, session: DbSession, tab: str) -> d
         ctx["configs"] = configs
         runtime = runtime_snapshot_to_dict(get_runtime_status_snapshot())
         ctx["host_info"] = {"library_root": runtime["library_root"]["value"]}
+        from pullbox.services.library_root_management import list_library_roots
+
+        root_states = await list_library_roots(session)
+        root_states.sort(
+            key=lambda root: (
+                not bool(root["is_default_managed_destination"]),
+                str(root["name"]).casefold(),
+            )
+        )
+        ctx["library_roots"] = root_states
+        from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
+
+        ctx["arc_file_defaults"] = await load_story_arc_file_defaults(session)
     elif tab == "metadata":
         result = await session.execute(select(SystemConfig).order_by(SystemConfig.key))
         ctx["configs"] = {c.key: c.value for c in result.scalars().all()}

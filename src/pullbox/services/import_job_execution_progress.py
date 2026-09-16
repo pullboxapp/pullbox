@@ -6,12 +6,16 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy import and_, or_
+from sqlalchemy import func as sa_func
+from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
 from pullbox.models.import_job import (
     ImportedFile,
+    ImportedFileStatus,
     ImportedSeries,
     ImportJob,
     ImportJobStatus,
@@ -22,16 +26,15 @@ from pullbox.services.import_active_file_progress import (
     ActiveFileProgressSettings,
     active_file_progress_pct,
 )
-from pullbox.services.import_file_resolution import load_importable_files
 from pullbox.services.import_progress_runtime import (
     ImportGroupProgressPlan,
     ImportProgressFileProfile,
     ImportProgressSettings,
     current_item_payload,
-    import_group_file_progress_pct,
-    import_group_metadata_progress_pct,
+    import_group_file_completed_weight,
+    import_group_metadata_completed_weight,
     import_group_progress_plan,
-    weighted_import_progress_pct,
+    import_work_progress,
 )
 
 if TYPE_CHECKING:
@@ -41,13 +44,42 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.services.import_job_execution_types import (
-        EstimateRemainingFunc,
         ExecutionItemPlan,
         RaiseIfCancelledFunc,
         ReportFileProgressFunc,
     )
 
 logger = structlog.get_logger(__name__)
+
+_IMPORT_PROGRESS_PLAN_BATCH_SIZE = 500
+_IMPORTABLE_FILE_STATUSES = (
+    ImportedFileStatus.MATCHED,
+    ImportedFileStatus.CONFIRMED,
+)
+
+
+async def reconcile_durable_import_execution_counters(
+    session: AsyncSession,
+    job: ImportJob,
+) -> None:
+    """Rebuild execution totals from file and series rows committed before interruption."""
+    file_status_result = await session.execute(
+        sa_select(ImportedFile.status, sa_func.count(ImportedFile.id))
+        .where(ImportedFile.import_job_id == job.id)
+        .group_by(ImportedFile.status)
+    )
+    file_status_counts = {status: count for status, count in file_status_result.all()}
+    series_status_result = await session.execute(
+        sa_select(ImportedSeries.status, sa_func.count(ImportedSeries.id))
+        .where(ImportedSeries.import_job_id == job.id)
+        .group_by(ImportedSeries.status)
+    )
+    series_status_counts = {status: count for status, count in series_status_result.all()}
+
+    job.total_files_imported = file_status_counts.get(ImportedFileStatus.IMPORTED, 0)
+    job.total_files_failed = file_status_counts.get(ImportedFileStatus.FAILED, 0)
+    job.series_imported = series_status_counts.get(ImportSeriesStatus.IMPORTED, 0)
+    job.series_failed = series_status_counts.get(ImportSeriesStatus.FAILED, 0)
 
 
 async def build_import_group_progress_plans(
@@ -56,27 +88,60 @@ async def build_import_group_progress_plans(
     settings: ImportProgressSettings,
 ) -> dict[int, ImportGroupProgressPlan]:
     """Build weighted progress plans for selected Step 4 review groups."""
-    plans: dict[int, ImportGroupProgressPlan] = {}
-    for item_plan in execution_items:
-        item = await session.get(ImportedSeries, item_plan.item_id)
-        if item is None:
-            plans[item_plan.item_id] = import_group_progress_plan(settings, [])
-            continue
-        files = await load_importable_files(
-            session,
-            item,
-            duplicate_mode=item_plan.mode == "duplicate",
-        )
-        profiles = [
-            ImportProgressFileProfile(
-                file_id=imp_file.id,
-                file_path=imp_file.file_path,
-                file_size=imp_file.file_size,
+    modes_by_item_id = {item.item_id: item.mode for item in execution_items}
+    profiles_by_item_id: dict[int, list[ImportProgressFileProfile]] = {
+        item.item_id: [] for item in execution_items
+    }
+
+    for start in range(0, len(execution_items), _IMPORT_PROGRESS_PLAN_BATCH_SIZE):
+        batch = execution_items[start : start + _IMPORT_PROGRESS_PLAN_BATCH_SIZE]
+        batch_ids = [item.item_id for item in batch]
+        files_result = await session.execute(
+            sa_select(ImportedFile)
+            .select_from(ImportedSeries)
+            .join(
+                ImportedFile,
+                and_(
+                    ImportedFile.import_job_id == ImportedSeries.import_job_id,
+                    ImportedFile.import_series_id == ImportedSeries.id,
+                ),
             )
-            for imp_file in files
-        ]
-        plans[item_plan.item_id] = import_group_progress_plan(settings, profiles)
-    return plans
+            .where(
+                ImportedSeries.id.in_(batch_ids),
+                or_(
+                    ImportedFile.status.in_(_IMPORTABLE_FILE_STATUSES),
+                    and_(
+                        ImportedFile.status == ImportedFileStatus.CONFLICT,
+                        ImportedFile.is_preferred.is_(True),
+                    ),
+                ),
+            )
+            .order_by(ImportedFile.import_series_id.asc(), ImportedFile.id.asc())
+        )
+        for imp_file in files_result.scalars().all():
+            item_id = int(imp_file.import_series_id)
+            mode = modes_by_item_id.get(item_id)
+            if mode is None:
+                continue
+            if mode == "duplicate" and (
+                imp_file.status not in _IMPORTABLE_FILE_STATUSES or not imp_file.include_in_import
+            ):
+                continue
+            profiles_by_item_id[item_id].append(
+                ImportProgressFileProfile(
+                    file_id=imp_file.id,
+                    file_path=imp_file.file_path,
+                    file_size=imp_file.file_size,
+                )
+            )
+
+    return {
+        item.item_id: import_group_progress_plan(
+            settings,
+            profiles_by_item_id[item.item_id],
+        )
+        for item in execution_items
+    }
 
 
 def progress_session_factory_for_runtime(
@@ -140,9 +205,9 @@ def build_report_file_progress_callback(
     job_id: int,
     job: ImportJob,
     job_started_at: datetime | None,
+    work_started_at: datetime,
     progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None,
     progress_session_factory: async_sessionmaker[AsyncSession] | None,
-    estimate_remaining_seconds: EstimateRemainingFunc,
     group_progress_plans: dict[int, ImportGroupProgressPlan],
     shared_progress_settings: ImportProgressSettings,
     group_progress_weights: list[float],
@@ -185,15 +250,15 @@ def build_report_file_progress_callback(
             series_id,
             import_group_progress_plan(shared_progress_settings, []),
         )
-        group_progress_pct = import_group_file_progress_pct(
+        group_completed_weight = import_group_file_completed_weight(
             group_plan,
             file_index=file_index,
             current_file_pct=current_file_pct,
         )
-        overall_progress = weighted_import_progress_pct(
+        work_progress = import_work_progress(
             group_progress_weights,
             current_group_index=group_index,
-            current_group_progress_pct=group_progress_pct,
+            current_group_completed_weight=group_completed_weight,
         )
         loop_now = monotonic_time()
         emitted_at_value = progress_state.get("emitted_at")
@@ -231,7 +296,7 @@ def build_report_file_progress_callback(
             ephemeral_progress=not persist_progress,
             mode="import",
             phase="importing",
-            progress=overall_progress,
+            progress=work_progress.progress_pct,
             message=(
                 f"Processing file {file_index}/{max(total_files, 1)} "
                 f"in review group {group_index + 1}/{max(total_groups, 1)}"
@@ -247,10 +312,7 @@ def build_report_file_progress_callback(
             current_file_progress_unit=unit,
             current_series=series_name,
             current_series_status=ImportSeriesStatus.IMPORTING,
-            estimated_seconds_remaining=estimate_remaining_seconds(
-                job_started_at,
-                overall_progress,
-            ),
+            estimated_seconds_remaining=work_progress.remaining_seconds(work_started_at),
             series_imported=int(stats["series_imported"]),
             series_failed=int(stats["series_failed"]),
             series_found=series_found,
@@ -295,10 +357,10 @@ def build_series_metadata_progress_emitter(
     job_id: int,
     job: ImportJob,
     job_started_at: datetime | None,
+    work_started_at: datetime,
     progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None,
     emit_progress: Callable[..., Awaitable[None]],
     emit_live_progress: Callable[..., Awaitable[None]],
-    estimate_remaining_seconds: EstimateRemainingFunc,
     group_progress_plans: dict[int, ImportGroupProgressPlan],
     shared_progress_settings: ImportProgressSettings,
     group_progress_weights: list[float],
@@ -326,14 +388,14 @@ def build_series_metadata_progress_emitter(
             series_id,
             import_group_progress_plan(shared_progress_settings, []),
         )
-        group_progress = import_group_metadata_progress_pct(
+        group_completed_weight = import_group_metadata_completed_weight(
             group_plan,
             metadata_progress_pct=current_item_progress_pct,
         )
-        progress = weighted_import_progress_pct(
+        work_progress = import_work_progress(
             group_progress_weights,
             current_group_index=group_index,
-            current_group_progress_pct=group_progress,
+            current_group_completed_weight=group_completed_weight,
         )
         current_stats = stats()
         event = ImportProgressEvent(
@@ -341,16 +403,13 @@ def build_series_metadata_progress_emitter(
             status=ImportJobStatus.IMPORTING,
             mode="import",
             phase="importing",
-            progress=progress,
+            progress=work_progress.progress_pct,
             message=message,
             current_series_id=series_id,
             current_series_name=series_name,
             current_series=series_name,
             current_series_status=ImportSeriesStatus.IMPORTING,
-            estimated_seconds_remaining=estimate_remaining_seconds(
-                job_started_at,
-                progress,
-            ),
+            estimated_seconds_remaining=work_progress.remaining_seconds(work_started_at),
             series_imported=current_stats["series_imported"],
             series_failed=current_stats["series_failed"],
             series_found=series_found,

@@ -37,6 +37,7 @@ from pullbox.providers.airdcpp.errors import AirDcppUnavailableError
 from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
 from pullbox.providers.download.qbittorrent import QBittorrentError
 from pullbox.providers.indexer.newznab import NewznabError
+from pullbox.providers.indexer.prowlarr import ProwlarrError
 from pullbox.services.auth_service import AuthService
 
 if TYPE_CHECKING:
@@ -121,6 +122,36 @@ async def _seed_issue(
         issue_id = issue.id
         await session.commit()
         return issue_id
+
+
+@pytest.fixture
+async def torrent_source(db_factory, monkeypatch):
+    from pullbox.providers.indexer.torznab_transport import TorznabDescriptor
+
+    async with db_factory() as session:
+        config = IndexerConfig(
+            name="Torrent source",
+            indexer_type=IndexerType.TORZNAB,
+            source=IndexerSource.MANUAL,
+            url="https://example.com",
+            api_key="fixture",
+            enabled=True,
+        )
+        session.add(config)
+        await session.commit()
+    indexer = AsyncMock()
+    indexer.browser_resolver_enabled = False
+    indexer.fetch_torrent_descriptor.return_value = TorznabDescriptor(
+        content=b"fixture-torrent",
+        magnet_url=None,
+    )
+
+    async def register(_session, registry):
+        registry.register_indexer(config.id, indexer)
+        return {config.id: config}
+
+    monkeypatch.setattr("pullbox.composition.providers.register_indexers", register)
+    return config.id, indexer
 
 
 async def _seed_download(
@@ -496,6 +527,7 @@ class TestDownloadRetry:
         self,
         client: AsyncClient,
         db_factory: async_sessionmaker[AsyncSession],
+        torrent_source,
     ) -> None:
         issue_id = await _seed_issue(db_factory, status=IssueStatus.OWNED)
         download_id = await _seed_download(
@@ -505,10 +537,11 @@ class TestDownloadRetry:
             download_url="https://example.com/batman-004.torrent",
             downloaded_path=None,
             error_message="Cancelled by user",
+            indexer_id=torrent_source[0],
         )
         mock_client = AsyncMock()
         mock_client.client_type = "qbittorrent"
-        mock_client.add_torrent = AsyncMock(return_value="torrent-hash")
+        mock_client.add_torrent_data = AsyncMock(return_value="torrent-hash")
 
         with patch(
             "pullbox.composition.providers.register_download_clients",
@@ -523,10 +556,11 @@ class TestDownloadRetry:
             response = await client.post(f"/api/v1/downloads/{download_id}/retry")
 
         assert response.status_code == 200
-        mock_client.add_torrent.assert_awaited_once_with(
-            "https://example.com/batman-004.torrent",
+        mock_client.add_torrent_data.assert_awaited_once_with(
+            b"fixture-torrent",
             "Batman 004 (2025)",
         )
+        mock_client.add_torrent.assert_not_awaited()
         download = await _get_download(db_factory, download_id)
         assert download.external_id == "torrent-hash"
         issue = await _get_issue(db_factory, issue_id)
@@ -537,6 +571,7 @@ class TestDownloadRetry:
         self,
         client: AsyncClient,
         db_factory: async_sessionmaker[AsyncSession],
+        torrent_source,
     ) -> None:
         issue_id = await _seed_issue(db_factory, status=IssueStatus.OWNED)
         download_id = await _seed_download(
@@ -546,11 +581,12 @@ class TestDownloadRetry:
             download_url="https://example.com/absolute-wonder-woman-012.torrent",
             downloaded_path=None,
             error_message="Cancelled by user",
+            indexer_id=torrent_source[0],
         )
         provider_message = "Torrent was not added to qBittorrent."
         mock_client = AsyncMock()
         mock_client.client_type = "qbittorrent"
-        mock_client.add_torrent = AsyncMock(side_effect=QBittorrentError(provider_message))
+        mock_client.add_torrent_data = AsyncMock(side_effect=QBittorrentError(provider_message))
 
         with patch(
             "pullbox.composition.providers.register_download_clients",
@@ -566,6 +602,7 @@ class TestDownloadRetry:
 
         assert response.status_code == 502
         assert response.json()["detail"] == provider_message
+        mock_client.add_torrent.assert_not_awaited()
         download = await _get_download(db_factory, download_id)
         assert download.state == DownloadState.FAILED
         assert download.external_id == "download-ext"
@@ -825,6 +862,7 @@ class TestDownloadRouteFunctions:
     async def test_retry_download_route_sends_torrent(
         self,
         db_factory: async_sessionmaker[AsyncSession],
+        torrent_source,
     ) -> None:
         issue_id = await _seed_issue(db_factory)
         download_id = await _seed_download(
@@ -834,10 +872,11 @@ class TestDownloadRouteFunctions:
             download_url="https://example.com/batman-004.torrent",
             downloaded_path=None,
             error_message="Cancelled by user",
+            indexer_id=torrent_source[0],
         )
         mock_client = AsyncMock()
         mock_client.client_type = "qbittorrent"
-        mock_client.add_torrent = AsyncMock(return_value="torrent-hash")
+        mock_client.add_torrent_data = AsyncMock(return_value="torrent-hash")
 
         async with db_factory() as session:
             with patch(
@@ -853,16 +892,19 @@ class TestDownloadRouteFunctions:
             await session.commit()
 
         assert result == {"status": "sent"}
-        mock_client.add_torrent.assert_awaited_once_with(
-            "https://example.com/batman-004.torrent",
+        mock_client.add_torrent_data.assert_awaited_once_with(
+            b"fixture-torrent",
             "Batman 004 (2025)",
         )
+        mock_client.add_torrent.assert_not_awaited()
 
+    @pytest.mark.parametrize("error_type", [NewznabError, ProwlarrError])
     @pytest.mark.asyncio
-    async def test_retry_download_reports_torznab_descriptor_failure(
+    async def test_retry_download_reports_descriptor_failure(
         self,
         client: AsyncClient,
         db_factory: async_sessionmaker[AsyncSession],
+        error_type: type[Exception],
     ) -> None:
         issue_id = await _seed_issue(db_factory)
         async with db_factory() as session:
@@ -893,7 +935,7 @@ class TestDownloadRouteFunctions:
         mock_indexer = AsyncMock()
         mock_indexer.browser_resolver_enabled = True
         mock_indexer.fetch_torrent_descriptor = AsyncMock(
-            side_effect=NewznabError("The Torznab descriptor is unavailable."),
+            side_effect=error_type("The torrent descriptor is unavailable."),
         )
 
         with (
@@ -918,7 +960,9 @@ class TestDownloadRouteFunctions:
             response = await client.post(f"/api/v1/downloads/{download_id}/retry")
 
         assert response.status_code == 502
-        assert response.json()["detail"] == "The Torznab descriptor is unavailable."
+        assert response.json()["detail"] == "The torrent descriptor is unavailable."
+        mock_client.add_torrent.assert_not_awaited()
+        mock_client.add_torrent_data.assert_not_awaited()
         download = await _get_download(db_factory, download_id)
         assert download.state == DownloadState.FAILED
         assert download.error_message == "Descriptor failed"

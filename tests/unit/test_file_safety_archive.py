@@ -72,6 +72,20 @@ def test_run_safety_checks_rejects_unreadable_zip_archive(tmp_path: Path) -> Non
         )
 
 
+def test_run_safety_checks_classifies_zero_byte_archive_before_reader_failure(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "empty.cbz"
+    archive.touch()
+
+    with pytest.raises(FileSafetyError, match="zero_byte_file"):
+        run_safety_checks(
+            archive,
+            block_dangerous=True,
+            max_archive_size=2000 * 1024 * 1024,
+        )
+
+
 def test_ensure_zip_archive_inspectable_ignores_non_zip_and_accepts_valid_zip(
     tmp_path: Path,
 ) -> None:
@@ -93,6 +107,14 @@ def test_run_safety_checks_inspects_zip_archive_once(
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("safe/page001.jpg", b"ok")
         zf.writestr("safe/page002.jpg", b"ok")
+        zf.writestr(
+            "metadata/ComicInfo.xml",
+            (
+                "<ComicInfo><Series>Batman</Series><Number>1</Number>"
+                "<StoryArc>Batman: The Court of Owls</StoryArc>"
+                "<StoryArcNumber>001.50-A</StoryArcNumber></ComicInfo>"
+            ),
+        )
 
     open_count = 0
     original_zip_file = zipfile.ZipFile
@@ -104,13 +126,52 @@ def test_run_safety_checks_inspects_zip_archive_once(
 
     monkeypatch.setattr(zipfile, "ZipFile", counting_zip_file)
 
-    run_safety_checks(
+    inspection = run_safety_checks(
         archive,
         block_dangerous=True,
         max_archive_size=2000 * 1024 * 1024,
     )
 
     assert open_count == 1
+    assert len(inspection.archives) == 1
+    report = inspection.archives[0]
+    assert report.archive_path == archive
+    assert report.comicinfo is not None
+    assert report.comicinfo.series == "Batman"
+    assert report.comicinfo.number == "1"
+    assert report.comicinfo.story_arc == "Batman: The Court of Owls"
+    assert report.comicinfo.story_arc_number == "001.50-A"
+    assert report.comicinfo_entry == "metadata/ComicInfo.xml"
+    assert report.comicinfo_entry_count == 1
+    assert report.comicinfo_error is None
+    assert report.entry_names == (
+        "safe/page001.jpg",
+        "safe/page002.jpg",
+        "metadata/ComicInfo.xml",
+    )
+
+
+def test_run_safety_checks_prefers_canonical_root_comicinfo(tmp_path: Path) -> None:
+    archive = tmp_path / "duplicate-comicinfo.cbz"
+    with zipfile.ZipFile(archive, "w") as payload:
+        payload.writestr("Legacy/ComicInfo.xml", "<ComicInfo><Series>Wrong</Series></ComicInfo>")
+        payload.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Babyteeth</Series><Number>1</Number></ComicInfo>",
+        )
+        payload.writestr("page001.jpg", b"ok")
+
+    report = run_safety_checks(
+        archive,
+        block_dangerous=True,
+        max_archive_size=2000 * 1024 * 1024,
+    ).archives[0]
+
+    assert report.comicinfo_entry_count == 2
+    assert report.comicinfo_entry == "ComicInfo.xml"
+    assert report.comicinfo is not None
+    assert report.comicinfo.series == "Babyteeth"
+    assert report.comicinfo.number == "1"
 
 
 def test_run_safety_checks_rejects_dangerous_files_on_disk(tmp_path: Path) -> None:
@@ -159,6 +220,9 @@ def test_archive_helpers_report_size_and_dangerous_entries(tmp_path: Path) -> No
     assert report.total_size == 5
     assert report.traversal_entries == []
     assert report.dangerous_entries == ["scripts/setup.exe"]
+    assert report.entry_names == ("safe/page001.jpg", "scripts/setup.exe")
+    assert report.comicinfo is None
+    assert report.comicinfo_entry_count == 0
     assert inspect_zip_archive_safety(tmp_path / "issue.cbr", block_dangerous=True) is None
 
 

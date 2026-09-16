@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from pullbox.core.library_policy import LibraryIngestPolicy
     from pullbox.models.import_job import ImportedSeries, ImportJob, ImportJobAction
     from pullbox.models.issue import Issue
-    from pullbox.models.library import LibraryFile, MatchConfidence
+    from pullbox.models.library import LibraryFile, LibraryFileStorageMode, MatchConfidence
     from pullbox.services.import_file_execution_protocols import ReportFileProgressFunc
     from pullbox.services.import_file_preparation import PreparedImportFile
 
@@ -94,6 +94,8 @@ async def process_series_files_for_import(
         confidence: MatchConfidence,
         *,
         move_to_library: bool,
+        storage_mode: LibraryFileStorageMode,
+        expected_source_signature: dict[str, object] | None,
         library_root_id: int | None,
         transfer_method: str | None,
         normalize_to_cbz: bool | None = None,
@@ -106,6 +108,13 @@ async def process_series_files_for_import(
         | None = None,
         comicinfo_progress_callback: Callable[[str, int, int, str], Awaitable[None] | None]
         | None = None,
+        recovery_imported_file_id: int | None = None,
+        recovery_original_source_path: Path | None = None,
+        replace_existing_library_file: bool = False,
+        replacement_trash_dir: Path | None = None,
+        preserve_replaced_artifact: bool = False,
+        source_scan_root: Path | None = None,
+        strict_import_target: bool = False,
     ) -> LibraryFile | LibraryFileRegistrationOutcome:
         return await register_import_library_file(
             session,
@@ -114,6 +123,8 @@ async def process_series_files_for_import(
             issue,
             confidence,
             move_to_library=move_to_library,
+            storage_mode=storage_mode,
+            expected_source_signature=expected_source_signature,
             library_root_id=library_root_id,
             transfer_method=transfer_method,
             normalize_to_cbz=normalize_to_cbz,
@@ -124,6 +135,13 @@ async def process_series_files_for_import(
             permission_policy=permission_policy,
             transfer_progress_callback=transfer_progress_callback,
             comicinfo_progress_callback=comicinfo_progress_callback,
+            recovery_imported_file_id=recovery_imported_file_id,
+            recovery_original_source_path=recovery_original_source_path,
+            replace_existing_library_file=replace_existing_library_file,
+            replacement_trash_dir=replacement_trash_dir,
+            preserve_replaced_artifact=preserve_replaced_artifact,
+            source_scan_root=source_scan_root,
+            strict_import_target=strict_import_target,
         )
 
     return await core_processor(
@@ -147,6 +165,7 @@ async def process_series_files_for_import(
         move_to_trash=move_to_trash,
         report_file_progress=report_file_progress,
         defer_comicinfo_enrichment=defer_comicinfo_enrichment,
+        revalidate_managed_sources=True,
         file_worker_count=file_worker_count,
         session_factory=session_factory,
     )

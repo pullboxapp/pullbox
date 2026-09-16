@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from playwright.sync_api import Page, expect
 
 from pullbox.config import get_settings
 from pullbox.utilities.settings import resolve_utility_directory
@@ -17,6 +18,209 @@ pytestmark = pytest.mark.e2e
 
 class TestSettingsPage:
     """Behavior-first E2E checks for the settings shell."""
+
+    def test_search_priority_chevrons_swap_and_renumber_rows(
+        self, authed_page: Page, seeded_server: str
+    ) -> None:
+        page = authed_page
+        SettingsPage(page, seeded_server).goto("indexers")
+        card = page.get_by_test_id("settings-indexers-priority-card")
+        up = card.locator('[data-order-direction="up"]')
+        down = card.locator('[data-order-direction="down"]')
+        expect(up).to_have_count(4)
+        expect(up.first).to_be_disabled()
+        expect(down.last).to_be_disabled()
+        initial = [up.nth(index).get_attribute("aria-label") for index in range(4)]
+        assert initial[0] and initial[1]
+        down.first.press("Enter")
+        expect(up.first).to_have_attribute("aria-label", initial[1])
+        expect(up.nth(1)).to_have_attribute("aria-label", initial[0])
+        expect(card.locator('span[x-text="index + 1"]')).to_have_text(["1", "2", "3", "4"])
+        up.nth(1).press("Enter")
+        expect(up.first).to_have_attribute("aria-label", initial[0])
+        expect(up.nth(1)).to_have_attribute("aria-label", initial[1])
+
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_disabled_root_removal_preview_confirmation_and_cancel(
+        self,
+        authed_page,
+        seeded_server: str,
+        blocked: bool,
+    ) -> None:  # type: ignore[no-untyped-def]
+        root = {
+            "id": 702,
+            "name": "Offline archive",
+            "path": "/offline/library",
+            "enabled": False,
+            "is_default_managed_destination": False,
+            "allow_managed_writes": True,
+            "allow_referenced_registrations": True,
+            "status": "unavailable",
+            "available": False,
+            "readable": False,
+            "writable": False,
+            "free_bytes": None,
+            "can_disable": True,
+            "warnings": [],
+        }
+        removed = []
+        errors = []
+        authed_page.on("pageerror", lambda error: errors.append(str(error)))
+        authed_page.route(
+            "**/api/v1/config/library-roots",
+            lambda route: route.fulfill(
+                json=[root],
+            ),
+        )
+        authed_page.route(
+            "**/api/v1/config/library-roots/702/remove/preview",
+            lambda route: route.fulfill(
+                json={
+                    **root,
+                    "can_remove": not blocked,
+                    "history_count": 1,
+                    "has_naming_policy": False,
+                    "dependencies": {"series": int(blocked)},
+                    "preview_token": None if blocked else "signed-preview",
+                    "blocking_reasons": ["1 series still uses this root. Relocate it first."]
+                    if blocked
+                    else [],
+                },
+            ),
+        )
+
+        def delete_root(route):  # type: ignore[no-untyped-def]
+            removed.append(route.request.post_data_json)
+            assert route.request.method == "DELETE"
+            route.fulfill(status=204)
+
+        authed_page.route("**/api/v1/config/library-roots/702", delete_root)
+        SettingsPage(authed_page, seeded_server).goto("media")
+        card = authed_page.get_by_test_id("settings-media-library-root-702")
+        card.get_by_role("button", name="Remove Offline archive").click()
+        preview = card.get_by_test_id("settings-media-library-root-removal")
+        preview.wait_for(state="visible")
+        assert "No folders or files will be deleted." in preview.inner_text()
+        confirm = preview.get_by_role("button", name="Confirm removal")
+        if blocked:
+            assert confirm.is_disabled()
+            assert "1 series" in preview.inner_text()
+        else:
+            confirm.click()
+            dialog = authed_page.locator("#pb-confirm-dialog")
+            dialog.get_by_role("button", name="Cancel", exact=True).click()
+            assert removed == []
+            assert card.is_visible()
+            confirm.click()
+            dialog.get_by_role("button", name="Remove root", exact=True).click()
+            card.wait_for(state="detached")
+            assert removed == [{"preview_token": "signed-preview", "confirmation": "REMOVE"}]
+        assert errors == []
+
+    def test_media_library_root_manager_previews_and_adds_a_root(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        roots = [
+            {
+                "id": 700,
+                "name": "Primary",
+                "path": "/comics",
+                "enabled": True,
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": True,
+                "is_default_managed_destination": True,
+                "available": True,
+                "readable": True,
+                "writable": True,
+                "free_bytes": 10 * 1024**3,
+                "status": "ready",
+                "warnings": [],
+                "can_disable": False,
+            }
+        ]
+        create_requests: list[dict[str, Any]] = []
+
+        def handle_roots(route) -> None:  # type: ignore[no-untyped-def]
+            if route.request.method == "GET":
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(roots),
+                )
+                return
+
+            payload = route.request.post_data_json
+            create_requests.append(payload)
+            created = {
+                "id": 701,
+                **payload,
+                "enabled": True,
+                "available": True,
+                "readable": True,
+                "writable": False,
+                "free_bytes": 8 * 1024**3,
+                "status": "read_only",
+                "warnings": ["Directory is read-only to Pullbox."],
+                "can_disable": True,
+            }
+            roots.append(created)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps(created),
+            )
+
+        def handle_preview(route) -> None:  # type: ignore[no-untyped-def]
+            payload = route.request.post_data_json
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        **payload,
+                        "available": True,
+                        "readable": True,
+                        "writable": False,
+                        "free_bytes": 8 * 1024**3,
+                        "status": "read_only",
+                        "warnings": ["Directory is read-only to Pullbox."],
+                        "blocking_reasons": [],
+                        "can_create": True,
+                    }
+                ),
+            )
+
+        authed_page.route("**/api/v1/config/library-roots/preview", handle_preview)
+        authed_page.route("**/api/v1/config/library-roots", handle_roots)
+
+        settings = SettingsPage(authed_page, seeded_server)
+        settings.goto("media")
+
+        manager = authed_page.get_by_test_id("settings-media-library-roots")
+        manager.get_by_text("Primary", exact=True).wait_for(state="visible", timeout=5000)
+        authed_page.get_by_test_id("settings-media-library-root-name").fill("Archive")
+        authed_page.get_by_test_id("settings-media-library-root-path").fill("/archive")
+        authed_page.get_by_test_id("settings-media-library-root-managed-role").locator(
+            "xpath=.."
+        ).click()
+
+        manager.get_by_text("Ready to add", exact=True).wait_for(state="visible", timeout=5000)
+        manager.get_by_role("button", name="Add library root").click()
+
+        archive = authed_page.get_by_test_id("settings-media-library-root-701")
+        archive.get_by_text("Archive", exact=True).wait_for(state="visible", timeout=5000)
+        assert archive.get_by_text("Read only", exact=True).is_visible()
+        assert create_requests == [
+            {
+                "name": "Archive",
+                "path": "/archive",
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": False,
+                "is_default_managed_destination": False,
+            }
+        ]
 
     def test_settings_renders_stable_shell(
         self,
@@ -795,16 +999,10 @@ class TestSettingsPage:
         settings = SettingsPage(authed_page, seeded_server)
         settings.goto("media")
 
-        authed_page.evaluate(
-            """
-            () => {
-              const content = document.getElementById("content");
-              if (!content) return;
-              content.scrollTop = 500;
-              content.dispatchEvent(new Event("scroll"));
-            }
-            """
-        )
+        format_toggle = authed_page.locator(
+            "[data-testid='settings-panel-media'] .settings-row:has(.settings-row-label:text('Normalize Imported Archives to CBZ')) .toggle-switch"
+        ).first
+        format_toggle.scroll_into_view_if_needed()
 
         before_scroll = authed_page.evaluate(
             """
@@ -814,27 +1012,29 @@ class TestSettingsPage:
             }
             """
         )
-        assert before_scroll == 500
+        assert before_scroll > 0
 
-        authed_page.locator(
-            "[data-testid='settings-panel-media'] .settings-row:has(.settings-row-label:text('Normalize Imported Archives to CBZ')) .toggle-switch"
-        ).first.click()
+        format_toggle.click()
 
         authed_page.wait_for_function(
             """
-            () => {
+            (expectedScroll) => {
               const content = document.getElementById("content");
               if (!content) return false;
-              const resetButton = document.querySelector(
-                "[data-testid='settings-panel-media'] .section-card:nth-of-type(2) .settings-footer button[type='button']"
+              const formatToggle = document.querySelector(
+                "[data-testid='settings-panel-media'] input[name='convert_to_preferred_format_on_import']"
               );
+              const resetButton = formatToggle
+                ?.closest("form")
+                ?.querySelector(".settings-footer button[type='button']");
               return (
-                Math.abs(content.scrollTop - 500) <= 1 &&
+                Math.abs(content.scrollTop - expectedScroll) <= 1 &&
                 !!resetButton &&
                 window.getComputedStyle(resetButton).display !== "none"
               );
             }
             """,
+            arg=before_scroll,
             timeout=5000,
         )
 
@@ -846,7 +1046,9 @@ class TestSettingsPage:
             }
             """
         )
-        assert abs(after_scroll - 500) <= 1, f"media toggle scrolled content to {after_scroll}"
+        assert abs(after_scroll - before_scroll) <= 1, (
+            f"media toggle scrolled content from {before_scroll} to {after_scroll}"
+        )
 
     def test_media_naming_preview_edit_keeps_layout_stable(
         self,
@@ -859,7 +1061,7 @@ class TestSettingsPage:
 
         authed_page.wait_for_function(
             """
-            () => Array.from(document.querySelectorAll(".settings-media-preview-panel"))
+            () => Array.from(document.querySelectorAll("[data-testid='settings-naming-editor'] .settings-media-preview-panel"))
               .every((el) => el.dataset.previewReady === "true")
             """,
             timeout=5000,
@@ -891,17 +1093,19 @@ class TestSettingsPage:
                 content_type="application/json",
                 body=json.dumps(
                     {
-                        "examples": [
-                            {
-                                "input": "Batman #1",
-                                "output": "Batman (2016) #001 — revised.cbz",
-                            }
-                        ]
+                        "examples": {
+                            "comic_file_template": [
+                                {
+                                    "input": "Batman #1",
+                                    "output": "Batman (2016) #001 — revised.cbz",
+                                }
+                            ]
+                        }
                     }
                 ),
             )
 
-        authed_page.route("**/api/v1/config/naming/preview?*", handle_preview)
+        authed_page.route("**/api/v1/config/naming/preview", handle_preview)
 
         standard_input.fill("{Series} ({Year}) #{Issue:03d} — revised")
 
@@ -1037,7 +1241,7 @@ class TestSettingsPage:
 
         naming_card = (
             authed_page.locator("[data-testid='settings-panel-media'] .section-card")
-            .filter(has=authed_page.locator(".section-title-plain:text-is('Naming behavior')"))
+            .filter(has=authed_page.locator(".section-title-plain:text-is('Naming templates')"))
             .first
         )
         dropdown = authed_page.locator(
@@ -1056,7 +1260,7 @@ class TestSettingsPage:
         assert panel_box is not None
         assert panel_box["y"] > card_box["y"]
         assert panel_box["y"] + panel_box["height"] > card_box["y"] + card_box["height"], (
-            "Colon replacement dropdown should extend beyond the naming behavior card "
+            "Colon replacement dropdown should extend beyond the naming templates card "
             "instead of being clipped underneath it."
         )
 

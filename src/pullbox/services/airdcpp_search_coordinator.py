@@ -194,6 +194,7 @@ class AirDcppSearchCoordinator:
             wanted_series=target.series_title,
             wanted_issue=target.issue_number,
             wanted_year=target.search_year,
+            year_context=target.year_context,
             wanted_issue_type=target.issue_type,
             alternate_names=target.alternate_names,
             wanted_issue_title=target.issue_title,
@@ -537,11 +538,7 @@ class AirDcppSearchCoordinator:
 
 
 def _query_pattern(target: IssueSearchTarget) -> str:
-    number = (
-        str(int(target.issue_number))
-        if target.issue_number.is_integer()
-        else str(target.issue_number)
-    )
+    number = target.effective_issue_number_text
     return f"{target.series_title} {number}"
 
 

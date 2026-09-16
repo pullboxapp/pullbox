@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import ImportedFileStatus
 from pullbox.models.issue import IssueType
+from pullbox.services.import_file_issue_signals import candidate_issue_number_text
 from pullbox.services.import_file_match_targets import (
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND,
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
@@ -44,6 +45,22 @@ class FileMatchLogEvent:
     level: str = "DEBUG"
 
 
+_SOURCE_EVIDENCE_DIAGNOSTIC_KEYS = (
+    "source_issue_type",
+    "comicvine_series_id",
+    "series_status",
+    "issue_count_hint",
+    "metadata_signals",
+    "source_metadata",
+    "mylar3_cross_folder_reconciliation",
+)
+
+
+def _source_evidence_diagnostics(imp_file: ImportedFile) -> dict[str, Any]:
+    diagnostics = dict(imp_file.diagnostics or {})
+    return {key: diagnostics[key] for key in _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS if key in diagnostics}
+
+
 def apply_matched_file_outcome(
     imp_file: ImportedFile,
     imp_series: ImportedSeries,
@@ -53,6 +70,7 @@ def apply_matched_file_outcome(
     duplicate_target_state: DuplicateTargetStateFunc,
 ) -> FileMatchLogEvent:
     """Apply accepted file-match status/diagnostics and return its log event."""
+    source_evidence = _source_evidence_diagnostics(imp_file)
     imp_file.matched_issue_id = match_candidate.matched_issue_id
     imp_file.matched_issue_cv_id = match_candidate.matched_issue_cv_id
     imp_file.match_confidence = match_candidate.confidence
@@ -63,10 +81,13 @@ def apply_matched_file_outcome(
         if match_candidate.has_library_file:
             imp_file.status = ImportedFileStatus.ALREADY_OWNED
             imp_file.include_in_import = False
-            imp_file.diagnostics = _duplicate_file_diagnostics(
-                matched_issue,
-                target_state="already_owned",
-            )
+            imp_file.diagnostics = {
+                **source_evidence,
+                **_duplicate_file_diagnostics(
+                    matched_issue,
+                    target_state="already_owned",
+                ),
+            }
             return FileMatchLogEvent(
                 name="import_duplicate_file_already_owned",
                 message=f"Duplicate file already owned: {imp_file.file_name}",
@@ -81,10 +102,13 @@ def apply_matched_file_outcome(
         target_state = duplicate_target_state(matched_issue)
         imp_file.status = ImportedFileStatus.MATCHED
         imp_file.include_in_import = False
-        imp_file.diagnostics = _duplicate_file_diagnostics(
-            matched_issue,
-            target_state=target_state,
-        )
+        imp_file.diagnostics = {
+            **source_evidence,
+            **_duplicate_file_diagnostics(
+                matched_issue,
+                target_state=target_state,
+            ),
+        }
         return FileMatchLogEvent(
             name="import_duplicate_file_importable_match",
             message=f"Duplicate file matched to {target_state} issue: {imp_file.file_name}",
@@ -109,6 +133,7 @@ def apply_matched_file_outcome(
     ):
         provisional = match_candidate.method == PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD
         imp_file.diagnostics = {
+            **source_evidence,
             "kind": (
                 PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND
                 if provisional
@@ -131,11 +156,14 @@ def apply_matched_file_outcome(
             ),
         }
     else:
-        imp_file.diagnostics = _target_issue_summary_diagnostics(
-            imp_file,
-            imp_series,
-            match_candidate,
-        )
+        imp_file.diagnostics = {
+            **source_evidence,
+            **_target_issue_summary_diagnostics(
+                imp_file,
+                imp_series,
+                match_candidate,
+            ),
+        }
     return FileMatchLogEvent(
         name="import_file_match_detail",
         message=f"File matched: {imp_file.file_name}",
@@ -174,6 +202,16 @@ def _target_issue_summary_diagnostics(
         "cover_url": None,
         "issue_type": issue_type.value,
     }
+    issue_number_text = (
+        match_candidate.matched_issue.effective_issue_number_text
+        if match_candidate.matched_issue is not None
+        else candidate_issue_number_text(imp_file)
+    )
+    numeric_issue_text = (
+        str(int(issue_number)) if float(issue_number).is_integer() else str(float(issue_number))
+    )
+    if issue_number_text is not None and issue_number_text != numeric_issue_text:
+        target_summary["issue_number_text"] = issue_number_text
     return {
         "target_issue_summary": target_summary,
     }
@@ -292,6 +330,7 @@ def apply_unmatched_file_outcome(
         )
         next_diagnostics = metadata_conflict or {
             "kind": "duplicate_series_file",
+            "reason": "duplicate_series_no_importable_target",
             "target_state": (
                 "no_importable_targets"
                 if duplicate_merge_profile is not None and not duplicate_merge_profile.actionable
@@ -309,6 +348,10 @@ def apply_unmatched_file_outcome(
                 else 0
             ),
         }
+        next_diagnostics.setdefault(
+            "reason",
+            str(next_diagnostics.get("kind") or "duplicate_series_issue_target_not_found"),
+        )
         imp_file.diagnostics = {**existing_diagnostics, **next_diagnostics}
         informational_only = (
             duplicate_merge_profile is not None and not duplicate_merge_profile.actionable
@@ -341,9 +384,23 @@ def apply_unmatched_file_outcome(
         )
 
     imp_file.diagnostics = (
-        {**existing_diagnostics, **metadata_conflict}
+        {
+            **existing_diagnostics,
+            **metadata_conflict,
+            "reason": str(
+                metadata_conflict.get("reason")
+                or metadata_conflict.get("kind")
+                or "issue_target_not_found"
+            ),
+        }
         if metadata_conflict is not None
-        else existing_diagnostics
+        else {
+            **existing_diagnostics,
+            "reason": "issue_target_not_found",
+            "rejection_reason": (
+                "No issue target matched the available file name and metadata evidence."
+            ),
+        }
     )
     return FileMatchLogEvent(
         name=(

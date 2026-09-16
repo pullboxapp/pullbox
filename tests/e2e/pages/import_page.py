@@ -64,6 +64,129 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-collection-source-browse']").first
 
     @property
+    def source_path_input(self) -> Locator:
+        return self.page.locator("[data-testid='import-collection-source-path']").first
+
+    @property
+    def mylar_path_section(self) -> Locator:
+        return self.page.locator("[data-testid='import-mylar-path-section']").first
+
+    @property
+    def mylar_path_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-mylar-path-preview']").first
+
+    @property
+    def mylar_path_mapping_rows(self) -> Locator:
+        return self.page.locator("[data-testid='import-mylar-path-mapping-row']")
+
+    @property
+    def mylar_path_confirm(self) -> Locator:
+        return self.page.locator("[data-testid='import-mylar-path-confirm']").first
+
+    @property
+    def file_handling_managed(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-managed']").first
+
+    @property
+    def file_handling_in_place(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place']").first
+
+    @property
+    def file_handling_in_place_ready(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place-ready']").first
+
+    @property
+    def file_handling_in_place_blocked(self) -> Locator:
+        return self.page.locator("[data-testid='import-file-handling-in-place-blocked']").first
+
+    @property
+    def start_scan_button(self) -> Locator:
+        return self.page.locator("[data-testid='import-start-scan']").first
+
+    @property
+    def source_layout_series_folders(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-series-folders']").first
+
+    @property
+    def source_layout_section(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-advanced']").first
+
+    @property
+    def advanced_options(self) -> Locator:
+        return self.page.locator("[data-testid='import-advanced-options']").first
+
+    @property
+    def advanced_file_management(self) -> Locator:
+        return self.page.locator("[data-testid='import-advanced-file-management']").first
+
+    def open_advanced_options(self) -> None:
+        if not self.advanced_options.evaluate("element => element.open"):
+            self.advanced_options.locator("summary").first.click()
+
+    def open_layout_options(self) -> None:
+        self.open_advanced_options()
+        if not self.source_layout_section.evaluate("element => element.open"):
+            self.source_layout_section.locator("summary").first.click()
+
+    def open_file_management_options(self) -> None:
+        self.open_advanced_options()
+        if not self.advanced_file_management.evaluate("element => element.open"):
+            self.advanced_file_management.locator("summary").first.click()
+
+    def open_mylar_path_options(self) -> None:
+        self.open_advanced_options()
+        if not self.mylar_path_section.evaluate("element => element.open"):
+            self.mylar_path_section.locator("summary").first.click()
+
+    @property
+    def source_layout_publisher_series(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-publisher-series']").first
+
+    @property
+    def source_layout_custom(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-custom']").first
+
+    @property
+    def source_layout_custom_fields(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-custom-fields']").first
+
+    @property
+    def source_layout_analyze_button(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-analyze']").first
+
+    @property
+    def source_layout_fallback_checkbox(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-fallback']").first
+
+    @property
+    def source_layout_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-layout-preview']").first
+
+    @property
+    def story_arc_section(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-section']").first
+
+    @property
+    def story_arc_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-preview']").first
+
+    @property
+    def story_arc_import_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-import-toggle']").first
+
+    @property
+    def story_arc_materialize_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-story-arc-materialize-toggle']").first
+
+    @property
+    def future_layout_toggle(self) -> Locator:
+        return self.page.locator("[data-testid='import-future-layout-toggle']").first
+
+    @property
+    def future_layout_preview(self) -> Locator:
+        return self.page.locator("[data-testid='import-future-layout-preview']").first
+
+    @property
     def file_browser_modal(self) -> Locator:
         return self.page.locator("[data-testid='file-browser-modal']").first
 
@@ -77,7 +200,21 @@ class ImportPage(BasePage):
 
     @property
     def unmatched_panel(self) -> Locator:
-        return self.page.locator("[data-testid='import-orphaned-page']").first
+        return self.page.locator("[data-testid='import-follow-up-page']").first
+
+    @property
+    def follow_up_job_list(self) -> Locator:
+        return self.page.locator("[data-testid='import-follow-up-job-list']").first
+
+    @property
+    def follow_up_jobs_table(self) -> Locator:
+        return self.page.locator("[data-testid='import-follow-up-jobs-table']").first
+
+    def open_follow_up_job(self, source_path: str) -> None:
+        row = self.follow_up_jobs_table.locator("tbody tr").filter(has_text=source_path).first
+        row.get_by_role("link").click()
+        self.wait_for_htmx()
+        self.unmatched_table.wait_for(state="visible", timeout=5000)
 
     @property
     def stepper(self) -> Locator:
@@ -193,8 +330,8 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-progress-eta']").first
 
     @property
-    def progress_recent_log(self) -> Locator:
-        return self.page.locator("[data-testid='import-progress-recent-log']").first
+    def progress_log_download(self) -> Locator:
+        return self.page.locator("[data-testid='import-progress-log-download']").first
 
     @property
     def progress_continue_button(self) -> Locator:
@@ -231,6 +368,10 @@ class ImportPage(BasePage):
     @property
     def retry_failed_button(self) -> Locator:
         return self.page.locator("[data-testid='import-results-retry-action']").first
+
+    @property
+    def review_follow_up_button(self) -> Locator:
+        return self.page.locator("[data-testid='import-results-follow-up-action'] a").first
 
     @property
     def rollback_import_button(self) -> Locator:
@@ -336,7 +477,11 @@ class ImportPage(BasePage):
         return self.page.locator("[data-testid='import-orphaned-modal-host']").first
 
     def select_unmatched_view(self, key: str) -> None:
-        self.select_dropdown_option("import-orphaned-view", key)
+        follow_up_view = self.dropdown("import-follow-up-view")
+        dropdown_name = (
+            "import-follow-up-view" if follow_up_view.is_visible() else "import-orphaned-view"
+        )
+        self.select_dropdown_option(dropdown_name, key)
 
     def show_collection_source_step(self) -> None:
         self.page.evaluate(

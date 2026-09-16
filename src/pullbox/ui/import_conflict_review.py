@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from pullbox.composition.services import build_import_control_service
 from pullbox.core.exceptions import NotFoundError
@@ -40,8 +40,21 @@ async def _load_import_conflict_review_context(
     if job is None:
         raise NotFoundError("ImportJob", job_id)
 
+    allowed_sort_fields = {"series", "conflict", "files", "signal", "status"}
+    sort_field = sort.removeprefix("-")
+    if sort_field not in allowed_sort_fields:
+        sort = "series"
+
+    page_size = 25
     svc = build_import_control_service()
-    conflict_groups = await svc.get_conflict_groups(session, job_id)
+    conflict_page = await svc.get_conflict_groups_page(
+        session,
+        job_id,
+        page=page,
+        page_size=page_size,
+        sort=sort,
+    )
+    conflict_groups = list(conflict_page.items)
     metadata_extractor = SourceMetadataExtractor()
 
     def _series_label(imp_series: ImportedSeries) -> str:
@@ -128,118 +141,98 @@ async def _load_import_conflict_review_context(
                 seen[normalized] = label
         return sorted(seen.values(), key=lambda value: NameMatcher.normalize(value))
 
-    def _conflict_sort_issue_number(group: dict[str, object]) -> tuple[int, float, str]:
-        value = group.get("display_issue_number")
-        if value is None:
-            return (1, 0.0, "")
-        if isinstance(value, int | float):
-            return (0, float(value), str(value))
-        if isinstance(value, str):
-            try:
-                return (0, float(value), value)
-            except ValueError:
-                return (0, 0.0, value)
-        return (0, 0.0, str(value))
+    series_by_id: dict[int, ImportedSeries] = {}
+    for group in conflict_groups:
+        group_series = group.get("series")
+        if isinstance(group_series, ImportedSeries):
+            series_by_id[group_series.id] = group_series
 
-    def _default_conflict_sort_key(
-        group: dict[str, object],
-    ) -> tuple[str, int, tuple[int, float, str], str]:
-        series_label = str(group.get("series_name") or group.get("raw_series_name") or "")
-        kind_order = 0 if group.get("kind") == "series_conflict" else 1
-        return (
-            NameMatcher.normalize(series_label),
-            kind_order,
-            _conflict_sort_issue_number(group),
-            str(group.get("conflict_group_id") or ""),
+    requested_series_ids = {
+        int(series_id)
+        for group in conflict_groups
+        if (series_id := group.get("series_id")) is not None
+    }
+    missing_series_ids = requested_series_ids.difference(series_by_id)
+    if missing_series_ids:
+        series_result = await session.execute(
+            select(ImportedSeries).where(ImportedSeries.id.in_(missing_series_ids))
         )
+        series_by_id.update({item.id: item for item in series_result.scalars().all()})
 
-    def _conflict_signal_label(group: dict[str, object]) -> str:
-        diagnostics = group.get("diagnostics")
-        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-        selected_candidate = diagnostics.get("selected_candidate")
-        if isinstance(selected_candidate, dict) and selected_candidate.get("title"):
-            return str(selected_candidate["title"])
-        if group.get("kind") == "series_conflict":
-            return "candidate needs review"
-        return "auto-selected" if group.get("has_preferred") else "needs choice"
+    issue_ids = {
+        int(issue_id)
+        for group in conflict_groups
+        if (issue_id := group.get("matched_issue_id")) is not None
+    }
+    issues_by_id: dict[int, Issue] = {}
+    if issue_ids:
+        issue_result = await session.execute(select(Issue).where(Issue.id.in_(issue_ids)))
+        issues_by_id = {item.id: item for item in issue_result.scalars().all()}
 
-    def _conflict_status_label(group: dict[str, object]) -> str:
-        if group.get("kind") == "series_conflict":
-            return "series match conflict"
-        return "auto-selected" if group.get("has_preferred") else "needs choice"
+    series_conflicts = [
+        group for group in conflict_groups if group.get("kind") == "series_conflict"
+    ]
+    sibling_series_by_name: dict[str, list[ImportedSeries]] = {}
+    related_files_by_series_id: dict[int, list[ImportedFile]] = {}
+    if series_conflicts:
+        conflict_series = [
+            series_by_id[int(group["series_id"])]
+            for group in series_conflicts
+            if int(group["series_id"]) in series_by_id
+        ]
+        raw_names = {item.raw_series_name.casefold() for item in conflict_series}
+        sibling_result = await session.execute(
+            select(ImportedSeries).where(
+                ImportedSeries.import_job_id == job_id,
+                func.lower(ImportedSeries.raw_series_name).in_(raw_names),
+            )
+        )
+        sibling_series = list(sibling_result.scalars().all())
+        for sibling in sibling_series:
+            sibling_series_by_name.setdefault(
+                NameMatcher.normalize(sibling.raw_series_name), []
+            ).append(sibling)
 
-    def _sortable_conflict_key(group: dict[str, object]) -> Any:
-        match sort_field:
-            case "conflict":
-                return (
-                    0 if group.get("kind") == "series_conflict" else 1,
-                    _conflict_sort_issue_number(group),
-                    _default_conflict_sort_key(group),
+        sibling_ids = [sibling.id for sibling in sibling_series]
+        if sibling_ids:
+            related_file_limit = max(24, len(series_conflicts) * 24)
+            sibling_files_result = await session.execute(
+                select(ImportedFile)
+                .where(ImportedFile.import_series_id.in_(sibling_ids))
+                .order_by(ImportedFile.has_comicinfo.desc(), ImportedFile.id.asc())
+                .limit(related_file_limit)
+            )
+            for sibling_file in sibling_files_result.scalars().all():
+                related_files_by_series_id.setdefault(sibling_file.import_series_id, []).append(
+                    sibling_file
                 )
-            case "files":
-                return (
-                    _object_to_int(group.get("file_count")),
-                    _default_conflict_sort_key(group),
-                )
-            case "signal":
-                return (
-                    NameMatcher.normalize(_conflict_signal_label(group)),
-                    _default_conflict_sort_key(group),
-                )
-            case "status":
-                return (
-                    NameMatcher.normalize(_conflict_status_label(group)),
-                    _default_conflict_sort_key(group),
-                )
-            case _:
-                return _default_conflict_sort_key(group)
-
-    allowed_sort_fields = {"series", "conflict", "files", "signal", "status"}
-    sort_desc = sort.startswith("-")
-    sort_field = sort.removeprefix("-")
-    if sort_field not in allowed_sort_fields:
-        sort_field = "series"
-        sort_desc = False
-        sort = "series"
 
     enriched_groups: list[dict[str, object]] = []
     for group in conflict_groups:
         if group.get("kind") == "series_conflict":
-            imp_series = await session.get(ImportedSeries, group["series_id"])
+            imp_series = series_by_id.get(int(group["series_id"]))
             if imp_series is None:
                 continue
-            files = list(group.get("files", []))
+            files = [item for item in group.get("files", []) if isinstance(item, ImportedFile)]
             parsed_series_names = _distinct_filename_series_names(files)
-            sibling_series_result = await session.execute(
-                select(ImportedSeries).where(
-                    ImportedSeries.import_job_id == job_id,
-                    ImportedSeries.id != imp_series.id,
-                )
-            )
             normalized_title = NameMatcher.normalize(imp_series.raw_series_name or "")
             sibling_series = [
                 sibling
-                for sibling in sibling_series_result.scalars().all()
-                if NameMatcher.normalize(sibling.raw_series_name or "") == normalized_title
+                for sibling in sibling_series_by_name.get(normalized_title, [])
+                if sibling.id != imp_series.id
             ]
             sibling_by_id = {sibling.id: sibling for sibling in sibling_series}
             related_source_files: list[dict[str, object]] = []
             current_series_year = imp_series.raw_year
             if sibling_by_id:
-                sibling_files_result = await session.execute(
-                    select(ImportedFile)
-                    .where(ImportedFile.import_series_id.in_(list(sibling_by_id)))
-                    .order_by(ImportedFile.import_series_id.asc(), ImportedFile.id.asc())
-                )
-                for sibling_file in sibling_files_result.scalars().all():
-                    related_summary = _build_source_file_summary(
-                        sibling_file,
-                        current_series_label=_series_label(
-                            sibling_by_id[sibling_file.import_series_id]
-                        ),
-                    )
-                    if related_summary["comicinfo"]:
-                        related_source_files.append(related_summary)
+                for sibling_id, sibling in sibling_by_id.items():
+                    for sibling_file in related_files_by_series_id.get(sibling_id, []):
+                        related_summary = _build_source_file_summary(
+                            sibling_file,
+                            current_series_label=_series_label(sibling),
+                        )
+                        if related_summary["comicinfo"]:
+                            related_source_files.append(related_summary)
             related_source_files.sort(
                 key=lambda item: (
                     0
@@ -262,7 +255,8 @@ async def _load_import_conflict_review_context(
                     "raw_series_name": imp_series.raw_series_name,
                     "source_folder": imp_series.source_folder or "",
                     "has_preferred": False,
-                    "file_count": len(files),
+                    "file_count": _object_to_int(group.get("file_count"), len(files)),
+                    "files_truncated": bool(group.get("files_truncated")),
                     "display_issue_number": None,
                     "parsed_series_names": parsed_series_names,
                     "mixed_series_bucket": False,
@@ -283,31 +277,31 @@ async def _load_import_conflict_review_context(
         series_name = ""
         source_folder = ""
         if group["matched_issue_id"]:
-            issue = await session.get(Issue, group["matched_issue_id"])
-        if group["files"]:
-            first_file: ImportedFile = group["files"][0]
-            imp_series = await session.get(ImportedSeries, first_file.import_series_id)
-            if imp_series:
-                series_name = imp_series.raw_series_name
-                if imp_series.raw_year:
-                    series_name += f" ({imp_series.raw_year})"
-                source_folder = imp_series.source_folder or ""
+            issue = issues_by_id.get(int(group["matched_issue_id"]))
+        group_files = [item for item in group.get("files", []) if isinstance(item, ImportedFile)]
+        group_series_id = group.get("series_id")
+        imp_series = series_by_id.get(int(group_series_id)) if group_series_id is not None else None
+        if imp_series:
+            series_name = imp_series.raw_series_name
+            if imp_series.raw_year:
+                series_name += f" ({imp_series.raw_year})"
+            source_folder = imp_series.source_folder or ""
 
         parsed_issue_numbers = sorted(
-            {f.parsed_issue_number for f in group["files"] if f.parsed_issue_number is not None}
+            {f.parsed_issue_number for f in group_files if f.parsed_issue_number is not None}
         )
-        parsed_series_names = _distinct_filename_series_names(group["files"])
+        parsed_series_names = _distinct_filename_series_names(group_files)
         display_issue_number = (
             issue.issue_number
             if issue is not None
             else (parsed_issue_numbers[0] if parsed_issue_numbers else None)
         )
 
-        has_preferred = any(f.is_preferred for f in group["files"])
-        preferred_file = next((f for f in group["files"] if f.is_preferred), None)
+        has_preferred = any(f.is_preferred for f in group_files)
+        preferred_file = next((f for f in group_files if f.is_preferred), None)
         diagnostics = (
             (preferred_file.diagnostics if preferred_file is not None else None)
-            or (group["files"][0].diagnostics if group["files"] else {})
+            or (group_files[0].diagnostics if group_files else {})
             or {}
         )
         enriched_groups.append(
@@ -315,12 +309,13 @@ async def _load_import_conflict_review_context(
                 "kind": group.get("kind", "file_conflict"),
                 "conflict_group_id": group["conflict_group_id"],
                 "matched_issue_id": group["matched_issue_id"],
-                "files": group["files"],
+                "files": group_files,
                 "issue": issue,
                 "series_name": series_name,
                 "source_folder": source_folder,
                 "has_preferred": has_preferred,
-                "file_count": len(group["files"]),
+                "file_count": _object_to_int(group.get("file_count"), len(group_files)),
+                "files_truncated": bool(group.get("files_truncated")),
                 "display_issue_number": display_issue_number,
                 "parsed_series_names": parsed_series_names,
                 "mixed_series_bucket": len(parsed_series_names) > 1,
@@ -328,28 +323,20 @@ async def _load_import_conflict_review_context(
             }
         )
 
-    enriched_groups.sort(key=_sortable_conflict_key, reverse=sort_desc)
-
-    page_size = 25
-    total_groups = len(enriched_groups)
-    file_conflict_groups = [g for g in enriched_groups if g.get("kind") == "file_conflict"]
-    auto_resolved = sum(1 for g in file_conflict_groups if g["has_preferred"])
-    needs_decision = sum(1 for g in file_conflict_groups if not g["has_preferred"])
-    series_candidate_conflicts = sum(
-        1 for g in enriched_groups if g.get("kind") == "series_conflict"
-    )
+    total_groups = conflict_page.total
     total_pages = max(1, (total_groups + page_size - 1) // page_size)
-    current_page = min(page, total_pages)
-    visible_groups = enriched_groups[(current_page - 1) * page_size : current_page * page_size]
-    visible_file_conflict_groups = [g for g in visible_groups if g.get("kind") == "file_conflict"]
+    current_page = conflict_page.page
+    visible_file_conflict_groups = [
+        group for group in enriched_groups if group.get("kind") == "file_conflict"
+    ]
 
     return {
         "job": job,
-        "conflict_groups": visible_groups,
-        "auto_resolved": auto_resolved,
-        "needs_decision": needs_decision,
-        "series_candidate_conflicts": series_candidate_conflicts,
-        "file_conflict_group_count": len(file_conflict_groups),
+        "conflict_groups": enriched_groups,
+        "auto_resolved": conflict_page.auto_resolved,
+        "needs_decision": conflict_page.needs_decision,
+        "series_candidate_conflicts": conflict_page.series_candidate_conflicts,
+        "file_conflict_group_count": conflict_page.file_conflict_groups,
         "visible_file_conflict_group_count": len(visible_file_conflict_groups),
         "total_groups": total_groups,
         "page": current_page,

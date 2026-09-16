@@ -70,6 +70,15 @@ async def split_explicit_issue_series_mismatches(
             remaining_files.append(imp_file)
             continue
 
+        series_signal = metadata.signals.get("comicvine_series_id")
+        if (
+            metadata.comicvine_series_id == current_target_cv_id
+            and series_signal in {MetadataSignal.COMICINFO, MetadataSignal.SIDECAR}
+            and not metadata.diagnostics.get("identity_conflicts")
+        ):
+            remaining_files.append(imp_file)
+            continue
+
         try:
             issue_meta = await metadata_provider.get_issue(str(metadata.comicvine_issue_id))
         except Exception as exc:
@@ -134,20 +143,31 @@ async def split_explicit_issue_series_mismatches(
         imp_series.sample_paths = [
             path for path in list(imp_series.sample_paths or []) if path not in moved_file_paths
         ]
-        imp_series.file_count = max(int(imp_series.file_count or 0) - len(moved_file_ids), 0)
-        if not remaining_files:
+        pre_move_file_count = int(imp_series.file_count or 0)
+        diagnostics = dict(imp_series.diagnostics or {})
+        diagnostics.setdefault(
+            "pre_split_file_count",
+            max(pre_move_file_count, int(imp_series.files_total or 0)),
+        )
+        imp_series.file_count = max(pre_move_file_count - len(moved_file_ids), 0)
+        accumulated_file_ids = list(diagnostics.get("moved_file_ids") or [])
+        accumulated_split_ids = list(diagnostics.get("split_series_ids") or [])
+        diagnostics["moved_file_ids"] = list(
+            dict.fromkeys([*accumulated_file_ids, *moved_file_ids])
+        )
+        diagnostics["split_series_ids"] = list(
+            dict.fromkeys([*accumulated_split_ids, *created_split_series_ids])
+        )
+        if int(imp_series.file_count or 0) == 0:
             imp_series.status = ImportSeriesStatus.SKIPPED
             imp_series.selected_for_import = False
-            diagnostics = dict(imp_series.diagnostics or {})
             diagnostics.update(
                 {
                     "kind": "rebucketed_series",
                     "reason": "all_files_moved_to_split_series",
-                    "moved_file_ids": moved_file_ids,
-                    "split_series_ids": created_split_series_ids,
                 }
             )
-            imp_series.diagnostics = diagnostics
+        imp_series.diagnostics = diagnostics
 
     return remaining_files, created_split_series_ids
 

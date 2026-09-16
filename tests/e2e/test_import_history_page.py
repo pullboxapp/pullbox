@@ -366,6 +366,103 @@ class TestImportHistoryTab:
         assert result["rowStillExists"] is False
         assert result["modalOpen"] is False
 
+    def test_import_history_pending_rollback_keeps_row_and_reports_truthfully(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="history")
+        failed_job_id = self._job_id_for_source_path(authed_page, "/tmp/imports/failed-run")
+
+        assert failed_job_id is not None
+
+        result = authed_page.evaluate(
+            """async (jobId) => {
+                const root = document.querySelector("[data-testid='import-history-page']");
+                if (!root || !window.Alpine) {
+                    throw new Error("Import history controller is unavailable");
+                }
+
+                const controller = window.Alpine.$data(root);
+                const originalFetch = window.fetch.bind(window);
+                const originalRefreshResults = controller.refreshResults.bind(controller);
+                const originalDispatchToast = controller.dispatchToast.bind(controller);
+                const calls = [];
+                const toasts = [];
+
+                window.fetch = async () => ({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({
+                        status: "rollback_pending",
+                        message:
+                            "Rollback is still stopping an in-progress Story Arc placement. " +
+                            "The import remains in history; delete it again after rollback finishes.",
+                    }),
+                });
+                controller.refreshResults = function(path) {
+                    calls.push({ kind: "results", path: String(path || "") });
+                };
+                controller.dispatchToast = function(message, level) {
+                    toasts.push({ message: String(message || ""), level: String(level || "") });
+                };
+
+                try {
+                    controller.openDeleteModal(jobId);
+                    controller.deleteJob();
+                    await new Promise((resolve) => {
+                        let attempts = 0;
+                        function check() {
+                          if (controller.deleting === false && controller.deleteJobId === null) {
+                            resolve();
+                            return;
+                          }
+                          attempts += 1;
+                          if (attempts >= 50) {
+                            resolve();
+                            return;
+                          }
+                          window.setTimeout(check, 10);
+                        }
+                        check();
+                    });
+
+                    return {
+                        calls,
+                        toasts,
+                        rowStillExists: Boolean(
+                            document.querySelector(`[data-testid='import-history-job-${jobId}']`)
+                        ),
+                        modalOpen: controller.deleteJobId !== null,
+                    };
+                } finally {
+                    window.fetch = originalFetch;
+                    controller.refreshResults = originalRefreshResults;
+                    controller.dispatchToast = originalDispatchToast;
+                }
+            }""",
+            failed_job_id,
+        )
+
+        assert result["calls"] == [
+            {
+                "kind": "results",
+                "path": "/import?tab=history&sort=-created_at",
+            }
+        ]
+        assert result["toasts"] == [
+            {
+                "message": (
+                    "Rollback is still stopping an in-progress Story Arc placement. "
+                    "The import remains in history; delete it again after rollback finishes."
+                ),
+                "level": "info",
+            }
+        ]
+        assert result["rowStillExists"] is True
+        assert result["modalOpen"] is False
+
     @pytest.mark.parametrize(
         "stale_path",
         [

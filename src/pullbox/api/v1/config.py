@@ -25,14 +25,84 @@ from pullbox.models.user import User
 from pullbox.schemas.config import (
     ConfigResponse,
     ConfigUpdate,
+    LibraryRootCreate,
+    LibraryRootPolicyClear,
+    LibraryRootPolicyPreviewRequest,
+    LibraryRootPolicyPreviewResponse,
+    LibraryRootPolicyState,
+    LibraryRootPolicyUpdate,
+    LibraryRootPreviewResponse,
+    LibraryRootRebindConfirmRequest,
+    LibraryRootRebindPreviewRequest,
+    LibraryRootRebindPreviewResponse,
+    LibraryRootRemovalConfirm,
+    LibraryRootRemovalPreview,
+    LibraryRootState,
+    LibraryRootUpdate,
     NamingPreview,
     NamingPreviewEntry,
     NamingPreviewGrouped,
+    NamingSettingsPreview,
+    NamingSettingsPreviewRequest,
+    NamingSettingsState,
+    NamingSettingsUpdate,
+)
+from pullbox.services.library_root_management import (
+    create_library_root,
+    list_library_roots,
+    preview_library_root,
+    preview_library_root_rebind,
+    preview_library_root_removal,
+    rebind_library_root,
+    remove_library_root,
+    update_library_root,
+)
+from pullbox.services.library_root_policy_service import (
+    clear_library_root_policy,
+    get_library_root_policy_state,
+    preview_library_root_policy,
+    update_library_root_policy,
+)
+from pullbox.services.naming_settings import (
+    get_naming_settings,
+    preview_naming_settings,
+    save_naming_settings,
 )
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/config", tags=["config"], include_in_schema=False)
+
+
+@router.get("/naming", response_model=NamingSettingsState)
+async def naming_settings(
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+    library_root_id: int | None = Query(None, gt=0),
+) -> NamingSettingsState:
+    """Read global defaults or effective naming for a single library."""
+    return await get_naming_settings(session, library_root_id)
+
+
+@router.put("/naming", response_model=NamingSettingsState)
+async def update_naming_settings(
+    payload: NamingSettingsUpdate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> NamingSettingsState:
+    """Save one naming scope without renaming existing files."""
+    state = await save_naming_settings(session, payload)
+    logger.info("naming_settings_updated", library_root_id=state.library_root_id)
+    return state
+
+
+@router.post("/naming/preview", response_model=NamingSettingsPreview)
+async def preview_scoped_naming_settings(
+    payload: NamingSettingsPreviewRequest,
+    _user: InteractiveOperatorUser,
+) -> NamingSettingsPreview:
+    """Preview all naming fields with the proposed character cleanup settings."""
+    return preview_naming_settings(payload.policy)
 
 
 def _validate_library_permission_setting(key: str, value: str) -> None:
@@ -145,6 +215,22 @@ async def update_config(
     secret_keys = {"comicvine_api_key"}
     runtime_managed_keys = {"logs_dir", "backup_dir"}
     runtime_managed_https = https_runtime_config_values()
+
+    from pullbox.services.story_arc_file_defaults import (
+        STORY_ARC_FILE_DEFAULT_KEYS,
+        validate_story_arc_file_defaults,
+    )
+    from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
+
+    # Validate the complete group before any update or runtime side effect.
+    if body.values.keys() & set(STORY_ARC_FILE_DEFAULT_KEYS):
+        effective_arc_files = await _effective_config_values(
+            session, body.values, STORY_ARC_FILE_DEFAULT_KEYS
+        )
+        try:
+            await validate_story_arc_file_defaults(session, effective_arc_files)
+        except StoryArcPlacementIntegrationError as exc:
+            raise ValidationError(str(exc)) from exc
 
     actually_changed: set[str] = set()
     old_values: dict[str, str] = {}
@@ -629,6 +715,22 @@ async def update_config(
 # ── ComicVine API Key ────────────────────────────────────────────────
 
 
+@router.post("/story-arc-files/preview")
+async def preview_story_arc_file_defaults(
+    body: ConfigUpdate,
+    _user: InteractiveOperatorUser,
+) -> dict[str, str]:
+    """Render sample naming with the real placement renderer; never touch disk."""
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.story_arc_file_defaults import parse_story_arc_file_defaults
+    from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
+
+    try:
+        return {"path": parse_story_arc_file_defaults(body.values).naming_preview()}
+    except StoryArcPlacementIntegrationError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
 @router.post("/comicvine/test")
 async def test_comicvine_key(
     _user: InteractiveOperatorUser,
@@ -679,6 +781,223 @@ async def save_comicvine_key(
         "message": "API key saved.",
         "obfuscated": obfuscate_api_key(api_key),
     }
+
+
+# ── Library Root Management ────────────────────────────────────────
+
+
+@router.get("/library-roots", response_model=list[LibraryRootState])
+async def get_library_roots(
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> list[LibraryRootState]:
+    """List configured roots with live read/write/capacity state."""
+    states = await list_library_roots(session)
+    return [LibraryRootState.model_validate(state) for state in states]
+
+
+@router.post(
+    "/library-roots/preview",
+    response_model=LibraryRootPreviewResponse,
+)
+async def preview_new_library_root(
+    body: LibraryRootCreate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPreviewResponse:
+    """Validate a proposed root without persisting it."""
+    preview = await preview_library_root(session, **body.model_dump())
+    return LibraryRootPreviewResponse.model_validate(preview)
+
+
+@router.post(
+    "/library-roots",
+    response_model=LibraryRootState,
+    status_code=201,
+)
+async def post_library_root(
+    body: LibraryRootCreate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootState:
+    """Add an existing persistent container directory as a root."""
+    state = await create_library_root(session, **body.model_dump())
+    logger.info("library_root_created", library_root_id=state["id"])
+    return LibraryRootState.model_validate(state)
+
+
+@router.patch(
+    "/library-roots/{library_root_id}",
+    response_model=LibraryRootState,
+)
+async def patch_library_root(
+    library_root_id: int,
+    body: LibraryRootUpdate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootState:
+    """Update root roles/default state while preserving immutable path identity."""
+    state = await update_library_root(
+        session,
+        library_root_id,
+        body.model_dump(exclude_unset=True),
+    )
+    logger.info("library_root_updated", library_root_id=library_root_id)
+    return LibraryRootState.model_validate(state)
+
+
+@router.post(
+    "/library-roots/{library_root_id}/rebind/preview",
+    response_model=LibraryRootRebindPreviewResponse,
+)
+async def preview_existing_library_root_rebind(
+    library_root_id: int,
+    body: LibraryRootRebindPreviewRequest,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootRebindPreviewResponse:
+    """Preview a path rebind and its persisted association impact without writing."""
+    preview = await preview_library_root_rebind(
+        session,
+        library_root_id,
+        replacement_path=body.replacement_path,
+        actor_id=user.id,
+    )
+    return LibraryRootRebindPreviewResponse.model_validate(preview)
+
+
+@router.post(
+    "/library-roots/{library_root_id}/rebind",
+    response_model=LibraryRootState,
+)
+async def confirm_existing_library_root_rebind(
+    library_root_id: int,
+    body: LibraryRootRebindConfirmRequest,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootState:
+    """Apply one explicitly confirmed, signed and drift-checked root path rebind."""
+    state = await rebind_library_root(
+        session,
+        library_root_id,
+        replacement_path=body.replacement_path,
+        preview_token=body.preview_token,
+        actor_id=user.id,
+    )
+    logger.info("library_root_rebound", library_root_id=library_root_id)
+    return LibraryRootState.model_validate(state)
+
+
+@router.post(
+    "/library-roots/{library_root_id}/remove/preview", response_model=LibraryRootRemovalPreview
+)
+async def preview_root_removal(
+    library_root_id: int,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootRemovalPreview:
+    preview = await preview_library_root_removal(session, library_root_id, actor_id=user.id)
+    return LibraryRootRemovalPreview.model_validate(preview)
+
+
+@router.delete("/library-roots/{library_root_id}", status_code=204)
+async def delete_library_root(
+    library_root_id: int,
+    body: LibraryRootRemovalConfirm,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> None:
+    await remove_library_root(
+        session, library_root_id, actor_id=user.id, preview_token=body.preview_token
+    )
+    logger.info("library_root_removed", library_root_id=library_root_id, actor_id=user.id)
+
+
+# ── Per-root Naming Policy ──────────────────────────────────────────
+
+
+@router.get(
+    "/library-roots/{library_root_id}/naming-policy",
+    response_model=LibraryRootPolicyState,
+)
+async def get_root_naming_policy(
+    library_root_id: int,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPolicyState:
+    """Return a library root's effective policy and inheritance scope."""
+    state = await get_library_root_policy_state(session, library_root_id)
+    return LibraryRootPolicyState.model_validate(state)
+
+
+@router.put(
+    "/library-roots/{library_root_id}/naming-policy",
+    response_model=LibraryRootPolicyState,
+)
+async def put_root_naming_policy(
+    library_root_id: int,
+    body: LibraryRootPolicyUpdate,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPolicyState:
+    """Create or update one root's explicit policy with optimistic locking."""
+    state = await update_library_root_policy(
+        session,
+        library_root_id,
+        expected_revision=body.expected_revision,
+        definition=body.policy.model_dump(),
+    )
+    logger.info(
+        "library_root_policy_updated",
+        library_root_id=library_root_id,
+        revision=state["revision"],
+        source="manual",
+    )
+    return LibraryRootPolicyState.model_validate(state)
+
+
+@router.delete(
+    "/library-roots/{library_root_id}/naming-policy",
+    response_model=LibraryRootPolicyState,
+)
+async def delete_root_naming_policy(
+    library_root_id: int,
+    body: LibraryRootPolicyClear,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPolicyState:
+    """Clear an explicit policy so the root inherits global defaults again."""
+    state = await clear_library_root_policy(
+        session,
+        library_root_id,
+        expected_revision=body.expected_revision,
+    )
+    logger.info(
+        "library_root_policy_cleared",
+        library_root_id=library_root_id,
+        source="manual",
+    )
+    return LibraryRootPolicyState.model_validate(state)
+
+
+@router.post(
+    "/library-roots/{library_root_id}/naming-policy/preview",
+    response_model=LibraryRootPolicyPreviewResponse,
+)
+async def preview_root_naming_policy(
+    library_root_id: int,
+    body: LibraryRootPolicyPreviewRequest,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+) -> LibraryRootPolicyPreviewResponse:
+    """Preview a complete proposal without writing a root policy."""
+    preview = await preview_library_root_policy(
+        session,
+        library_root_id,
+        definition=body.policy.model_dump(),
+        examples=[example.model_dump() for example in body.examples],
+    )
+    return LibraryRootPolicyPreviewResponse.model_validate(preview)
 
 
 # ── Naming Preview ───────────────────────────────────────────────────

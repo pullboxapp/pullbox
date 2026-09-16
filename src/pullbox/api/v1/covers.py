@@ -20,7 +20,14 @@ from pullbox.core.exceptions import NotFoundError
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
-from pullbox.services.cover_cache_service import cache_series_cover, resolve_series_cover_file
+from pullbox.models.story_arc import StoryArc
+from pullbox.services.cover_cache_service import (
+    cache_series_cover,
+    cache_story_arc_cover,
+    resolve_series_cover_file,
+    resolve_story_arc_cover_file,
+)
+from pullbox.services.cover_url_service import story_arc_provider_cover_url
 
 logger = structlog.get_logger(__name__)
 
@@ -110,6 +117,36 @@ async def get_series_cover(
             return _serve_image(cover)
 
     # 5. No cover found
+    return Response(status_code=404)
+
+
+# ── Story Arc Cover ───────────────────────────────────────────────
+
+
+@router.get("/story-arcs/{story_arc_id}/cover")
+async def get_story_arc_cover(
+    story_arc_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Serve cached provider artwork for one Story Arc."""
+    story_arc = await session.get(StoryArc, story_arc_id)
+    if story_arc is None:
+        raise NotFoundError("Story Arc", story_arc_id)
+    cover = await resolve_story_arc_cover_file(session, story_arc)
+    if cover:
+        if not story_arc.cover_path:
+            story_arc.cover_path = f"/api/v1/story-arcs/{story_arc.id}/cover"
+            await session.commit()
+        return _serve_image(cover)
+    provider_url = story_arc_provider_cover_url(story_arc)
+    if provider_url:
+        if not story_arc.cover_url:
+            story_arc.cover_url = provider_url
+        cover = await cache_story_arc_cover(session, story_arc)
+        if cover:
+            await session.commit()
+            return _serve_image(cover)
     return Response(status_code=404)
 
 

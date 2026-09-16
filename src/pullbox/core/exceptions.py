@@ -91,6 +91,15 @@ class ConfigurationError(PullboxError):
         super().__init__(message=message, code="CONFIG_ERROR", status_code=500)
 
 
+class ImportDestinationValidationError(ConfigurationError):
+    """Fail-closed managed-import destination requiring explicit review."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
+        self.code = "IMPORT_DESTINATION_REVIEW"
+
+
 class BackupError(PullboxError):
     """Raised when a backup operation fails."""
 

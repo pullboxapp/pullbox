@@ -10,6 +10,7 @@ from pullbox.core.issue_title import collection_title_number, collection_title_s
 from pullbox.core.name_matcher import NameMatcher, NameMatchResult
 from pullbox.core.naming import extract_base_series_title
 from pullbox.core.release_parser import issues_match, normalize_issue_number
+from pullbox.core.release_year_matching import ReleaseYearContext, match_release_year
 from pullbox.core.source_metadata import MetadataSignal
 from pullbox.core.type_semantics import (
     TypeFamily,
@@ -156,6 +157,7 @@ class SemanticMatchEngine:
         wanted_issue_cv_id: int | None = None,
         wanted_issue_title: str | None = None,
         wanted_series_issue_count: int | None = None,
+        year_context: ReleaseYearContext | None = None,
     ) -> IssueMatchDecision:
         """Return a workflow-aware semantic match decision for one issue target."""
         series_name = metadata.series_name or ""
@@ -409,15 +411,22 @@ class SemanticMatchEngine:
                     match_diagnostics={"type_mode": compatibility.mode},
                 )
 
-        year_match: bool | None = None
-        if metadata.year is not None and wanted_year is not None:
-            year_match = abs(metadata.year - wanted_year) <= self._config.year_tolerance
+        year_evidence = match_release_year(
+            metadata.year,
+            wanted_year=wanted_year,
+            volume_year=metadata.parsed_release.volume_year if metadata.parsed_release else None,
+            context=year_context,
+            issue_type=wanted_issue_type,
+            tolerance=self._config.year_tolerance,
+        )
 
         confidence = self._compute_confidence(
             match_type=match_result.match_type,
             similarity=match_result.similarity,
-            year_match=year_match,
+            year_match=year_evidence.matches,
         )
+        if year_evidence.weak and confidence is MatchConfidence.HIGH:
+            confidence = MatchConfidence.MEDIUM
         if compatibility.lowers_confidence:
             confidence = _lower_confidence(confidence)
         if issue_check_skipped and wanted_issue_type not in {IssueType.ISSUE, IssueType.ANNUAL}:
@@ -434,6 +443,8 @@ class SemanticMatchEngine:
                 "series_similarity": round(match_result.similarity, 4),
                 "match_type": match_result.match_type,
                 "single_word_collection_prefix": single_word_collection_prefix,
+                "year_match": year_evidence.matches,
+                "year_match_basis": year_evidence.basis,
             },
         )
 

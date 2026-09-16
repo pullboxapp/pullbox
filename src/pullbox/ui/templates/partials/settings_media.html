@@ -2,21 +2,270 @@
 {% from "components/dropdown_select.html" import dropdown_select %}
 {% from "components/settings_shell.html" import field_note, section_card, settings_footer, settings_row, ui_icon %}
 
-<div class="space-y-6 pt-6" x-data="mediaSettings()">
+<div class="space-y-6 pt-6" x-data="mediaSettings()" x-init="initMediaSettings()">
   {% call section_card(
-    title="Comics Directory",
-    description="This path is controlled by the deployment environment and stays visible here for reference.",
+    title="Bootstrap Comics Directory",
+    description="The deployment path bootstraps the default managed destination on first run. Library-root settings below control ongoing placement.",
     eyebrow="Storage source",
     title_style="plain",
     body_class="p-0"
   ) %}
     <div class="settings-rows">
-      {% call settings_row(label="Comics Directory", help="All imports and download handoff work eventually target this library root.") %}
+      {% call settings_row(label="Bootstrap directory", help="Pullbox keeps this deployment value visible for troubleshooting; a series-specific preferred root or the configured default managed root controls new files.") %}
         <input type="text" readonly value="{{ host_info.library_root }}" class="input-pb max-w-lg cursor-not-allowed font-mono opacity-70">
         {% call field_note(tone="warning", icon="lock") %}
           Set by <code class="font-mono">PULLBOX_LIBRARY_ROOT</code> in the environment.
         {% endcall %}
       {% endcall %}
+    </div>
+  {% endcall %}
+
+  {% call section_card(
+    title="Library roots",
+    description="Register every persistent comic directory Pullbox can reference or manage. Paths are container-visible; ordinary edits cannot change them, and replacement paths require a separate preview and confirmation.",
+    eyebrow="Storage destinations",
+    title_style="plain",
+    body_class="p-0"
+  ) %}
+    <div class="space-y-5 p-5" data-testid="settings-media-library-roots">
+      <div class="space-y-3" aria-live="polite" :aria-busy="libraryRootLoading">
+        <template x-if="!libraryRoots.length && !libraryRootLoading">
+          <div class="inline-alert inline-alert-warning">
+            No library roots are configured. Add a Pullbox-visible directory before importing or downloading comics.
+          </div>
+        </template>
+
+        <template x-for="root in libraryRoots" :key="root.id">
+          <article class="rounded-xl border border-pb-border bg-pb-surface/40 p-4" :data-testid="'settings-media-library-root-' + root.id">
+            <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+              <div class="min-w-0 space-y-2">
+                <div class="flex flex-wrap items-center gap-2">
+                  <h3 class="text-sm font-semibold text-pb-text" x-text="root.name"></h3>
+                  <span
+                    x-show="root.is_default_managed_destination"
+                    class="rounded-full border border-pb-accent/40 bg-pb-accent/10 px-2 py-0.5 text-[11px] font-semibold text-pb-accent"
+                  >Default managed destination</span>
+                  <span
+                    class="rounded-full border px-2 py-0.5 text-[11px] font-semibold"
+                    :class="rootStatusClass(root)"
+                    x-text="rootStatusLabel(root)"
+                  ></span>
+                </div>
+                <p class="break-all font-mono text-xs text-pb-text-sec" x-text="root.path"></p>
+                <p class="text-xs text-pb-text-dim" x-text="libraryRootCapacityLabel(root)"></p>
+                <template x-if="Array.isArray(root.warnings) && root.warnings.length">
+                  <ul class="space-y-1 text-xs text-pb-warning">
+                    <template x-for="warning in root.warnings" :key="warning">
+                      <li x-text="warning"></li>
+                    </template>
+                  </ul>
+                </template>
+              </div>
+
+              <div class="grid shrink-0 gap-3 sm:grid-cols-2 xl:w-[34rem]">
+                <label class="flex items-center justify-between gap-3 rounded-lg border border-pb-border px-3 py-2">
+                  <span class="text-xs font-medium text-pb-text-sec">Reference existing files</span>
+                  <input
+                    type="checkbox"
+                    class="peer toggle-input"
+                    :checked="root.allow_referenced_registrations"
+                    :disabled="libraryRootSaving || !root.enabled"
+                    :aria-label="'Allow ' + root.name + ' to reference existing files'"
+                    @change="updateLibraryRoot(root, { allow_referenced_registrations: $event.target.checked })"
+                  >
+                  <span class="toggle-switch"></span>
+                </label>
+                <label class="flex items-center justify-between gap-3 rounded-lg border border-pb-border px-3 py-2">
+                  <span class="text-xs font-medium text-pb-text-sec">Allow managed files</span>
+                  <input
+                    type="checkbox"
+                    class="peer toggle-input"
+                    :checked="root.allow_managed_writes"
+                    :disabled="libraryRootSaving || !root.enabled"
+                    :aria-label="'Allow ' + root.name + ' to receive managed files'"
+                    @change="updateLibraryRoot(root, { allow_managed_writes: $event.target.checked })"
+                  >
+                  <span class="toggle-switch"></span>
+                </label>
+                <div
+                  data-testid="settings-media-library-root-actions"
+                  class="flex flex-wrap justify-end gap-2 sm:col-span-2"
+                >
+                  <button
+                    type="button"
+                    data-testid="settings-media-library-root-make-default"
+                    class="btn-ghost btn-sm"
+                    :disabled="libraryRootSaving || root.is_default_managed_destination || !root.enabled || !root.allow_managed_writes || !root.writable"
+                    @click="updateLibraryRoot(root, { is_default_managed_destination: true })"
+                    :aria-label="'Make ' + root.name + ' the default managed destination'"
+                  >Make default</button>
+                  <button
+                    type="button"
+                    data-testid="settings-media-library-root-toggle-enabled"
+                    class="btn-ghost btn-sm"
+                    :disabled="libraryRootSaving || (root.enabled && !root.can_disable)"
+                    @click="updateLibraryRoot(root, { enabled: !root.enabled })"
+                    :aria-label="(root.enabled ? 'Disable ' : 'Enable ') + root.name"
+                    x-text="root.enabled ? 'Disable' : 'Enable'"
+                  ></button>
+                </div>
+              </div>
+            </div>
+
+            <div
+              x-show="libraryRootRebindRootId === Number(root.id)"
+              x-cloak
+              class="mt-4 space-y-3 border-t border-pb-border pt-4"
+              data-testid="settings-media-library-root-rebind"
+            >
+              <div>
+                <h4 class="text-xs font-semibold uppercase tracking-wide text-pb-text-sec">Rebind root path</h4>
+                <p class="mt-1 text-xs leading-5 text-pb-text-dim">
+                  This changes only the configured container-visible root identity. Pullbox will not rewrite stored series or file paths.
+                </p>
+              </div>
+              <div class="flex flex-col gap-3 lg:flex-row lg:items-end">
+                <label class="min-w-0 flex-1 space-y-1">
+                  <span class="block text-xs font-medium text-pb-text-sec">Replacement Pullbox-visible path</span>
+                  <input
+                    type="text"
+                    x-model.trim="libraryRootRebindPath"
+                    @input="libraryRootRebindPreview = null"
+                    class="input-pb w-full font-mono"
+                    maxlength="1000"
+                    autocomplete="off"
+                    placeholder="/comics/rebound"
+                    :aria-label="'Replacement path for ' + root.name"
+                  >
+                </label>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    class="btn-secondary"
+                    :disabled="libraryRootSaving || !libraryRootRebindPath.trim()"
+                    @click="previewLibraryRootRebind(root)"
+                  >Preview rebind</button>
+                  <button
+                    type="button"
+                    class="btn-danger"
+                    :disabled="libraryRootSaving || !libraryRootRebindPreview || !libraryRootRebindPreview.can_rebind"
+                    @click="confirmLibraryRootRebind(root)"
+                  >Confirm rebind</button>
+                  <button type="button" class="btn-ghost" :disabled="libraryRootSaving" @click="closeLibraryRootRebind()">Cancel</button>
+                </div>
+              </div>
+              <template x-if="libraryRootRebindPreview">
+                <div class="info-panel text-xs" aria-live="polite">
+                  <p class="font-semibold" x-text="libraryRootRebindPreview.can_rebind ? 'Ready for explicit confirmation' : 'Rebind blocked'"></p>
+                  <p class="mt-1 text-pb-text-sec" x-text="libraryRootRebindImpactSummary()"></p>
+                  <p x-show="libraryRootRebindPreview.same_physical_directory" class="mt-1 text-pb-warning">The replacement is an alias of the current physical directory.</p>
+                  <p x-show="libraryRootRebindPreview.overlaps_current_path" class="mt-1 text-pb-warning">The replacement overlaps the current root boundary.</p>
+                  <template x-if="libraryRootRebindPreview.blocking_reasons && libraryRootRebindPreview.blocking_reasons.length">
+                    <ul class="mt-2 space-y-1 text-pb-error"><template x-for="reason in libraryRootRebindPreview.blocking_reasons" :key="reason"><li x-text="reason"></li></template></ul>
+                  </template>
+                  <p class="mt-2 text-pb-text-dim">Confirm only after verifying the replacement mount exposes the same intended library.</p>
+                </div>
+              </template>
+            </div>
+
+            <div class="mt-3 flex justify-end" x-show="libraryRootRebindRootId !== Number(root.id)">
+              <button type="button" class="btn-ghost" :disabled="libraryRootSaving" @click="openLibraryRootRebind(root)">Rebind path</button>
+              <button type="button" class="btn-danger ml-2" x-show="!root.enabled && !root.is_default_managed_destination"
+                :disabled="libraryRootSaving" @click="previewLibraryRootRemoval(root)"
+                :aria-label="'Remove ' + root.name">Remove root</button>
+            </div>
+            <template x-if="libraryRootRemovalPreview && libraryRootRemovalPreview.id === root.id">
+              <section class="mt-4 space-y-3 rounded-lg border border-pb-border p-4" aria-live="polite"
+                data-testid="settings-media-library-root-removal">
+                <h4 class="text-sm font-semibold" x-text="libraryRootRemovalPreview.can_remove ? 'Ready to remove root' : 'Root removal blocked'"></h4>
+                <p class="text-sm text-pb-text-sec">Only this root's configuration and root-specific naming settings will be removed. No folders or files will be deleted.</p>
+                <p class="text-sm text-pb-text-sec" x-show="libraryRootRemovalPreview.history_count"
+                  x-text="libraryRootRemovalPreview.history_count + ' import history record(s) will retain the original root name and path. To retry them, start a new import and explicitly choose a destination.'"></p>
+                <ul class="space-y-2 text-sm text-pb-warning">
+                  <template x-for="reason in libraryRootRemovalPreview.blocking_reasons" :key="reason"><li x-text="reason"></li></template>
+                </ul>
+                <div class="flex flex-wrap gap-2">
+                  <button type="button" class="btn-danger" :disabled="libraryRootSaving || !libraryRootRemovalPreview.can_remove"
+                    @click="confirmLibraryRootRemoval(root)">Confirm removal</button>
+                  <button type="button" class="btn-ghost" :disabled="libraryRootSaving" @click="libraryRootRemovalPreview = null">Cancel</button>
+                </div>
+              </section>
+            </template>
+          </article>
+        </template>
+      </div>
+
+      <form
+        class="space-y-4 rounded-xl border border-pb-border bg-pb-surface/30 p-4"
+        data-testid="settings-media-library-root-add"
+        @submit.prevent="createLibraryRoot()"
+      >
+        <div>
+          <h3 class="text-sm font-semibold text-pb-text">Add library root</h3>
+          <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+            Enter a directory exactly as Pullbox sees it inside the container. Established paths require the separate preview-and-confirm rebind workflow above.
+          </p>
+        </div>
+        <div class="grid gap-3 lg:grid-cols-[minmax(12rem,0.7fr)_minmax(18rem,1.3fr)]">
+          <label class="space-y-1">
+            <span class="block text-xs font-medium text-pb-text-sec">Name</span>
+            <input
+              type="text"
+              x-model.trim="libraryRootForm.name"
+              @input.debounce.400ms="previewLibraryRoot()"
+              class="input-pb w-full"
+              required
+              maxlength="255"
+              autocomplete="off"
+              data-testid="settings-media-library-root-name"
+            >
+          </label>
+          <label class="space-y-1">
+            <span class="block text-xs font-medium text-pb-text-sec">Pullbox-visible path</span>
+            <input
+              type="text"
+              x-model.trim="libraryRootForm.path"
+              @input.debounce.400ms="previewLibraryRoot()"
+              class="input-pb w-full font-mono"
+              required
+              maxlength="1000"
+              autocomplete="off"
+              placeholder="/comics/archive"
+              data-testid="settings-media-library-root-path"
+            >
+          </label>
+        </div>
+        <div class="grid gap-3 md:grid-cols-3">
+          <label class="flex items-start gap-3 rounded-lg border border-pb-border p-3">
+            <input type="checkbox" x-model="libraryRootForm.allow_referenced_registrations" @change="previewLibraryRoot()" class="peer toggle-input" data-testid="settings-media-library-root-reference-role">
+            <span class="toggle-switch mt-0.5"></span>
+            <span><span class="block text-xs font-semibold text-pb-text">Reference existing files</span><span class="mt-1 block text-xs text-pb-text-dim">Register files in place without changing them.</span></span>
+          </label>
+          <label class="flex items-start gap-3 rounded-lg border border-pb-border p-3">
+            <input type="checkbox" x-model="libraryRootForm.allow_managed_writes" @change="previewLibraryRoot()" class="peer toggle-input" data-testid="settings-media-library-root-managed-role">
+            <span class="toggle-switch mt-0.5"></span>
+            <span><span class="block text-xs font-semibold text-pb-text">Allow managed files</span><span class="mt-1 block text-xs text-pb-text-dim">Permit Pullbox-created copies and downloads.</span></span>
+          </label>
+          <label class="flex items-start gap-3 rounded-lg border border-pb-border p-3" :class="!libraryRootForm.allow_managed_writes && 'opacity-60'">
+            <input type="checkbox" x-model="libraryRootForm.is_default_managed_destination" @change="previewLibraryRoot()" :disabled="!libraryRootForm.allow_managed_writes" class="peer toggle-input" data-testid="settings-media-library-root-default">
+            <span class="toggle-switch mt-0.5"></span>
+            <span><span class="block text-xs font-semibold text-pb-text">Default managed destination</span><span class="mt-1 block text-xs text-pb-text-dim">Use when no series-specific destination exists.</span></span>
+          </label>
+        </div>
+        <div x-show="libraryRootPreview" x-cloak class="info-panel text-xs" aria-live="polite">
+          <p class="font-semibold" x-text="libraryRootPreview && libraryRootPreview.can_create ? 'Ready to add' : 'Review required'"></p>
+          <p class="mt-1 text-pb-text-sec" x-text="libraryRootPreviewSummary()"></p>
+          <template x-if="libraryRootPreview && libraryRootPreview.blocking_reasons && libraryRootPreview.blocking_reasons.length">
+            <ul class="mt-2 space-y-1 text-pb-error"><template x-for="reason in libraryRootPreview.blocking_reasons" :key="reason"><li x-text="reason"></li></template></ul>
+          </template>
+        </div>
+        <p x-show="libraryRootError" x-cloak class="text-sm text-pb-error" role="alert" x-text="libraryRootError"></p>
+        <div class="flex justify-end">
+          <button type="submit" class="btn-primary" :disabled="libraryRootSaving || !libraryRootPreview || !libraryRootPreview.can_create">
+            <span x-text="libraryRootSaving ? 'Adding…' : 'Add library root'"></span>
+          </button>
+        </div>
+      </form>
     </div>
   {% endcall %}
 
@@ -27,7 +276,7 @@
     title_style="plain",
     body_class="p-0"
   ) %}
-    <form x-data="dirtyForm()" @input="checkDirty()" @change="checkDirty()" @submit.prevent="saveConfig($el).then(() => markClean())">
+    <form id="import-policy" x-data="dirtyForm()" @input="checkDirty()" @change="checkDirty()" @submit.prevent="saveConfig($el).then(() => markClean())">
       <div class="settings-rows">
         {% call settings_row(label="Preferred Format", help="When two otherwise valid releases exist, this format receives priority.") %}
           {{ dropdown_select(
@@ -45,7 +294,7 @@
           ) }}
         {% endcall %}
 
-        {% call settings_row(label="Normalize Imported Archives to CBZ", help="When enabled, Pullbox will convert imported archives to CBZ during import processing. This does not change the search preferred format setting above.") %}
+        {% call settings_row(label="Normalize Imported Archives to CBZ", help="When enabled, Pullbox converts managed import copies to CBZ. Referenced in-place files are never converted. This does not change the search preferred format setting above.") %}
           <div class="flex items-center gap-3">
             <label class="relative inline-flex cursor-pointer items-center">
               <input
@@ -60,11 +309,11 @@
             <span class="text-sm text-pb-text-sec" x-text="convertToPreferredFormat ? 'Enabled' : 'Disabled'"></span>
           </div>
           {% call field_note(tone="info", icon="information-circle") %}
-            CBZ files are kept as-is. CBR, CB7, PDF, and other supported import formats are normalized into CBZ when this is enabled.
+            Managed CBZ copies are kept as-is. CBR, CB7, PDF, and other supported formats are normalized only when Pullbox creates a managed copy.
           {% endcall %}
         {% endcall %}
 
-        {% call settings_row(label="Update Embedded ComicInfo.xml on Import", help="When enabled, Pullbox rewrites ComicInfo.xml on the final imported library artifact using the matched issue metadata.") %}
+        {% call settings_row(label="Update Embedded ComicInfo.xml on Import", help="When enabled, Pullbox rewrites ComicInfo.xml on managed import copies using matched issue metadata. Referenced in-place files are never rewritten.") %}
           <div class="flex items-center gap-3">
             <label class="relative inline-flex cursor-pointer items-center">
               <input
@@ -79,7 +328,7 @@
             <span class="text-sm text-pb-text-sec" x-text="updateEmbeddedComicInfoOnImport ? 'Enabled' : 'Disabled'"></span>
           </div>
           {% call field_note(tone="info", icon="information-circle") %}
-            Metadata updates apply to the final library artifact only. If a non-CBZ archive needs rewriting, Pullbox uses the same CBZ normalization path as import conversion.
+            Metadata updates apply only to a managed artifact Pullbox creates. If a non-CBZ managed copy needs rewriting, Pullbox uses the same CBZ normalization path as import conversion.
           {% endcall %}
         {% endcall %}
 
@@ -260,7 +509,7 @@
 
   {% call section_card(
     title="Naming behavior",
-    description="Turn automatic renaming on or off, then control how Pullbox sanitizes invalid filename characters.",
+    description="Control automatic renaming for all libraries. Choose global or library-specific formats in Naming templates below.",
     eyebrow="Rename rules",
     title_style="plain",
     body_class="p-0",
@@ -279,32 +528,6 @@
           </div>
         {% endcall %}
 
-        {% call settings_row(label="Replace Illegal Characters", help="Replace filesystem characters such as <code class='text-pb-text-sec font-mono'>&lt; &gt; : &quot; / &#92; | ? *</code> so generated file and folder names stay valid.") %}
-          <div class="flex items-center gap-3">
-            {% set replace_illegal = configs.get('replace_illegal_characters', 'true') %}
-            <label class="relative inline-flex cursor-pointer items-center">
-              <input type="checkbox" name="replace_illegal_characters" value="true" {% if replace_illegal == 'true' %}checked{% endif %} class="peer toggle-input">
-              <span class="toggle-switch"></span>
-            </label>
-            <span class="text-sm text-pb-text-sec">{{ 'Enabled' if replace_illegal == 'true' else 'Disabled' }}</span>
-          </div>
-        {% endcall %}
-
-        {% call settings_row(label="Colon Replacement", help="Choose how Pullbox rewrites colons when illegal-character cleanup is enabled.") %}
-          {% set colon_repl = configs.get('colon_replacement', 'dash') %}
-          {{ dropdown_select(
-            name="colon_replacement",
-            value=colon_repl,
-            options=[
-              ("dash", "Dash ( - )"),
-              ("space", "Space"),
-              ("empty", "Remove"),
-              ("smart", "Em-dash ( — )"),
-            ],
-            root_testid="settings-media-colon-replacement-select",
-            class_name="w-40 text-xs"
-          ) }}
-        {% endcall %}
       </div>
 
       {% call settings_footer(align="end") %}
@@ -320,78 +543,9 @@
     </form>
   {% endcall %}
 
-  {% call section_card(
-    title="Naming templates",
-    description="Preview each template against sample library content before you save it.",
-    eyebrow="Template previews",
-    title_style="plain",
-    body_class="p-0"
-  ) %}
-    <form x-data="dirtyForm()" @input="checkDirty()" @change="checkDirty()" @submit.prevent="saveConfig($el).then(() => markClean())">
-      <div class="settings-rows">
-        {% set folder_tmpl = configs.get('series_folder_template', '{Series} ({Year})') %}
-        {% call settings_row(label="Series Folder Format", help='Tokens: {Series}, {Year}, {Publisher}, {ComicVineId}, {Type}') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="series_folder_template" value="{{ folder_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'folder', 'preview-folder')" class="input-pb font-mono">
-            <div id="preview-folder" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ folder_tmpl|tojson|forceescape }}, "folder", "preview-folder")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
+  {% include "partials/settings_naming.html" %}
 
-        {% set std_tmpl = configs.get('comic_file_template', '{Series} ({Year}) #{Issue:03d}') %}
-        {% call settings_row(label="Standard Comic Format", help='Tokens: {Series}, {Year}, {Issue}, {Issue:03d}, {Publisher}') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="comic_file_template" value="{{ std_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'standard', 'preview-standard')" class="input-pb font-mono">
-            <div id="preview-standard" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ std_tmpl|tojson|forceescape }}, "standard", "preview-standard")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-
-        {% set annual_tmpl = configs.get('annual_file_template', '{Series} ({Year}) Annual #{Issue:03d}') %}
-        {% call settings_row(label="Annual Format", help='Use the same core tokens as the standard comic template and include the annual marker when needed.') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="annual_file_template" value="{{ annual_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'annual', 'preview-annual')" class="input-pb font-mono">
-            <div id="preview-annual" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ annual_tmpl|tojson|forceescape }}, "annual", "preview-annual")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-
-        {% set ns_tmpl = configs.get('non_standard_file_template', '{Series} ({Year}) {Type} {Volume:02d} - {Title}') %}
-        {% call settings_row(label="Collection Non-Standard Format", help='For TPBs, omnibuses, compendiums, hardcovers, and other multi-book collection releases. Extra tokens: {Type}, {Title}, {Volume}, {Volume:02d}.') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="non_standard_file_template" value="{{ ns_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'non_standard_collection', 'preview-nonstandard')" class="input-pb font-mono">
-            <div id="preview-nonstandard" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ ns_tmpl|tojson|forceescape }}, "non_standard_collection", "preview-nonstandard")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-
-        {% set single_ns_tmpl = configs.get('single_non_standard_file_template', '{Series} ({Year}) {Type} - {Title}') %}
-        {% call settings_row(label="Single-Release Non-Standard Format", help='For one-shots, graphic novels, and specials. Extra tokens: {Type}, {Title}.') %}
-          <div class="space-y-2 max-w-2xl">
-            <input type="text" name="single_non_standard_file_template" value="{{ single_ns_tmpl }}" @input.debounce.300ms="previewNaming($event.target.value, 'non_standard_single', 'preview-nonstandard-single')" class="input-pb font-mono">
-            <div id="preview-nonstandard-single" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1" data-preview-ready="false" aria-live="polite" aria-busy="false" x-init='previewNaming({{ single_ns_tmpl|tojson|forceescape }}, "non_standard_single", "preview-nonstandard-single")'>
-              <span class="block italic text-pb-text-dim">Loading preview...</span>
-            </div>
-          </div>
-        {% endcall %}
-      </div>
-
-      {% call settings_footer(align="end") %}
-        <div class="settings-footer-actions ml-auto justify-end">
-          <button type="button" x-show="isDirty" x-cloak @click="resetForm()" class="btn-ghost btn-sm">
-            Reset
-          </button>
-          <button type="submit" :disabled="!isDirty" :class="!isDirty && 'opacity-50 cursor-not-allowed'" class="btn-primary">
-            Save naming templates
-          </button>
-        </div>
-      {% endcall %}
-    </form>
-  {% endcall %}
+  {% include "partials/settings_story_arc_files.html" %}
 
   {% include 'components/file_browser.html' %}
 </div>
@@ -406,7 +560,299 @@ function mediaSettings() {
     libraryPermissionsEnabled: {{ 'true' if configs.get('library_permissions_enabled', 'false') == 'true' else 'false' }},
     libraryPermissionsApplyFolders: {{ 'true' if configs.get('library_permissions_apply_to_created_folders', 'true') == 'true' else 'false' }},
     libraryPermissionsApplyFiles: {{ 'true' if configs.get('library_permissions_apply_to_materialized_files', 'true') == 'true' else 'false' }},
-    namingPreviewRequests: {},
+    libraryRoots: {{ library_roots|tojson }},
+    libraryRootLoading: false,
+    libraryRootSaving: false,
+    libraryRootError: '',
+    libraryRootPreview: null,
+    libraryRootPreviewRequest: 0,
+    libraryRootRebindRootId: null,
+    libraryRootRebindPath: '',
+    libraryRootRebindPreview: null,
+    libraryRootRebindPreviewRequest: 0,
+    libraryRootRemovalPreview: null,
+    libraryRootForm: {
+      name: '',
+      path: '',
+      allow_referenced_registrations: true,
+      allow_managed_writes: true,
+      is_default_managed_destination: false,
+    },
+    async initMediaSettings() {
+      await this.refreshLibraryRoots();
+    },
+
+    enabledLibraryRoots() {
+      return this.libraryRoots.filter(root => root.enabled);
+    },
+
+    async libraryRootRequest(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": "{{ csrf_token }}",
+          ...(options.headers || {}),
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = Array.isArray(data.detail)
+          ? data.detail.map(item => item.msg || String(item)).join('; ')
+          : data.detail;
+        throw new Error(data.error?.message || detail || "Library root request failed.");
+      }
+      return data;
+    },
+
+    async refreshLibraryRoots() {
+      this.libraryRootLoading = true;
+      this.libraryRootError = '';
+      try {
+        const roots = await this.libraryRootRequest("/api/v1/config/library-roots");
+        this.libraryRoots = Array.isArray(roots) ? roots : [];
+      } catch (err) {
+        this.libraryRootError = err.message || 'Could not load library roots.';
+      } finally {
+        this.libraryRootLoading = false;
+      }
+    },
+
+    libraryRootPayload() {
+      return {
+        name: this.libraryRootForm.name,
+        path: this.libraryRootForm.path,
+        allow_referenced_registrations: this.libraryRootForm.allow_referenced_registrations,
+        allow_managed_writes: this.libraryRootForm.allow_managed_writes,
+        is_default_managed_destination: this.libraryRootForm.is_default_managed_destination,
+      };
+    },
+
+    async previewLibraryRoot() {
+      const requestId = ++this.libraryRootPreviewRequest;
+      this.libraryRootPreview = null;
+      this.libraryRootError = '';
+      if (!this.libraryRootForm.name.trim() || !this.libraryRootForm.path.trim()) return;
+      try {
+        const preview = await this.libraryRootRequest("/api/v1/config/library-roots/preview", {
+          method: "POST",
+          body: JSON.stringify(this.libraryRootPayload()),
+        });
+        if (requestId === this.libraryRootPreviewRequest) this.libraryRootPreview = preview;
+      } catch (err) {
+        if (requestId === this.libraryRootPreviewRequest) {
+          this.libraryRootError = err.message || 'Could not preview this library root.';
+        }
+      }
+    },
+
+    async createLibraryRoot() {
+      if (this.libraryRootSaving || !this.libraryRootPreview?.can_create) return;
+      this.libraryRootSaving = true;
+      this.libraryRootError = '';
+      try {
+        await this.libraryRootRequest("/api/v1/config/library-roots", {
+          method: "POST",
+          body: JSON.stringify(this.libraryRootPayload()),
+        });
+        this.libraryRootForm = {
+          name: '',
+          path: '',
+          allow_referenced_registrations: true,
+          allow_managed_writes: true,
+          is_default_managed_destination: false,
+        };
+        this.libraryRootPreview = null;
+        await this.refreshLibraryRoots();
+        if (typeof showToast === "function") showToast({ message: "Library root added.", level: "success" });
+      } catch (err) {
+        this.libraryRootError = err.message || 'Could not add this library root.';
+      } finally {
+        this.libraryRootSaving = false;
+      }
+    },
+
+    async updateLibraryRoot(root, changes) {
+      if (this.libraryRootSaving) return;
+      this.libraryRootSaving = true;
+      this.libraryRootError = '';
+      this.libraryRootRemovalPreview = null;
+      try {
+        await this.libraryRootRequest(`/api/v1/config/library-roots/${root.id}`, {
+          method: "PATCH",
+          body: JSON.stringify(changes),
+        });
+        await this.refreshLibraryRoots();
+        if (typeof showToast === "function") showToast({ message: "Library root updated.", level: "success" });
+      } catch (err) {
+        this.libraryRootError = err.message || 'Could not update this library root.';
+        await this.refreshLibraryRoots();
+      } finally {
+        this.libraryRootSaving = false;
+      }
+    },
+
+    async previewLibraryRootRemoval(root) {
+      if (this.libraryRootSaving) return;
+      this.libraryRootSaving = true;
+      this.libraryRootError = '';
+      this.libraryRootRemovalPreview = null;
+      try {
+        this.libraryRootRemovalPreview = await this.libraryRootRequest(
+          `/api/v1/config/library-roots/${root.id}/remove/preview`, { method: "POST" }
+        );
+        await this.$nextTick();
+        this.$root.querySelector('[data-testid="settings-media-library-root-removal"]')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      } catch (err) {
+        this.libraryRootError = err.message || 'Could not check this library root.';
+      } finally {
+        this.libraryRootSaving = false;
+      }
+    },
+
+    async confirmLibraryRootRemoval(root) {
+      const preview = this.libraryRootRemovalPreview;
+      if (this.libraryRootSaving || preview?.id !== root.id || !preview.can_remove || !preview.preview_token) return;
+      this.libraryRootSaving = true;
+      this.libraryRootError = '';
+      try {
+        const confirmed = await pbConfirm({
+          title: 'Remove library root?',
+          message: `Remove "${preview.name}" (${preview.path})? Its configuration and root-specific naming settings will be removed. No folders or files will be deleted. Import history will be preserved.`,
+          confirmText: 'Remove root',
+          destructive: true,
+        });
+        if (!confirmed) return;
+        await this.libraryRootRequest(`/api/v1/config/library-roots/${root.id}`, {
+          method: "DELETE",
+          body: JSON.stringify({ preview_token: preview.preview_token, confirmation: "REMOVE" }),
+        });
+        this.libraryRoots = this.libraryRoots.filter(item => item.id !== root.id);
+        this.libraryRootRemovalPreview = null;
+        if (this.namingScope === String(root.id)) await this.loadNamingScope('global');
+        if (typeof showToast === 'function') showToast({ message: 'Library root removed. Files are unchanged.', level: 'success' });
+      } catch (err) {
+        this.libraryRootError = err.message || 'Could not remove this library root.';
+        this.libraryRootRemovalPreview = null;
+      } finally {
+        this.libraryRootSaving = false;
+      }
+    },
+
+    openLibraryRootRebind(root) {
+      this.libraryRootRemovalPreview = null;
+      this.libraryRootRebindRootId = Number(root.id);
+      this.libraryRootRebindPath = '';
+      this.libraryRootRebindPreview = null;
+      this.libraryRootError = '';
+    },
+
+    closeLibraryRootRebind() {
+      this.libraryRootRebindRootId = null;
+      this.libraryRootRebindPath = '';
+      this.libraryRootRebindPreview = null;
+      this.libraryRootRebindPreviewRequest += 1;
+    },
+
+    async previewLibraryRootRebind(root) {
+      const requestId = ++this.libraryRootRebindPreviewRequest;
+      this.libraryRootRebindPreview = null;
+      this.libraryRootError = '';
+      if (!this.libraryRootRebindPath.trim()) return;
+      try {
+        const preview = await this.libraryRootRequest(
+          `/api/v1/config/library-roots/${root.id}/rebind/preview`,
+          {
+            method: "POST",
+            body: JSON.stringify({ replacement_path: this.libraryRootRebindPath }),
+          }
+        );
+        if (
+          requestId === this.libraryRootRebindPreviewRequest
+          && this.libraryRootRebindRootId === Number(root.id)
+        ) {
+          this.libraryRootRebindPreview = preview;
+        }
+      } catch (err) {
+        if (requestId === this.libraryRootRebindPreviewRequest) {
+          this.libraryRootError = err.message || 'Could not preview this root rebind.';
+        }
+      }
+    },
+
+    async confirmLibraryRootRebind(root) {
+      const preview = this.libraryRootRebindPreview;
+      if (this.libraryRootSaving || !preview?.can_rebind || !preview.preview_token) return;
+      this.libraryRootSaving = true;
+      this.libraryRootError = '';
+      try {
+        await this.libraryRootRequest(`/api/v1/config/library-roots/${root.id}/rebind`, {
+          method: "POST",
+          body: JSON.stringify({
+            replacement_path: this.libraryRootRebindPath,
+            preview_token: preview.preview_token,
+            confirmation: "REBIND",
+          }),
+        });
+        this.closeLibraryRootRebind();
+        await this.refreshLibraryRoots();
+        if (typeof showToast === "function") showToast({ message: "Library root path rebound.", level: "success" });
+      } catch (err) {
+        this.libraryRootError = err.message || 'Could not rebind this library root.';
+        this.libraryRootRebindPreview = null;
+        await this.refreshLibraryRoots();
+      } finally {
+        this.libraryRootSaving = false;
+      }
+    },
+
+    libraryRootRebindImpactSummary() {
+      const impact = this.libraryRootRebindPreview?.impact;
+      if (!impact) return '';
+      const parts = [
+        `${impact.library_file_count} library file${impact.library_file_count === 1 ? '' : 's'}`,
+        `${impact.series_count} current series association${impact.series_count === 1 ? '' : 's'}`,
+        `${impact.preferred_series_count} preferred destination${impact.preferred_series_count === 1 ? '' : 's'}`,
+        `${impact.story_arc_placement_count} Story Arc placement${impact.story_arc_placement_count === 1 ? '' : 's'}`,
+      ];
+      if (impact.affects_default_destination) parts.push('default managed destination');
+      return parts.join(' · ');
+    },
+
+    rootStatusLabel(root) {
+      if (!root.enabled) return 'Disabled';
+      if (root.status === 'ready') return 'Ready';
+      if (root.status === 'read_only') return 'Read only';
+      if (root.status === 'low_capacity') return 'Low capacity';
+      if (root.status === 'unavailable') return 'Unavailable';
+      return 'Checking';
+    },
+
+    rootStatusClass(root) {
+      if (!root.enabled) return 'border-pb-border text-pb-text-dim';
+      if (root.status === 'ready') return 'border-pb-success/40 bg-pb-success/10 text-pb-success';
+      if (root.status === 'unavailable') return 'border-pb-error/40 bg-pb-error/10 text-pb-error';
+      return 'border-pb-warning/40 bg-pb-warning/10 text-pb-warning';
+    },
+
+    libraryRootCapacityLabel(root) {
+      if (root.free_bytes == null) return root.enabled ? 'Capacity unavailable' : 'Root disabled';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let value = Number(root.free_bytes);
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      return value.toFixed(unit === 0 ? 0 : 1) + ' ' + units[unit] + ' free';
+    },
+
+    libraryRootPreviewSummary() {
+      if (!this.libraryRootPreview) return '';
+      const status = this.rootStatusLabel({ ...this.libraryRootPreview, enabled: true });
+      const capacity = this.libraryRootCapacityLabel({ ...this.libraryRootPreview, enabled: true });
+      return status + ' · ' + capacity;
+    },
 
     saveConfig(formEl) {
       const formData = new FormData(formEl);
@@ -443,74 +889,7 @@ function mediaSettings() {
         });
     },
 
-    lockNamingPreviewHeight(el) {
-      const currentHeight = Math.ceil(el.getBoundingClientRect().height);
-      const lockedHeight = Number.parseInt(el.style.minHeight || "0", 10) || 0;
-      if (currentHeight > lockedHeight) {
-        el.style.minHeight = currentHeight + "px";
-      }
-    },
-
-    previewNaming(template, templateType, targetId) {
-      const el = document.getElementById(targetId);
-      if (!el) return;
-      const requestId = (this.namingPreviewRequests[targetId] || 0) + 1;
-      this.namingPreviewRequests[targetId] = requestId;
-      if (!template.trim()) {
-        el.classList.remove("is-loading");
-        el.setAttribute("aria-busy", "false");
-        el.dataset.previewReady = "true";
-        el.innerHTML = '<span class="block text-pb-text-dim italic">Enter a template above.</span>';
-        return;
-      }
-      el.setAttribute("aria-busy", "true");
-      el.classList.add("is-loading");
-      if (el.dataset.previewReady !== 'true') {
-        el.innerHTML = '<span class="block text-pb-text-dim italic">Loading preview...</span>';
-      } else {
-        this.lockNamingPreviewHeight(el);
-      }
-
-      const params = new URLSearchParams({
-        template: template,
-        template_type: templateType,
-      });
-
-      fetch("/api/v1/config/naming/preview?" + params.toString(), {
-        headers: { "X-CSRF-Token": "{{ csrf_token }}" },
-      })
-        .then(r => r.json())
-        .then(data => {
-          if (this.namingPreviewRequests[targetId] !== requestId) return;
-          el.classList.remove("is-loading");
-          el.setAttribute("aria-busy", "false");
-          el.dataset.previewReady = "true";
-          const examples = data.examples || [];
-          if (examples.length === 0) {
-            el.innerHTML = '<span class="block text-pb-text-dim italic">No matching examples.</span>';
-            return;
-          }
-          el.innerHTML = examples.map(ex => {
-            const inputHtml = '<span class="text-pb-text-dim">' + escapeHtml(ex.input || '') + '</span>';
-            const arrow = '<span class="text-pb-text-dim mx-1">→</span>';
-            const outputHtml = '<span class="text-pb-success">' + escapeHtml(ex.output || '') + '</span>';
-            return '<div class="flex items-baseline gap-0 flex-wrap">' + inputHtml + arrow + outputHtml + '</div>';
-          }).join("");
-        })
-        .catch(() => {
-          if (this.namingPreviewRequests[targetId] !== requestId) return;
-          el.classList.remove("is-loading");
-          el.setAttribute("aria-busy", "false");
-          el.dataset.previewReady = "true";
-          el.innerHTML = '<span class="block text-pb-error">Preview failed.</span>';
-        });
-    },
   };
 }
 
-function escapeHtml(value) {
-  const div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(value)));
-  return div.innerHTML;
-}
 </script>

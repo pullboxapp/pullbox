@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from pullbox.core.collection_scanner import DiscoveredFile, DiscoveredSeries
 from pullbox.models.import_job import (
@@ -34,6 +34,40 @@ async def _create_job(session: AsyncSession) -> ImportJob:
     return job
 
 
+async def test_materialization_batches_file_inserts_without_losing_review_rows(db_session):
+    job = await _create_job(db_session)
+    files = [_discovered_file(name=f"Issue {number}.cbz") for number in range(120)]
+    discovered = DiscoveredSeries(
+        raw_series_name="Test",
+        raw_year=2024,
+        raw_publisher=None,
+        file_count=len(files),
+        sample_paths=[],
+        source_folder="/tmp/comics",
+        source_folder_relative=".",
+        files=files,
+    )
+    statements = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO import_files"):
+            statements.append(statement)
+
+    engine = db_session.bind.sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        await materialize_discovered_scan_results(db_session, job, [discovered])
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert 0 < len(statements) <= 2
+    rows = (await db_session.scalars(select(ImportedFile).order_by(ImportedFile.id))).all()
+    assert [row.file_name for row in rows] == [file.file_name for file in files]
+    assert all(row.status == ImportedFileStatus.PENDING for row in rows)
+    assert all(
+        row.diagnostics["source_metadata"] == {"title": "Absolute Wonder Woman"} for row in rows
+    )
+
+
 def _discovered_file(
     *,
     name: str = "Absolute Wonder Woman 019.cbz",
@@ -56,6 +90,16 @@ def _discovered_file(
         issue_count_hint=24,
         metadata_signals={"series": "comicinfo", "issue": "filename"},
         metadata_diagnostics={"title": "Absolute Wonder Woman"},
+        source_signature={
+            "schema_version": 1,
+            "resolved_path": f"/tmp/comics/Absolute Wonder Woman/{name}",
+            "size": 12345,
+            "mtime_ns": 123456789,
+            "device": 1,
+            "inode": 2,
+        },
+        source_folder_cohort_key="Absolute Wonder Woman",
+        source_ordinal=19,
     )
 
 
@@ -122,7 +166,17 @@ async def test_materialize_discovered_scan_results_persists_series_and_files(
     assert file_row.has_comicinfo is True
     assert file_row.comicvine_issue_id == 123456
     assert file_row.issue_number_raw == "019"
+    assert file_row.source_folder_cohort_key == "Absolute Wonder Woman"
+    assert file_row.source_ordinal == 19
     assert file_row.status == ImportedFileStatus.PENDING
+    assert file_row.source_signature == {
+        "schema_version": 1,
+        "resolved_path": ("/tmp/comics/Absolute Wonder Woman/Absolute Wonder Woman 019.cbz"),
+        "size": 12345,
+        "mtime_ns": 123456789,
+        "device": 1,
+        "inode": 2,
+    }
     assert file_row.diagnostics == {
         "source_issue_type": "issue",
         "comicvine_series_id": 98765,
@@ -174,6 +228,199 @@ async def test_materialize_discovered_scan_results_persists_safety_blocked_files
         "reason": "Archive decompressed size exceeds limit",
         "details": [blocked_file.file_path],
     }
+
+
+async def test_materialize_non_fitting_layout_files_as_explicit_review_rows(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    review_file = _discovered_file(name="Batman 001.cbz")
+    review_file.metadata_diagnostics = {
+        "source_layout": {
+            "fit": False,
+            "fallback_used": False,
+            "review_required": True,
+            "review_reason": "selected_layout_no_match",
+            "relative_path": "Batman (2011)/Batman 001.cbz",
+        }
+    }
+    discovered = DiscoveredSeries(
+        raw_series_name="Batman",
+        raw_year=2011,
+        raw_publisher=None,
+        file_count=1,
+        sample_paths=[review_file.file_path],
+        source_folder="/tmp/comics/Batman (2011)",
+        source_folder_relative="Batman (2011)",
+        files=[review_file],
+        has_files=True,
+    )
+
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+
+    series_row = pairs[0][1]
+    file_row = (
+        (await db_session.execute(select(ImportedFile).where(ImportedFile.import_job_id == job.id)))
+        .scalars()
+        .one()
+    )
+    assert series_row.status == ImportSeriesStatus.NO_MATCH
+    assert series_row.diagnostics["kind"] == "source_layout_review"
+    assert series_row.diagnostics["reason"] == "selected_layout_no_match"
+    assert file_row.status == ImportedFileStatus.NO_MATCH
+    assert file_row.include_in_import is False
+    assert file_row.diagnostics["kind"] == "source_layout_review"
+    assert file_row.diagnostics["reason"] == "selected_layout_no_match"
+    assert file_row.diagnostics["rejection_reason"] == (
+        "This file does not fit the selected source layout. Review its series before importing."
+    )
+    assert file_row.diagnostics["source_metadata"]["source_layout"]["relative_path"] == (
+        "Batman (2011)/Batman 001.cbz"
+    )
+
+
+async def test_materialize_incompatible_mylar_path_as_series_review(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    discovered = DiscoveredSeries(
+        raw_series_name="Batman",
+        raw_year=2011,
+        raw_publisher="DC Comics",
+        file_count=0,
+        sample_paths=[],
+        source_folder="",
+        source_folder_relative="/comics/Batman",
+        files=[],
+        has_files=False,
+        mylar3_cv_id=42721,
+        diagnostics={
+            "kind": "mylar3_path_incompatible",
+            "reason": "unmapped_path",
+            "rejection_reason": (
+                "The Mylar comic folder is not available through the configured path mappings."
+            ),
+            "mylar3_path": {
+                "status": "unmapped",
+                "mapping_applied": False,
+            },
+        },
+    )
+
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+
+    series_row = pairs[0][1]
+    assert series_row.status == ImportSeriesStatus.NO_MATCH
+    assert series_row.cv_id == 42721
+    assert series_row.cv_match_method == "mylar3_cv_id"
+    assert series_row.diagnostics["kind"] == "mylar3_path_incompatible"
+    assert series_row.diagnostics["reason"] == "unmapped_path"
+
+
+async def test_materialize_mixed_layout_keeps_only_non_fitting_file_in_review(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    fitting_file = _discovered_file(name="Batman 001.cbz")
+    fitting_file.metadata_diagnostics = {
+        "source_layout": {
+            "fit": True,
+            "fallback_used": False,
+            "relative_path": "DC Comics/Batman/Batman 001.cbz",
+        }
+    }
+    review_file = _discovered_file(name="Batman Special.cbz")
+    review_file.metadata_diagnostics = {
+        "source_layout": {
+            "fit": False,
+            "fallback_used": False,
+            "review_required": True,
+            "review_reason": "selected_layout_no_match",
+            "relative_path": "Loose/Batman Special.cbz",
+        }
+    }
+    discovered = DiscoveredSeries(
+        raw_series_name="Batman",
+        raw_year=2011,
+        raw_publisher="DC Comics",
+        file_count=2,
+        sample_paths=[fitting_file.file_path, review_file.file_path],
+        source_folder="/tmp/comics/DC Comics/Batman",
+        source_folder_relative="DC Comics/Batman",
+        files=[fitting_file, review_file],
+        has_files=True,
+    )
+
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+
+    assert pairs[0][1].status == ImportSeriesStatus.PENDING
+    files = (
+        (
+            await db_session.execute(
+                select(ImportedFile)
+                .where(ImportedFile.import_job_id == job.id)
+                .order_by(ImportedFile.file_name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {row.file_name: row.status for row in files} == {
+        "Batman 001.cbz": ImportedFileStatus.PENDING,
+        "Batman Special.cbz": ImportedFileStatus.NO_MATCH,
+    }
+
+
+async def test_materialize_mixed_mylar_folder_keeps_foreign_file_in_review(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job(db_session)
+    owned_file = _discovered_file(name="Fritzi Ritz 001.cbz")
+    owned_file.parsed_series = "Fritzi Ritz"
+    foreign_file = _discovered_file(name="Batman 001.cbz")
+    foreign_file.parsed_series = "Batman"
+    foreign_file.comicvine_series_id = None
+    foreign_file.comicvine_issue_id = None
+    foreign_file.metadata_diagnostics = {
+        "mylar3_folder_scope_conflict": {
+            "expected_series": "Fritzi Ritz",
+            "parsed_series": "Batman",
+            "recorded_issue": False,
+        }
+    }
+    discovered = DiscoveredSeries(
+        raw_series_name="Fritzi Ritz",
+        raw_year=1953,
+        raw_publisher=None,
+        file_count=2,
+        sample_paths=[owned_file.file_path, foreign_file.file_path],
+        source_folder="/tmp/comics/Fritzi Ritz (1953)",
+        source_folder_relative="Fritzi Ritz (1953)",
+        files=[owned_file, foreign_file],
+        has_files=True,
+        mylar3_cv_id=31895,
+    )
+
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+
+    assert pairs[0][1].status == ImportSeriesStatus.PENDING
+    files = (
+        (
+            await db_session.execute(
+                select(ImportedFile)
+                .where(ImportedFile.import_job_id == job.id)
+                .order_by(ImportedFile.file_name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {row.file_name: row.status for row in files} == {
+        "Batman 001.cbz": ImportedFileStatus.NO_MATCH,
+        "Fritzi Ritz 001.cbz": ImportedFileStatus.PENDING,
+    }
+    assert files[0].diagnostics["reason"] == "mylar3_folder_scope_conflict"
+    assert "another series" in files[0].diagnostics["rejection_reason"]
 
 
 async def test_materialize_discovered_scan_results_uses_comicinfo_cv_when_no_mylar_id(

@@ -13,7 +13,12 @@ from sqlalchemy.orm import joinedload
 from pullbox.core.exceptions import NotFoundError
 from pullbox.core.file_ops import register_library_file
 from pullbox.core.file_safety import get_allowed_extensions
-from pullbox.core.library_policy import LibraryIngestPolicy, load_library_ingest_policy
+from pullbox.core.library_policy import (
+    LibraryIngestPolicy,
+    load_effective_library_ingest_policy,
+    load_library_ingest_policy,
+)
+from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile, MatchConfidence
 from pullbox.models.series import Series
@@ -121,11 +126,17 @@ async def prepare_manual_issue_import(
             detail=f"Unsupported format '{ext}'. Supported: {supported}",
         )
 
+    root_id = getattr(getattr(issue, "series", None), "library_root_id", None)
+    ingest_policy = (
+        await load_effective_library_ingest_policy(session, root_id)
+        if root_id is not None
+        else await load_library_ingest_policy(session)
+    )
     return PreparedManualIssueImport(
         issue=issue,
         issue_id=issue.id,
         source_path=source_path,
-        ingest_policy=await load_library_ingest_policy(session),
+        ingest_policy=ingest_policy,
     )
 
 
@@ -183,7 +194,7 @@ async def execute_manual_issue_import(
         issue=prepared.issue,
         confidence=MatchConfidence.MANUAL,
         move_to_library=True,
-        library_root_id=prepared.issue.series.library_root_id,
+        library_root_id=preferred_managed_root_id(prepared.issue.series),
         loaded_issue=prepared.issue,
         ingest_policy=prepared.ingest_policy,
         allow_resource_safety_exception=allow_resource_safety_exception,

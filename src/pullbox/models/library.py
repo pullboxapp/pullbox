@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     Float,
     ForeignKey,
     Index,
     Integer,
     String,
+    text,
 )
 from sqlalchemy import (
     Enum as SQLAlchemyEnum,
@@ -41,6 +43,21 @@ class MatchConfidence(enum.StrEnum):
     MEDIUM = "medium"
     LOW = "low"
     UNMATCHED = "unmatched"
+    MANUAL = "manual"
+
+
+class LibraryFileStorageMode(enum.StrEnum):
+    """Whether Pullbox owns an artifact or references a user-owned file."""
+
+    MANAGED = "managed"
+    REFERENCED = "referenced"
+
+
+class LibraryRootPolicySource(enum.StrEnum):
+    """Origin of an explicit complete naming policy for one library root."""
+
+    GLOBAL_DEFAULT = "global_default"
+    IMPORT_ADOPTION = "import_adoption"
     MANUAL = "manual"
 
 
@@ -76,10 +93,26 @@ class LibraryFile(Base, IdentityMixin, TimestampMixin):
     naming_snapshot: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}", nullable=False
     )
+    storage_mode: Mapped[LibraryFileStorageMode] = mapped_column(
+        SQLAlchemyEnum(
+            LibraryFileStorageMode,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+            create_constraint=True,
+        ),
+        default=LibraryFileStorageMode.MANAGED,
+        server_default=LibraryFileStorageMode.MANAGED.value,
+        nullable=False,
+    )
+    source_signature: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
+        JSON, default=dict, server_default="{}", nullable=False
+    )
 
     # Foreign keys
     issue_id: Mapped[int | None] = mapped_column(ForeignKey("issues.id", ondelete="SET NULL"))
-    library_root_id: Mapped[int] = mapped_column(ForeignKey("library_roots.id", ondelete="CASCADE"))
+    library_root_id: Mapped[int] = mapped_column(
+        ForeignKey("library_roots.id", ondelete="RESTRICT")
+    )
 
     # Relationships
     issue: Mapped[Issue | None] = relationship(back_populates="library_file")
@@ -88,16 +121,93 @@ class LibraryFile(Base, IdentityMixin, TimestampMixin):
 
 class LibraryRoot(Base, IdentityMixin, TimestampMixin):
     __tablename__ = "library_roots"
+    __table_args__ = (
+        Index(
+            "uq_library_roots_default_managed_destination",
+            "is_default_managed_destination",
+            unique=True,
+            sqlite_where=text("is_default_managed_destination = 1"),
+            postgresql_where=text("is_default_managed_destination"),
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     path: Mapped[str] = mapped_column(String(1000), nullable=False, unique=True)
-    enabled: Mapped[bool] = mapped_column(default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    allow_referenced_registrations: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="1",
+        nullable=False,
+    )
+    allow_managed_writes: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="1",
+        nullable=False,
+    )
+    is_default_managed_destination: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
     last_scan_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_scan_duration_seconds: Mapped[float | None] = mapped_column(Float)
     last_scan_files_found: Mapped[int | None] = mapped_column(Integer)
 
     # Relationships
     files: Mapped[list[LibraryFile]] = relationship(
-        back_populates="library_root", cascade="all, delete-orphan"
+        back_populates="library_root", passive_deletes="all"
     )
-    series: Mapped[list[Series]] = relationship(back_populates="library_root")
+    series: Mapped[list[Series]] = relationship(
+        back_populates="library_root",
+        foreign_keys="Series.library_root_id",
+        passive_deletes="all",
+    )
+    preferred_series: Mapped[list[Series]] = relationship(
+        back_populates="preferred_library_root",
+        foreign_keys="Series.preferred_library_root_id",
+        passive_deletes="all",
+    )
+    naming_policy: Mapped[LibraryRootPolicy | None] = relationship(
+        back_populates="library_root",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class LibraryRootPolicy(Base, IdentityMixin, TimestampMixin):
+    """Complete explicit naming policy owned by exactly one library root."""
+
+    __tablename__ = "library_root_policies"
+
+    library_root_id: Mapped[int] = mapped_column(
+        ForeignKey("library_roots.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    series_path_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    comic_file_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    annual_file_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    non_standard_file_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    single_non_standard_file_template: Mapped[str] = mapped_column(String(1024), nullable=False)
+    replace_illegal_characters: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    colon_replacement: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[LibraryRootPolicySource] = mapped_column(
+        SQLAlchemyEnum(
+            LibraryRootPolicySource,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+            create_constraint=True,
+        ),
+        nullable=False,
+    )
+    source_import_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    library_root: Mapped[LibraryRoot] = relationship(back_populates="naming_policy")

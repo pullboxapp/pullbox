@@ -543,6 +543,61 @@ class TestListConflicts:
         assert data["groups"] == []
 
     @pytest.mark.asyncio
+    async def test_conflicts_endpoint_returns_one_bounded_server_page(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        job_id, _series_ids, _file_ids, _iids = await _seed_job_with_files(
+            _db_factory,
+            files_per_series=0,
+            conflict_files=6,
+        )
+
+        response = await client.get(
+            f"/api/v1/import/{job_id}/conflicts",
+            params={"page": 2, "page_size": 1},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 3
+        assert payload["page"] == 2
+        assert payload["page_size"] == 1
+        assert len(payload["groups"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_conflicts_endpoint_represents_series_candidate_conflicts(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        job_id, series_ids, _file_ids, _iids = await _seed_job_with_files(
+            _db_factory,
+            files_per_series=1,
+            conflict_files=0,
+        )
+        async with _db_factory() as session:
+            imported_series = await session.get(ImportedSeries, series_ids[0])
+            assert imported_series is not None
+            imported_series.status = ImportSeriesStatus.NO_MATCH
+            imported_series.diagnostics = {
+                "kind": "series_conflict",
+                "reason": "ambiguous_match",
+            }
+            await session.commit()
+
+        response = await client.get(f"/api/v1/import/{job_id}/conflicts")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 1
+        assert payload["groups"][0]["kind"] == "series_conflict"
+        assert payload["groups"][0]["conflict_group_id"] == f"series-{series_ids[0]}"
+        assert payload["groups"][0]["series_id"] == series_ids[0]
+        assert payload["groups"][0]["matched_issue_id"] is None
+
+    @pytest.mark.asyncio
     async def test_job_not_found(
         self,
         client: AsyncClient,

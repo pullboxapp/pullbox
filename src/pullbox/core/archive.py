@@ -24,6 +24,18 @@ logger = structlog.get_logger(__name__)
 _ARCHIVE_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff"})
 
 
+def comicinfo_member_sort_key(name: str) -> tuple[int, int, str, str]:
+    """Prefer the canonical root ComicInfo.xml, then the shallowest nested copy."""
+    normalized = name.replace("\\", "/")
+    member = PurePosixPath(normalized)
+    return (
+        0 if len(member.parts) == 1 else 1,
+        len(member.parts),
+        normalized.casefold(),
+        normalized,
+    )
+
+
 class ArchiveError(Exception):
     """Raised when an archive cannot be read or is corrupt."""
 
@@ -124,19 +136,22 @@ class ArchiveReader:
 
         raise ArchiveError(f"Unsupported format: {self._extension}")
 
-    def read_comicinfo(self) -> ComicInfoData | None:
+    def read_comicinfo(self, *, entries: list[str] | None = None) -> ComicInfoData | None:
         """Extract and parse ComicInfo.xml from the archive.
 
         Returns ``None`` if the archive does not contain a ComicInfo.xml.
         """
-        files = self.list_files()
+        files = entries if entries is not None else self.list_files()
 
-        # ComicInfo.xml can be at root or in a subdirectory
-        comicinfo_name = None
-        for name in files:
-            if name.lower().endswith("comicinfo.xml"):
-                comicinfo_name = name
-                break
+        comicinfo_names = sorted(
+            (
+                name
+                for name in files
+                if PurePosixPath(name.replace("\\", "/")).name.casefold() == "comicinfo.xml"
+            ),
+            key=comicinfo_member_sort_key,
+        )
+        comicinfo_name = comicinfo_names[0] if comicinfo_names else None
 
         if comicinfo_name is None:
             return None

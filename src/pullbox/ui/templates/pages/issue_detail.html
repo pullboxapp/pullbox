@@ -27,18 +27,29 @@
   })"
 >
   <div class="series-domain-breadcrumb-row">
-    <a href="/series/{{ issue.series.id }}" data-testid="issue-detail-back-link" class="series-domain-back-link">
+    <a href="{{ issue_detail_back_url }}" data-testid="issue-detail-back-link" class="series-domain-back-link">
       <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
         <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
       </svg>
-      Back to series
+      {{ 'Back to story arc' if issue_story_arc_origin else 'Back to series' }}
     </a>
-    <nav data-testid="issue-detail-breadcrumbs" class="series-domain-breadcrumbs" aria-label="Breadcrumb">
+    <nav
+      data-testid="issue-detail-breadcrumbs"
+      data-breadcrumb-origin="{{ 'story-arc' if issue_story_arc_origin else 'series' }}"
+      class="series-domain-breadcrumbs"
+      aria-label="Breadcrumb"
+    >
+      {% if issue_story_arc_origin %}
+      <a href="/story-arcs">All Story Arcs</a>
+      <span class="series-domain-breadcrumb-sep">›</span>
+      <a href="{{ issue_detail_back_url }}">{{ issue_story_arc_origin.name }}</a>
+      {% else %}
       <a href="/series">All Series</a>
       <span class="series-domain-breadcrumb-sep">›</span>
       <a href="/series/{{ issue.series.id }}">{{ issue.series.title }}</a>
+      {% endif %}
       <span class="series-domain-breadcrumb-sep">›</span>
-      <span class="current">#{{ issue.issue_number|issue_num }}</span>
+      <span class="current" aria-current="page">#{{ issue.issue_number|issue_num }}</span>
     </nav>
   </div>
 

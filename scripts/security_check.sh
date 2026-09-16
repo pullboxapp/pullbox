@@ -4,7 +4,6 @@ set -euo pipefail
 
 venv_bin="${VENV_BIN:-.venv/bin}"
 pip_bin="${venv_bin}/pip"
-pip_audit_bin="${venv_bin}/pip-audit"
 safety_bin="${venv_bin}/safety"
 bandit_bin="${venv_bin}/bandit"
 requirements_file="$(mktemp /tmp/pullbox-requirements-audit.XXXXXX.txt)"
@@ -21,8 +20,7 @@ echo "═══ Pullbox Security Check ═══"
 echo ""
 echo "── pip-audit (blocking) ──"
 "${pip_bin}" freeze --exclude-editable | awk '!/^pullbox==/' > "${requirements_file}"
-if ! "${pip_audit_bin}" --strict --desc on -r "${requirements_file}" \
-  --ignore-vuln CVE-2026-4539; then
+if ! "${venv_bin}/python" scripts/run_dependency_audit.py -r "${requirements_file}"; then
   status=1
 fi
 echo ""

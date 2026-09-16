@@ -287,8 +287,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         async with factory() as session:
             reconciliation = await reconcile_runtime_library_paths(session, settings.library_root)
             if reconciliation:
-                await session.commit()
-                logger.info("library_paths_reconciled_at_startup", **reconciliation)
+                if reconciliation.get("rebind_required") is True:
+                    logger.warning("library_path_rebind_required", **reconciliation)
+                elif reconciliation.get("status") == "root_unavailable":
+                    logger.warning("runtime_library_root_unavailable", **reconciliation)
+                else:
+                    await session.commit()
+                    logger.info("runtime_library_root_bootstrapped", **reconciliation)
     except Exception:
         logger.warning("library_path_reconciliation_failed", exc_info=True)
 
@@ -414,24 +419,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         factory = get_session_factory()
         import_runner = ImportRunner(factory)
         set_import_runner(import_runner)
-        import_runner_task = asyncio.create_task(import_runner.recover_and_dispatch())
-        _startup_background_tasks.add(import_runner_task)
-
-        def _cleanup_import_runner_task(task: asyncio.Task[object]) -> None:
-            _startup_background_tasks.discard(task)
-            with suppress(asyncio.CancelledError):
-                exc = task.exception()
-                if exc is not None:
-                    logger.warning("import_runner_startup_failed", exc_info=exc)
-                    return
-
-                recovered = task.result()
-                if isinstance(recovered, int) and recovered:
-                    logger.info("import_jobs_recovered_at_startup", count=recovered)
-
-        import_runner_task.add_done_callback(_cleanup_import_runner_task)
-    except Exception:
+        # Reconcile durable import/control state before the scheduler can claim
+        # Story Arc work. Dispatch itself remains asynchronous inside the runner.
+        recovered = await import_runner.recover_and_dispatch()
+        if recovered:
+            logger.info("import_jobs_recovered_at_startup", count=recovered)
+    except Exception as exc:
         logger.warning("import_recovery_failed", subsystem="import_recovery", exc_info=True)
+        raise RuntimeError("Import recovery failed before scheduler startup") from exc
 
     # Recover native direct-download attempts. Signed artifact URLs remain
     # ephemeral and are reconstructed by the runner only when work resumes.
@@ -497,9 +492,24 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         async def _resume_deferred_import_metadata() -> tuple[int, int]:
             async with factory() as session:
                 import_service = await build_import_service(session)
-            comicinfo_jobs = await import_service.recover_pending_comicinfo_enrichment(factory)
-            hydrated_series = await import_service.recover_pending_catalog_hydration(factory)
-            return comicinfo_jobs, hydrated_series
+            # Each lane owns its sessions and already shares provider rate limiting.
+            # A long archive rewrite queue must not block visible catalog hydration.
+            results = await asyncio.gather(
+                import_service.recover_pending_comicinfo_enrichment(factory),
+                import_service.recover_pending_catalog_hydration(factory),
+                return_exceptions=True,
+            )
+            for lane, result in zip(("comicinfo", "catalog"), results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "import_metadata_lane_recovery_failed",
+                        lane=lane,
+                        exc_info=result,
+                    )
+            return (
+                results[0] if isinstance(results[0], int) else 0,
+                results[1] if isinstance(results[1], int) else 0,
+            )
 
         import_metadata_recovery_task = asyncio.create_task(_resume_deferred_import_metadata())
         _startup_background_tasks.add(import_metadata_recovery_task)
@@ -797,6 +807,19 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                 subsystem="update_check",
                 exc_info=True,
             )
+
+    async def _startup_catalog_check() -> None:
+        from pullbox.services.catalog.contract import CatalogError
+        from pullbox.services.catalog.service import get_catalog_service
+
+        try:
+            await get_catalog_service().sync()
+        except CatalogError:
+            logger.warning("startup_catalog_check_failed")
+
+    catalog_startup_task = asyncio.create_task(_startup_catalog_check())
+    _startup_background_tasks.add(catalog_startup_task)
+    catalog_startup_task.add_done_callback(_startup_background_tasks.discard)
 
     if settings.startup_update_check_enabled:
         startup_update_task = asyncio.create_task(_startup_update_check())

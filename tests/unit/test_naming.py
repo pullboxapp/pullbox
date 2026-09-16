@@ -466,6 +466,10 @@ class TestFormatFilenameLegacy:
         result = format_filename("Batman", 1, 2016)
         assert result == "Batman (2016) #001.cbz"
 
+    def test_large_issue_number_never_uses_scientific_notation(self) -> None:
+        result = format_filename("Wonder Woman", 1_000_000.0, 1998)
+        assert result == "Wonder Woman (1998) #1000000.cbz"
+
     def test_lowercase_tokens_normalized(self) -> None:
         result = format_filename(
             "Batman",
@@ -589,6 +593,12 @@ class TestGetNamingPreview:
         results = get_naming_preview("{Series} ({Year})", "folder")
         for r in results:
             assert not r["output"].endswith(".cbz")
+
+    def test_folder_preview_preserves_nested_path_segments(self) -> None:
+        results = get_naming_preview("{Publisher}/{Series} ({Year})", "folder")
+        outputs = [result["output"] for result in results]
+
+        assert "DC Comics/Absolute Batman (2024)" in outputs
 
     def test_non_standard_type_display(self) -> None:
         results = get_naming_preview("{Series} {Type} ({Year})", "non_standard")

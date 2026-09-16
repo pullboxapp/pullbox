@@ -180,7 +180,7 @@ def test_security_workflow_runs_required_scanners_on_pr_full_gate() -> None:
         "GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks@sha256:",
         "docker run --rm",
         '"$GITLEAKS_IMAGE"',
-        "pip-audit --strict",
+        "python scripts/run_dependency_audit.py",
         "safety check",
         "--save-json safety-report.json",
         "bandit -r src/pullbox/",
@@ -240,10 +240,18 @@ def test_codeql_branch_probe_is_manual_fallback_with_summary() -> None:
 
 def test_ci_and_local_full_ci_enforce_v1_coverage_gate() -> None:
     ci_workflow = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
+    ci_config = _load_yaml(WORKFLOW_DIR / "ci.yml")
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     ci_local_match = re.search(r"^ci-local:.*?(?=^\S|\Z)", makefile, re.MULTILINE | re.DOTALL)
 
-    assert "--cov-fail-under=90" in ci_workflow
+    test_job = ci_config["jobs"]["test"]
+    matrix_rows = test_job["strategy"]["matrix"]["include"]
+    assert matrix_rows == [
+        {"python-version": "3.12", "coverage_fail_under": 0},
+        {"python-version": "3.13", "coverage_fail_under": 0},
+        {"python-version": "3.14", "coverage_fail_under": 90},
+    ]
+    assert '--cov-fail-under="${COVERAGE_FAIL_UNDER}"' in ci_workflow
     assert "--cov-fail-under=60" not in ci_workflow
     assert ci_local_match is not None
     assert "--cov-fail-under=90 -v" in ci_local_match.group(0)
@@ -618,6 +626,23 @@ def test_local_security_script_writes_valid_safety_json_artifact() -> None:
     assert "--output json > safety-report.json" not in script
 
 
+def test_dependency_audit_policy_is_shared_and_retains_raw_ci_evidence() -> None:
+    script = (REPO_ROOT / "scripts" / "security_check.sh").read_text(encoding="utf-8")
+    workflow = _load_yaml(WORKFLOW_DIR / "security.yml")
+    job = workflow["jobs"]["dependency-audit"]
+    scan = next(step for step in job["steps"] if step.get("name") == "Run pip-audit")
+    assert '"${venv_bin}/python" scripts/run_dependency_audit.py' in script
+    assert "python scripts/run_dependency_audit.py" in scan["run"]
+    assert "mktemp" in scan["run"]
+    assert "continue-on-error" not in scan
+    assert "|| true" not in scan["run"]
+    upload = next(
+        step for step in job["steps"] if step.get("name") == "Upload dependency audit report"
+    )
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"] == "dependency-audit-report.json"
+
+
 def test_environment_bootstrap_uses_current_packaging_tool_floor() -> None:
     runner_setup = (REPO_ROOT / ".github" / "scripts" / "setup-runner-venv.sh").read_text(
         encoding="utf-8"
@@ -627,6 +652,19 @@ def test_environment_bootstrap_uses_current_packaging_tool_floor() -> None:
     assert 'PACKAGING_TOOLS_VERSION=("pip>=26.0" "wheel")' in runner_setup
     assert '"${PACKAGING_TOOLS_VERSION[@]}"' in runner_setup
     assert '$(PIP) install --upgrade "pip>=26.0" wheel' in makefile
+
+
+def test_local_docker_smoke_imports_pullbox_from_active_worktree() -> None:
+    """A shared editable venv must not redirect smoke tests to another checkout."""
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = re.search(
+        r"^docker-smoke:.*?(?=^\S|\Z)",
+        makefile,
+        re.MULTILINE | re.DOTALL,
+    )
+
+    assert target is not None
+    assert "PYTHONPATH=src PULLBOX_SMOKE_URL=" in target.group(0)
 
 
 def test_docker_validation_workflow_never_publishes_images() -> None:
@@ -945,6 +983,8 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     assert "CVE-2026-11824" in config_text
     assert "CVE-2026-14456" in config_text
     assert "CVE-2026-66046" in config_text
+    assert "CVE-2026-76956" in config_text
+    assert "CVE-2026-76957" in config_text
     assert "3.14.6" in config_text
     assert config.get("ignore")
 
@@ -969,6 +1009,63 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     } == {
         ("libexpat1", "2.8.3-1~deb13u1+dhi2", "deb"),
         ("libexpat1-dev", "2.8.3-1~deb13u1+dhi2", "deb"),
+        ("libexpat1", "2.8.3-1~deb13u1+dhi3", "deb"),
+    }
+
+    current_expat_exceptions = [
+        entry
+        for entry in config["ignore"]
+        if entry.get("vulnerability") in {"CVE-2026-76956", "CVE-2026-76957"}
+    ]
+    assert "Re-review by 2026-10-07" in config_text
+    assert {
+        (
+            entry["vulnerability"],
+            entry["package"]["name"],
+            entry["package"]["version"],
+            entry["package"]["type"],
+        )
+        for entry in current_expat_exceptions
+    } == {
+        (cve, "libexpat1", version, "deb")
+        for cve in {"CVE-2026-76956", "CVE-2026-76957"}
+        for version in ("2.8.3-1~deb13u1+dhi2", "2.8.3-1~deb13u1+dhi3")
+    }
+
+
+def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() -> None:
+    config_text = GRYPE_CONFIG.read_text(encoding="utf-8")
+    config = _load_yaml(GRYPE_CONFIG)
+    reviewed_cves = {
+        "CVE-2026-85091",
+        "CVE-2026-76642",
+        "CVE-2026-78408",
+        "CVE-2026-78409",
+        "CVE-2026-78410",
+    }
+    entries = [entry for entry in config["ignore"] if entry.get("vulnerability") in reviewed_cves]
+
+    assert "Re-review by 2026-10-04" in config_text
+    assert {
+        (
+            entry["vulnerability"],
+            entry["package"]["name"],
+            entry["package"]["version"],
+            entry["package"]["type"],
+        )
+        for entry in entries
+    } == {
+        (
+            "CVE-2026-85091",
+            package,
+            "1:1.3.dfsg+really1.3.1-1+dhi3",
+            "deb",
+        )
+        for package in ("zlib1g", "zlib1g-dev")
+    } | {
+        (cve, "libuuid1", version, "deb")
+        for cve in reviewed_cves - {"CVE-2026-85091"}
+        for version in ("2.41.5-0+deb13u1+dhi2", "2.41.5-0+deb13u1+dhi3")
     }
 
 
@@ -1066,8 +1163,8 @@ def test_docker_workflow_signs_and_verifies_published_images() -> None:
     assert "cosign verify" in docker_workflow
     assert "verify_image_signature()" in docker_workflow
     assert "Signature for ${label} was not discoverable yet" in docker_workflow
-    assert "--certificate-identity-regexp" in docker_workflow
-    assert "docker-release\\.yml" in docker_workflow
+    assert '--certificate-identity "${CERTIFICATE_IDENTITY}"' in docker_workflow
+    assert "CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}" in docker_workflow
     assert "--certificate-oidc-issuer" in docker_workflow
 
 

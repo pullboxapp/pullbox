@@ -19,9 +19,15 @@ from pullbox.models.indexer import IndexerConfig, IndexerType
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import MatchConfidence
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
-from pullbox.models.series import Series, SeriesStatus, SeriesType
+from pullbox.models.series import Series, SeriesStatus, SeriesStatusOverride, SeriesType
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcResolutionState,
+)
 from pullbox.providers.base import ProviderRegistry, ReleaseResult
 from pullbox.services import search_service
+from pullbox.services.search_acquisition_router import route_search_acquisition
 from pullbox.services.search_service import (
     IssueSearchOutcome,
     IssueSearchTarget,
@@ -220,6 +226,182 @@ async def test_load_issue_and_wanted_targets_filter_and_shape(
 
         wanted_targets = await load_wanted_issue_search_targets(session, limit=10)
         assert [item.issue_id for item in wanted_targets] == [ids["wanted_issue_id"]]
+
+
+@pytest.mark.parametrize(
+    "override", [None, SeriesStatusOverride.ENDED, SeriesStatusOverride.CONTINUING]
+)
+async def test_all_target_loaders_preserve_issue_dates_and_effective_series_status(
+    db_factory: async_sessionmaker[AsyncSession], override: SeriesStatusOverride | None
+) -> None:
+    from pullbox.services.search_targets import load_wanted_issue_search_targets_by_ids
+
+    ids = await _seed_search_rows(db_factory)
+    async with db_factory() as session:
+        series = await session.get(Series, ids["monitored_series_id"])
+        issue = await session.get(Issue, ids["wanted_issue_id"])
+        assert series is not None and issue is not None
+        series.status_override = override
+        issue.store_date = date(2023, 12, 31)
+        await session.commit()
+        target = await load_issue_search_target(session, issue.id)
+        assert target is not None
+        targets = [
+            target,
+            *(await load_series_wanted_search_targets(session, series.id)),
+            *(await load_wanted_issue_search_targets(session, limit=10)),
+            *(await load_wanted_issue_search_targets_by_ids(session, [issue.id])),
+        ]
+        assert len(targets) == 4
+        for loaded in targets:
+            assert loaded.year_context.publication_years == (2023, 2024)
+            assert loaded.year_context.series_year == 2025
+            assert loaded.year_context.series_continuing is (
+                override is not SeriesStatusOverride.ENDED
+            )
+
+
+@pytest.mark.asyncio
+async def test_global_wanted_targets_include_one_issue_from_multiple_monitored_arcs(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_factory() as session:
+        series = Series(
+            comicvine_id=111,
+            title="Unmonitored Canonical Series",
+            sort_title="unmonitored canonical series",
+            year_start=2026,
+            status=SeriesStatus.CONTINUING,
+            series_type=SeriesType.STANDARD,
+            monitored=False,
+            issue_count=1,
+        )
+        session.add(series)
+        await session.flush()
+        issue = Issue(
+            series_id=series.id,
+            comicvine_id=211,
+            issue_number=1.0,
+            issue_number_text="1",
+            # Arc monitoring is independent from canonical series monitoring;
+            # importing the membership need not rewrite the series-owned state.
+            status=IssueStatus.SKIPPED,
+            issue_type=IssueType.ISSUE,
+        )
+        enabled = StoryArc(
+            name="Enabled Arc",
+            monitored=True,
+            search_missing=False,
+        )
+        also_enabled = StoryArc(
+            name="Also Enabled Arc",
+            monitored=True,
+            search_missing=False,
+        )
+        disabled = StoryArc(
+            name="Disabled Arc",
+            monitored=False,
+            search_missing=True,
+        )
+        session.add_all([issue, enabled, also_enabled, disabled])
+        await session.flush()
+        session.add_all(
+            [
+                IssueStoryArc(
+                    issue_id=issue.id,
+                    story_arc_id=arc.id,
+                    sequence_number=index,
+                    source_ordinal=index,
+                    resolution_state=StoryArcResolutionState.RESOLVED,
+                    sync_eligible=True,
+                )
+                for index, arc in enumerate((enabled, also_enabled, disabled), start=1)
+            ]
+        )
+        await session.commit()
+
+        targets = await load_wanted_issue_search_targets(session, limit=10)
+
+        enabled.monitored = False
+        also_enabled.monitored = False
+        await session.flush()
+        targets_after_disabling = await load_wanted_issue_search_targets(session, limit=10)
+
+    assert [target.issue_id for target in targets] == [issue.id]
+    assert targets_after_disabling == []
+    assert issue.status == IssueStatus.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_arc_monitoring_searches_released_members_without_legacy_flags(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    today = date.today()
+    async with db_factory() as session:
+        series = Series(
+            comicvine_id=112,
+            title="Upcoming Arc Series",
+            sort_title="upcoming arc series",
+            year_start=today.year,
+            status=SeriesStatus.CONTINUING,
+            series_type=SeriesType.STANDARD,
+            monitored=False,
+            issue_count=3,
+        )
+        session.add(series)
+        await session.flush()
+        upcoming = Issue(
+            series_id=series.id,
+            comicvine_id=212,
+            issue_number=1.0,
+            issue_number_text="1",
+            status=IssueStatus.SKIPPED,
+            issue_type=IssueType.ISSUE,
+            release_date=today + timedelta(days=7),
+        )
+        released = Issue(
+            series_id=series.id,
+            comicvine_id=213,
+            issue_number=2.0,
+            issue_number_text="2",
+            status=IssueStatus.SKIPPED,
+            issue_type=IssueType.ISSUE,
+            release_date=today + timedelta(days=60),
+            store_date=today,
+        )
+        undated = Issue(
+            series_id=series.id,
+            comicvine_id=214,
+            issue_number=3.0,
+            issue_number_text="3",
+            status=IssueStatus.SKIPPED,
+            issue_type=IssueType.ISSUE,
+        )
+        arc = StoryArc(
+            name="Upcoming Only Arc",
+            monitored=True,
+            search_missing=False,
+            include_upcoming=True,
+        )
+        session.add_all([upcoming, released, undated, arc])
+        await session.flush()
+        session.add_all(
+            [
+                IssueStoryArc(
+                    issue_id=issue.id,
+                    story_arc_id=arc.id,
+                    sequence_number=index,
+                    source_ordinal=index,
+                    resolution_state=StoryArcResolutionState.RESOLVED,
+                )
+                for index, issue in enumerate((upcoming, released, undated), start=1)
+            ]
+        )
+        await session.commit()
+
+        targets = await load_wanted_issue_search_targets(session, limit=10)
+
+    assert [target.issue_id for target in targets] == [released.id, undated.id]
 
 
 @pytest.mark.asyncio
@@ -902,6 +1084,79 @@ async def test_manual_search_bypasses_backoff_and_automated_empty_cache() -> Non
     indexer.search.assert_awaited_once()
     assert config.failure_count == 0
     assert config.disabled_until is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["fast", "deep"])
+@pytest.mark.parametrize("issue_number", [2487, 2489, 2490])
+@pytest.mark.parametrize("release_year", [2026, None])
+async def test_four_digit_issues_match_in_manual_and_automated_search(
+    monkeypatch: pytest.MonkeyPatch, mode: str, issue_number: int, release_year: int | None
+) -> None:
+    from pullbox.services.blocklist_service import BlocklistService
+
+    service = SearchService(ProviderRegistry())
+    target = replace(
+        _make_target(
+            series_title="2000 AD",
+            issue_number=float(issue_number),
+            series_year=1977,
+            release_year=release_year,
+        ),
+        series_continuing=True,
+    )
+    correct = _make_release(f"2000AD {issue_number} [2026] [Digital-Empire]")
+    results = [
+        _make_release(f"2000AD {issue_number + 1} [2026] [Digital-Empire]"),
+        _make_release(f"2000AD Annual {issue_number} [2026] [Digital-Empire]"),
+        _make_release(f"Another Series {issue_number} [2026] [Digital-Empire]"),
+        correct,
+    ]
+    monkeypatch.setattr(BlocklistService, "filter_results", AsyncMock(return_value=results))
+    monkeypatch.setattr(
+        service, "_run_query_batch_with_provenance", AsyncMock(return_value=(results, {}, []))
+    )
+    outcome = await service.search_issue_target(MagicMock(), target, mode=mode)
+    assert outcome.best_release is correct
+    assert len(outcome.matched) == 1
+    assert len(outcome.rejected) == 3
+    matched = outcome.matched[0]
+    expected_confidence = MatchConfidence.HIGH if release_year else MatchConfidence.MEDIUM
+    assert matched.confidence is expected_confidence
+    assert matched.series_similarity == 1.0
+    assert matched.parsed.series_name == "2000AD"
+    assert matched.parsed.issue_number == issue_number
+    assert outcome.search_details["matched"][0]["parsed_issue"] == issue_number
+    assert outcome.search_details["rejected_count"] == 3
+    assert outcome.search_details["matched"][0]["year_match_basis"] == (
+        "publication_year" if release_year else "series_window"
+    )
+
+    download_service = AsyncMock()
+    intervention_service = AsyncMock()
+    intervention_service.has_pending_for_issue.return_value = False
+    routed = await route_search_acquisition(
+        MagicMock(),
+        outcome=outcome,
+        search_log_id=1,
+        eval_kwargs={},
+        type_thresholds={"issue": "high"},
+        download_service=download_service,
+        intervention_service=intervention_service,
+        runner=None,
+    )
+    if release_year:
+        assert routed.action_status == "downloading"
+        assert routed.grabbed == 1
+        download_service.send_to_client.assert_awaited_once()
+        assert download_service.send_to_client.await_args.args[1] is correct
+        intervention_service.create_pending_match.assert_not_awaited()
+    else:
+        assert routed.action_status == "queued"
+        assert routed.queued == 1
+        intervention_service.create_pending_match.assert_awaited_once()
+        assert intervention_service.create_pending_match.await_args.args[2] is correct
+        download_service.send_to_client.assert_not_awaited()
 
 
 @pytest.mark.asyncio

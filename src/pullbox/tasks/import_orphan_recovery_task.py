@@ -130,7 +130,7 @@ async def _run_orphan_recovery(
                     current=current,
                     total=total,
                 )
-                _set_orphan_recovery_state(
+                progress = _set_orphan_recovery_state(
                     imported_series_id,
                     state="running",
                     message=(
@@ -147,12 +147,14 @@ async def _run_orphan_recovery(
                     file_index=file_index,
                     total_files=total_files,
                 )
+                await _queue_orphan_recovery_progress(progress)
 
-            completed = _set_orphan_recovery_state(
+            preparing = _set_orphan_recovery_state(
                 imported_series_id,
                 state="running",
                 message=f"Preparing recovery for {item.cv_title or item.raw_series_name}...",
             )
+            await _queue_orphan_recovery_progress(preparing)
             payload = await service.recover_orphan(
                 session,
                 imported_series_id,
@@ -160,7 +162,7 @@ async def _run_orphan_recovery(
                 progress_callback=progress_callback,
             )
             await session.commit()
-            _set_orphan_recovery_state(
+            completed = _set_orphan_recovery_state(
                 imported_series_id,
                 state="completed",
                 message=(

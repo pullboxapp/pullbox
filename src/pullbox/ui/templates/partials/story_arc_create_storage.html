@@ -1,0 +1,13 @@
+<section class="space-y-2 border-t border-pb-border pt-4" data-testid="story-arc-create-storage">
+  <h3 class="text-sm font-medium text-pb-text">Story arc files</h3>
+  <input type="hidden" name="file_defaults_fingerprint" value="{{ arc_file_defaults.fingerprint }}">
+  <p class="text-sm text-pb-text">{{ arc_file_defaults.summary_label }}</p>
+  {% if arc_file_defaults.enabled %}
+    <p class="break-all font-mono text-xs text-pb-text-sec">{{ arc_file_defaults.destination }}/{{ arc_file_defaults.naming_preview() }}</p>
+    <p class="text-xs text-pb-text-sec">Example only. {{ 'Newly acquired issues are added automatically after reading-order review.' if arc_file_defaults.synchronize else 'Automatic file synchronization is off.' }}</p>
+  {% endif %}
+  <p class="text-xs leading-5 text-pb-text-sec">
+    Original files stay in their series folders. This arc saves the current defaults when added; later settings changes won't alter it.
+  </p>
+  <a href="/settings?tab=media#story-arc-files" class="text-sm text-pb-interactive hover:underline">Configure Story Arc Files in Media Management</a>
+</section>

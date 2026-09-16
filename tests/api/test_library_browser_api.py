@@ -17,7 +17,13 @@ from pullbox.api.v1 import library as library_api
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.series import Series
 from pullbox.schemas.library import (
     LibraryBrowserConvertRequest,
@@ -86,6 +92,8 @@ async def seeded_library_browser_data(
 
     convertible_file = root_path / "Convert Me.cbr"
     _write_zip_archive(convertible_file)
+    referenced_file = root_path / "Referenced.cbr"
+    _write_zip_archive(referenced_file)
 
     trash_dir = tmp_path / ".trash"
     trash_dir.mkdir()
@@ -144,6 +152,19 @@ async def seeded_library_browser_data(
                 ),
                 LibraryFile(
                     library_root_id=root.id,
+                    file_path=str(referenced_file),
+                    file_name=referenced_file.name,
+                    file_size=referenced_file.stat().st_size,
+                    file_format=FileFormat.CBR,
+                    file_modified_at=datetime.fromtimestamp(
+                        referenced_file.stat().st_mtime, tz=UTC
+                    ),
+                    match_confidence=MatchConfidence.UNMATCHED,
+                    has_comicinfo=False,
+                    storage_mode=LibraryFileStorageMode.REFERENCED,
+                ),
+                LibraryFile(
+                    library_root_id=root.id,
                     file_path=str(series_file),
                     file_name=series_file.name,
                     file_size=series_file.stat().st_size,
@@ -194,6 +215,7 @@ async def seeded_library_browser_data(
         "untracked_file": untracked_file,
         "untracked_folder": untracked_folder,
         "convertible_file": convertible_file,
+        "referenced_file": referenced_file,
         "trash_dir": trash_dir,
     }
 
@@ -224,6 +246,53 @@ async def test_library_browser_entry_returns_real_metadata_and_actions(
     assert data["delete_context"]["has_linked_issue"] is False
     assert data["delete_context"]["issue_status_after_delete"] is None
     assert data["rename_context"]["stale_reference"] is False
+
+
+@pytest.mark.asyncio
+async def test_library_browser_entry_disables_mutations_for_referenced_file(
+    authenticated_client,
+    seeded_library_browser_data: dict[str, Path],
+) -> None:  # type: ignore[no-untyped-def]
+    referenced_file = seeded_library_browser_data["referenced_file"]
+    response = await authenticated_client.get(
+        "/api/v1/library/browser/entry",
+        params={"path": str(referenced_file)},
+        headers=_csrf_header_for(authenticated_client),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["delete_context"]["referenced_file_count"] == 1
+    assert data["delete_context"]["managed_file_count"] == 0
+    assert data["actions"] == {
+        "can_properties": True,
+        "can_rename": False,
+        "can_auto_rename": False,
+        "can_convert": False,
+        "can_delete": True,
+    }
+
+    rename_response = await authenticated_client.post(
+        "/api/v1/library/browser/rename/manual/validate",
+        json={"path": str(referenced_file), "proposed_name": "Renamed.cbr"},
+        headers=_csrf_header_for(authenticated_client),
+    )
+    convert_response = await authenticated_client.post(
+        "/api/v1/library/browser/convert",
+        json={"path": str(referenced_file)},
+        headers=_csrf_header_for(authenticated_client),
+    )
+
+    assert rename_response.status_code == 422
+    assert (
+        "Referenced library files cannot be renamed" in rename_response.json()["error"]["message"]
+    )
+    assert convert_response.status_code == 422
+    assert (
+        "Referenced library files cannot be converted"
+        in convert_response.json()["error"]["message"]
+    )
+    assert referenced_file.exists()
 
 
 @pytest.mark.asyncio
@@ -1014,6 +1083,8 @@ async def test_library_browser_validation_and_wrapper_branches(
             source_path=str(kwargs["target"]),
             deleted_via_trash=False,
             result_path=None,
+            managed_files_deleted=1,
+            referenced_files_detached=0,
         )
 
     monkeypatch.setattr(library_api, "delete_library_entry", fake_delete)

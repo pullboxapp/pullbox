@@ -65,10 +65,20 @@ class TestImportJobCreate:
         )
         assert "/" in data.source_path  # resolved to absolute
 
-    def test_mylar3_path_map_default_empty(self, tmp_path: object) -> None:
+    def test_mylar3_path_map_requires_confirmation_even_when_empty(self, tmp_path: object) -> None:
+        with pytest.raises(ValidationError, match="confirm the Mylar path mapping"):
+            ImportJobCreate(
+                source_path=str(tmp_path),
+                source_type=ImportSourceType.MYLAR3,
+            )
+
+    def test_mylar3_path_map_accepts_confirmed_empty_identity_snapshot(
+        self, tmp_path: object
+    ) -> None:
         data = ImportJobCreate(
             source_path=str(tmp_path),
             source_type=ImportSourceType.MYLAR3,
+            mylar3_path_map_confirmed=True,
         )
         assert data.mylar3_path_map == {}
 
@@ -77,8 +87,89 @@ class TestImportJobCreate:
             source_path=str(tmp_path),
             source_type=ImportSourceType.MYLAR3,
             mylar3_path_map={"/data": "/mnt/storage"},
+            mylar3_path_map_confirmed=True,
         )
         assert data.mylar3_path_map == {"/data": "/mnt/storage"}
+
+    def test_mylar3_path_map_requires_explicit_confirmation(self, tmp_path: object) -> None:
+        with pytest.raises(ValidationError, match="confirm the Mylar path mapping"):
+            ImportJobCreate(
+                source_path=str(tmp_path),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map={"/data": "/mnt/storage"},
+            )
+
+    @pytest.mark.parametrize(
+        "path_map",
+        [
+            {"relative": "/mnt/storage"},
+            {"/data": "relative"},
+            {"/data/../private": "/mnt/storage"},
+            {"/data": "/mnt/storage/../private"},
+            {"/data\x00": "/mnt/storage"},
+        ],
+    )
+    def test_mylar3_path_map_rejects_unsafe_paths(
+        self,
+        tmp_path: object,
+        path_map: dict[str, str],
+    ) -> None:
+        with pytest.raises(ValidationError, match="Mylar path mapping"):
+            ImportJobCreate(
+                source_path=str(tmp_path),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map=path_map,
+                mylar3_path_map_confirmed=True,
+            )
+
+    def test_mylar3_path_map_rejects_conflicting_nested_mappings(
+        self,
+        tmp_path: object,
+    ) -> None:
+        with pytest.raises(ValidationError, match="overlapping"):
+            ImportJobCreate(
+                source_path=str(tmp_path),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map={
+                    "/data": "/library",
+                    "/data/archive": "/other-library",
+                },
+                mylar3_path_map_confirmed=True,
+            )
+
+    def test_mylar3_path_map_accepts_compatible_nested_mappings(
+        self,
+        tmp_path: object,
+    ) -> None:
+        data = ImportJobCreate(
+            source_path=str(tmp_path),
+            source_type=ImportSourceType.MYLAR3,
+            mylar3_path_map={
+                "/data": "/library",
+                "/data/archive": "/library/archive",
+            },
+            mylar3_path_map_confirmed=True,
+        )
+
+        assert len(data.mylar3_path_map) == 2
+
+    def test_mylar3_path_map_is_bounded(self, tmp_path: object) -> None:
+        with pytest.raises(ValidationError, match="at most 16"):
+            ImportJobCreate(
+                source_path=str(tmp_path),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map={f"/stored/{index}": f"/library/{index}" for index in range(17)},
+                mylar3_path_map_confirmed=True,
+            )
+
+    def test_mylar3_path_map_rejected_for_folder_import(self, tmp_path: object) -> None:
+        with pytest.raises(ValidationError, match="only supported for Mylar"):
+            ImportJobCreate(
+                source_path=str(tmp_path),
+                source_type=ImportSourceType.FILESYSTEM,
+                mylar3_path_map={"/data": "/mnt/storage"},
+                mylar3_path_map_confirmed=True,
+            )
 
     def test_advanced_options_defaults(self, tmp_path: object) -> None:
         data = ImportJobCreate(

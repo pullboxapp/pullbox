@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from pullbox.core.exceptions import MylarReadError
+from pullbox.core.library_layout import ImportLayoutMode, SourceLayoutSpec
 from pullbox.core.mylar3_reader import Mylar3Reader
 from pullbox.models.issue import IssueType
 from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
@@ -29,6 +30,895 @@ def _create_mylar_db(
         issues=issues,
         annuals=annuals,
     )
+
+
+@pytest.mark.parametrize("file_name", ["mylar#export.db", "mylar%23export.db"])
+async def test_mylar_reader_preserves_literal_uri_characters(
+    tmp_path: Path, file_name: str
+) -> None:
+    source = tmp_path / file_name
+    _create_mylar_db(source)
+    before = source.read_bytes()
+    reader = Mylar3Reader(source)
+    snapshot = await reader.read_story_arc_preflight()
+    assert snapshot.arcs_count == 0
+    assert await reader.read_series() == []
+    assert not (await reader.read_import_metadata()).storyarcs_present
+    assert [page async for page in reader.iter_import_series_pages()] == []
+    assert [page async for page in reader.iter_import_story_arc_pages()] == []
+    assert source.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == [file_name]
+
+
+@pytest.mark.parametrize("actual_name", ["Firefly 007 (2019).cbz", "FIREFLY 007  (2019).cbz"])
+async def test_in_place_reconciles_unique_stale_mylar_filename(tmp_path, actual_name):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "Firefly (2018)"
+    comic = folder / actual_name
+    create_minimal_cbz(comic)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-115251",
+                "ComicName": "Firefly",
+                "ComicYear": "2018",
+                "ComicLocation": "/comics/Firefly (2018)",
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "711865",
+                "ComicID": "115251",
+                "ComicName": "Firefly",
+                "Issue_Number": "7",
+                "Location": "Firefly 007 (2019).cbr",
+                "IssueDate": "2019-06-19",
+            }
+        ],
+    )
+    original_db = db.read_bytes()
+    original_comic = comic.read_bytes()
+    results = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(tmp_path / "comics")},
+        include_missing_files=True,
+    ).read_series()
+
+    assert [file.file_path for file in results[0].files] == [str(comic)]
+    file = results[0].files[0]
+    assert file.comicvine_issue_id == 711865
+    assert file.source_signature
+    assert file.metadata_diagnostics["mylar3_path_reconciliation"]["recorded_path"].endswith(
+        "Firefly 007 (2019).cbr"
+    )
+    assert db.read_bytes() == original_db
+    assert comic.read_bytes() == original_comic
+
+
+@pytest.mark.parametrize(
+    "actual_names",
+    [
+        ["Firefly 007 (2019).cbz", "Firefly 007 (2019).pdf"],
+        ["Firefly Annual 007 (2019).cbz"],
+        ["Firefly 007 (2020).cbz"],
+        ["Firefly 007 Variant (2019).cbz"],
+        ["Firefly 00 7 (2019).cbz"],
+        ["Other/Firefly 007 (2019).cbz"],
+    ],
+)
+async def test_in_place_does_not_guess_stale_mylar_identity(tmp_path, actual_names):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "Firefly"
+    folder.mkdir(parents=True)
+    for name in actual_names:
+        create_minimal_cbz(folder / name)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-115251",
+                "ComicName": "Firefly",
+                "ComicYear": "2018",
+                "ComicLocation": str(folder),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "711865",
+                "ComicID": "115251",
+                "ComicName": "Firefly",
+                "Issue_Number": "7",
+                "Location": "Firefly 007 (2019).cbr",
+            }
+        ],
+    )
+    results = await Mylar3Reader(db, include_missing_files=True).read_series()
+    missing = next((file for file in results[0].files if file.file_name.endswith(".cbr")), None)
+    assert missing is not None
+    assert missing.source_signature == {}
+    assert missing.comicvine_issue_id == 711865
+    assert not any(
+        "mylar3_path_reconciliation" in file.metadata_diagnostics for file in results[0].files
+    )
+
+
+async def test_stale_path_reconciliation_does_not_merge_conflicting_records(tmp_path):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics"
+    create_minimal_cbz(folder / "Firefly 007 (2019).cbz")
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-115251",
+                "ComicName": "Firefly",
+                "ComicLocation": str(folder),
+            }
+        ],
+        issues=[
+            {
+                "IssueID": str(issue_id),
+                "ComicID": "115251",
+                "Issue_Number": "7",
+                "Location": "Firefly 007 (2019).cbr",
+            }
+            for issue_id in [711865, 711866]
+        ],
+    )
+    results = await Mylar3Reader(db, include_missing_files=True).read_series()
+    actual = next(file for file in results[0].files if file.file_format == "cbz")
+    assert actual.comicvine_issue_id is None
+    assert "mylar3_path_reconciliation" not in actual.metadata_diagnostics
+
+
+async def test_mixed_series_folder_quarantines_unrecorded_foreign_files(tmp_path):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "Fritzi Ritz (1953)"
+    fritzi = folder / "Fritzi Ritz 001 (1953).cbz"
+    batman = folder / "Batman 001 (2011).cbz"
+    create_minimal_cbz(fritzi)
+    create_minimal_cbz(batman)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-31895",
+                "ComicName": "Fritzi Ritz",
+                "ComicYear": "1953",
+                "ComicLocation": str(folder),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "900001",
+                "ComicID": "31895",
+                "ComicName": "Fritzi Ritz",
+                "Issue_Number": "1",
+                "Location": fritzi.name,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(db).read_series()
+
+    assert len(results) == 1
+    series = results[0]
+    files = {file.file_name: file for file in series.files}
+    assert files[fritzi.name].comicvine_series_id == 31895
+    assert files[fritzi.name].comicvine_issue_id == 900001
+    assert files[batman.name].parsed_series == "Batman"
+    assert files[batman.name].comicvine_series_id is None
+    assert files[batman.name].metadata_signals["series_name"] == "release_title"
+    assert files[batman.name].metadata_diagnostics["mylar3_folder_scope_conflict"] == {
+        "expected_series": "Fritzi Ritz",
+        "parsed_series": "Batman",
+        "recorded_issue": False,
+    }
+    assert series.diagnostics["mylar3_folder_scope"] == {
+        "review_required": True,
+        "unrecorded_file_count": 1,
+        "conflicting_file_count": 1,
+        "examples": [batman.name],
+    }
+
+
+async def test_mixed_series_folder_quarantines_unparseable_named_foreign_file(tmp_path):
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "X-Men Unlimited Infinity Comic (2021)"
+    intended = folder / "X-Men Unlimited Infinity Comic 087 (2023).cbz"
+    foreign = folder / "XMen - S1_ABRIL_BR0078 - 1995.cbz"
+    create_minimal_cbz(intended)
+    create_minimal_cbz(foreign)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-139055",
+                "ComicName": "X-Men Unlimited Infinity Comic",
+                "ComicYear": "2021",
+                "ComicLocation": str(folder),
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "1000087",
+                "ComicID": "139055",
+                "ComicName": "X-Men Unlimited Infinity Comic",
+                "Issue_Number": "87",
+                "Location": intended.name,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(db).read_series()
+
+    files = {file.file_name: file for file in results[0].files}
+    assert files[intended.name].comicvine_series_id == 139055
+    assert files[foreign.name].parsed_series == "XMen - S1_ABRIL_BR0078"
+    assert files[foreign.name].comicvine_series_id is None
+    assert files[foreign.name].metadata_diagnostics["mylar3_folder_scope_conflict"] == {
+        "expected_series": "X-Men Unlimited Infinity Comic",
+        "parsed_series": "XMen - S1_ABRIL_BR0078",
+        "recorded_issue": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_selected_layout_applies_to_mapped_mylar_paths_without_overriding_identity(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    comics_root = tmp_path / "mounted-comics"
+    issue_path = (
+        comics_root
+        / "DC Comics"
+        / "Batman (2011)"
+        / "Batman The Court of Owls, Part One Issue 001.cbz"
+    )
+    create_minimal_cbz(issue_path)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": "/comics/DC Comics/Batman (2011)",
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "ComicName": "Batman",
+                "IssueName": "The Court of Owls, Part One",
+                "Issue_Number": "1",
+                "Location": issue_path.name,
+                "IssueDate": "2011-09-21",
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(comics_root)},
+        source_layout=SourceLayoutSpec(
+            mode=ImportLayoutMode.PRESET,
+            preset="publisher_series",
+            fallback_to_auto=False,
+        ),
+    ).read_series()
+
+    assert len(results) == 1
+    series = results[0]
+    assert series.mylar3_cv_id == 42721
+    assert series.raw_series_name == "Batman"
+    assert series.raw_year == 2011
+    assert series.raw_publisher == "DC Comics"
+    assert len(series.files) == 1
+    discovered_file = series.files[0]
+    assert discovered_file.comicvine_issue_id == 340001
+    assert discovered_file.comicvine_series_id == 42721
+    assert discovered_file.parsed_series == "Batman"
+    assert discovered_file.parsed_issue_number == 1.0
+    assert discovered_file.metadata_signals["series_name"] == "mylar3"
+    assert discovered_file.metadata_signals["issue_number"] == "mylar3"
+    assert discovered_file.metadata_diagnostics["source_layout"] == {
+        "fit": True,
+        "fallback_used": False,
+        "relative_path": (
+            "DC Comics/Batman (2011)/Batman The Court of Owls, Part One Issue 001.cbz"
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_managed_reader_includes_existing_recorded_paths_beyond_series_folder(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    comics_root = tmp_path / "mounted-comics"
+    direct_issue = comics_root / "Batman" / "issue.cbz"
+    nested_issue = comics_root / "Batman" / "Annuals" / "issue.cbz"
+    mapped_issue = comics_root / "Shared" / "Batman Special 001.cbz"
+    for issue_path in (direct_issue, nested_issue, mapped_issue):
+        create_minimal_cbz(issue_path)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": "/comics/Batman",
+                "Total": 4,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "Issue_Number": "1",
+                "Location": direct_issue.name,
+            },
+            {
+                "IssueID": "340002",
+                "ComicID": "42721",
+                "Issue_Number": "2",
+                "Location": "Annuals/issue.cbz",
+            },
+            {
+                "IssueID": "340003",
+                "ComicID": "42721",
+                "Issue_Number": "3",
+                "Location": "/comics/Shared/Batman Special 001.cbz",
+            },
+            {
+                "IssueID": "340004",
+                "ComicID": "42721",
+                "Issue_Number": "4",
+                "Location": "/comics/Shared/Missing 001.cbz",
+            },
+        ],
+    )
+
+    pages = [
+        page
+        async for page in Mylar3Reader(
+            db,
+            path_map={"/comics": str(comics_root)},
+        ).iter_import_series_pages(page_size=1)
+    ]
+
+    assert len(pages) == 1
+    assert {item.file_path: item.comicvine_issue_id for item in pages[0][0].files} == {
+        str(direct_issue): 340001,
+        str(nested_issue): 340002,
+        str(mapped_issue): 340003,
+    }
+    assert sum(item.file_path == str(direct_issue) for item in pages[0][0].files) == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_reader_uses_absolute_issue_location_without_comic_location(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    comics_root = tmp_path / "mounted-comics"
+    issue_path = comics_root / "Shared" / "Batman Special 001.cbz"
+    create_minimal_cbz(issue_path)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": None,
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "Issue_Number": "1",
+                "Location": "/comics/Shared/Batman Special 001.cbz",
+            }
+        ],
+    )
+
+    pages = [
+        page
+        async for page in Mylar3Reader(
+            db,
+            path_map={"/comics": str(comics_root)},
+        ).iter_import_series_pages(page_size=1)
+    ]
+
+    assert len(pages) == 1
+    series = pages[0][0]
+    assert [(item.file_path, item.comicvine_issue_id) for item in series.files] == [
+        (str(issue_path), 340001)
+    ]
+    assert series.has_files is True
+    assert series.file_count == 1
+    assert series.diagnostics["mylar3_path"] == {
+        "status": "mapped",
+        "mapping_applied": True,
+    }
+    assert series.diagnostics["mylar3_series_location"]["status"] == "missing"
+    assert "kind" not in series.diagnostics
+
+
+@pytest.mark.asyncio
+async def test_missing_absolute_issue_without_comic_location_is_retained_only_in_place(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    comics_root = tmp_path / "mounted-comics"
+    comics_root.mkdir()
+    missing_issue = comics_root / "Shared" / "Missing 001.cbz"
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicLocation": None,
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "Issue_Number": "1",
+                "Location": "/comics/Shared/Missing 001.cbz",
+            }
+        ],
+    )
+    root_boundaries = ((comics_root.absolute(), comics_root.resolve()),)
+
+    managed = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(comics_root)},
+    ).read_series()
+    in_place = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(comics_root)},
+        include_missing_files=True,
+        reference_root_boundaries=root_boundaries,
+    ).read_series()
+
+    assert managed[0].files == []
+    assert [item.file_path for item in in_place[0].files] == [str(missing_issue)]
+    assert in_place[0].files[0].comicvine_issue_id == 340001
+    assert in_place[0].files[0].source_signature == {}
+
+
+@pytest.mark.asyncio
+async def test_recorded_missing_issue_paths_are_retained_only_for_in_place_review(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    comics_root = tmp_path / "mounted-comics"
+    (comics_root / "Batman").mkdir(parents=True)
+    missing_issue = comics_root / "Batman" / "Missing" / "issue.cbz"
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": "/comics/Batman",
+                "Total": 1,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "Issue_Number": "1",
+                "Location": "Missing/issue.cbz",
+            }
+        ],
+    )
+
+    managed = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(comics_root)},
+    ).read_series()
+    in_place = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(comics_root)},
+        include_missing_files=True,
+    ).read_series()
+
+    assert managed[0].files == []
+    assert [item.file_path for item in in_place[0].files] == [str(missing_issue)]
+    assert in_place[0].files[0].source_signature == {}
+
+
+@pytest.mark.asyncio
+async def test_mylar_series_identity_wins_while_sidecar_conflict_is_preserved(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    series_dir = tmp_path / "comics" / "Batman (2011)"
+    issue_path = series_dir / "Batman 001.cbz"
+    create_minimal_cbz(issue_path)
+    (series_dir / "series.json").write_text(
+        '{"comicid": 99999, "booktype": "TPB", "status": "Ended", '
+        '"total_issues": 12, "name": "Batman", "year": 2011}'
+    )
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": str(series_dir),
+                "Total": 1,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(db).read_series()
+
+    discovered_file = results[0].files[0]
+    assert discovered_file.comicvine_series_id == 42721
+    assert discovered_file.metadata_signals["comicvine_series_id"] == "mylar3"
+    assert discovered_file.metadata_diagnostics["sidecar_files_present"] == ["series.json"]
+    assert discovered_file.metadata_diagnostics["archive_metadata_deferred"] is True
+    assert discovered_file.metadata_diagnostics["sidecar_snapshot"] == {
+        "files_present": ["series.json"],
+        "series_id": 99999,
+        "series_id_source": "series.json",
+        "issue_id": None,
+        "booktype": IssueType.TPB.value,
+        "series_status": "Ended",
+        "issue_count": 12,
+        "series_name": "Batman",
+        "year": 2011,
+        "identity_conflicts": [],
+    }
+    assert discovered_file.metadata_diagnostics["identity_conflicts"] == [
+        {
+            "field": "comicvine_series_id",
+            "mylar3": 42721,
+            "sidecar": 99999,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_existing_identity_location_wins_over_explicit_alias_mapping(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    identity_root = tmp_path / "primary" / "comics"
+    identity_series = identity_root / "Batman (2011)"
+    identity_issue = identity_series / "Batman 001.cbz"
+    alias_root = tmp_path / "alias-comics"
+    alias_issue = alias_root / identity_series.name / "Batman 099.cbz"
+    create_minimal_cbz(identity_issue)
+    create_minimal_cbz(alias_issue)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": str(identity_series),
+                "Total": 1,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={str(identity_root): str(alias_root)},
+    ).read_series()
+
+    assert len(results) == 1
+    series = results[0]
+    assert series.source_folder == str(identity_series)
+    assert [file.file_path for file in series.files] == [str(identity_issue)]
+    assert series.diagnostics["mylar3_path"] == {
+        "status": "local",
+        "mapping_applied": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_in_place_identity_inside_reference_root_wins_over_mapping(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    identity_root = tmp_path / "reference-comics"
+    identity_series = identity_root / "Batman (2011)"
+    identity_issue = identity_series / "Batman 001.cbz"
+    alias_root = tmp_path / "alias-comics"
+    alias_issue = alias_root / identity_series.name / "Batman 099.cbz"
+    create_minimal_cbz(identity_issue)
+    create_minimal_cbz(alias_issue)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicLocation": str(identity_series),
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={str(identity_root): str(alias_root)},
+        include_missing_files=True,
+        reference_root_boundaries=((identity_root.absolute(), identity_root.resolve()),),
+    ).read_series()
+
+    assert results[0].source_folder == str(identity_series)
+    assert [file.file_path for file in results[0].files] == [str(identity_issue)]
+    assert results[0].diagnostics["mylar3_path"] == {
+        "status": "local",
+        "mapping_applied": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_in_place_external_identity_uses_confirmed_reference_root_mapping(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    external_root = tmp_path / "external-comics"
+    external_series = external_root / "Batman (2011)"
+    external_issue = external_series / "Batman 001.cbz"
+    reference_root = tmp_path / "reference-comics"
+    mapped_series = reference_root / external_series.name
+    mapped_issue = mapped_series / external_issue.name
+    create_minimal_cbz(external_issue)
+    create_minimal_cbz(mapped_issue)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicLocation": str(external_series),
+            }
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "Issue_Number": "1",
+                "Location": str(external_issue),
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={str(external_root): str(reference_root)},
+        include_missing_files=True,
+        reference_root_boundaries=((reference_root.absolute(), reference_root.resolve()),),
+    ).read_series()
+
+    series = results[0]
+    assert series.source_folder == str(mapped_series)
+    assert [(file.file_path, file.comicvine_issue_id) for file in series.files] == [
+        (str(mapped_issue), 340001)
+    ]
+    assert series.diagnostics["mylar3_path"] == {
+        "status": "mapped",
+        "mapping_applied": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_path_mapping_rejects_parent_traversal_outside_mapped_root(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    mapped_root = tmp_path / "mapped-comics"
+    escaped_issue = tmp_path / "escaped" / "Batman 001.cbz"
+    create_minimal_cbz(escaped_issue)
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": "/comics/../escaped",
+                "Total": 1,
+            }
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={"/comics": str(mapped_root)},
+    ).read_series()
+
+    assert len(results) == 1
+    series = results[0]
+    assert series.files == []
+    assert series.has_files is False
+    assert series.source_folder == ""
+    assert series.diagnostics["kind"] == "mylar3_path_incompatible"
+    assert series.diagnostics["reason"] == "unsafe_path_mapping"
+    assert series.diagnostics["mylar3_path"] == {
+        "status": "invalid",
+        "mapping_applied": True,
+    }
+    assert "outside the configured mapped root" in str(series.diagnostics["rejection_reason"])
+
+
+@pytest.mark.asyncio
+async def test_multiple_path_maps_keep_roots_identities_and_failures_isolated(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "mylar.db"
+    primary_root = tmp_path / "primary-host"
+    secondary_root = tmp_path / "secondary-host"
+    primary_series = primary_root / "DC Comics" / "Batman (2011)"
+    secondary_series = secondary_root / "Image Comics" / "Saga (2012)"
+    primary_issue = primary_series / "Batman 001.cbz"
+    secondary_issue = secondary_series / "Saga 001.cbz"
+    escaped_issue = tmp_path / "escaped" / "Should Not Import 001.cbz"
+    for issue_path in (primary_issue, secondary_issue, escaped_issue):
+        create_minimal_cbz(issue_path)
+
+    source_snapshot = {
+        issue_path: (
+            issue_path.read_bytes(),
+            issue_path.stat().st_mtime_ns,
+            issue_path.stat().st_mode,
+        )
+        for issue_path in (primary_issue, secondary_issue, escaped_issue)
+    }
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "CV-42721",
+                "ComicName": "Batman",
+                "ComicYear": "2011",
+                "ComicPublisher": "DC Comics",
+                "ComicLocation": "/primary/DC Comics/Batman (2011)",
+                "Total": 1,
+            },
+            {
+                "ComicID": "CV-67824",
+                "ComicName": "Saga",
+                "ComicYear": "2012",
+                "ComicPublisher": "Image Comics",
+                "ComicLocation": "/secondary/Image Comics/Saga (2012)",
+                "Total": 1,
+            },
+            {
+                "ComicID": "CV-90001",
+                "ComicName": "Escaped",
+                "ComicYear": "2020",
+                "ComicPublisher": "Unsafe Comics",
+                "ComicLocation": "/primary/../escaped",
+                "Total": 1,
+            },
+            {
+                "ComicID": "CV-90002",
+                "ComicName": "Unmapped",
+                "ComicYear": "2021",
+                "ComicPublisher": "Unknown Comics",
+                "ComicLocation": "/unmapped/Unknown Comics/Unmapped (2021)",
+                "Total": 1,
+            },
+        ],
+        issues=[
+            {
+                "IssueID": "340001",
+                "ComicID": "42721",
+                "ComicName": "Batman",
+                "IssueName": "The Court of Owls",
+                "Issue_Number": "1",
+                "Location": primary_issue.name,
+                "IssueDate": "2011-09-21",
+            },
+            {
+                "IssueID": "500001",
+                "ComicID": "67824",
+                "ComicName": "Saga",
+                "IssueName": "Chapter One",
+                "Issue_Number": "1",
+                "Location": secondary_issue.name,
+                "IssueDate": "2012-03-14",
+            },
+        ],
+    )
+
+    results = await Mylar3Reader(
+        db,
+        path_map={
+            "/primary": str(primary_root),
+            "/secondary": str(secondary_root),
+        },
+    ).read_series()
+
+    by_cv_id = {series.mylar3_cv_id: series for series in results}
+    assert set(by_cv_id) == {42721, 67824, 90001, 90002}
+
+    batman = by_cv_id[42721]
+    assert batman.source_folder == str(primary_series.resolve())
+    assert batman.source_folder_relative == "/primary/DC Comics/Batman (2011)"
+    assert batman.diagnostics["mylar3_path"] == {
+        "status": "mapped",
+        "mapping_applied": True,
+    }
+    assert len(batman.files) == 1
+    assert batman.files[0].comicvine_series_id == 42721
+    assert batman.files[0].comicvine_issue_id == 340001
+    assert batman.files[0].metadata_signals["comicvine_series_id"] == "mylar3"
+    assert batman.files[0].metadata_signals["comicvine_issue_id"] == "mylar3"
+
+    saga = by_cv_id[67824]
+    assert saga.source_folder == str(secondary_series.resolve())
+    assert saga.source_folder_relative == "/secondary/Image Comics/Saga (2012)"
+    assert saga.diagnostics["mylar3_path"] == {
+        "status": "mapped",
+        "mapping_applied": True,
+    }
+    assert len(saga.files) == 1
+    assert saga.files[0].comicvine_series_id == 67824
+    assert saga.files[0].comicvine_issue_id == 500001
+    assert saga.files[0].metadata_signals["comicvine_series_id"] == "mylar3"
+    assert saga.files[0].metadata_signals["comicvine_issue_id"] == "mylar3"
+
+    escaped = by_cv_id[90001]
+    assert escaped.files == []
+    assert escaped.source_folder == ""
+    assert escaped.diagnostics["reason"] == "unsafe_path_mapping"
+    assert escaped.diagnostics["mylar3_path"] == {
+        "status": "invalid",
+        "mapping_applied": True,
+    }
+
+    unmapped = by_cv_id[90002]
+    assert unmapped.files == []
+    assert unmapped.source_folder == ""
+    assert unmapped.diagnostics["reason"] == "unmapped_path"
+    assert unmapped.diagnostics["mylar3_path"] == {
+        "status": "unmapped",
+        "mapping_applied": False,
+    }
+
+    assert {
+        issue_path: (
+            issue_path.read_bytes(),
+            issue_path.stat().st_mtime_ns,
+            issue_path.stat().st_mode,
+        )
+        for issue_path in (primary_issue, secondary_issue, escaped_issue)
+    } == source_snapshot
 
 
 @pytest.mark.asyncio

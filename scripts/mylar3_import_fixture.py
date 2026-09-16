@@ -31,6 +31,7 @@ def create_minimal_cbz(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("001.jpg", b"pullbox-mylar-fixture")
+        archive.writestr("002.jpg", b"pullbox-mylar-fixture")
 
 
 def create_mylar3_db(

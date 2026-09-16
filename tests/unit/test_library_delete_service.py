@@ -11,7 +11,13 @@ import pytest
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.series import Series, SeriesStatus
 from pullbox.services import library_delete_service
 from pullbox.services.library_delete_service import (
@@ -40,6 +46,7 @@ async def _seed_series_issue_file(
     manual_skip: bool = False,
     series_path: Path | None = None,
     comicvine_id: int | None = None,
+    storage_mode: LibraryFileStorageMode = LibraryFileStorageMode.MANAGED,
 ) -> tuple[Series, Issue, LibraryFile]:
     series = Series(
         title="Library Delete Test",
@@ -70,6 +77,7 @@ async def _seed_series_issue_file(
         file_format=FileFormat.CBZ,
         file_modified_at=datetime.now(tz=UTC),
         match_confidence=MatchConfidence.HIGH,
+        storage_mode=storage_mode,
     )
     session.add(library_file)
     await session.flush()
@@ -248,6 +256,35 @@ async def test_build_delete_context_describes_root_series_folder_and_file(
 
 
 @pytest.mark.asyncio
+async def test_build_delete_context_reports_referenced_file_ownership(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "library"
+    series_folder = root_path / "Referenced Series"
+    series_folder.mkdir(parents=True)
+    file_path = series_folder / "Referenced Series 001.cbz"
+    file_path.write_bytes(b"user-owned comic")
+    root = await _seed_root(db_session, root_path)
+    await _seed_series_issue_file(
+        db_session,
+        root,
+        file_path,
+        storage_mode=LibraryFileStorageMode.REFERENCED,
+    )
+
+    context = await build_delete_context(
+        db_session,
+        target=file_path,
+        kind="file",
+        trash_enabled=True,
+    )
+
+    assert context.referenced_file_count == 1
+    assert context.managed_file_count == 0
+
+
+@pytest.mark.asyncio
 async def test_build_delete_context_reports_manual_skip_and_unmonitored_file_reasons(
     db_session: AsyncSession,
     tmp_path: Path,
@@ -416,6 +453,97 @@ async def test_delete_library_entry_removes_file_and_updates_issue_status(
     assert not file_path.exists()
     assert issue.status == IssueStatus.WANTED
     assert await db_session.get(LibraryFile, library_file.id) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_library_entry_detaches_referenced_file_without_touching_source(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "library"
+    series_folder = root_path / "Referenced Series"
+    series_folder.mkdir(parents=True)
+    file_path = series_folder / "Referenced Series 001.cbz"
+    original = b"user-owned comic"
+    file_path.write_bytes(original)
+    root = await _seed_root(db_session, root_path)
+    _series, issue, library_file = await _seed_series_issue_file(
+        db_session,
+        root,
+        file_path,
+        storage_mode=LibraryFileStorageMode.REFERENCED,
+    )
+
+    outcome = await delete_library_entry(
+        db_session,
+        target=file_path,
+        root=root,
+        kind="file",
+        delete_context=LibraryDeleteContext(
+            mode="file",
+            trash_enabled=True,
+            referenced_file_count=1,
+        ),
+        trash_dir=tmp_path / ".trash",
+    )
+    await db_session.flush()
+
+    assert file_path.read_bytes() == original
+    assert issue.status == IssueStatus.WANTED
+    assert await db_session.get(LibraryFile, library_file.id) is None
+    assert outcome.deleted_via_trash is False
+    assert outcome.referenced_files_detached == 1
+    assert outcome.managed_files_deleted == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_library_entry_preserves_referenced_file_in_mixed_folder(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "library"
+    folder = root_path / "Mixed"
+    folder.mkdir(parents=True)
+    referenced_path = folder / "Referenced 001.cbz"
+    managed_path = folder / "Managed 001.cbz"
+    referenced_path.write_bytes(b"reference")
+    managed_path.write_bytes(b"managed")
+    root = await _seed_root(db_session, root_path)
+    _series, _issue, referenced_file = await _seed_series_issue_file(
+        db_session,
+        root,
+        referenced_path,
+        series_path=root_path / "Other Referenced",
+        storage_mode=LibraryFileStorageMode.REFERENCED,
+    )
+    _managed_series, _managed_issue, managed_file = await _seed_series_issue_file(
+        db_session,
+        root,
+        managed_path,
+        series_path=root_path / "Other Managed",
+    )
+
+    outcome = await delete_library_entry(
+        db_session,
+        target=folder,
+        root=root,
+        kind="folder",
+        delete_context=LibraryDeleteContext(
+            mode="folder",
+            trash_enabled=False,
+            referenced_file_count=1,
+            managed_file_count=1,
+        ),
+    )
+    await db_session.flush()
+
+    assert folder.is_dir()
+    assert referenced_path.read_bytes() == b"reference"
+    assert not managed_path.exists()
+    assert await db_session.get(LibraryFile, referenced_file.id) is None
+    assert await db_session.get(LibraryFile, managed_file.id) is None
+    assert outcome.referenced_files_detached == 1
+    assert outcome.managed_files_deleted == 1
 
 
 @pytest.mark.asyncio

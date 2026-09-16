@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pullbox.services.cover_url_service import build_series_cover_url
+from pullbox.services.cover_url_service import build_series_cover_url, build_story_arc_cover_url
 
 
 class _SeriesStub:
@@ -22,6 +22,25 @@ class _SeriesStub:
         self.cover_path = cover_path
         self.cover_url = cover_url
         self.updated_at = updated_at or datetime(2026, 5, 23, 12, 0, tzinfo=UTC)
+
+
+class _StoryArcStub:
+    def __init__(
+        self,
+        *,
+        id: int = 1,
+        comicvine_id: int | None = 31,
+        name: str = "Remote Arc",
+        cover_path: str | None = "/api/v1/story-arcs/1/cover",
+        cover_url: str | None = "https://example.test/arc.jpg",
+        updated_at: datetime | None = None,
+    ) -> None:
+        self.id = id
+        self.comicvine_id = comicvine_id
+        self.name = name
+        self.cover_path = cover_path
+        self.cover_url = cover_url
+        self.updated_at = updated_at or datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 
 
 def test_build_series_cover_url_adds_version_for_local_series_cover() -> None:
@@ -54,3 +73,18 @@ def test_build_series_cover_url_preserves_non_api_cover_paths() -> None:
     )
 
     assert build_series_cover_url(series) == "https://cdn.example.test/series.jpg"
+
+
+def test_build_story_arc_cover_url_uses_versioned_authenticated_route() -> None:
+    arc = _StoryArcStub(id=42)
+
+    url = build_story_arc_cover_url(arc)
+
+    assert url is not None
+    assert url.startswith("/api/v1/story-arcs/42/cover?v=")
+
+
+def test_build_story_arc_cover_url_returns_none_without_cover_source() -> None:
+    arc = _StoryArcStub(cover_path=None, cover_url=None)
+
+    assert build_story_arc_cover_url(arc) is None

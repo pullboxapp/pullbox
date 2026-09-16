@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from pullbox.core.exceptions import ProviderError
+from pullbox.models.import_job import (
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSeriesStatus,
+    ImportSourceType,
+)
+from pullbox.models.library import LibraryRoot
+from pullbox.models.operation_progress import OperationProgress, OperationProgressState
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.providers.base import IssueSummary, SeriesMetadata
+from pullbox.services import import_catalog_hydration as hydration_module
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.import_catalog_hydration import (
+    load_catalog_hydration_plan,
     mark_catalog_hydration_failed,
+    run_catalog_hydration,
     run_pending_catalog_hydration,
 )
 from pullbox.services.metadata_service import MetadataService
@@ -98,6 +113,49 @@ class CatalogHydrationProviderDouble:
         ]
 
 
+class BatchCatalogHydrationSeriesServiceStub(CatalogHydrationSeriesServiceStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[str] = []
+        self.profile_batch_calls: list[list[int]] = []
+        self.catalog_batch_calls: list[list[int]] = []
+
+    async def prefetch_comicvine_profiles(self, comicvine_ids: list[int]):
+        self.profile_batch_calls.append(list(comicvine_ids))
+        self.events.append("profiles_fetched")
+        return {
+            comicvine_id: {"title": f"Hydrated {comicvine_id}"} for comicvine_id in comicvine_ids
+        }
+
+    async def prefetch_comicvine_issue_catalogs(self, comicvine_ids: list[int]):
+        assert self.events.count("profile_persisted") == sum(
+            len(batch) for batch in self.profile_batch_calls
+        )
+        self.catalog_batch_calls.append(list(comicvine_ids))
+        self.events.append("catalogs_fetched")
+        return {comicvine_id: [] for comicvine_id in comicvine_ids}
+
+    async def upsert_comicvine_profile(self, hydrate_session, comicvine_id: int, series_meta):
+        result = await hydrate_session.execute(
+            sa_select(Series).where(Series.comicvine_id == comicvine_id)
+        )
+        series = result.scalar_one()
+        series.title = series_meta["title"]
+        self.events.append("profile_persisted")
+        await hydrate_session.flush()
+        return series
+
+
+class RateLimitedBatchCatalogHydrationSeriesServiceStub(BatchCatalogHydrationSeriesServiceStub):
+    async def prefetch_comicvine_profiles(self, comicvine_ids: list[int]):
+        self.profile_batch_calls.append(list(comicvine_ids))
+        raise ProviderError(
+            "comicvine",
+            "HTTP 420: /volumes/",
+            details={"status_code": 420, "retryable": True},
+        )
+
+
 async def test_run_pending_catalog_hydration_recovers_hydrating_series_after_restart(
     db_session,
 ) -> None:
@@ -156,6 +214,366 @@ async def test_run_pending_catalog_hydration_recovers_hydrating_series_after_res
     await db_session.refresh(no_provider_id)
     assert already_complete.issue_catalog_state == IssueCatalogState.COMPLETE
     assert no_provider_id.issue_catalog_state == IssueCatalogState.HYDRATING
+
+
+async def test_run_pending_catalog_hydration_batches_profiles_before_issue_catalogs(
+    db_session,
+) -> None:
+    series_rows = [
+        Series(
+            title=f"Pending {comicvine_id}",
+            sort_title=f"pending {comicvine_id}",
+            comicvine_id=comicvine_id,
+            issue_catalog_state=IssueCatalogState.HYDRATING,
+        )
+        for comicvine_id in (6101, 6102, 6103)
+    ]
+    db_session.add_all(series_rows)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    service = BatchCatalogHydrationSeriesServiceStub()
+
+    recovered = await run_pending_catalog_hydration(
+        session_factory,
+        series_service=service,
+    )
+
+    assert recovered == 3
+    assert service.profile_batch_calls == [[6101, 6102, 6103]]
+    assert service.catalog_batch_calls == [[6101, 6102, 6103]]
+    assert service.prefetch_calls == []
+    assert service.events.index("profiles_fetched") < service.events.index("profile_persisted")
+    assert service.events.index("profile_persisted") < service.events.index("catalogs_fetched")
+    for series in series_rows:
+        await db_session.refresh(series)
+        assert series.title == f"Hydrated {series.comicvine_id}"
+        assert series.issue_catalog_state == IssueCatalogState.COMPLETE
+
+
+async def test_run_pending_catalog_hydration_chunks_provider_batches(
+    db_session,
+    monkeypatch,
+) -> None:
+    series_rows = [
+        Series(
+            title=f"Chunked {comicvine_id}",
+            sort_title=f"chunked {comicvine_id}",
+            comicvine_id=comicvine_id,
+            issue_catalog_state=IssueCatalogState.HYDRATING,
+        )
+        for comicvine_id in (6201, 6202, 6203)
+    ]
+    db_session.add_all(series_rows)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    service = BatchCatalogHydrationSeriesServiceStub()
+    monkeypatch.setattr(hydration_module, "COMICVINE_BULK_BATCH_SIZE", 2, raising=False)
+
+    recovered = await run_pending_catalog_hydration(
+        session_factory,
+        series_service=service,
+    )
+
+    assert recovered == 3
+    assert service.profile_batch_calls == [[6201, 6202], [6203]]
+    assert service.catalog_batch_calls == [[6201, 6202], [6203]]
+
+
+async def test_retryable_provider_failure_pauses_hydration_without_failing_backlog(
+    db_session,
+    monkeypatch,
+) -> None:
+    series_rows = [
+        Series(
+            title=f"Rate limited {comicvine_id}",
+            sort_title=f"rate limited {comicvine_id}",
+            comicvine_id=comicvine_id,
+            issue_catalog_state=IssueCatalogState.HYDRATING,
+        )
+        for comicvine_id in (6301, 6302, 6303)
+    ]
+    db_session.add_all(series_rows)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    service = RateLimitedBatchCatalogHydrationSeriesServiceStub()
+    monkeypatch.setattr(hydration_module, "COMICVINE_BULK_BATCH_SIZE", 2, raising=False)
+
+    recovered = await run_pending_catalog_hydration(
+        session_factory,
+        series_service=service,
+    )
+
+    assert recovered == 0
+    assert service.profile_batch_calls == [[6301, 6302]]
+    for series in series_rows:
+        await db_session.refresh(series)
+        assert series.issue_catalog_state == IssueCatalogState.HYDRATING
+    assert series_rows[0].issue_catalog_error is not None
+    assert "HTTP 420" in series_rows[0].issue_catalog_error
+    assert series_rows[0].issue_catalog_last_checked_at is not None
+    assert series_rows[1].issue_catalog_last_checked_at is not None
+    assert series_rows[2].issue_catalog_error is None
+    assert series_rows[2].issue_catalog_last_checked_at is None
+
+    assert await hydration_module.load_pending_catalog_hydration(session_factory) == []
+
+
+async def test_scheduled_catalog_hydration_resumes_after_provider_cooldown(
+    db_session,
+    monkeypatch,
+) -> None:
+    series = Series(
+        title="Cooldown Recovery",
+        sort_title="cooldown recovery",
+        comicvine_id=6350,
+        issue_catalog_state=IssueCatalogState.HYDRATING,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+
+    class TransientRateLimitService(CatalogHydrationSeriesServiceStub):
+        async def prefetch_comicvine_bundle(
+            self,
+            comicvine_id: int,
+        ) -> tuple[dict[str, int], list[Any]]:
+            self.prefetch_calls.append(comicvine_id)
+            if len(self.prefetch_calls) == 1:
+                raise ProviderError(
+                    "comicvine",
+                    "HTTP 420: /volumes/",
+                    details={"status_code": 420, "retryable": True},
+                )
+            return {"comicvine_id": comicvine_id}, []
+
+    service = TransientRateLimitService()
+    monkeypatch.setattr(
+        hydration_module,
+        "CATALOG_HYDRATION_RETRY_DELAY",
+        timedelta(milliseconds=25),
+    )
+
+    hydration_module.schedule_catalog_hydration(
+        session_factory,
+        series_service=service,
+        series_id=series.id,
+        search_on_add=False,
+    )
+
+    try:
+        async with asyncio.timeout(1):
+            while True:
+                await db_session.refresh(series)
+                if series.issue_catalog_state is IssueCatalogState.COMPLETE:
+                    break
+                await asyncio.sleep(0.01)
+            while hydration_module.catalog_hydration_tasks:
+                active_tasks = list(hydration_module.catalog_hydration_tasks)
+                await asyncio.gather(*active_tasks)
+                await asyncio.sleep(0)
+    finally:
+        pending_tasks = [
+            *(task for task in hydration_module.catalog_hydration_tasks if not task.done()),
+            *(task for task in hydration_module.catalog_hydration_retry_tasks if not task.done()),
+        ]
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    assert service.prefetch_calls == [6350, 6350]
+    assert series.issue_catalog_error is None
+
+
+async def test_old_rate_limited_failed_catalog_is_resumed_after_backoff(db_session) -> None:
+    series = Series(
+        title="Legacy Rate Limit Failure",
+        sort_title="legacy rate limit failure",
+        comicvine_id=6401,
+        issue_catalog_state=IssueCatalogState.FAILED,
+        issue_catalog_error="Provider 'comicvine' error: HTTP 420: /volumes/",
+        issue_catalog_last_checked_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    service = CatalogHydrationSeriesServiceStub()
+
+    recovered = await run_pending_catalog_hydration(
+        session_factory,
+        series_service=service,
+    )
+
+    assert recovered == 1
+    assert service.prefetch_calls == [6401]
+    await db_session.refresh(series)
+    assert series.issue_catalog_state == IssueCatalogState.COMPLETE
+    assert series.issue_catalog_error is None
+
+
+async def test_catalog_hydration_does_not_recreate_series_deleted_during_fetch(
+    db_session,
+) -> None:
+    series = Series(
+        title="Rollback Race",
+        sort_title="rollback race",
+        comicvine_id=4040,
+        monitored=True,
+        issue_catalog_state=IssueCatalogState.HYDRATING,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    series_id = series.id
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    add_calls = 0
+
+    async def delete_while_fetching(_comicvine_id: int):
+        async with session_factory() as delete_session:
+            persisted = await delete_session.get(Series, series_id)
+            assert persisted is not None
+            await delete_session.delete(persisted)
+            await delete_session.commit()
+        return {"comicvine_id": 4040}, []
+
+    async def add_from_prefetched(*_args, **_kwargs):
+        nonlocal add_calls
+        add_calls += 1
+
+    hydrated = await run_catalog_hydration(
+        session_factory,
+        series_id=series_id,
+        search_on_add=True,
+        prefetch_comicvine_bundle=delete_while_fetching,
+        add_from_comicvine_prefetched=add_from_prefetched,
+    )
+
+    assert add_calls == 0
+    assert hydrated is False
+
+
+async def test_catalog_hydration_skips_series_completed_after_queue_snapshot(db_session) -> None:
+    series = Series(
+        title="Completed While Queued",
+        sort_title="completed while queued",
+        comicvine_id=4041,
+        monitored=True,
+        issue_catalog_state=IssueCatalogState.COMPLETE,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+    prefetch = AsyncMock()
+    persist = AsyncMock()
+
+    hydrated = await run_catalog_hydration(
+        session_factory,
+        series_id=series.id,
+        search_on_add=True,
+        prefetch_comicvine_bundle=prefetch,
+        add_from_comicvine_prefetched=persist,
+    )
+
+    assert hydrated is False
+    prefetch.assert_not_awaited()
+    persist.assert_not_awaited()
+
+
+async def test_load_catalog_hydration_plan_uses_explicit_preferred_root(db_session) -> None:
+    current_root = LibraryRoot(
+        name="Existing",
+        path="/existing",
+        enabled=True,
+        allow_managed_writes=False,
+    )
+    preferred_root = LibraryRoot(name="Future", path="/future", enabled=True)
+    db_session.add_all([current_root, preferred_root])
+    await db_session.flush()
+    series = Series(
+        title="Preferred Hydration",
+        sort_title="preferred hydration",
+        comicvine_id=4010,
+        library_root_id=current_root.id,
+        preferred_library_root_id=preferred_root.id,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+
+    plan = await load_catalog_hydration_plan(
+        session_factory,
+        series_id=series.id,
+        search_on_add=False,
+    )
+
+    assert plan is not None
+    assert plan.library_root_id == preferred_root.id
+
+
+async def test_load_catalog_hydration_plan_does_not_force_reference_only_current_root(
+    db_session,
+) -> None:
+    current_root = LibraryRoot(
+        name="Existing",
+        path="/existing",
+        enabled=True,
+        allow_managed_writes=False,
+    )
+    db_session.add(current_root)
+    await db_session.flush()
+    series = Series(
+        title="Default Hydration",
+        sort_title="default hydration",
+        comicvine_id=4020,
+        library_root_id=current_root.id,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    session_factory = async_sessionmaker(
+        db_session.bind,
+        class_=type(db_session),
+        expire_on_commit=False,
+    )
+
+    plan = await load_catalog_hydration_plan(
+        session_factory,
+        series_id=series.id,
+        search_on_add=False,
+    )
+
+    assert plan is not None
+    assert plan.library_root_id is None
 
 
 async def test_run_pending_catalog_hydration_reuses_step_2_persistent_cache(
@@ -274,3 +692,38 @@ async def test_mark_catalog_hydration_failed_sets_retryable_state(db_session) ->
     assert series.issue_catalog_error == "ComicVine timed out"
     assert series.issue_catalog_last_synced_at is None
     assert series.issue_catalog_last_checked_at is None
+
+
+async def test_restart_catalog_hydration_publishes_one_import_summary(db_session) -> None:
+    job = ImportJob(
+        source_path="/imports",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.COMPLETED,
+    )
+    series = Series(
+        title="Imported",
+        sort_title="imported",
+        comicvine_id=4001,
+        issue_catalog_state=IssueCatalogState.HYDRATING,
+    )
+    db_session.add_all([job, series])
+    await db_session.flush()
+    db_session.add(
+        ImportedSeries(
+            import_job_id=job.id,
+            series_id=series.id,
+            raw_series_name="Imported",
+            status=ImportSeriesStatus.IMPORTED,
+        )
+    )
+    await db_session.commit()
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    await run_pending_catalog_hydration(factory, series_service=CatalogHydrationSeriesServiceStub())
+
+    progress = (await db_session.scalars(sa_select(OperationProgress))).one_or_none()
+    assert progress is not None
+    assert progress.operation_key == f"metadata:{job.id}"
+    assert progress.state == OperationProgressState.COMPLETED
+    assert progress.overall_percent == 100
+    assert progress.item_key is None

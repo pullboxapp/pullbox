@@ -1,15 +1,18 @@
 """Import workspace UI routes and loaders."""
 
 from collections.abc import Callable, Mapping
+from html import escape
+from typing import Annotated
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
-from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser
+from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.models.import_job import (
     ImportJob,
     ImportJobLog,
@@ -17,7 +20,37 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.library import LibraryRoot
-from pullbox.services.import_workflow_state import ACTIVE_IMPORT_JOB_STATUSES
+from pullbox.services.audit_service import source_ip_from_request
+from pullbox.services.import_completed_cleanup import (
+    CompletedImportCleanupAction,
+    list_completed_import_cleanup_files,
+)
+from pullbox.services.import_misplaced_source_cleanup import (
+    MisplacedSourceCleanupAction,
+    apply_misplaced_source_cleanup,
+    apply_verified_misplaced_source_cleanup,
+    list_misplaced_source_cleanup_files,
+    preview_misplaced_source_cleanup,
+    preview_verified_misplaced_source_cleanup,
+)
+from pullbox.services.import_safety_bulk_review import (
+    ImportSafetyBulkInterruptedError,
+    ImportSafetyBulkPreview,
+    allow_import_safety_category_once,
+    preview_import_safety_category,
+    preview_import_safety_category_skip,
+    skip_import_safety_category,
+)
+from pullbox.services.import_safety_diagnostics import ImportSafetyCategory
+from pullbox.services.import_safety_source_cleanup import (
+    move_one_page_source_to_trash,
+    preview_one_page_source_cleanup,
+)
+from pullbox.services.import_workflow_state import (
+    ACTIVE_IMPORT_JOB_STATUSES,
+    snapshot_mode_for_job,
+)
+from pullbox.tasks.import_task import trigger_import_safety_bulk_rematch
 from pullbox.ui import import_orphaned_routes
 from pullbox.ui.comicvine_series_search import (
     COMICVINE_SERIES_SEARCH_LIMIT,
@@ -29,15 +62,23 @@ from pullbox.ui.comicvine_series_search import (
     wrap_comicvine_provider_for_ui_cache,
 )
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
+from pullbox.ui.import_follow_up import (
+    count_import_follow_up_jobs,
+    load_import_follow_up_context,
+)
 from pullbox.ui.import_history import (
     _history_resume_step_for_job,
     _load_import_history_context,
 )
 from pullbox.ui.import_progress_snapshot import build_import_progress_snapshot
 from pullbox.ui.import_results_context import load_import_results_context
-from pullbox.ui.import_review_context import load_import_review_context
+from pullbox.ui.import_review_context import (
+    has_pending_import_safety_rematch,
+    load_import_review_context,
+)
 from pullbox.ui.import_review_summary import load_import_review_summary
 from pullbox.ui.import_series_details_context import load_import_series_details_context
+from pullbox.ui.import_story_arc_entry_review import StoryArcEntryResolutionFilter
 
 router = APIRouter()
 
@@ -126,7 +167,11 @@ def _can_resume_collection_job(job: ImportJob, requested_step: int | None) -> bo
             ImportJobStatus.ROLLING_BACK,
             ImportJobStatus.COMPLETED,
             ImportJobStatus.FAILED,
-        } and (job.status != ImportJobStatus.STALLED or job.import_started_at is not None)
+        } and (
+            job.status != ImportJobStatus.STALLED
+            or job.import_started_at is not None
+            or snapshot_mode_for_job(job) in {"import", "rollback"}
+        )
     if step == 3:
         return job.status == ImportJobStatus.REVIEW and job.import_started_at is None
     if step == 2:
@@ -228,6 +273,17 @@ async def _load_import_collection_context(session: AsyncSession) -> dict[str, ob
     """Load the collection import wizard context."""
     roots_result = await session.execute(select(LibraryRoot).order_by(LibraryRoot.name))
     library_roots = list(roots_result.scalars().all())
+    from pullbox.services.library_root_management import list_library_roots
+
+    enabled_root_options = [
+        root for root in await list_library_roots(session) if bool(root["enabled"])
+    ]
+    enabled_root_options.sort(
+        key=lambda root: (
+            not bool(root["is_default_managed_destination"]),
+            str(root["name"]).casefold(),
+        )
+    )
 
     jobs_result = await session.execute(
         select(ImportJob).order_by(ImportJob.created_at.desc()).limit(10)
@@ -236,6 +292,7 @@ async def _load_import_collection_context(session: AsyncSession) -> dict[str, ob
 
     return {
         "library_roots": library_roots,
+        "library_root_options": enabled_root_options,
         "recent_jobs": recent_jobs,
         "resume_step": None,
         "resume_job_id": None,
@@ -287,12 +344,8 @@ async def _load_import_progress_snapshot(
 
 async def _load_import_workspace_counts(session: AsyncSession) -> dict[str, object]:
     """Load shared counts used by the unified Import workspace tabs."""
-    from pullbox.composition.services import build_import_control_service
-
-    svc = build_import_control_service()
-
     return {
-        "unmatched_count": await svc.get_orphaned_count(session),
+        "follow_up_count": await count_import_follow_up_jobs(session),
     }
 
 
@@ -306,11 +359,16 @@ async def import_page(
     search: str = Query(""),
     sort: str = Query(""),
     page: int = Query(1, ge=1),
+    show_archived: bool = Query(False),
+    job_id: int | None = Query(None),
     resume_job_id: int | None = Query(None),
     resume_step: int | None = Query(None),
 ) -> Response:
     """Render the unified Import workspace and its tab-scoped partials."""
-    normalized_tab = tab if tab in {"collection", "unmatched", "history"} else "collection"
+    normalized_tab = "follow-up" if tab in {"follow-up", "unmatched"} else tab
+    if normalized_tab not in {"collection", "follow-up", "history"}:
+        normalized_tab = "collection"
+    selected_follow_up_job_id = job_id if isinstance(job_id, int) else None
 
     workspace_ctx: dict[str, object]
     if normalized_tab == "history":
@@ -319,12 +377,14 @@ async def import_page(
             search_query=search,
             sort=sort,
             requested_page=page,
+            show_archived=show_archived,
         )
-    elif normalized_tab == "unmatched":
-        workspace_ctx = await _load_import_orphaned_context(
+    elif normalized_tab == "follow-up":
+        workspace_ctx = await load_import_follow_up_context(
             session,
             view=view,
             requested_page=page,
+            job_id=selected_follow_up_job_id,
         )
     else:
         workspace_ctx = await _load_import_collection_context(session)
@@ -384,7 +444,7 @@ async def import_page(
                 "partials/import_history_panel_bundle.html",
                 ctx,
             )
-        if hx_target == "import-orphaned-results" and normalized_tab == "unmatched":
+        if hx_target == "import-orphaned-results" and normalized_tab == "follow-up":
             return _templates().TemplateResponse(
                 request,
                 "partials/import_orphaned_content_bundle.html",
@@ -468,9 +528,71 @@ async def import_review_partial(
     status: str | None = Query(None),
     page: int = Query(1, ge=1),
     sort: str | None = Query(None),
+    story_arc_id: int | None = Query(None, ge=1),
+    arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
+    arc_entry_page: int = Query(1, ge=1),
 ) -> Response:
     """Render the review table partial for an import job."""
-    from pullbox.core.exceptions import NotFoundError
+
+    return await _render_import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+        story_arc_id=story_arc_id,
+        arc_entry_state=arc_entry_state,
+        arc_entry_page=arc_entry_page,
+    )
+
+
+@router.get(
+    "/import/{job_id}/review-rematch-status",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_rematch_status(
+    job_id: int,
+    _user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Poll safety rematch completion without replacing the review surface."""
+    job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+
+    pending = await has_pending_import_safety_rematch(session, job_id)
+    if pending:
+        escaped_job_id = escape(str(job_id), quote=True)
+        return HTMLResponse(
+            f'<div id="import-safety-rematch-poll" hidden '
+            f'hx-get="/import/{escaped_job_id}/review-rematch-status" '
+            'hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]" '
+            'hx-target="this" hx-swap="outerHTML"></div>'
+        )
+
+    response = HTMLResponse('<div id="import-safety-rematch-poll" hidden></div>')
+    response.headers["HX-Trigger"] = "import:review-refresh"
+    return response
+
+
+async def _render_import_review_partial(
+    job_id: int,
+    request: Request,
+    user: object,
+    session: AsyncSession,
+    *,
+    status: str | None,
+    page: int,
+    sort: str | None,
+    story_arc_id: int | None = None,
+    arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
+    arc_entry_page: int = 1,
+    extra_context: Mapping[str, object] | None = None,
+) -> Response:
+    """Render the canonical review partial with optional route-local state."""
 
     job = await session.get(ImportJob, job_id)
     if job is None:
@@ -482,7 +604,12 @@ async def import_review_partial(
         status=status,
         page=page,
         sort=sort,
+        story_arc_id=story_arc_id,
+        arc_entry_state=arc_entry_state,
+        arc_entry_page=arc_entry_page,
     )
+    if extra_context:
+        template_ctx.update(extra_context)
 
     return _templates().TemplateResponse(
         request,
@@ -492,6 +619,347 @@ async def import_review_partial(
             user,
             **template_ctx,
         ),
+    )
+
+
+async def _load_import_safety_bulk_preview(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    category: ImportSafetyCategory,
+    actor_id: int,
+) -> ImportSafetyBulkPreview:
+    """Load an authoritative signed preview or hide unavailable actions."""
+    try:
+        preview = await preview_import_safety_category(
+            session,
+            job_id,
+            category,
+            actor_id=actor_id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    if not preview.overrideable or preview.preview_token is None:
+        raise HTTPException(status_code=404, detail="Bulk safety action not available.")
+    return preview
+
+
+async def _load_import_safety_bulk_skip_preview(
+    session: AsyncSession,
+    *,
+    job_id: int,
+    category: ImportSafetyCategory,
+    actor_id: int,
+) -> ImportSafetyBulkPreview:
+    """Load an authoritative preview for a source-preserving category skip."""
+    try:
+        preview = await preview_import_safety_category_skip(
+            session,
+            job_id,
+            category,
+            actor_id=actor_id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    if preview.preview_token is None:
+        raise HTTPException(status_code=404, detail="Bulk safety action not available.")
+    return preview
+
+
+@router.get(
+    "/import/{job_id}/safety/categories/{category}/preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_preview_safety_category(
+    job_id: int,
+    category: ImportSafetyCategory,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    """Render a signed, exact, read-only category preview for Step 3."""
+    preview = await _load_import_safety_bulk_preview(
+        session,
+        job_id=job_id,
+        category=category,
+        actor_id=user.id,
+    )
+    return await _render_import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+        extra_context={"safety_bulk_preview": preview},
+    )
+
+
+@router.post(
+    "/import/{job_id}/safety/categories/{category}/allow-once",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_allow_safety_category_once(
+    job_id: int,
+    category: ImportSafetyCategory,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    """Apply one exact signed category preview, then refresh Step 3."""
+    if category is not ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT:
+        raise HTTPException(status_code=404, detail="Bulk safety action not available.")
+    try:
+        await allow_import_safety_category_once(
+            session,
+            job_id,
+            category,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except ImportSafetyBulkInterruptedError:
+        trigger_import_safety_bulk_rematch(job_id)
+        return await _render_import_review_partial(
+            job_id,
+            request,
+            user,
+            session,
+            status=status,
+            page=page,
+            sort=sort,
+            extra_context={
+                "safety_bulk_error": (
+                    "The bulk action stopped because the import job changed. "
+                    "The review below shows the latest state."
+                ),
+                "safety_bulk_error_category": category.value,
+            },
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        return await _render_import_review_partial(
+            job_id,
+            request,
+            user,
+            session,
+            status=status,
+            page=page,
+            sort=sort,
+            extra_context={
+                "safety_bulk_error": exc.message,
+                "safety_bulk_error_category": category.value,
+            },
+        )
+
+    trigger_import_safety_bulk_rematch(job_id)
+    return await import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+    )
+
+
+@router.get(
+    "/import/{job_id}/safety/categories/{category}/skip-preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_preview_safety_category_skip(
+    job_id: int,
+    category: ImportSafetyCategory,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    """Render a signed preview for excluding one-page archives from this import."""
+    preview = await _load_import_safety_bulk_skip_preview(
+        session,
+        job_id=job_id,
+        category=category,
+        actor_id=user.id,
+    )
+    return await _render_import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+        extra_context={
+            "safety_bulk_preview": preview,
+            "safety_bulk_action": "skip",
+        },
+    )
+
+
+@router.post(
+    "/import/{job_id}/safety/categories/{category}/skip",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_skip_safety_category(
+    job_id: int,
+    category: ImportSafetyCategory,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    """Exclude a signed one-page archive set while leaving source files untouched."""
+    try:
+        await skip_import_safety_category(
+            session,
+            job_id,
+            category,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except (ImportSafetyBulkInterruptedError, ValidationError) as exc:
+        await session.rollback()
+        message = (
+            exc.message
+            if isinstance(exc, ValidationError)
+            else "The bulk skip stopped because the import job changed. Review the latest state."
+        )
+        return await _render_import_review_partial(
+            job_id,
+            request,
+            user,
+            session,
+            status=status,
+            page=page,
+            sort=sort,
+            extra_context={
+                "safety_bulk_error": message,
+                "safety_bulk_error_category": category.value,
+            },
+        )
+    return await import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+    )
+
+
+@router.get(
+    "/import/{job_id}/files/{file_id}/safety/source-cleanup-preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_source_cleanup_preview(
+    job_id: int,
+    file_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+    return_to: str = Query("review"),
+) -> Response:
+    """Preview the explicitly destructive source cleanup for one one-page archive."""
+    try:
+        preview = await preview_one_page_source_cleanup(
+            session,
+            job_id,
+            file_id,
+            actor_id=user.id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_source_cleanup_modal.html",
+        _ctx(
+            request,
+            user,
+            preview=preview,
+            status=status or "safety_blocked",
+            page=page,
+            sort=sort or "confidence",
+            return_to=(return_to if return_to in {"results", "follow-up"} else "review"),
+            error="",
+        ),
+    )
+
+
+@router.post(
+    "/import/{job_id}/files/{file_id}/safety/source-cleanup",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_review_source_cleanup(
+    job_id: int,
+    file_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+    status: str | None = Query("safety_blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+    return_to: str = Query("review"),
+) -> Response:
+    """Move one explicitly confirmed source file to configured Trash."""
+    try:
+        await move_one_page_source_to_trash(
+            session,
+            job_id,
+            file_id,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    if return_to == "results":
+        return Response(
+            status_code=204,
+            headers={
+                "HX-Redirect": (f"/import?tab=collection&resume_job_id={job_id}&resume_step=5")
+            },
+        )
+    if return_to == "follow-up":
+        return await import_follow_up_job_partial(job_id, request, user, session)
+    return await import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
     )
 
 
@@ -635,7 +1103,11 @@ async def import_results_partial(
     if job.status not in {ImportJobStatus.COMPLETED, ImportJobStatus.FAILED}:
         raise ValidationError("Results are only available for completed or failed imports.")
     progress_snapshot = await _load_import_progress_snapshot(session, job)
-    results_context = await load_import_results_context(session, job)
+    results_context = await load_import_results_context(
+        session,
+        job,
+        include_clean_library=False,
+    )
 
     return _templates().TemplateResponse(
         request,
@@ -650,6 +1122,239 @@ async def import_results_partial(
             resume_progress_snapshot=progress_snapshot,
         ),
     )
+
+
+async def import_follow_up_job_partial(
+    job_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Refresh one job-scoped Follow-up surface after a mutation."""
+    follow_up_context = await load_import_follow_up_context(
+        session,
+        view="all",
+        requested_page=1,
+        job_id=job_id,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_orphaned_results.html",
+        _ctx(request, user, tab="follow-up", **follow_up_context),
+    )
+
+
+@router.get(
+    "/import/{job_id}/clean-library-panel",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_clean_library_panel(
+    job_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Render optional clean-library organization from Import History."""
+    job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+    if job.status is not ImportJobStatus.COMPLETED or job.archived_at is not None:
+        raise ValidationError("Library organization is available for current completed imports.")
+    results_context = await load_import_results_context(
+        session,
+        job,
+        include_clean_library=True,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_clean_library_modal.html",
+        _ctx(request, user, job=job, **results_context),
+    )
+
+
+@router.get(
+    "/import/{job_id}/cleanup/{action}/files",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_completed_cleanup_files_partial(
+    job_id: int,
+    action: CompletedImportCleanupAction,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    page: int = Query(1, ge=1),
+) -> Response:
+    """Render one bounded page of files in a completed cleanup scope."""
+    cleanup_page = await list_completed_import_cleanup_files(
+        session,
+        job_id,
+        action,
+        page=page,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_completed_cleanup_files.html",
+        _ctx(
+            request,
+            user,
+            job_id=job_id,
+            cleanup_action=action.value,
+            cleanup_page=cleanup_page,
+        ),
+    )
+
+
+@router.get(
+    "/import/{job_id}/misplaced-source-cleanup/{action}/files",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_files_partial(
+    job_id: int,
+    action: MisplacedSourceCleanupAction,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    page: int = Query(1, ge=1),
+) -> Response:
+    """Render one bounded page of optional source cleanup candidates."""
+    cleanup_page = await list_misplaced_source_cleanup_files(
+        session,
+        job_id,
+        action,
+        page=page,
+    )
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_misplaced_source_cleanup_files.html",
+        _ctx(
+            request,
+            user,
+            job_id=job_id,
+            cleanup_action=action.value,
+            cleanup_page=cleanup_page,
+        ),
+    )
+
+
+@router.get(
+    "/import/{job_id}/misplaced-source-cleanup/restore-recorded-path/preview-all",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_preview_all(
+    job_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    """Preview moving every currently eligible verified misplaced source."""
+    try:
+        preview = await preview_verified_misplaced_source_cleanup(
+            session,
+            job_id,
+            actor_id=user.id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_misplaced_source_cleanup_bulk_modal.html",
+        _ctx(request, user, preview=preview),
+    )
+
+
+@router.post(
+    "/import/{job_id}/misplaced-source-cleanup/restore-recorded-path/apply-all",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_apply_all(
+    job_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+) -> Response:
+    """Apply a signed exact-scope move and refresh Step 5 without navigation."""
+    try:
+        await apply_verified_misplaced_source_cleanup(
+            session,
+            job_id,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return await import_follow_up_job_partial(job_id, request, user, session)
+
+
+@router.get(
+    "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}/preview",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_preview(
+    job_id: int,
+    file_id: int,
+    action: MisplacedSourceCleanupAction,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    """Preview one physical source cleanup without changing the library."""
+    try:
+        preview = await preview_misplaced_source_cleanup(
+            session,
+            job_id,
+            file_id,
+            action,
+            actor_id=user.id,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_misplaced_source_cleanup_modal.html",
+        _ctx(request, user, preview=preview, error=""),
+    )
+
+
+@router.post(
+    "/import/{job_id}/files/{file_id}/misplaced-source-cleanup/{action}",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_misplaced_source_cleanup_apply(
+    job_id: int,
+    file_id: int,
+    action: MisplacedSourceCleanupAction,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+) -> Response:
+    """Apply one signed source cleanup and return to the completed results."""
+    try:
+        await apply_misplaced_source_cleanup(
+            session,
+            job_id,
+            file_id,
+            action,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return await import_follow_up_job_partial(job_id, request, user, session)
 
 
 @router.get(
@@ -777,11 +1482,19 @@ async def import_cv_search(
     if query_text:
         parsed_query = parse_comicvine_series_query(query_text)
         api_key = await get_comicvine_api_key(session)
-        if api_key:
+        from pullbox.services.catalog.lookup import CatalogLookupService
+        from pullbox.services.catalog.reader import get_catalog_reader
+
+        catalog = get_catalog_reader()
+        if api_key or catalog.available:
             try:
-                provider = wrap_comicvine_provider_for_ui_cache(
-                    ComicVineProvider(api_key=api_key, rate_limit=10),
-                    request,
+                provider = (
+                    CatalogLookupService(catalog)
+                    if catalog.available
+                    else wrap_comicvine_provider_for_ui_cache(
+                        ComicVineProvider(api_key=api_key, rate_limit=10),
+                        request,
+                    )
                 )
                 cv_results, _total_results = await provider.search_series_globally(
                     parsed_query.title_query,

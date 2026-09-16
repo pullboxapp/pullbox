@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,6 +24,7 @@ from pullbox.models.library import LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, SeriesType
 from pullbox.providers.base import IssueSummary, SeriesMetadata
+from pullbox.services import cover_cache_service
 from pullbox.services import series_service as series_service_module
 from pullbox.services.series_service import SeriesService
 
@@ -185,7 +187,18 @@ async def test_targeted_import_caches_discovered_local_series_cover(
     metadata = MagicMock()
     metadata.upsert_series_metadata = AsyncMock(side_effect=_fake_upsert_series)
     metadata.upsert_issue_summaries = AsyncMock(side_effect=_fake_upsert_issue_summaries)
-    cache_local_cover = AsyncMock()
+    cached_path = tmp_path / ".covers" / "1" / "series.jpg"
+    covers_base = cached_path.parents[1]
+    cache_local_cover = AsyncMock(
+        return_value=SimpleNamespace(
+            path=cached_path,
+            covers_base=covers_base,
+            ownership_boundary_path=tmp_path,
+            created_directory_paths=(covers_base, cached_path.parent),
+            artifact_created=True,
+            artifact_signature={"sha256": "import-cover"},
+        )
+    )
     monkeypatch.setattr(
         series_service_module,
         "cache_imported_series_cover",
@@ -208,6 +221,71 @@ async def test_targeted_import_caches_discovered_local_series_cover(
     )
 
     cache_local_cover.assert_awaited_once_with(db_session, series, local_cover)
+    assert import_series.diagnostics["kind"] == "series_match"
+    assert import_series.diagnostics["cover_cache_ownership"] == {
+        "schema_version": 1,
+        "base_path": str(covers_base),
+        "ownership_boundary_path": str(tmp_path),
+        "created_directory_paths": [str(covers_base), str(cached_path.parent)],
+        "artifact_path": str(cached_path),
+        "artifact_signature": {"sha256": "import-cover"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_targeted_import_reuses_preexisting_cover_without_claiming_artifact(
+    db_session: AsyncSession,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_cover = tmp_path / "mylar" / "cover.jpg"
+    source_cover.parent.mkdir()
+    source_cover.write_bytes(b"mylar source")
+    job = ImportJob(
+        source_path=str(tmp_path / "mylar.db"),
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.IMPORTING,
+    )
+    series = Series(
+        comicvine_id=47051,
+        title="Existing Cover",
+        sort_title="existing cover",
+        cover_path="https://example.invalid/prior.jpg",
+    )
+    db_session.add_all([job, series])
+    await db_session.flush()
+    covers_base = tmp_path / ".covers"
+    cached_cover = covers_base / str(series.id) / "series.jpg"
+    cached_cover.parent.mkdir(parents=True)
+    cached_cover.write_bytes(b"pre-existing artifact")
+    monkeypatch.setattr(
+        cover_cache_service,
+        "resolve_covers_dir",
+        AsyncMock(return_value=covers_base),
+    )
+    metadata = MagicMock()
+    metadata.upsert_series_metadata = AsyncMock(side_effect=_fake_upsert_series)
+    metadata.upsert_issue_summaries = AsyncMock(side_effect=_fake_upsert_issue_summaries)
+    service = SeriesService(metadata_service=metadata, event_bus=EventBus())
+    import_series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Existing Cover",
+        cv_id=47051,
+        cv_title="Existing Cover",
+        source_folder=str(source_cover.parent),
+        diagnostics={"kind": "series_match"},
+    )
+
+    resolved = await service.add_from_import_review_targeted(
+        db_session,
+        import_series=import_series,
+        issue_summaries=[],
+    )
+
+    assert resolved is series
+    assert series.cover_path == f"/api/v1/series/{series.id}/cover"
+    assert cached_cover.read_bytes() == b"pre-existing artifact"
+    assert "cover_cache_ownership" not in (import_series.diagnostics or {})
 
 
 @pytest.mark.asyncio
@@ -263,7 +341,14 @@ async def test_targeted_import_uses_cached_metadata_for_type_aware_folder_name(
     )
 
     assert series.series_type == SeriesType.HARDCOVER
-    assert series.path == str(tmp_path / "Archaia - About Betty's Boob (2018) [HC] [cv-111396]")
+    expected_folder = tmp_path / "Archaia - About Betty's Boob (2018) [HC] [cv-111396]"
+    assert series.path == str(expected_folder)
+    assert import_series.diagnostics["series_folder_ownership"] == {
+        "schema_version": 1,
+        "folder_path": str(expected_folder),
+        "ownership_boundary_path": str(tmp_path),
+        "created_directory_paths": [str(expected_folder)],
+    }
 
 
 @pytest.mark.asyncio
@@ -309,6 +394,39 @@ async def test_targeted_import_uses_explicit_single_one_shot_as_folder_hint(
 
     assert series.series_type == SeriesType.STANDARD
     assert series.path == str(tmp_path / "Black Mass Rising (2022) [One-Shot]")
+
+
+def test_series_folder_creation_rejects_symlink_segment_escaping_library_root(
+    tmp_path,
+) -> None:
+    library_root = tmp_path / "library"
+    outside = tmp_path / "outside"
+    library_root.mkdir()
+    outside.mkdir()
+    (library_root / "Publisher").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError):
+        series_service_module._create_series_folder_directories(
+            library_root / "Publisher" / "Series",
+            library_root,
+        )
+
+    assert not (outside / "Series").exists()
+
+
+def test_series_folder_creation_reports_only_exact_missing_nested_segments(tmp_path) -> None:
+    library_root = tmp_path / "library"
+    publisher_folder = library_root / "Publisher"
+    publisher_folder.mkdir(parents=True)
+    series_folder = publisher_folder / "Series"
+
+    created = series_service_module._create_series_folder_directories(
+        series_folder,
+        library_root,
+    )
+
+    assert created == (series_folder.resolve(strict=True),)
+    assert publisher_folder.exists()
 
 
 @pytest.mark.asyncio
@@ -368,6 +486,41 @@ async def test_hydrate_series_catalog_marks_complete_and_emits_series_added(
     assert series.issue_catalog_last_synced_at is not None
     assert series.issue_catalog_error is None
     assert emitted == [SeriesAdded(series_id=series.id, comicvine_id=166904)]
+
+
+@pytest.mark.asyncio
+async def test_hydrate_series_catalog_routes_future_folder_work_to_preferred_root(
+    db_session: AsyncSession,
+) -> None:
+    metadata = MagicMock()
+    service = SeriesService(metadata_service=metadata, event_bus=EventBus())
+    current_root = LibraryRoot(
+        name="Existing",
+        path="/existing",
+        enabled=True,
+        allow_managed_writes=False,
+    )
+    preferred_root = LibraryRoot(name="Future", path="/future", enabled=True)
+    db_session.add_all([current_root, preferred_root])
+    await db_session.flush()
+    series = Series(
+        comicvine_id=166905,
+        title="Future Root",
+        sort_title="future root",
+        library_root_id=current_root.id,
+        preferred_library_root_id=preferred_root.id,
+        issue_catalog_state=IssueCatalogState.HYDRATING,
+    )
+    db_session.add(series)
+    await db_session.flush()
+    service.prefetch_comicvine_bundle = AsyncMock(return_value=(MagicMock(), []))  # type: ignore[method-assign]
+    add_prefetched = AsyncMock(return_value=series)
+    service.add_from_comicvine_prefetched = add_prefetched  # type: ignore[method-assign]
+
+    hydrated = await service.hydrate_series_catalog(db_session, series.id)
+
+    assert hydrated is series
+    assert add_prefetched.await_args.kwargs["library_root_id"] == preferred_root.id
 
 
 @pytest.mark.asyncio

@@ -206,6 +206,7 @@ async def test_restore_review_state_after_rollback_resets_series_and_files(
     assert matched_file.include_in_import is False
     assert no_match_file.status == ImportedFileStatus.NO_MATCH
     assert no_match_file.include_in_import is False
+    assert no_match_file.diagnostics["reason"] == "rollback_restored_unmatched"
     assert duplicate_matched_file.status == ImportedFileStatus.MATCHED
     assert duplicate_matched_file.include_in_import is False
     assert pending_file.status == ImportedFileStatus.PENDING

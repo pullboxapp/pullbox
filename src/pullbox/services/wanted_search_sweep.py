@@ -10,13 +10,14 @@ from typing import TYPE_CHECKING, Literal
 from sqlalchemy import and_, case, exists, func, select
 
 from pullbox.models.config import SystemConfig
-from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.issue import Issue
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.search_log import SearchLog
 from pullbox.models.series import Series
 from pullbox.services.search_targets import (
     IssueSearchTarget,
     load_wanted_issue_search_targets_by_ids,
+    wanted_issue_eligibility_filter,
 )
 
 if TYPE_CHECKING:
@@ -280,8 +281,7 @@ async def _load_fair_wanted_issue_ids(session: AsyncSession) -> list[int]:
         select(Issue.id)
         .join(Series, Series.id == Issue.series_id)
         .where(
-            Issue.status == IssueStatus.WANTED,
-            Series.monitored.is_(True),
+            wanted_issue_eligibility_filter(),
             ~exists().where(
                 and_(
                     PendingMatch.issue_id == Issue.id,

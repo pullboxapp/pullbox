@@ -165,7 +165,7 @@ async def test_direct_pack_always_imports_the_explicitly_selected_skipped_issue(
     monkeypatch.setattr(
         post_processing.asyncio,
         "to_thread",
-        AsyncMock(return_value={5.0: extracted_path}),
+        AsyncMock(return_value={"5": extracted_path}),
     )
 
     async def fake_prepare(_session: Any, *, issue_id: int, **_kwargs: Any) -> SimpleNamespace:
@@ -239,7 +239,7 @@ async def test_direct_pack_only_replaces_the_explicitly_selected_existing_issue(
     monkeypatch.setattr(
         post_processing.asyncio,
         "to_thread",
-        AsyncMock(return_value={5.0: target_path, 6.0: supplemental_path}),
+        AsyncMock(return_value={"5": target_path, "6": supplemental_path}),
     )
 
     async def fake_prepare(_session: Any, *, issue_id: int, **_kwargs: Any) -> SimpleNamespace:
@@ -299,7 +299,7 @@ async def test_direct_pack_materializes_library_symlinks_before_workspace_cleanu
     monkeypatch.setattr(
         post_processing,
         "extract_same_series_issue_files",
-        lambda *_args, **_kwargs: {5.0: source_path},
+        lambda *_args, **_kwargs: {"5": source_path},
     )
 
     async def run_inline(function: Any, *args: Any, **kwargs: Any) -> Any:

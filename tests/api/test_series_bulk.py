@@ -587,7 +587,12 @@ class TestBulkDelete:
         )
 
         assert response.status_code == 200
-        assert response.json() == {"series_count": 1, "linked_file_count": 1}
+        assert response.json() == {
+            "series_count": 1,
+            "linked_file_count": 1,
+            "managed_file_count": 1,
+            "referenced_file_count": 0,
+        }
 
     @pytest.mark.asyncio
     async def test_delete_context_ignores_missing_disk_files(
@@ -641,7 +646,12 @@ class TestBulkDelete:
         )
 
         assert response.status_code == 200
-        assert response.json() == {"series_count": 1, "linked_file_count": 0}
+        assert response.json() == {
+            "series_count": 1,
+            "linked_file_count": 0,
+            "managed_file_count": 0,
+            "referenced_file_count": 0,
+        }
 
     @pytest.mark.asyncio
     async def test_delete_multiple_series(

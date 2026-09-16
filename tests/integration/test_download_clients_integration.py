@@ -21,6 +21,7 @@ from pullbox.core.events import EventBus
 from pullbox.models import Base
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
+from pullbox.models.indexer import IndexerConfig, IndexerType
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
 from pullbox.providers.base import (
@@ -28,6 +29,7 @@ from pullbox.providers.base import (
     ProviderRegistry,
     ReleaseResult,
 )
+from pullbox.providers.indexer.torznab_transport import TorznabDescriptor
 from pullbox.services.download_service import DownloadService
 
 if TYPE_CHECKING:
@@ -43,6 +45,7 @@ def _mock_client(client_type: str, name: str | None = None) -> MagicMock:
     client.name = name or client_type
     client.add_nzb = AsyncMock(return_value="ext-123")
     client.add_torrent = AsyncMock(return_value="hash-abc")
+    client.add_torrent_data = AsyncMock(return_value="hash-abc")
     client.get_download_status = AsyncMock(
         return_value=DownloadStatus(
             external_id="ext-123",
@@ -61,7 +64,19 @@ def _mock_client(client_type: str, name: str | None = None) -> MagicMock:
     return client
 
 
-def _make_release(title: str, is_torrent: bool) -> ReleaseResult:
+def _make_release(
+    title: str, is_torrent: bool, registry: ProviderRegistry | None = None
+) -> ReleaseResult:
+    if is_torrent:
+        assert registry is not None
+        indexer = MagicMock()
+        indexer.fetch_torrent_descriptor = AsyncMock(
+            return_value=TorznabDescriptor(
+                content=b"fixture-torrent",
+                magnet_url=None,
+            )
+        )
+        registry.register_indexer(7, indexer)
     return ReleaseResult(
         title=title,
         indexer_name="test-indexer",
@@ -74,6 +89,7 @@ def _make_release(title: str, is_torrent: bool) -> ReleaseResult:
         is_torrent=is_torrent,
         category="comics",
         published_at=None,
+        indexer_id=7 if is_torrent else None,
     )
 
 
@@ -98,6 +114,15 @@ async def session(db: async_sessionmaker[AsyncSession]) -> AsyncGenerator[AsyncS
 async def issue(session: AsyncSession) -> Issue:
     """Create a test series + issue."""
     series = Series(title="Test Series", sort_title="test series")
+    session.add(
+        IndexerConfig(
+            id=7,
+            name="test-indexer",
+            indexer_type=IndexerType.TORZNAB,
+            url="http://example.com",
+            api_key="fixture",
+        )
+    )
     session.add(series)
     await session.flush()
     issue = Issue(
@@ -193,12 +218,13 @@ class TestDownloadRouting:
         reg.register_download_client(1, tr, priority=10)
 
         svc = DownloadService(registry=reg, event_bus=EventBus())
-        release = _make_release("Test Torrent", is_torrent=True)
+        release = _make_release("Test Torrent", is_torrent=True, registry=reg)
         dl = await svc.send_to_client(session, release, issue.id)
 
         assert dl.download_client == DownloadClientType.TRANSMISSION
         assert dl.state == DownloadState.SENT
-        tr.add_torrent.assert_called_once()
+        tr.add_torrent_data.assert_awaited_once_with(b"fixture-torrent", "Test Torrent")
+        tr.add_torrent.assert_not_awaited()
 
     async def test_torrent_release_goes_to_deluge(
         self,
@@ -211,11 +237,12 @@ class TestDownloadRouting:
         reg.register_download_client(1, dl_client, priority=10)
 
         svc = DownloadService(registry=reg, event_bus=EventBus())
-        release = _make_release("Test Torrent", is_torrent=True)
+        release = _make_release("Test Torrent", is_torrent=True, registry=reg)
         dl = await svc.send_to_client(session, release, issue.id)
 
         assert dl.download_client == DownloadClientType.DELUGE
-        dl_client.add_torrent.assert_called_once()
+        dl_client.add_torrent_data.assert_awaited_once_with(b"fixture-torrent", "Test Torrent")
+        dl_client.add_torrent.assert_not_awaited()
 
     async def test_mixed_clients_correct_routing(
         self,
@@ -236,10 +263,11 @@ class TestDownloadRouting:
         assert dl_nzb.download_client == DownloadClientType.SABNZBD
         sab.add_nzb.assert_called_once()
 
-        torrent_release = _make_release("Torrent Release", is_torrent=True)
+        torrent_release = _make_release("Torrent Release", is_torrent=True, registry=reg)
         dl_tor = await svc.send_to_client(session, torrent_release, issue.id)
         assert dl_tor.download_client == DownloadClientType.TRANSMISSION
-        tr.add_torrent.assert_called_once()
+        tr.add_torrent_data.assert_awaited_once_with(b"fixture-torrent", "Torrent Release")
+        tr.add_torrent.assert_not_awaited()
 
     async def test_no_nzb_client_raises(
         self,
@@ -291,7 +319,7 @@ class TestClientTypeAffinity:
         svc = DownloadService(registry=reg, event_bus=EventBus())
 
         # Send to Transmission (higher priority)
-        release = _make_release("Test", is_torrent=True)
+        release = _make_release("Test", is_torrent=True, registry=reg)
         dl = await svc.send_to_client(session, release, issue.id)
         assert dl.download_client == DownloadClientType.TRANSMISSION
         assert dl.download_client_config_id == 1
@@ -395,7 +423,7 @@ class TestClientTypeAffinity:
         reg.register_download_client(1, dl_client, priority=10)
 
         svc = DownloadService(registry=reg, event_bus=EventBus())
-        release = _make_release("Test", is_torrent=True)
+        release = _make_release("Test", is_torrent=True, registry=reg)
         dl = await svc.send_to_client(session, release, issue.id)
 
         # Remove Deluge from registry (simulates config removal)
@@ -454,7 +482,7 @@ class TestDownloadLifecycle:
         reg.register_download_client(1, tr, priority=10)
 
         svc = DownloadService(registry=reg, event_bus=EventBus())
-        release = _make_release("Transmission Test", is_torrent=True)
+        release = _make_release("Transmission Test", is_torrent=True, registry=reg)
         dl = await svc.send_to_client(session, release, issue.id)
 
         assert dl.state == DownloadState.SENT
@@ -485,7 +513,7 @@ class TestDownloadLifecycle:
         reg.register_download_client(1, dl_client, priority=10)
 
         svc = DownloadService(registry=reg, event_bus=EventBus())
-        release = _make_release("Deluge Test", is_torrent=True)
+        release = _make_release("Deluge Test", is_torrent=True, registry=reg)
         dl = await svc.send_to_client(session, release, issue.id)
 
         assert dl.state == DownloadState.SENT
@@ -513,6 +541,28 @@ class TestDownloadLifecycle:
 @pytest.mark.asyncio
 class TestRetryFlow:
     """Retry preserves client type affinity."""
+
+    @pytest.mark.parametrize("client_type", ["qbittorrent", "transmission", "deluge"])
+    async def test_automatic_handoff_and_retry_upload_torrent_metadata(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+        client_type: str,
+    ) -> None:
+        registry = ProviderRegistry()
+        client = _mock_client(client_type)
+        registry.register_download_client(1, client)
+        service = DownloadService(registry, EventBus())
+        release = _make_release("Synthetic torrent", is_torrent=True, registry=registry)
+        download = await service.send_to_client(session, release, issue.id)
+        assert download.state is DownloadState.SENT
+        download.state = DownloadState.FAILED
+        await session.flush()
+        retried = await service.manual_retry(session, download.id)
+        assert retried.state is DownloadState.SENT
+        assert client.add_torrent_data.await_count == 2
+        assert registry.get_indexer(7).fetch_torrent_descriptor.await_count == 2
+        client.add_torrent.assert_not_awaited()
 
     async def test_failed_nzbget_retries_to_nzbget(
         self,

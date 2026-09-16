@@ -224,6 +224,7 @@ async def test_reclassify_matched_series_flags_owned_reversed_crossover_candidat
     assert imported.diagnostics["competing_candidate"]["existing_series_id"] == owned_series.id
     assert imported_file.status == ImportedFileStatus.NO_MATCH
     assert imported_file.diagnostics["kind"] == "series_conflict_file"
+    assert imported_file.diagnostics["reason"] == "library_owned_ambiguous_candidate"
 
 
 async def test_reclassify_matched_series_respects_manual_reversed_crossover_choice(

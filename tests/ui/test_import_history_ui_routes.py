@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import UTC, datetime
 
 import pytest
 
@@ -21,6 +22,8 @@ async def _seed_import_history_job(
     status: str = "scanning",
     source_path: str = "/tmp/import-history-contract",
     source_type: str = "filesystem",
+    progress_snapshot: dict[str, object] | None = None,
+    archived: bool = False,
 ) -> int:  # type: ignore[no-untyped-def]
     from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 
@@ -33,6 +36,8 @@ async def _seed_import_history_job(
             series_imported=0,
             series_failed=0,
             series_no_match=2,
+            progress_snapshot=progress_snapshot or {},
+            archived_at=(datetime.now(UTC) if archived else None),
         )
         session.add(job)
         await session.commit()
@@ -71,6 +76,51 @@ class TestImportHistoryTabRouteContracts:
         assert 'data-testid="import-history-results"' in response.text
         assert 'data-testid="import-history-table-shell"' in response.text
         assert 'data-testid="import-history-delete-modal"' in response.text
+
+    async def test_archived_imports_are_hidden_by_default_and_can_be_shown(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        active_id = await _seed_import_history_job(
+            sec_db,
+            status="completed",
+            source_path="/imports/visible",
+        )
+        archived_id = await _seed_import_history_job(
+            sec_db,
+            status="completed",
+            source_path="/imports/archived",
+            archived=True,
+        )
+
+        response = await authenticated_client.get("/import?tab=history")
+        assert f"import-job-row-{active_id}" in response.text
+        assert f"import-job-row-{archived_id}" not in response.text
+
+        archived_response = await authenticated_client.get("/import?tab=history&show_archived=true")
+        assert f"import-job-row-{active_id}" not in archived_response.text
+        assert f"import-job-row-{archived_id}" in archived_response.text
+        assert f"import-history-restore-{archived_id}" in archived_response.text
+
+    async def test_archive_toggle_targets_the_replaceable_history_panel(
+        self,
+        authenticated_client,
+    ) -> None:  # type: ignore[no-untyped-def]
+        response = await authenticated_client.get("/import?tab=history")
+
+        assert response.status_code == 200
+        assert len(re.findall(r'(?<![-\w])id="import-history-page"', response.text)) == 1
+        assert 'hx-target="#import-history-page"' in response.text
+
+        archived_response = await authenticated_client.get(
+            "/import?tab=history&show_archived=true",
+            headers={"HX-Request": "true", "HX-Target": "import-history-page"},
+        )
+
+        assert archived_response.status_code == 200
+        assert len(re.findall(r'(?<![-\w])id="import-history-page"', archived_response.text)) == 1
+        assert ">\n            Show current\n          </a>" in archived_response.text
 
     @pytest.mark.parametrize("source_type", ["filesystem", "mylar3"])
     async def test_step_four_explains_that_import_continues_in_background(
@@ -146,6 +196,26 @@ class TestImportHistoryTabRouteContracts:
         assert 'class="downloads-led ' in response.text
         assert 'class="downloads-action-btn import-history-action-btn' in response.text
         assert 'class="downloads-error-row table-detail-row"' in response.text
+
+    async def test_import_history_labels_incomplete_rollback_truthfully(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        await _seed_import_history_job(
+            sec_db,
+            status="failed",
+            progress_snapshot={
+                "mode": "rollback",
+                "phase": "rollback_incomplete",
+                "rollback_manual_recovery_count": 1,
+            },
+        )
+
+        response = await authenticated_client.get("/import?tab=history")
+
+        assert response.status_code == 200
+        assert "Rollback Incomplete" in response.text
 
     async def test_import_history_toolbar_matches_downloads_history_search_contract(
         self,

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-  echo "Usage: $0 <actionlint|gitleaks> [install-dir]" >&2
+  echo "Usage: $0 <actionlint|gitleaks|grype> [install-dir]" >&2
   exit 1
 fi
 
@@ -47,6 +47,22 @@ case "${tool}" in
       arm64|aarch64) archive_arch="arm64" ;;
       *)
         echo "Unsupported gitleaks architecture: ${arch}" >&2
+        exit 1
+        ;;
+    esac
+    archive="${binary}_${version}_${os}_${archive_arch}.tar.gz"
+    version_args="version"
+    ;;
+  grype)
+    version="0.110.0"
+    binary="grype"
+    checksum_file="grype_${version}_checksums.txt"
+    base_url="https://github.com/anchore/grype/releases/download/v${version}"
+    case "${arch}" in
+      x86_64|amd64) archive_arch="amd64" ;;
+      arm64|aarch64) archive_arch="arm64" ;;
+      *)
+        echo "Unsupported grype architecture: ${arch}" >&2
         exit 1
         ;;
     esac

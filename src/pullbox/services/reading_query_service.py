@@ -12,7 +12,12 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series
-from pullbox.services.reader_state_service import ReaderStateSnapshot, snapshot_reader_state
+from pullbox.models.story_arc import IssueStoryArc, StoryArcResolutionState
+from pullbox.services.reader_state_service import (
+    ReaderStateSnapshot,
+    calculate_reader_position_percent,
+    snapshot_reader_state,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -52,9 +57,7 @@ class ReadingStateProjection:
 
     @property
     def position_percent(self) -> int:
-        if self.last_page_index is None or self.page_count is None:
-            return 0
-        return max(0, min(100, ((self.last_page_index + 1) * 100) // self.page_count))
+        return calculate_reader_position_percent(self.last_page_index, self.page_count)
 
     @property
     def is_continue_candidate(self) -> bool:
@@ -116,6 +119,16 @@ class SeriesReadingAggregate:
         if self.readable_count <= 0:
             return 0
         return (self.completed_count * 100) // self.readable_count
+
+
+@dataclass(frozen=True, slots=True)
+class StoryArcReadingAggregate:
+    """Readable and completed issue totals for one visible Story Arc."""
+
+    story_arc_id: int
+    readable_count: int
+    completed_count: int
+    in_progress_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +317,72 @@ async def load_series_reading_aggregates(
             in_progress_count=int(in_progress_count),
         )
         for series_id, readable_count, completed_count, in_progress_count in result.all()
+    }
+
+
+async def load_story_arc_reading_aggregates(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    story_arc_ids: tuple[int, ...],
+) -> dict[int, StoryArcReadingAggregate]:
+    """Load private reader totals for resolved members of bounded visible arcs."""
+    if not story_arc_ids:
+        return {}
+    if len(story_arc_ids) > 100:
+        raise ValueError("Visible Story Arc aggregate queries are limited to 100 arcs.")
+    completed_issue = case((IssueReaderState.completed_at.is_not(None), Issue.id))
+    in_progress_issue = case(
+        (
+            and_(
+                IssueReaderState.last_page_index.is_not(None),
+                IssueReaderState.content_revision.is_not(None),
+                IssueReaderState.page_count.is_not(None),
+                IssueReaderState.last_page_index >= 0,
+                IssueReaderState.page_count > 0,
+                IssueReaderState.completed_at.is_(None),
+                IssueReaderState.last_page_index < IssueReaderState.page_count - 1,
+            ),
+            Issue.id,
+        )
+    )
+    result = await session.execute(
+        select(
+            IssueStoryArc.story_arc_id,
+            func.count(func.distinct(Issue.id)),
+            func.count(func.distinct(completed_issue)),
+            func.count(func.distinct(in_progress_issue)),
+        )
+        .join(Issue, Issue.id == IssueStoryArc.issue_id)
+        .join(
+            LibraryFile,
+            and_(
+                LibraryFile.issue_id == Issue.id,
+                LibraryFile.file_format.in_(SUPPORTED_READER_FORMATS),
+            ),
+        )
+        .outerjoin(
+            IssueReaderState,
+            and_(
+                IssueReaderState.issue_id == Issue.id,
+                IssueReaderState.user_id == user_id,
+            ),
+        )
+        .where(
+            IssueStoryArc.story_arc_id.in_(story_arc_ids),
+            IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+            Issue.status == IssueStatus.OWNED,
+        )
+        .group_by(IssueStoryArc.story_arc_id)
+    )
+    return {
+        int(story_arc_id): StoryArcReadingAggregate(
+            story_arc_id=int(story_arc_id),
+            readable_count=int(readable_count),
+            completed_count=int(completed_count),
+            in_progress_count=int(in_progress_count),
+        )
+        for story_arc_id, readable_count, completed_count, in_progress_count in result.all()
     }
 
 

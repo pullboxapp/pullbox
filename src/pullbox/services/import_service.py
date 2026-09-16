@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -21,8 +22,17 @@ from pullbox.core.file_ops import (
     register_library_file_with_metadata,
 )
 from pullbox.core.mylar3_reader import Mylar3Reader
-from pullbox.models.import_job import ImportedSeries, ImportJob, ImportJobAction, ImportJobStatus
-from pullbox.services.import_catalog_hydration import run_pending_catalog_hydration
+from pullbox.models.import_job import (
+    ImportedSeries,
+    ImportJob,
+    ImportJobAction,
+    ImportJobStatus,
+    ImportSourceType,
+)
+from pullbox.services.import_catalog_hydration import (
+    ensure_catalog_hydration_retry_scheduled,
+    run_pending_catalog_hydration,
+)
 from pullbox.services.import_comicinfo_enrichment import (
     run_pending_import_comicinfo_enrichment,
     schedule_import_comicinfo_enrichment,
@@ -46,6 +56,7 @@ from pullbox.services.import_job_actions import (
     next_action_sequence as next_import_action_sequence,
 )
 from pullbox.services.import_job_actions import record_action as record_import_action
+from pullbox.services.import_job_actions import record_actions as record_import_actions
 from pullbox.services.import_job_actions import rollback_action as rollback_import_action
 from pullbox.services.import_job_controls import (
     raise_if_job_cancelled_immediately as raise_if_import_job_cancelled_immediately,
@@ -70,6 +81,9 @@ from pullbox.services.import_matching import (
 )
 from pullbox.services.import_matching import (
     score_cv_result as _score_cv_result,  # noqa: F401 - compatibility import
+)
+from pullbox.services.import_placement_recovery import (
+    load_completed_import_placement_recovery,
 )
 from pullbox.services.import_provider_cache import (
     CachedImportMetadataProvider,
@@ -103,6 +117,10 @@ from pullbox.services.import_service_job_lifecycle import ImportServiceJobLifecy
 from pullbox.services.import_service_matching import ImportServiceMatchingMixin
 from pullbox.services.import_service_recovery import ImportServiceRecoveryMixin
 from pullbox.services.import_service_review import ImportServiceReviewMixin
+from pullbox.services.import_story_arc_placement_completion import (
+    ImportStoryArcPlacementCompletionState,
+    finalize_import_story_arc_placements,
+)
 from pullbox.services.import_workflow_state import (
     emit_progress,
     estimate_remaining_seconds,
@@ -117,9 +135,8 @@ from pullbox.services.semantic_matching import ImportPolicy, SemanticMatchEngine
 from pullbox.utilities.sse import publish
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
     from datetime import datetime
-    from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -127,7 +144,6 @@ if TYPE_CHECKING:
     from pullbox.core.events import EventBus
     from pullbox.core.library_permissions import LibraryPermissionPolicy
     from pullbox.core.library_policy import LibraryIngestPolicy
-    from pullbox.models.import_job import ImportJobAction
     from pullbox.models.issue import Issue
     from pullbox.models.library import LibraryFile, MatchConfidence
     from pullbox.providers.base import SeriesMetadata
@@ -137,6 +153,7 @@ if TYPE_CHECKING:
         ImportProgressEvent,
     )
     from pullbox.services.import_file_execution_protocols import ReportFileProgressFunc
+    from pullbox.services.import_job_actions import ImportJobActionSpec
     from pullbox.services.metadata_service import MetadataService
     from pullbox.services.series_service import SeriesService
 
@@ -151,6 +168,7 @@ class RunImportResult:
     """Post-transaction follow-up work requested by import execution."""
 
     schedule_comicinfo_enrichment: bool = False
+    schedule_story_arc_sync: bool = False
 
 
 # ── ImportService class ──────────────────────────────────────────────────
@@ -325,9 +343,16 @@ class ImportService(
         self,
         session: AsyncSession,
         discovered_list: list[DiscoveredSeries],
+        *,
+        progress_callback: Callable[[int, int, str], Awaitable[None]] | None = None,
     ) -> None:
         """Run safety checks on discovered source files before review/import."""
-        await validate_import_discovered_files_safety(session, discovered_list)
+        await validate_import_discovered_files_safety(
+            session,
+            discovered_list,
+            progress_callback=progress_callback,
+            worker_count=self._settings.import_scan_worker_count,
+        )
 
     def _build_scan_metadata_provider(self, session: AsyncSession) -> CachedImportMetadataProvider:
         """Return the Step 2 provider stack: persistent cache, then per-job cache."""
@@ -449,6 +474,15 @@ class ImportService(
             payload=payload,
         )
 
+    async def _record_actions(
+        self,
+        session: AsyncSession,
+        job: ImportJob,
+        specs: Sequence[ImportJobActionSpec],
+    ) -> list[ImportJobAction]:
+        """Persist one bounded rollback-journal action batch."""
+        return await record_import_actions(session, job, specs)
+
     async def _register_import_library_file(
         self,
         session: AsyncSession,
@@ -469,6 +503,12 @@ class ImportService(
                 self._materialize_import_cbz_with_comicinfo_interruptible
             ),
         )
+        recovery_imported_file_id = kwargs.pop("recovery_imported_file_id", None)
+        recovery_source_value = kwargs.pop("recovery_original_source_path", None)
+        recovery_original_source_path = (
+            Path(recovery_source_value) if recovery_source_value is not None else source_path
+        )
+        placement_action_id: int | None = None
 
         async def placement_started_callback(
             *,
@@ -477,26 +517,111 @@ class ImportService(
             transfer_method: str,
             series_folder_created: bool,
             series_folder_path: Path,
+            created_directory_paths: tuple[Path, ...] = (),
+            directory_ownership_boundary_path: Path | None = None,
             temp_paths: tuple[Path, ...] = (),
         ) -> None:
-            await self._record_action(
+            nonlocal placement_action_id
+            action = await self._record_action(
                 session,
                 job,
                 phase="import",
                 action_type="library_file_placement_started",
                 payload={
+                    "imported_file_id": recovery_imported_file_id,
+                    "issue_id": issue.id,
                     "destination_path": str(target_path),
-                    "original_source_path": str(source_path),
+                    "original_source_path": str(recovery_original_source_path),
                     "artifact_source_path": str(artifact_source_path),
                     "transfer_method": transfer_method,
                     "created_series_folder": series_folder_created,
                     "created_series_folder_path": str(series_folder_path),
+                    "created_directory_paths": [str(path) for path in created_directory_paths],
+                    "directory_ownership_boundary_path": (
+                        str(directory_ownership_boundary_path)
+                        if directory_ownership_boundary_path is not None
+                        else None
+                    ),
                     "temp_paths": [str(path) for path in temp_paths],
+                    "placement_completed": False,
                 },
             )
+            placement_action_id = action.id
             # This journal row must survive if archive materialization raises and
             # the caller rolls back the active session.
             await session.commit()
+
+        async def placement_completed_callback(
+            *,
+            target_path: Path,
+            destination_signature: dict[str, int | str],
+        ) -> None:
+            if placement_action_id is None:
+                raise RuntimeError("Import placement completed without a durable start record")
+            action = await session.get(ImportJobAction, placement_action_id)
+            if action is None:
+                raise RuntimeError("Import placement start record disappeared before completion")
+            payload = dict(action.payload or {})
+            if str(payload.get("destination_path") or "") != str(target_path):
+                raise RuntimeError("Import placement completion target changed after planning")
+            payload["placement_completed"] = True
+            payload["destination_signature"] = dict(destination_signature)
+            action.payload = payload
+            await session.commit()
+
+        source_scan_root = kwargs.pop(
+            "source_scan_root",
+            Path(job.source_path) if job.source_type == ImportSourceType.FILESYSTEM else None,
+        )
+        kwargs.pop("strict_import_target", None)
+
+        transfer_method = str(kwargs.get("transfer_method") or "")
+        recovery = None
+        if (
+            isinstance(recovery_imported_file_id, int)
+            and not isinstance(recovery_imported_file_id, bool)
+            and issue.id is not None
+            and transfer_method
+        ):
+            recovery = await load_completed_import_placement_recovery(
+                session,
+                job_id=int(job.id),
+                imported_file_id=recovery_imported_file_id,
+                issue_id=int(issue.id),
+                source_path=recovery_original_source_path,
+                transfer_method=transfer_method,
+            )
+        if recovery is not None:
+            recovery_kwargs = dict(kwargs)
+            recovery_kwargs.update(
+                {
+                    "move_to_library": False,
+                    "expected_source_signature": None,
+                    "transfer_method": "recovered",
+                    "normalize_to_cbz": False,
+                    "update_embedded_comicinfo_from_match": False,
+                    "comicinfo_payload": None,
+                    "rename": False,
+                    "recover_existing_managed_artifact": True,
+                }
+            )
+            result = await register_library_file(
+                session,
+                recovery.destination_path,
+                issue,
+                confidence,
+                source_scan_root=None,
+                strict_import_target=True,
+                **recovery_kwargs,
+            )
+            library_file = (
+                result.library_file
+                if isinstance(result, LibraryFileRegistrationOutcome)
+                else result
+            )
+            library_file.source_signature = dict(recovery.destination_signature)
+            await session.flush()
+            return result
 
         result = await register_library_file(
             session,
@@ -508,6 +633,10 @@ class ImportService(
             artifact_transfer=adapters.artifact_transfer,
             comicinfo_materializer=adapters.comicinfo_materializer,
             placement_started_callback=placement_started_callback,
+            placement_completed_callback=placement_completed_callback,
+            placement_temp_paths=adapters.placement_temp_paths,
+            source_scan_root=source_scan_root,
+            strict_import_target=True,
             **kwargs,
         )
         await self._log_import_file_timing_events(
@@ -555,9 +684,9 @@ class ImportService(
         job_id: int,
         *,
         progress_callback: Callable[[ImportProgressEvent], Awaitable[None]] | None = None,
-    ) -> None:
+    ) -> bool:
         """Rollback durable import actions in reverse order."""
-        await rollback_import_job(
+        return await rollback_import_job(
             session,
             job_id,
             rollback_action=self._rollback_action,
@@ -579,6 +708,20 @@ class ImportService(
     ) -> RunImportResult:
         """Execute confirmed new-series imports plus duplicate-series file merges."""
         try:
+            current_job = await session.get(ImportJob, job_id)
+            if (
+                current_job is not None
+                and dict(current_job.progress_snapshot or {}).get("phase") == "story_arc_placements"
+            ):
+                outcome = await finalize_import_story_arc_placements(session, job_id)
+                return RunImportResult(
+                    schedule_comicinfo_enrichment=(
+                        outcome.state is ImportStoryArcPlacementCompletionState.COMPLETED
+                    ),
+                    schedule_story_arc_sync=(
+                        outcome.state is ImportStoryArcPlacementCompletionState.PENDING
+                    ),
+                )
             await execute_import_job(
                 session,
                 job_id,
@@ -586,6 +729,7 @@ class ImportService(
                 process_series_files=self._process_series_files,
                 raise_if_cancelled=self._raise_if_job_cancelled,
                 record_action=self._record_action,
+                record_actions=self._record_actions,
                 log_event=self._log_event,
                 emit_progress=self._emit_progress,
                 estimate_remaining_seconds=self._estimate_remaining_seconds,
@@ -593,9 +737,16 @@ class ImportService(
                 progress_callback=progress_callback,
             )
             completed_job = await session.get(ImportJob, job_id)
+            story_arc_placements_pending = (
+                completed_job is not None
+                and completed_job.status == ImportJobStatus.IMPORTING
+                and dict(completed_job.progress_snapshot or {}).get("phase")
+                == "story_arc_placements"
+            )
             return RunImportResult(
                 schedule_comicinfo_enrichment=completed_job is not None
-                and completed_job.status == ImportJobStatus.COMPLETED
+                and completed_job.status == ImportJobStatus.COMPLETED,
+                schedule_story_arc_sync=story_arc_placements_pending,
             )
         finally:
             self._import_runtime_cache_by_job.pop(job_id, None)
@@ -613,7 +764,14 @@ class ImportService(
             build_comicinfo_payload=self._build_comicinfo_payload_for_issue,
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
+            prefetch_issue_metadata=self._metadata_service.prefetch_issue_metadata_batch,
         )
+
+    def schedule_story_arc_sync(self) -> None:
+        """Nudge durable story-arc work only after its import transaction commits."""
+        from pullbox.services.story_arc_sync_queue import request_story_arc_sync_now
+
+        request_story_arc_sync_now()
 
     async def recover_pending_comicinfo_enrichment(
         self,
@@ -625,6 +783,7 @@ class ImportService(
             build_comicinfo_payload=self._build_comicinfo_payload_for_issue,
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
+            prefetch_issue_metadata=self._metadata_service.prefetch_issue_metadata_batch,
         )
 
     async def recover_pending_catalog_hydration(
@@ -632,10 +791,15 @@ class ImportService(
         session_factory: async_sessionmaker[AsyncSession],
     ) -> int:
         """Resume full catalog hydration left pending after a restart."""
-        return await run_pending_catalog_hydration(
+        recovered = await run_pending_catalog_hydration(
             session_factory,
             series_service=self._series_service,
         )
+        await ensure_catalog_hydration_retry_scheduled(
+            session_factory,
+            series_service=self._series_service,
+        )
+        return recovered
 
     async def _process_series_files(
         self,
@@ -704,7 +868,7 @@ class ImportService(
 
     async def _fetch_series_metadata_for_override(self, cv_id: int) -> SeriesMetadata:
         """Fetch ComicVine metadata for a manual imported-series override."""
-        return await self._metadata_service._provider.get_series(str(cv_id))
+        return await self._metadata_service.get_series_metadata(cv_id)
 
     async def rematch_imported_series_files(
         self,

@@ -136,6 +136,16 @@ class TestSearch:
             {"t": "search", "q": "Annual Special 1.5"}
         )
 
+    async def test_search_formats_large_issue_without_scientific_notation(self) -> None:
+        indexer = _make_indexer()
+        indexer._request = AsyncMock(return_value="<rss><channel /></rss>")  # type: ignore[method-assign]
+
+        await indexer.search(SearchQuery(series_title="Wonder Woman", issue_number=1_000_000.0))
+
+        indexer._request.assert_awaited_once_with(  # type: ignore[attr-defined]
+            {"t": "search", "q": "Wonder Woman 1000000"}
+        )
+
     async def test_search_propagates_request_failure(self) -> None:
         indexer = _make_indexer()
         indexer._request = AsyncMock(side_effect=NewznabError("timeout"))  # type: ignore[method-assign]

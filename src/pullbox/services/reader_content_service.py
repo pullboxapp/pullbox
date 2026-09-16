@@ -150,7 +150,7 @@ async def load_reader_source_record(session: AsyncSession, issue_id: int) -> Rea
     return ReaderSourceRecord(
         issue_id=issue.id,
         issue_title=issue.title,
-        issue_number=f"{issue.issue_number:g}",
+        issue_number=issue.effective_issue_number_text,
         issue_number_value=issue.issue_number,
         series_id=issue.series_id,
         series_title=issue.series.title,

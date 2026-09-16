@@ -1,0 +1,39 @@
+<article data-testid="story-arc-grid-card" data-story-arc-id="{{ item.id }}" class="series-wall-card">
+  <div class="series-wall-cover-wrap">
+    {% if item.monitored %}
+      <span data-testid="story-arc-monitored-indicator" class="series-monitor-badge series-wall-monitor-dot" aria-label="Monitored" title="Monitored"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 10.6 8.2 14 15 6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>
+    {% endif %}
+    {% if item.review_count %}
+      <span data-testid="story-arc-grid-review" class="story-arc-wall-review story-arc-wall-review-{{ item.review_tone }}" data-tip="{{ item.review_summary }}" data-tip-pos="right" data-tip-size="wide" aria-label="{{ item.review_count }} items need review: {{ item.review_summary }}">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9.303 3.376c.866 1.5-.217 3.374-1.949 3.374H4.646c-1.732 0-2.815-1.874-1.949-3.374L10.05 3.374c.866-1.5 3.032-1.5 3.898 0l7.353 12.752zM12 15.75h.007v.008H12v-.008z"></path></svg>{{ item.review_count }}
+      </span>
+    {% endif %}
+    <a href="/story-arcs/{{ item.id }}" hx-boost="false" aria-label="Open {{ item.name }}" class="absolute inset-0 z-[1] block">
+      {% if item.cover_src %}
+        <img src="{{ item.cover_src }}" alt="{{ item.name }} cover" loading="{{ item.cover_loading }}" fetchpriority="{{ item.cover_fetchpriority }}" decoding="{{ item.cover_decoding }}" onerror="this.style.display='none'" class="h-full w-full object-cover object-top">
+      {% else %}
+        <div class="series-wall-cover-placeholder"><svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 3.75h9m-9 16.5h9M6 6.75h12A2.25 2.25 0 0120.25 9v6A2.25 2.25 0 0118 17.25H6A2.25 2.25 0 013.75 15V9A2.25 2.25 0 016 6.75z"></path></svg></div>
+      {% endif %}
+    </a>
+    <div class="series-wall-ring">
+      <svg viewBox="0 0 44 44" aria-hidden="true"><circle class="series-wall-ring-bg" cx="22" cy="22" r="18"></circle><circle class="series-wall-ring-fill series-wall-ring-fill-{{ item.acquisition_tone }}" cx="22" cy="22" r="18" stroke-dasharray="113.1" stroke-dashoffset="{{ (113.1 * (100 - item.completion_pct) / 100)|round(1) }}"></circle></svg>
+      <span class="series-wall-ring-center">{{ item.completion_pct }}</span>
+    </div>
+    <div class="series-wall-overlay">
+      <div class="series-wall-overlay-title">{{ item.name }}</div>
+      <div class="series-wall-overlay-meta" data-testid="story-arc-grid-hover-meta">
+        <div class="series-wall-overlay-meta-line"><span class="series-wall-overlay-meta-label">Publisher</span><span class="series-wall-overlay-meta-value">{{ item.publisher_name or "Unknown publisher" }}</span></div>
+        <div class="series-wall-overlay-meta-line"><span class="series-wall-overlay-meta-label">Status</span><span class="series-wall-overlay-meta-value">{{ item.lifecycle|title }}</span></div>
+      </div>
+      <div class="series-wall-overlay-stats">
+        <span class="series-wall-overlay-stat"><span class="series-wall-overlay-meta-label">Owned</span><span class="series-wall-overlay-meta-value"><strong>{{ item.owned_count }}</strong>/{{ item.membership_count }}</span></span>
+        {% if reader_enabled and item.readable_count > 0 %}<span data-testid="story-arc-grid-reading" class="series-wall-overlay-stat"><span class="series-wall-overlay-meta-label">Reading</span><span class="series-wall-overlay-meta-value">Read {{ item.read_count }}/{{ item.readable_count }}</span></span>{% endif %}
+      </div>
+      <div class="series-wall-overlay-actions">
+        {% if item.search_eligible_count > 0 and item.lifecycle == 'active' %}<form action="/story-arcs/{{ item.id }}/search" method="post" hx-post="/story-arcs/{{ item.id }}/search" hx-swap="none"><button type="submit" class="series-wall-overlay-btn">Search</button></form>{% endif %}
+        <a href="/story-arcs/{{ item.id }}" hx-boost="false" class="series-wall-overlay-btn">Open</a>
+      </div>
+    </div>
+  </div>
+  <a href="/story-arcs/{{ item.id }}" hx-boost="false" class="series-wall-card-title">{{ item.name }}</a>
+</article>

@@ -24,7 +24,9 @@ requirements.
   automation.
 - Pull request pushes run a cheap GitHub Actions preflight by default. Full PR
   CI/security/workflow-hygiene checks run after maintainers apply `ci:full`.
-- CI tests Python 3.12, 3.13, and 3.14.
+- CI runs the complete test suite and uploads coverage for Python 3.12, 3.13,
+  and 3.14. The blocking 90% coverage gate applies to the production/default
+  Python 3.14 runtime and local full CI.
 - Self-hosted Python matrix jobs use five pytest workers per Python version.
 - Self-hosted functional E2E jobs use three isolated pytest workers per browser.
 - Normal PR E2E runs disable video encoding; manual CI dispatches can enable
@@ -140,7 +142,9 @@ Key gates:
 |---|---|
 | `make validate` | CSS build, lint, format, typecheck, and non-E2E tests |
 | `make ci-local` | GitHub-aligned local CI shape |
-| `make ci-full` | CI-local plus security and Docker smoke validation |
+| `make ci-full` | CI-local, security, current-tree/history secret scans, container runtime/Grype checks, and Docker smoke validation |
+| `make secret-scan` | Blocking Gitleaks scan of current files and the PR commit range |
+| `make docker-security-check` | Build the production image, verify its security runtime, and run Grype with the blocking High cutoff |
 | `make test-a11y` | Contrast gate plus accessibility browser checks |
 | `make workflow-hygiene` | Local workflow linting |
 | `make security-check` | Local security checks |
@@ -160,6 +164,17 @@ Key gates:
 
 - Full validation can be slow. Focused tests are still expected during
   development.
+- Before `make secret-scan` or `make ci-full`, refresh the intended PR base
+  with `git fetch origin develop`. The default history range is
+  `origin/develop..HEAD`, excluding merge commits as in PR CI. For another
+  base, fetch it and set `SECRET_SCAN_BASE=origin/main` (or the intended ref).
+  A missing base fails the gate; current uncommitted files are also scanned.
+- `make docker-smoke` first runs the same container security runtime script,
+  pinned Grype version, `.grype.yaml`, and blocking High cutoff as Docker CI.
+  Local architecture, cached base layers, and vulnerability DB freshness may
+  differ from hosted CI, so a local pass does not replace the remote gate.
+- Set `DOCKER_SMOKE_KEEP_ON_FAILURE=1` when a failure must stop before smoke
+  logs or cleanup. Runtime and Grype failures stop before smoke startup.
 - CSS drift is a real failure and should not be hand-waved.
 - E2E failures should be diagnosed from logs, traces, screenshots, and artifacts
   before guessing at a fix.
@@ -195,7 +210,9 @@ tracked in the active CI/CD path.
 - Branch rulesets should require only stable aggregate checks:
   `CI Required`, `Security Required`, `Workflow Hygiene Required`, and
   `Docker Validate Required`.
-- Python tests run across the supported matrix.
+- Python tests run across the supported matrix. Every version publishes a
+  coverage report; the production/default Python 3.14 job enforces the 90%
+  release threshold while compatibility jobs report coverage without gating it.
 - Migration checks must validate upgrade and downgrade behavior.
 - Accessibility checks must stay separate from functional browser checks.
 - E2E runs should upload useful artifacts on failure.
@@ -456,6 +473,21 @@ TZ
 - The container runtime user must be able to read mounted import paths and read
   or write the mounted library and downloads paths based on the configured
   workflow.
+- Mylar Step 1 reports the exact unavailable locations. A missing child folder
+  under an accessible root is not itself evidence of a broken Docker mount.
+  Verify the stored path and container-visible path before adding a mapping;
+  do not create empty directories simply to make preflight pass.
+- Recent Mylar preflight reports are private app data under
+  `/data/diagnostics/mylar-preflight` (or the configured data directory).
+  Authenticated report/export requests expire after 24 hours; at most five
+  reports of up to 32 MiB each are retained. They contain library paths and
+  series names, so treat exports as private support data.
+- Diagnostic collection probes directory permissions and filesystem capacity
+  without recursively sizing the comic library. `dir_size_bytes` is `null`
+  with an explicit `not_collected` reason, not a zero-byte library. Blocking
+  filesystem collection, sanitized database copying, and ZIP compression run
+  on worker threads rather than the application event loop. Generation time
+  can still depend on database/log size and storage responsiveness.
 - Library permission management is chmod-only. It can normalize file and folder
   modes, but it cannot repair ownership, group, NAS ACL, or mount-option
   problems.

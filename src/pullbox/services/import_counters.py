@@ -163,7 +163,7 @@ async def recompute_file_counters(
         ImportedFileStatus.SAFETY_BLOCKED,
         0,
     ) + job_status_counts.get(ImportedFileStatus.SAFETY_APPROVED, 0)
-    job.total_files_found = (
+    classified_file_count = (
         job.total_files_matched
         + job.total_files_duplicate
         + job.total_files_already_owned
@@ -172,6 +172,11 @@ async def recompute_file_counters(
         + job.total_files_imported
         + job.total_files_failed
         + total_files_safety_blocked
+    )
+    job.total_files_found = max(
+        int(job.total_files_found or 0),
+        int(job.scan_total_files or 0),
+        classified_file_count,
     )
 
     await session.flush()

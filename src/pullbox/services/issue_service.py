@@ -45,7 +45,7 @@ class IssueService:
             select(Issue)
             .options(joinedload(Issue.library_file))
             .where(Issue.series_id == series_id)
-            .order_by(Issue.issue_number)
+            .order_by(Issue.issue_number, Issue.issue_number_text, Issue.id)
             .limit(limit)
             .offset(offset)
         )
@@ -57,7 +57,12 @@ class IssueService:
         result = await session.execute(
             select(Issue)
             .where(Issue.status == IssueStatus.WANTED)
-            .order_by(Issue.series_id, Issue.issue_number)
+            .order_by(
+                Issue.series_id,
+                Issue.issue_number,
+                Issue.issue_number_text,
+                Issue.id,
+            )
         )
         return list(result.scalars().all())
 

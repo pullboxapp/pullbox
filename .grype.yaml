@@ -13,6 +13,104 @@
 # stable Python 3.14 or Debian 13 packages become available upstream.
 
 ignore:
+  # Renewed by Adam Hernandez on 2026-09-14 only for this DHI libc6 revision.
+  # Accepted risk, NOT a fix: Debian 13 still lists this TSIG-printing issue
+  # as vulnerable/no-DSA. Direct Pullbox callers were not found, but dependency
+  # reachability and DHI backport status remain unproven. Re-review by
+  # 2026-09-30 or the next base refresh, whichever comes first; remove when
+  # a fixed stable package ships. All other High findings remain blocking.
+  # https://security-tracker.debian.org/tracker/CVE-2026-5435
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6
+      version: 2.41-12+deb13u4+dhi0
+      type: deb
+
+  # Approved by Adam Hernandez on 2026-09-15 for this exact runtime revision.
+  # Accepted risk, NOT a fix: strfmon/strfmon_l right-padding buffer overflow.
+  # Debian 13 lists this as vulnerable/no-DSA with no fixed stable package.
+  # No direct Pullbox callers were found; dependency reachability remains unproven.
+  # Re-review by 2026-09-30 or the next base refresh, whichever comes first;
+  # remove when a fixed stable package ships. All other High findings block.
+  # https://security-tracker.debian.org/tracker/CVE-2026-19499
+  - vulnerability: CVE-2026-19499
+    package:
+      name: libc6
+      version: 2.41-12+deb13u4+dhi0
+      type: deb
+
+  # Renewed by Adam Hernandez on 2026-09-13 for eight exact findings in the
+  # refreshed DHI runtime. These are accepted-risk exceptions, NOT fixes.
+  # Keep all other High findings blocking, including other package versions.
+  # Preserve the previous entries for cached images and the review dates below.
+  #
+  # Debian 13 still lists CVE-2026-5435 as vulnerable/no-DSA (TSIG printing).
+  # No direct Pullbox calls were found, but third-party reachability and DHI
+  # backport status remain unproven. Re-review by 2026-09-30 or the next base
+  # refresh, whichever comes first; remove when a fixed stable package ships.
+  # https://security-tracker.debian.org/tracker/CVE-2026-5435
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6
+      version: 2.41-12+deb13u4
+      type: deb
+
+  # Debian 13 still has no fixed stable Expat package for these findings.
+  # The libexpat1 copy supports Fontconfig/Poppler. The separate Python parser
+  # reports Expat 2.8.2: its >=2.8.1 runtime guard does NOT establish protection
+  # against these newer advisories. Do not interpret this renewal as proving
+  # either parser safe. No Python-binary or libexpat1-dev exception is added.
+  # Re-review by 2026-10-07 or the next base refresh, whichever comes first;
+  # remove as soon as a fixed stable package is available.
+  # https://security-tracker.debian.org/tracker/CVE-2026-66046
+  # https://security-tracker.debian.org/tracker/CVE-2026-76956
+  # https://security-tracker.debian.org/tracker/CVE-2026-76957
+  - vulnerability: CVE-2026-66046
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-76956
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-76957
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi3
+      type: deb
+
+  # These util-linux source-package findings attach to libuuid1, but concern
+  # privileged mount/nsenter helpers. The inspected ARM64 production image
+  # contains libuuid1 and neither executable. Other architectures still need
+  # their normal image validation. Re-review by 2026-10-04 or the next base
+  # refresh, whichever comes first; remove when fixed stable packages ship.
+  # https://security-tracker.debian.org/tracker/CVE-2026-76642
+  # https://security-tracker.debian.org/tracker/CVE-2026-78408
+  # https://security-tracker.debian.org/tracker/CVE-2026-78409
+  # https://security-tracker.debian.org/tracker/CVE-2026-78410
+  - vulnerability: CVE-2026-76642
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-78408
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-78409
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-78410
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi3
+      type: deb
+
   # Debian Trixie has postponed the OpenSSL 3.5 QUIC listener connection-limit
   # fix for CVE-2026-14456. Pullbox does not expose an OpenSSL QUIC listener;
   # retain this exact DHI base-image exception only until Debian ships a fix.
@@ -108,6 +206,24 @@ ignore:
   - vulnerability: CVE-2026-66046
     package:
       name: libexpat1-dev
+      version: 2.8.3-1~deb13u1+dhi2
+      type: deb
+
+  # Expat 2.8.4 fixes CVE-2026-76956 and CVE-2026-76957, but Debian 13
+  # currently classifies both as no-DSA minor issues and has no fixed stable
+  # package. This shared library is copied only for Fontconfig/Poppler; Pullbox
+  # XML parsing uses Python's separately bundled parser, and pyexpat does not
+  # expose the custom encoding callback required by CVE-2026-76957. Keep these
+  # exceptions exact and temporary. Re-review by 2026-10-07 or on the next DHI
+  # Python refresh, whichever comes first.
+  - vulnerability: CVE-2026-76956
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi2
+      type: deb
+  - vulnerability: CVE-2026-76957
+    package:
+      name: libexpat1
       version: 2.8.3-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2025-59375
@@ -239,6 +355,63 @@ ignore:
       version: 2.41-12+deb13u3+dhi1
       type: deb
 
+  # Accepted risk approved by Adam Hernandez on 2026-08-30 for the DHI +dhi2
+  # refresh in PR #133; this is NOT a vulnerability fix or a false-positive claim.
+  # Debian 13 still lists these as vulnerable with no-dsa/minor-issue status:
+  # https://security-tracker.debian.org/tracker/CVE-2026-5435 (DNS TSIG printing)
+  # https://security-tracker.debian.org/tracker/CVE-2026-5450 (scanf %mc width >1024)
+  # https://security-tracker.debian.org/tracker/CVE-2026-5928 (ungetwc pushback)
+  # No direct calls were found in Pullbox source/native integration code, but
+  # reachability through bundled third-party helpers and DHI backport status are
+  # unproven. Keep the High gate blocking and scope only these nine matches.
+  # Retain +dhi1 entries above for older/cached image variants. Re-review at the
+  # next base refresh or by 2026-09-30; remove when fixed Debian 13 packages ship.
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5450
+    package:
+      name: libc6
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5450
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5450
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5928
+    package:
+      name: libc6
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5928
+    package:
+      name: libc-dev-bin
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+  - vulnerability: CVE-2026-5928
+    package:
+      name: libc6-dev
+      version: 2.41-12+deb13u3+dhi2
+      type: deb
+
   - vulnerability: CVE-2021-45346
     package:
       name: libsqlite3-0
@@ -282,6 +455,33 @@ ignore:
     package:
       name: libuuid1
       version: 2.41-5+dhi3
+      type: deb
+
+  # Grype maps these util-linux source-package findings to libuuid1 in the
+  # current DHI. Their affected code is in privileged mount/nsenter commands,
+  # which are absent from the Pullbox runtime image. Debian 13 marks all four
+  # no-dsa/minor and has not published a stable fix. Keep the High gate active;
+  # retain only these exact package matches. Re-review by 2026-10-04 or at the
+  # next DHI refresh, whichever comes first.
+  - vulnerability: CVE-2026-76642
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi2
+      type: deb
+  - vulnerability: CVE-2026-78408
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi2
+      type: deb
+  - vulnerability: CVE-2026-78409
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi2
+      type: deb
+  - vulnerability: CVE-2026-78410
+    package:
+      name: libuuid1
+      version: 2.41.5-0+deb13u1+dhi2
       type: deb
 
   - vulnerability: CVE-2025-6141
@@ -329,6 +529,23 @@ ignore:
     package:
       name: zlib1g
       version: 1:1.3.dfsg+really1.3.1-1+dhi2
+      type: deb
+
+  # Debian 13 has no fixed zlib package for CVE-2026-85091. The affected path
+  # requires the non-blocking gzwrite API followed by gzprintf/gzvprintf;
+  # Pullbox does not call that native sequence. The duplicated development
+  # package metadata comes from the DHI Python build/runtime dependency tree.
+  # Keep this exact exception only. Re-review by 2026-10-04 or at the next DHI
+  # refresh, whichever comes first.
+  - vulnerability: CVE-2026-85091
+    package:
+      name: zlib1g
+      version: 1:1.3.dfsg+really1.3.1-1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-85091
+    package:
+      name: zlib1g-dev
+      version: 1:1.3.dfsg+really1.3.1-1+dhi3
       type: deb
   - vulnerability: CVE-2026-34743
     package:

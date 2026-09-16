@@ -10,7 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from pullbox.models.provider_cache import MetadataProviderCacheEntry
-from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
+from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesMetadata, SeriesSearchResult
+from pullbox.providers.story_arcs import StoryArcSearchResult
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 
 
@@ -20,7 +21,11 @@ class _ComicVineProviderDouble:
     def __init__(self) -> None:
         self.search_calls = 0
         self.global_search_calls = 0
+        self.story_arc_search_calls = 0
         self.series_calls = 0
+        self.series_batch_calls: list[list[str]] = []
+        self.issue_batch_calls: list[list[str]] = []
+        self.catalog_batch_calls: list[list[str]] = []
         self.issue_number_calls = 0
 
     async def search_series(
@@ -69,6 +74,24 @@ class _ComicVineProviderDouble:
         ]
         return results[:max_results], len(results)
 
+    async def search_story_arcs_page(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[StoryArcSearchResult], int]:
+        self.story_arc_search_calls += 1
+        results = [
+            StoryArcSearchResult(
+                provider_id="55766",
+                title=query,
+                cover_url="https://example.test/story-arcs/55766.jpg",
+                declared_issue_count=86,
+            )
+        ]
+        return results[:limit], len(results)
+
     async def get_series(self, series_provider_id: str) -> SeriesMetadata:
         self.series_calls += 1
         return SeriesMetadata(
@@ -84,6 +107,69 @@ class _ComicVineProviderDouble:
             issue_count=4,
             comicvine_url=None,
         )
+
+    async def get_series_batch(
+        self,
+        series_provider_ids: list[str],
+    ) -> dict[str, SeriesMetadata]:
+        self.series_batch_calls.append(list(series_provider_ids))
+        return {
+            provider_id: SeriesMetadata(
+                provider_id=provider_id,
+                title=f"Series {provider_id}",
+                sort_title=f"Series {provider_id}",
+                year_start=2026,
+                year_end=None,
+                status=None,
+                publisher="Pullbox",
+                description=None,
+                cover_url=None,
+                issue_count=1,
+                comicvine_url=None,
+            )
+            for provider_id in series_provider_ids
+        }
+
+    async def get_issue_batch(
+        self,
+        issue_provider_ids: list[str],
+    ) -> dict[str, IssueMetadata]:
+        self.issue_batch_calls.append(list(issue_provider_ids))
+        return {
+            provider_id: IssueMetadata(
+                provider_id=provider_id,
+                series_provider_id="123",
+                issue_number=float(index),
+                title=f"Issue {index}",
+                description="Complete issue metadata",
+                release_date="2026-01-01",
+                store_date="2025-12-31",
+                cover_url=None,
+                page_count=None,
+                comicvine_url=f"https://example.test/issue/{provider_id}",
+                creators=[{"name": "Writer", "role": "writer"}],
+            )
+            for index, provider_id in enumerate(issue_provider_ids, start=1)
+        }
+
+    async def get_issue_catalog_batch(
+        self,
+        series_provider_ids: list[str],
+    ) -> dict[str, list[IssueSummary]]:
+        self.catalog_batch_calls.append(list(series_provider_ids))
+        return {
+            provider_id: [
+                IssueSummary(
+                    provider_id=f"{provider_id}01",
+                    issue_number=1.0,
+                    title="One",
+                    release_date="2026-01-01",
+                    cover_url=None,
+                    issue_type="issue",
+                )
+            ]
+            for provider_id in series_provider_ids
+        }
 
     async def get_issues_for_series_by_numbers(
         self,
@@ -183,6 +269,24 @@ async def test_persistent_cache_reuses_global_search_results_across_wrappers(
     assert first_result == second_result
     assert provider.global_search_calls == 1
     assert second_cache.cache_metrics()["hits"] == {"search_series_globally": 1}
+
+
+async def test_persistent_cache_reuses_story_arc_search_results_across_wrappers(
+    async_engine: AsyncEngine,
+) -> None:
+    session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    provider = _ComicVineProviderDouble()
+
+    first_cache = PersistentComicVineCacheProvider(provider, session_factory)
+    first_result = await first_cache.search_story_arcs_page("Blackest Night", limit=20)
+
+    second_cache = PersistentComicVineCacheProvider(provider, session_factory)
+    second_result = await second_cache.search_story_arcs_page("blackest night", limit=20)
+
+    assert first_result == second_result
+    assert first_result[0][0].cover_url == "https://example.test/story-arcs/55766.jpg"
+    assert provider.story_arc_search_calls == 1
+    assert second_cache.cache_metrics()["hits"] == {"search_story_arcs_page": 1}
 
 
 async def test_persistent_cache_collapses_concurrent_global_search_misses(
@@ -302,6 +406,66 @@ async def test_persistent_cache_cached_only_series_lookup_does_not_fetch(
     assert cached_only == fetched
     assert provider.series_calls == 1
     assert cache.cache_metrics()["hits"] == {"get_series": 1}
+
+
+async def test_persistent_cache_bulk_fetches_only_missing_series_and_reuses_rows(
+    async_engine: AsyncEngine,
+) -> None:
+    session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    provider = _ComicVineProviderDouble()
+    cache = PersistentComicVineCacheProvider(provider, session_factory)
+    await cache.get_series("1")
+
+    first = await cache.get_series_batch(["1", "2", "3"])
+    second = await PersistentComicVineCacheProvider(provider, session_factory).get_series_batch(
+        ["3", "2", "1"]
+    )
+
+    assert list(first) == ["1", "2", "3"]
+    assert list(second) == ["3", "2", "1"]
+    assert provider.series_batch_calls == [["2", "3"]]
+
+
+async def test_persistent_cache_bulk_catalog_and_issue_metadata_populate_singular_keys(
+    async_engine: AsyncEngine,
+) -> None:
+    session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    provider = _ComicVineProviderDouble()
+    cache = PersistentComicVineCacheProvider(provider, session_factory)
+
+    catalogs = await cache.get_issue_catalog_batch(["10", "20"])
+    issues = await cache.get_issue_batch(["101", "201"])
+    cached_catalog = await PersistentComicVineCacheProvider(
+        provider, session_factory
+    ).get_issues_for_series("10")
+    cached_issue = await PersistentComicVineCacheProvider(provider, session_factory).get_issue(
+        "101"
+    )
+
+    assert catalogs["10"][0].provider_id == "1001"
+    assert issues["101"].description == "Complete issue metadata"
+    assert cached_catalog == catalogs["10"]
+    assert cached_issue == issues["101"]
+    assert provider.catalog_batch_calls == [["10", "20"]]
+    assert provider.issue_batch_calls == [["101", "201"]]
+
+
+async def test_persistent_cache_forced_refresh_replaces_singular_series_and_catalog_rows(
+    async_engine: AsyncEngine,
+) -> None:
+    session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    provider = _ComicVineProviderDouble()
+    cache = PersistentComicVineCacheProvider(provider, session_factory)
+    await cache.get_series("77")
+    await cache.get_issue_catalog_batch(["77"])
+
+    refreshed_series = await cache.refresh_series("77")
+    refreshed_catalog = await cache.refresh_issue_catalog("77")
+
+    assert refreshed_series.provider_id == "77"
+    assert refreshed_catalog[0].provider_id == "7701"
+    assert provider.series_calls == 2
+    assert provider.catalog_batch_calls == [["77"], ["77"]]
 
 
 async def test_persistent_cache_stores_targeted_issue_numbers_individually(

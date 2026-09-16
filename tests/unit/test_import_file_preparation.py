@@ -36,6 +36,7 @@ def test_format_comicinfo_issue_number_preserves_integer_and_fractional_values()
     assert format_comicinfo_issue_number(None) is None
     assert format_comicinfo_issue_number(4.0) == "4"
     assert format_comicinfo_issue_number(4.5) == "4.5"
+    assert format_comicinfo_issue_number(1_000_000.0) == "1000000"
 
 
 def test_inspect_archive_page_count_counts_image_entries_only(tmp_path: Path) -> None:

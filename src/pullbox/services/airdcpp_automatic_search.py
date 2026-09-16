@@ -1,4 +1,4 @@
-"""Attach bounded automatic AirDC++ evaluation without queue mutation."""
+"""Attach bounded, opted-in AirDC++ results before shared acquisition routing."""
 
 from __future__ import annotations
 

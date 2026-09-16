@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -177,6 +178,23 @@ def test_apply_orphan_recovery_decisions_skips_file() -> None:
     assert imp_file.error_message is None
     assert imp_file.diagnostics["existing"] == "kept"
     assert imp_file.diagnostics["resolution"] == "skipped"
+
+
+def test_source_failure_is_not_an_issue_recovery_decision() -> None:
+    from pullbox.services.import_orphans import requires_orphan_issue_decision
+
+    source_failure = ImportedFile(
+        status=ImportedFileStatus.FAILED,
+        diagnostics={
+            "source_revalidation": {
+                "category": "source_missing",
+                "retryable": True,
+            }
+        },
+    )
+
+    assert requires_orphan_issue_decision(source_failure) is False
+    assert requires_orphan_issue_decision(ImportedFile(status=ImportedFileStatus.NO_MATCH)) is True
 
 
 def test_summarize_orphan_recovery_marks_imported_when_no_files_remaining() -> None:
@@ -753,6 +771,279 @@ async def test_recover_orphan_helper_requires_assign_without_existing_import(
         )
 
 
+async def test_retry_failed_repairs_exhausted_partial_success_without_reimport(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session, series_failed=1)
+    item = await _create_imported_series(
+        db_session, job, name="Hellblazer", status=ImportSeriesStatus.FAILED
+    )
+    series = Series(title="Hellblazer", sort_title="hellblazer", comicvine_id=4008)
+    db_session.add(series)
+    await db_session.flush()
+    item.series_id = series.id
+    item.cv_id = 4008
+    item.error_message = "No eligible files available for import"
+    for status in (ImportedFileStatus.IMPORTED, ImportedFileStatus.NO_MATCH):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=item.id,
+                file_path=f"/comics/{status.value}.cbz",
+                file_name=f"{status.value}.cbz",
+                file_size=1024,
+                file_format="cbz",
+                status=status,
+            )
+        )
+    await db_session.flush()
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+    assert count == 0
+    assert updated_job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.IMPORTED
+    assert item.files_imported == 1
+    assert item.files_no_match == 1
+    assert job.series_failed == 0
+    assert job.series_imported == 1
+    assert item.diagnostics["previous_series_error"] == "No eligible files available for import"
+
+
+async def test_retry_failed_restores_partial_success_with_unresolved_target_to_follow_up(
+    db_session,
+):
+    service = _make_service()
+    job = await _create_job_row(db_session, series_failed=1)
+    item = await _create_imported_series(
+        db_session, job, name="Hellblazer", status=ImportSeriesStatus.FAILED
+    )
+    series = Series(title="Hellblazer", sort_title="hellblazer", comicvine_id=4008)
+    db_session.add(series)
+    await db_session.flush()
+    item.series_id = series.id
+    item.cv_id = 4008
+    item.error_message = "No eligible files available for import"
+    imported = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path="/comics/hellblazer-001.cbz",
+        file_name="Hellblazer 001.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.IMPORTED,
+    )
+    unresolved = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path="/comics/hellblazer-special.cbz",
+        file_name="Hellblazer Special.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        error_message="Could not resolve to a library issue",
+        diagnostics={"kind": "file_conflict"},
+    )
+    db_session.add_all([imported, unresolved])
+    await db_session.flush()
+
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+
+    assert count == 0
+    assert updated_job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.IMPORTED
+    assert unresolved.status is ImportedFileStatus.NO_MATCH
+    assert unresolved.include_in_import is False
+    assert item.files_imported == 1
+    assert item.files_no_match == 1
+    assert job.series_failed == 0
+
+
+async def test_retry_failed_routes_series_without_comicvine_id_to_follow_up(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session, series_failed=1)
+    item = await _create_imported_series(
+        db_session, job, name="Unknown anthology", status=ImportSeriesStatus.FAILED
+    )
+    item.error_message = "No ComicVine ID available"
+    db_session.add(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=item.id,
+            file_path="/comics/unknown-001.cbz",
+            file_name="Unknown anthology 001.cbz",
+            file_size=1024,
+            file_format="cbz",
+            status=ImportedFileStatus.MATCHED,
+        )
+    )
+    await db_session.flush()
+
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+
+    assert count == 0
+    assert updated_job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.NO_MATCH
+    assert item.error_message is None
+    assert item.diagnostics["previous_series_error"] == "No ComicVine ID available"
+    assert job.series_failed == 0
+    assert job.series_no_match == 1
+
+
+async def test_retry_failed_requeues_unique_local_issue_target(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    item = await _create_imported_series(
+        db_session, job, name="2000AD", status=ImportSeriesStatus.IMPORTED
+    )
+    await _create_series_with_issue(
+        db_session,
+        series_id=160,
+        issue_id=3218,
+        title="2000AD",
+        issue_number=2487.0,
+    )
+    item.series_id = 160
+    item.cv_id = 1783
+    failed_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path="/comics/2000AD-2487.cbz",
+        file_name="2000AD 2487.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        parsed_issue_number=2487.0,
+        match_confidence="high",
+        match_method="issue_number",
+        error_message="Could not resolve to a library issue",
+        diagnostics={"kind": "file_conflict"},
+    )
+    db_session.add(failed_file)
+    await db_session.flush()
+
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+
+    assert count == 1
+    assert updated_job.status is ImportJobStatus.IMPORTING
+    assert item.status is ImportSeriesStatus.CONFIRMED
+    assert failed_file.status is ImportedFileStatus.CONFIRMED
+    assert failed_file.matched_issue_id == 3218
+    assert failed_file.include_in_import is True
+    assert failed_file.match_method == "completed_import_exact_target"
+
+
+async def test_retry_failed_does_not_use_issue_number_after_provider_id_conflict(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    item = await _create_imported_series(
+        db_session, job, name="Aquaman", status=ImportSeriesStatus.IMPORTED
+    )
+    await _create_series_with_issue(
+        db_session,
+        series_id=160,
+        issue_id=3218,
+        title="Aquaman",
+        issue_number=1.0,
+    )
+    item.series_id = 160
+    item.cv_id = 91738
+    failed_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path="/comics/aquaman-volume-1.cbz",
+        file_name="Aquaman v01 - The Drowning.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        parsed_issue_number=1.0,
+        matched_issue_cv_id=1089296,
+        match_confidence="high",
+        match_method="issue_number",
+        error_message="Could not resolve to a library issue",
+        diagnostics={
+            "kind": "file_conflict",
+            "target_issue_summary": {
+                "provider_id": "1089296",
+                "issue_number": 1.0,
+            },
+        },
+    )
+    db_session.add(failed_file)
+    await db_session.flush()
+
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+
+    assert count == 0
+    assert updated_job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.IMPORTED
+    assert failed_file.status is ImportedFileStatus.NO_MATCH
+    assert failed_file.matched_issue_id is None
+    assert failed_file.include_in_import is False
+
+
+async def test_retry_failed_does_not_treat_volume_as_standard_issue_one(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    item = await _create_imported_series(
+        db_session, job, name="Aquaman", status=ImportSeriesStatus.IMPORTED
+    )
+    await _create_series_with_issue(
+        db_session,
+        series_id=160,
+        issue_id=3218,
+        title="Aquaman",
+        issue_number=1.0,
+    )
+    item.series_id = 160
+    item.cv_id = 91738
+    failed_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path="/comics/aquaman-volume-1.cbz",
+        file_name="Aquaman v01 - The Drowning.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.FAILED,
+        match_confidence="high",
+        match_method="issue_number",
+        error_message="Could not resolve to a library issue",
+        diagnostics={
+            "kind": "file_conflict",
+            "source_issue_type": IssueType.TPB.value,
+            "source_metadata": {
+                "filename_parse": {
+                    "issue_number": None,
+                    "issue_type": IssueType.TPB.value,
+                    "volume": "v01",
+                }
+            },
+        },
+    )
+    db_session.add(failed_file)
+    await db_session.flush()
+
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+
+    assert count == 0
+    assert updated_job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.IMPORTED
+    assert failed_file.status is ImportedFileStatus.NO_MATCH
+    assert failed_file.matched_issue_id is None
+    assert failed_file.include_in_import is False
+
+
+async def test_retry_failed_does_not_requeue_unresolved_legacy_series_identity(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session, series_failed=1)
+    item = await _create_imported_series(
+        db_session, job, name="Batman", status=ImportSeriesStatus.FAILED
+    )
+    item.diagnostics = {"reason": "trusted_source_identity_conflict"}
+    await db_session.flush()
+    with pytest.raises(ValidationError, match="Recover known series"):
+        await service.retry_failed_series(db_session, job.id)
+    assert job.status is ImportJobStatus.COMPLETED
+    assert item.status is ImportSeriesStatus.FAILED
+
+
 async def test_retry_failed_series_resets_rows_and_job_counter(
     db_session: AsyncSession,
 ) -> None:
@@ -804,6 +1095,51 @@ async def test_retry_failed_series_resets_rows_and_job_counter(
     await db_session.refresh(failed_file)
     assert failed_file.status == ImportedFileStatus.CONFIRMED
     assert failed_file.error_message is None
+
+
+async def test_retry_failed_series_repairs_confirmed_file_target_summary(
+    db_session: AsyncSession,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session, series_failed=1)
+    failed = await _create_imported_series(
+        db_session,
+        job,
+        name="The Amazing Spider-Man",
+        status=ImportSeriesStatus.FAILED,
+    )
+    imp_file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=failed.id,
+        file_path="/tmp/The Amazing Spider-Man 54.LR.cbz",
+        file_name="The Amazing Spider-Man 54.LR.cbz",
+        file_size=1024,
+        file_format="cbz",
+        status=ImportedFileStatus.CONFIRMED,
+        parsed_issue_number=54.0,
+        issue_number_raw="54.LR",
+        matched_issue_cv_id=123456,
+        match_confidence="high",
+        match_method="comicvine_id",
+        diagnostics={"source_issue_type": "issue"},
+    )
+    db_session.add(imp_file)
+    await db_session.flush()
+
+    updated_job, count = await service.retry_failed_series(db_session, job.id)
+
+    assert count == 1
+    assert updated_job.status == ImportJobStatus.IMPORTING
+    assert imp_file.status == ImportedFileStatus.CONFIRMED
+    assert imp_file.diagnostics["target_issue_summary"] == {
+        "provider_id": "123456",
+        "issue_number": 54.0,
+        "title": None,
+        "release_date": None,
+        "cover_url": None,
+        "issue_type": "issue",
+        "issue_number_text": "54LR",
+    }
 
 
 async def test_retry_failed_series_resets_duplicate_file_failures(
@@ -858,11 +1194,18 @@ async def test_retry_failed_series_resets_duplicate_file_failures(
     assert failed_file.error_message is None
 
 
+@pytest.mark.parametrize(
+    "job_status",
+    [ImportJobStatus.COMPLETED, ImportJobStatus.FAILED],
+)
 async def test_retry_failed_series_resets_partial_import_file_failures(
     db_session: AsyncSession,
+    job_status: ImportJobStatus,
 ) -> None:
     service = _make_service()
-    job = await _create_job_row(db_session)
+    job = await _create_job_row(db_session, status=job_status)
+    if job_status is ImportJobStatus.FAILED:
+        job.import_completed_at = datetime.now(UTC)
     imported = await _create_imported_series(
         db_session,
         job,

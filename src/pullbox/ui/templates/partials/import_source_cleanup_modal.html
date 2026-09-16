@@ -1,0 +1,80 @@
+<div
+  class="modal-shell"
+  x-data="{ open: true }"
+  x-show="open"
+  data-testid="import-source-cleanup-modal"
+  @keydown.escape.window="open = false; closeImportCvSearchModal()"
+>
+  <div class="modal-backdrop" @click="open = false; closeImportCvSearchModal()"></div>
+  <div class="modal-panel max-w-lg" @click.outside="open = false; closeImportCvSearchModal()">
+    <div class="modal-header">
+      <div class="space-y-1">
+        <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-error">Source cleanup</p>
+        <h3 class="text-base font-semibold text-pb-text">Move source to Trash</h3>
+        <p class="text-xs leading-5 text-pb-text-dim">{{ preview.file_name }}</p>
+      </div>
+      <button
+        type="button"
+        class="icon-btn icon-btn-sm"
+        @click="open = false; closeImportCvSearchModal()"
+        aria-label="Close source cleanup dialog"
+      >
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <div class="space-y-4 px-5 py-5">
+        <div class="inline-alert inline-alert-warning">
+          <div>
+            <p class="font-semibold text-pb-text">This changes the source library.</p>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Pullbox will move this one file to the configured Trash folder and skip it from this
+              import. Use this only after confirming it is cover art or another file you do not
+              want treated as a comic issue.
+            </p>
+          </div>
+        </div>
+
+        {% if error %}
+        <p role="alert" class="text-xs font-semibold text-pb-error">{{ error }}</p>
+        {% endif %}
+
+        {% if preview.can_move_to_trash %}
+        <form
+          method="post"
+          action="/import/{{ preview.job_id }}/files/{{ preview.file_id }}/safety/source-cleanup?status={{ status }}&sort={{ sort }}&page={{ page }}&return_to={{ return_to|default('review') }}"
+          hx-post="/import/{{ preview.job_id }}/files/{{ preview.file_id }}/safety/source-cleanup?status={{ status }}&sort={{ sort }}&page={{ page }}&return_to={{ return_to|default('review') }}"
+          {% if return_to|default('review') == 'review' %}
+          hx-target="#import-step-review-shell"
+          hx-swap="morph:outerHTML"
+          hx-sync="#import-step-review-shell:replace"
+          {% elif return_to|default('review') == 'follow-up' %}
+          hx-target="#import-orphaned-results"
+          hx-swap="outerHTML"
+          hx-sync="#import-orphaned-results:replace"
+          {% else %}
+          hx-swap="none"
+          {% endif %}
+          hx-on::after-request="if(event.detail.successful){ open = false; closeImportCvSearchModal(); }"
+        >
+          <input type="hidden" name="preview_token" value="{{ preview.preview_token }}">
+          <div class="flex flex-wrap justify-end gap-2">
+            <button type="button" class="btn-ghost btn-sm" @click="open = false; closeImportCvSearchModal()">Cancel</button>
+            <button type="submit" class="btn-danger btn-sm">Move source to Trash</button>
+          </div>
+        </form>
+        {% else %}
+        <div class="inline-alert inline-alert-info">
+          {{ preview.unavailable_reason }} You can still use <strong>Skip from import</strong> to leave the source untouched.
+        </div>
+        <div class="flex justify-end">
+          <button type="button" class="btn-ghost btn-sm" @click="open = false; closeImportCvSearchModal()">Close</button>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>

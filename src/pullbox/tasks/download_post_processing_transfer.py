@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.library import MatchConfidence
 from pullbox.tasks.post_processing_progress import PostProcessingPhase
 
@@ -59,7 +60,7 @@ async def transfer_and_register_library_file(
         issue,
         MatchConfidence.HIGH,
         move_to_library=True,
-        library_root_id=series.library_root_id,
+        library_root_id=preferred_managed_root_id(series),
         transfer_progress_callback=_on_transfer_progress,
         download_client=download.download_client,
         replace_existing_library_file=bool(getattr(download, "replace_existing_file", False)),

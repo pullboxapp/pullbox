@@ -207,3 +207,40 @@ async def test_recompute_file_counters_updates_series_job_and_duplicate_diagnost
     assert job.total_files_matched == 2
     assert job.total_files_already_owned == 1
     assert job.total_files_failed == 1
+
+
+async def test_recompute_file_counters_does_not_shrink_discovery_total(db_session) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    job.total_files_found = 5
+    job.scan_total_files = 6
+    series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Batman",
+        status=ImportSeriesStatus.MATCHED,
+    )
+    db_session.add(series)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            _make_imported_file(
+                job,
+                series,
+                name="batman-001.cbz",
+                status=ImportedFileStatus.IMPORTED,
+            ),
+            _make_imported_file(
+                job,
+                series,
+                name="batman-changed.cbz",
+                status=ImportedFileStatus.FAILED,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    await service._recompute_file_counters(db_session, job)
+
+    assert job.total_files_found == 6
+    assert job.total_files_imported == 1
+    assert job.total_files_failed == 1

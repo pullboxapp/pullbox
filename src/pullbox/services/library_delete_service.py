@@ -13,13 +13,14 @@ from sqlalchemy.orm import selectinload
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import LibraryFile, LibraryRoot
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.models.series import Series
 from pullbox.services.series_service import SeriesService
 from pullbox.utilities.settings import move_path_to_utility_trash
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.elements import ColumnElement
 
 
 def _is_relative_to(path: Path, other: Path) -> bool:
@@ -118,6 +119,8 @@ class LibraryDeleteContext:
     linked_file_count: int = 0
     tracked_file_count: int = 0
     tracked_series_count: int = 0
+    managed_file_count: int = 0
+    referenced_file_count: int = 0
     has_linked_issue: bool = False
     issue_status_after_delete: str | None = None
     issue_status_reason: str | None = None
@@ -132,6 +135,26 @@ class LibraryDeleteOutcome:
     source_path: str
     deleted_via_trash: bool
     result_path: str | None = None
+    managed_files_deleted: int = 0
+    referenced_files_detached: int = 0
+
+
+async def _storage_mode_counts(
+    session: AsyncSession,
+    file_clause: ColumnElement[bool],
+) -> tuple[int, int]:
+    rows = (
+        await session.execute(
+            select(LibraryFile.storage_mode, func.count(LibraryFile.id))
+            .where(file_clause)
+            .group_by(LibraryFile.storage_mode)
+        )
+    ).all()
+    counts = {storage_mode: int(count) for storage_mode, count in rows}
+    return (
+        counts.get(LibraryFileStorageMode.MANAGED, 0),
+        counts.get(LibraryFileStorageMode.REFERENCED, 0),
+    )
 
 
 async def build_delete_context(
@@ -162,12 +185,19 @@ async def build_delete_context(
                     )
                 ).scalar_one()
             )
+            issue_ids = select(Issue.id).where(Issue.series_id == series_id)
+            managed_file_count, referenced_file_count = await _storage_mode_counts(
+                session,
+                LibraryFile.issue_id.in_(issue_ids),
+            )
             return LibraryDeleteContext(
                 mode="series",
                 trash_enabled=trash_enabled,
                 series_id=series_id,
                 series_title=series_title,
                 linked_file_count=linked_file_count,
+                managed_file_count=managed_file_count,
+                referenced_file_count=referenced_file_count,
             )
 
     file_clause = (
@@ -178,6 +208,7 @@ async def build_delete_context(
     tracked_file_count = int(
         (await session.execute(select(func.count(LibraryFile.id)).where(file_clause))).scalar_one()
     )
+    managed_file_count, referenced_file_count = await _storage_mode_counts(session, file_clause)
 
     tracked_series_count = 0
     if kind == "folder":
@@ -217,6 +248,8 @@ async def build_delete_context(
         trash_enabled=trash_enabled,
         tracked_file_count=tracked_file_count,
         tracked_series_count=tracked_series_count,
+        managed_file_count=managed_file_count,
+        referenced_file_count=referenced_file_count,
         has_linked_issue=has_linked_issue,
         issue_status_after_delete=issue_status_after_delete,
         issue_status_reason=issue_status_reason,
@@ -292,8 +325,39 @@ async def delete_library_entry(
             .all()
         )
 
+    managed_files = [
+        library_file
+        for library_file in tracked_files
+        if library_file.storage_mode == LibraryFileStorageMode.MANAGED
+    ]
+    referenced_files = [
+        library_file
+        for library_file in tracked_files
+        if library_file.storage_mode == LibraryFileStorageMode.REFERENCED
+    ]
+
     result_path: str | None = None
-    if trash_dir is not None:
+    deleted_via_trash = False
+    if referenced_files:
+        # A whole-file or whole-folder operation could mutate a referenced artifact.
+        # Preserve the target and remove only Pullbox-owned files individually.
+        for library_file in managed_files:
+            managed_path = Path(library_file.file_path)
+            if not (managed_path.exists() or managed_path.is_symlink()):
+                continue
+            if trash_dir is not None:
+                try:
+                    move_path_to_utility_trash(
+                        managed_path,
+                        trash_dir,
+                        relative_path=_trash_relative_path(managed_path, root),
+                    )
+                except FileExistsError as exc:
+                    raise ValidationError(str(exc)) from exc
+                deleted_via_trash = True
+            else:
+                _delete_path_permanently(managed_path)
+    elif trash_dir is not None:
         try:
             result_path = str(
                 move_path_to_utility_trash(
@@ -302,6 +366,7 @@ async def delete_library_entry(
                     relative_path=_trash_relative_path(target, root),
                 )
             )
+            deleted_via_trash = True
         except FileExistsError as exc:
             raise ValidationError(str(exc)) from exc
     else:
@@ -312,13 +377,16 @@ async def delete_library_entry(
             library_file.issue.status = _status_after_library_file_removed(library_file.issue)
         await session.delete(library_file)
 
-    for series in tracked_series:
-        series.path = None
+    if not referenced_files:
+        for series in tracked_series:
+            series.path = None
 
     return LibraryDeleteOutcome(
         kind=kind,
         mode=delete_context.mode,
         source_path=str(target),
-        deleted_via_trash=trash_dir is not None,
+        deleted_via_trash=deleted_via_trash,
         result_path=result_path,
+        managed_files_deleted=len(managed_files),
+        referenced_files_detached=len(referenced_files),
     )

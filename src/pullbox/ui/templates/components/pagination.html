@@ -109,3 +109,24 @@
 </nav>
 {% endif %}
 {% endmacro %}
+
+{# Local workspaces expose page, totalPages, pageTokens and goToPage.
+   The shared five-token layout does not trigger an HTMX request. #}
+{% macro local_pagination() %}
+<nav class="flex items-center justify-center gap-1" aria-label="Pagination" hx-boost="false">
+  <button type="button" data-testid="series-pagination-prev" @click="goToPage(page - 1)" :disabled="page <= 1"
+          class="px-3 py-2 rounded-md text-sm font-medium text-pb-text-sec hover:bg-pb-card-hover disabled:text-pb-text-dim disabled:cursor-not-allowed">&laquo; Prev</button>
+  {% for index in range(5) %}
+    <span x-cloak x-show="pageTokens[{{ index }}] === null" class="px-3 py-2 text-sm text-pb-text-dim" aria-hidden="true">&hellip;</span>
+    <span x-cloak x-show="pageTokens[{{ index }}] === page" x-text="page" aria-current="page"
+          class="px-3 py-2 rounded-md text-sm font-medium bg-pb-interactive text-white"></span>
+    <button type="button" x-cloak x-show="pageTokens[{{ index }}] && pageTokens[{{ index }}] !== page"
+            @click="goToPage(pageTokens[{{ index }}])" x-text="pageTokens[{{ index }}]"
+            :aria-label="'Page ' + pageTokens[{{ index }}]"
+            :data-testid="'series-pagination-page-' + pageTokens[{{ index }}]"
+            class="px-3 py-2 rounded-md text-sm font-medium text-pb-text-sec hover:bg-pb-card-hover"></button>
+  {% endfor %}
+  <button type="button" data-testid="series-pagination-next" @click="goToPage(page + 1)" :disabled="page >= totalPages"
+          class="px-3 py-2 rounded-md text-sm font-medium text-pb-text-sec hover:bg-pb-card-hover disabled:text-pb-text-dim disabled:cursor-not-allowed">Next &raquo;</button>
+</nav>
+{% endmacro %}

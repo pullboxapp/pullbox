@@ -1,0 +1,19 @@
+{% from "components/page_dock.html" import page_dock %}
+
+{% set _owned_label = story_arc.owned_count|string ~ "/" ~ story_arc.membership_count|string %}
+{% set _status_items = [
+  {"led": "green" if story_arc.monitored and story_arc.active else "off", "label": "status", "value": "Monitored" if story_arc.monitored and story_arc.active else "Paused"},
+  {"label": "acquisition", "value": story_arc.acquisition_pct|string ~ "%"},
+  {"label": "owned", "value": _owned_label},
+  {"label": "review", "value": story_arc.review_count|string},
+  {"label": "cvid", "value": story_arc.comicvine_id|string if story_arc.comicvine_id else "Unlinked"},
+] %}
+
+<div data-testid="story-arc-detail-footer-dock">
+  {{ page_dock(
+    page=story_arc.page,
+    total_pages=story_arc.total_pages,
+    base_url=pagination_base_url,
+    status_items=_status_items
+  ) }}
+</div>

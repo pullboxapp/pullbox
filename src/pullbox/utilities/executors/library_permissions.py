@@ -23,7 +23,7 @@ from pullbox.core.library_permissions import (
     parse_permission_mode,
 )
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
-from pullbox.models.library import LibraryRoot
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.utilities.base_executor import (
     ApplyResult,
     ExecutionMode,
@@ -112,7 +112,22 @@ class LibraryPermissionsExecutor(JobExecutor):
             )
             for root in scoped_roots
         ]
-        return {"library_roots": roots, "permission_capabilities": capabilities}
+        referenced_paths = list(
+            (
+                await session.execute(
+                    select(LibraryFile.file_path).where(
+                        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {
+            "library_roots": roots,
+            "permission_capabilities": capabilities,
+            "referenced_paths": referenced_paths,
+        }
 
     async def generate_items(
         self,
@@ -157,6 +172,22 @@ class LibraryPermissionsExecutor(JobExecutor):
         run_mode = str(job_config.get("run_mode", "dry_run") or "dry_run")
 
         try:
+            if _path_would_mutate_reference(path, job_context):
+                return ProcessedItem(
+                    item_id=item_id,
+                    result=ItemResult.SKIPPED,
+                    before_state={"path": str(path)},
+                    after_state={"path": str(path), "reason": "referenced_file"},
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    warning_message="Referenced library paths cannot have permissions changed.",
+                    log_entries=[
+                        (
+                            "WARNING",
+                            f"Skipped referenced library path: {path}",
+                            {"reason": "referenced_file"},
+                        )
+                    ],
+                )
             requested_mode = _requested_mode_for_path(path, job_config)
             result = apply_permission_change(
                 path,
@@ -354,6 +385,21 @@ def _bool_config(value: object) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _path_would_mutate_reference(
+    path: Path,
+    job_context: dict[str, Any] | None,
+) -> bool:
+    referenced_paths = (job_context or {}).get("referenced_paths", [])
+    if not isinstance(referenced_paths, list):
+        return False
+    resolved_path = path.expanduser().resolve(strict=False)
+    for referenced_value in referenced_paths:
+        referenced = Path(str(referenced_value)).expanduser().resolve(strict=False)
+        if referenced == resolved_path or referenced.is_relative_to(resolved_path):
+            return True
+    return False
 
 
 def _library_root_entries(job_context: dict[str, Any] | None) -> list[tuple[str, Path]]:

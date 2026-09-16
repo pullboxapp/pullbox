@@ -28,7 +28,15 @@ from pullbox.schemas.import_job import (
     ImportSelectionBulkUpdateResponse,
     SeriesSelectionBulkUpdateRequest,
     SeriesSelectionUpdateRequest,
+    StoryArcPolicyConfirmationRequest,
+    StoryArcPolicyConfirmationResponse,
+    StoryArcReviewDecisionRequest,
+    StoryArcReviewDecisionResponse,
 )
+from pullbox.services.import_story_arc_policy_confirmation import (
+    confirm_import_story_arc_policy,
+)
+from pullbox.services.story_arc_placement_integration import StoryArcPlacementPolicyInput
 
 
 @dataclass(frozen=True)
@@ -91,20 +99,33 @@ async def list_conflicts_response(
     service: Any,
     session: Any,
     job_id: int,
+    *,
+    page: int,
+    page_size: int,
 ) -> ConflictGroupsResponse:
-    """Return all conflict groups for an import job."""
-    groups = await service.get_conflict_groups(session, job_id)
+    """Return one bounded conflict-group page for an import job."""
+    result = await service.get_conflict_groups_page(
+        session,
+        job_id,
+        page=page,
+        page_size=page_size,
+    )
     return ConflictGroupsResponse(
         job_id=job_id,
         groups=[
             FileConflictGroup(
+                kind=g["kind"],
                 conflict_group_id=g["conflict_group_id"],
                 matched_issue_id=g["matched_issue_id"],
+                series_id=g.get("series_id"),
+                diagnostics=dict(g.get("diagnostics") or {}),
                 files=[ImportedFileRead.model_validate(f) for f in g["files"]],
             )
-            for g in groups
+            for g in result.items
         ],
-        total=len(groups),
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
     )
 
 
@@ -167,6 +188,66 @@ async def update_series_selection_response(
     except ValidationError as exc:
         _raise_validation_http(exc)
     return ImportedSeriesRead.model_validate(imported_series)
+
+
+async def update_story_arc_decision_response(
+    service: Any,
+    session: Any,
+    job_id: int,
+    imported_story_arc_id: int,
+    body: StoryArcReviewDecisionRequest,
+) -> StoryArcReviewDecisionResponse:
+    """Persist one explicit staged story-arc review decision."""
+    try:
+        staged_arc = await service.update_story_arc_decision(
+            session,
+            job_id,
+            imported_story_arc_id,
+            action=body.action,
+            proposed_story_arc_id=body.proposed_story_arc_id,
+        )
+    except ValidationError as exc:
+        _raise_validation_http(exc)
+    return StoryArcReviewDecisionResponse(
+        imported_story_arc_id=int(staged_arc.id),
+        status=staged_arc.status.value,
+        selected_for_import=bool(staged_arc.selected_for_import),
+        proposed_story_arc_id=staged_arc.proposed_story_arc_id,
+    )
+
+
+async def confirm_story_arc_policy_response(
+    session: Any,
+    job_id: int,
+    imported_story_arc_id: int,
+    body: StoryArcPolicyConfirmationRequest,
+) -> StoryArcPolicyConfirmationResponse:
+    """Validate and persist one explicitly confirmed staged arc policy."""
+    payload = body.placement_policy
+    try:
+        result = await confirm_import_story_arc_policy(
+            session,
+            job_id=job_id,
+            imported_story_arc_id=imported_story_arc_id,
+            expected_policy_digest=body.expected_policy_digest,
+            explicit_confirmation=body.confirm_policy,
+            materialize_filesystem=body.materialize_filesystem,
+            monitored=body.monitored,
+            search_missing=body.search_missing,
+            include_upcoming=body.include_upcoming,
+            placement_policy=StoryArcPlacementPolicyInput(
+                mode=payload.mode,
+                target_library_root_id=payload.target_library_root_id,
+                destination_root=payload.destination_root,
+                folder_template=payload.folder_template,
+                file_template=payload.file_template,
+                symlink_style=payload.symlink_style,
+                synchronize=payload.synchronize,
+            ),
+        )
+    except ValidationError as exc:
+        _raise_validation_http(exc)
+    return StoryArcPolicyConfirmationResponse.model_validate(result, from_attributes=True)
 
 
 async def get_selection_state_response(

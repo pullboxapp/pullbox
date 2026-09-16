@@ -97,6 +97,12 @@ SAFE_FILTER_ALLOWLIST = {
         "partials/import_history_results.html",
         "{{ job.created_at|localtime|safe if job.created_at else '—' }}",
     ),
+    (
+        "partials/import_follow_up_jobs.html",
+        '<td class="downloads-mono-cell is-right hidden lg:table-cell">'
+        "{{ (follow_up_job.import_completed_at or "
+        "follow_up_job.created_at)|localtime|safe }}</td>",
+    ),
 }
 
 
@@ -124,9 +130,10 @@ def test_indexer_source_priority_uses_json_context_escape() -> None:
 
 
 def test_naming_preview_escapes_inline_js_and_api_results() -> None:
-    html = _template("partials/settings_media.html")
+    html = _template("partials/settings_naming.html")
 
     assert "previewNaming('{{" not in html
-    assert "|tojson|forceescape" in html
-    assert "escapeHtml(ex.input || '')" in html
-    assert "escapeHtml(ex.output || '')" in html
+    assert "configs.get(" not in html
+    assert "innerHTML" not in html
+    assert 'x-text="example.input"' in html
+    assert 'x-text="example.output"' in html

@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 import zipfile
 from pathlib import Path  # noqa: TC003 - used at runtime in helpers
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -34,6 +35,8 @@ from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series, SeriesStatus
 from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
 from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate, RecoverOrphanRequest
+from pullbox.schemas.import_layout import SourceLayoutSpecPayload
+from pullbox.services import library_root_management
 from pullbox.services.import_service import ImportService
 from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
 
@@ -120,6 +123,7 @@ def _write_cbz(path: Path, comicinfo_xml: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
         archive.writestr("page001.jpg", b"\xff\xd8\xff\xd9")
+        archive.writestr("page002.jpg", b"\xff\xd8\xff\xd9")
         if comicinfo_xml is not None:
             archive.writestr("ComicInfo.xml", comicinfo_xml)
 
@@ -127,11 +131,45 @@ def _write_cbz(path: Path, comicinfo_xml: str | None = None) -> None:
 async def _setup_comics_directory(session, comics_dir: Path) -> LibraryRoot:
     """Create a configured comics directory and matching LibraryRoot."""
     comics_dir.mkdir(parents=True, exist_ok=True)
-    session.add(SystemConfig(key="comics_directory", value=str(comics_dir), value_type="string"))
-    root = LibraryRoot(name="Comics", path=str(comics_dir), enabled=True)
-    session.add(root)
+    config = await session.get(SystemConfig, "comics_directory")
+    if config is None:
+        session.add(
+            SystemConfig(key="comics_directory", value=str(comics_dir), value_type="string")
+        )
+    else:
+        config.value = str(comics_dir)
+    root = await session.scalar(
+        sa_select(LibraryRoot).where(LibraryRoot.is_default_managed_destination.is_(True))
+    )
+    if root is None:
+        root = LibraryRoot(
+            name="Comics",
+            path=str(comics_dir),
+            enabled=True,
+            is_default_managed_destination=True,
+        )
+        session.add(root)
+    else:
+        root.path = str(comics_dir)
+        root.enabled = True
+        root.allow_managed_writes = True
     await session.flush()
     return root
+
+
+@pytest.fixture
+async def configured_managed_root(
+    db_session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LibraryRoot:
+    """Model the configured managed-root invariant for lifecycle tests."""
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024**3),
+    )
+    return await _setup_comics_directory(db_session, tmp_path / "library")
 
 
 def _make_fake_mylar_db(
@@ -365,6 +403,13 @@ async def _create_series_in_db(
 
 class TestFilesystemImport:
     """Scenario A: Full filesystem scan -> match -> import lifecycle."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     async def test_a_full_lifecycle(self, db_session, tmp_path) -> None:
         """Create job -> scan trusted folders -> confirm all -> import all."""
@@ -786,6 +831,13 @@ class TestFilesystemImport:
 class TestMylar3Import:
     """Scenario B: Import from Mylar3 database with CV ID lookup."""
 
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
+
     async def test_b_mylar3_lifecycle(self, db_session, tmp_path) -> None:
         """Mylar3 DB with 2 CV-ID lookups + 1 search match -> import."""
         comics_dir = tmp_path / "comics"
@@ -883,6 +935,7 @@ class TestMylar3Import:
         request = ImportJobCreate(
             source_path=str(mylar_db),
             source_type=ImportSourceType.MYLAR3,
+            mylar3_path_map_confirmed=True,
         )
         job = await svc.create_job(db_session, request)
 
@@ -1021,6 +1074,12 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
+                source_layout=SourceLayoutSpecPayload(
+                    mode="preset",
+                    preset="series_folders",
+                    fallback_to_auto=False,
+                ),
             ),
         )
 
@@ -1046,6 +1105,7 @@ class TestMylar3Import:
         by_name = {item.file_name: item for item in imported_files}
         assert by_name[regular_path.name].matched_issue_cv_id == 900001
         assert by_name[annual_path.name].matched_issue_cv_id == 950001
+        assert job.source_layout_snapshot["preset"] == "series_folders"
 
     @pytest.mark.parametrize(
         ("series_name", "series_year", "file_name", "issue_number", "series_cv_id", "issue_cv_id"),
@@ -1125,6 +1185,7 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
             ),
         )
 
@@ -1178,6 +1239,7 @@ class TestMylar3Import:
             ImportJobCreate(
                 source_path=str(mylar_db),
                 source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
             ),
         )
 
@@ -1197,6 +1259,667 @@ class TestMylar3Import:
         )
         assert file_item is not None
         assert file_item.status == ImportedFileStatus.NO_MATCH
+
+    async def test_unsafe_mylar_path_mapping_reaches_review_without_provider_calls(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        mapped_root = tmp_path / "mapped-comics"
+        mapped_series = mapped_root / "Batman"
+        create_minimal_cbz(mapped_series / "Batman 001.cbz")
+        escaped_issue = tmp_path / "escaped" / "Batman 001.cbz"
+        create_minimal_cbz(escaped_issue)
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-42721",
+                    "ComicName": "Batman",
+                    "ComicYear": "2011",
+                    "ComicPublisher": "DC Comics",
+                    "ComicLocation": "/comics/Batman",
+                    "Total": 1,
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map={"/comics": str(mapped_root)},
+                mylar3_path_map_confirmed=True,
+            ),
+        )
+        # Simulate the source database changing after the safe mapping preview.
+        # Runtime resolution must still reject traversal rather than trusting
+        # the earlier confirmation.
+        connection = sqlite3.connect(mylar_db)
+        connection.execute(
+            "UPDATE comics SET ComicLocation = ?",
+            ("/comics/../escaped",),
+        )
+        connection.commit()
+        connection.close()
+
+        await service.start_scan(db_session, job.id)
+        await db_session.refresh(job)
+
+        assert job.status == ImportJobStatus.REVIEW
+        assert job.series_found == 1
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.NO_MATCH
+        assert series_item.cv_id == 42721
+        assert series_item.cv_match_method == "mylar3_cv_id"
+        assert series_item.diagnostics["reason"] == "unsafe_path_mapping"
+        assert series_item.diagnostics["mylar3_path"] == {
+            "status": "invalid",
+            "mapping_applied": True,
+        }
+        assert (
+            await db_session.scalar(
+                sa_select(ImportedFile.id).where(ImportedFile.import_job_id == job.id)
+            )
+            is None
+        )
+
+    async def test_mylar_sidecar_and_comicinfo_conflict_preserves_mylar_identity(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "Batman (2011)"
+        series_dir.mkdir(parents=True)
+        (series_dir / "series.json").write_text('{"comicid": 42721}')
+        _write_cbz(
+            series_dir / "Batman 001.cbz",
+            """<?xml version="1.0"?>
+            <ComicInfo>
+              <Series>Batman</Series>
+              <Number>1</Number>
+              <Notes>[cv_vol_id:99999]</Notes>
+            </ComicInfo>
+            """,
+        )
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-42721",
+                    "ComicName": "Batman",
+                    "ComicYear": "2011",
+                    "ComicPublisher": "DC Comics",
+                    "ComicLocation": str(series_dir),
+                    "Total": 1,
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.cv_id == 42721
+        assert series_item.cv_match_method == "mylar3_cv_id"
+        assert series_item.diagnostics["file_identity_review_required"] is True
+        assert series_item.diagnostics["file_identity_conflict_count"] == 1
+        imported_file = await db_session.scalar(
+            sa_select(ImportedFile).where(ImportedFile.import_series_id == series_item.id)
+        )
+        assert imported_file is not None
+        assert imported_file.status == ImportedFileStatus.NO_MATCH
+        assert imported_file.include_in_import is False
+        assert imported_file.diagnostics["conflict_type"] == "trusted_source_identity_conflict"
+        assert imported_file.diagnostics["identity_conflicts"] == [
+            {
+                "field": "comicvine_series_id",
+                "comicinfo": 99999,
+                "sidecar": 42721,
+            }
+        ]
+
+    async def test_mylar_and_comicinfo_conflict_preserves_mylar_identity(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "Batman (2011)"
+        _write_cbz(
+            series_dir / "Batman 001.cbz",
+            """<?xml version="1.0"?>
+            <ComicInfo>
+              <Series>Batman</Series>
+              <Number>1</Number>
+              <Notes>[cv_vol_id:99999]</Notes>
+            </ComicInfo>
+            """,
+        )
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-42721",
+                    "ComicName": "Batman",
+                    "ComicYear": "2011",
+                    "ComicPublisher": "DC Comics",
+                    "ComicLocation": str(series_dir),
+                    "Total": 1,
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.cv_id == 42721
+        assert series_item.cv_match_method == "mylar3_cv_id"
+        assert series_item.diagnostics["file_identity_review_required"] is True
+        assert series_item.diagnostics["file_identity_conflict_count"] == 1
+        imported_file = await db_session.scalar(
+            sa_select(ImportedFile).where(ImportedFile.import_series_id == series_item.id)
+        )
+        assert imported_file is not None
+        assert imported_file.status == ImportedFileStatus.NO_MATCH
+        assert imported_file.include_in_import is False
+        assert imported_file.diagnostics["conflict_type"] == "trusted_source_identity_conflict"
+        assert imported_file.diagnostics["identity_conflicts"] == [
+            {
+                "field": "comicvine_series_id",
+                "first": 42721,
+                "conflicting": 99999,
+            }
+        ]
+
+    async def test_corroborated_comicinfo_replaces_stale_mylar_issue_identity(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "Dark Nights - Death Metal Omnibus (2023)"
+        file_path = series_dir / "Dark Nights - Death Metal Omnibus 01.cbz"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(file_path, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("page001.jpg", b"\xff\xd8\xff\xd9")
+            archive.writestr(
+                "ComicInfo.xml",
+                """<?xml version="1.0"?>
+                <ComicInfo>
+                  <Series>Dark Nights: Death Metal Omnibus</Series>
+                  <Number>1</Number>
+                  <Title>HC</Title>
+                  <Format>Trade Paper Back</Format>
+                  <Notes>[cv_vol_id:166912] [cv_issue_id:1132072]</Notes>
+                </ComicInfo>
+                """,
+            )
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-166912",
+                    "ComicName": "Dark Nights - Death Metal Omnibus",
+                    "ComicYear": "2023",
+                    "ComicPublisher": "DC Comics",
+                    "ComicLocation": str(series_dir),
+                    "Total": 1,
+                }
+            ],
+            issues=[
+                {
+                    "IssueID": "899000001",
+                    "ComicID": "CV-166912",
+                    "ComicName": "Dark Nights - Death Metal Omnibus",
+                    "IssueName": "HC",
+                    "Issue_Number": "1",
+                    "Location": file_path.name,
+                    "IssueDate": "2024-01-01",
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        imported_file = await db_session.scalar(
+            sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert imported_file is not None
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.files_matched == 0
+        assert imported_file.status == ImportedFileStatus.SAFETY_BLOCKED
+
+        await service.allow_safety_blocked_file_once(
+            db_session,
+            job.id,
+            imported_file.id,
+        )
+        await service.rematch_imported_series_files(db_session, job.id, series_item.id)
+
+        assert series_item.files_matched == 1
+        assert series_item.files_no_match == 0
+        assert imported_file.status == ImportedFileStatus.MATCHED
+        assert imported_file.comicvine_issue_id == 1132072
+        assert imported_file.matched_issue_cv_id == 1132072
+        source_metadata = imported_file.diagnostics["source_metadata"]
+        assert source_metadata["mylar3_issue_identity_reconciliation"] == {
+            "recorded_comicvine_issue_id": 899000001,
+            "embedded_comicvine_issue_id": 1132072,
+            "comicvine_series_id": 166912,
+            "issue_number": 1.0,
+            "method": "corroborated_embedded_comicinfo",
+        }
+        assert "identity_conflicts" not in source_metadata
+
+    async def test_preinspected_comicinfo_reconciles_stale_mylar_volume_during_scan(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "Aliens Epic Collection (2023)"
+        series_dir.mkdir(parents=True, exist_ok=True)
+        file_specs = (
+            (1, 848973001, 978613, 2),
+            (2, 1067468, 1067468, 2),
+            (3, 848973003, 1144431, 1),
+        )
+        file_paths: dict[int, Path] = {}
+        for number, _recorded_issue_id, embedded_issue_id, page_count in file_specs:
+            suffix = f" - Volume {number}" if number == 2 else ""
+            file_path = series_dir / f"Aliens Epic Collection (2023) Vol {number:02}{suffix}.cbz"
+            file_paths[number] = file_path
+            with zipfile.ZipFile(file_path, "w", zipfile.ZIP_STORED) as archive:
+                for page in range(1, page_count + 1):
+                    archive.writestr(f"page{page:03}.jpg", b"\xff\xd8\xff\xd9")
+                archive.writestr(
+                    "ComicInfo.xml",
+                    (
+                        "<?xml version='1.0'?>"
+                        "<ComicInfo>"
+                        "<Series>Aliens Epic Collection</Series>"
+                        f"<Number>{number}</Number>"
+                        f"<Title>Volume {number}</Title>"
+                        "<Publisher>Marvel</Publisher>"
+                        f"<Web>https://comicvine.gamespot.com/volume-{number}/"
+                        f"4000-{embedded_issue_id}/</Web>"
+                        "<Notes>[cv_vol_id:148973]</Notes>"
+                        "</ComicInfo>"
+                    ),
+                )
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-148973",
+                    "ComicName": "Aliens Epic Collection",
+                    "ComicYear": "2023",
+                    "ComicPublisher": "Marvel",
+                    "ComicLocation": str(series_dir),
+                    "Total": 3,
+                }
+            ],
+            issues=[
+                {
+                    "IssueID": str(recorded_issue_id),
+                    "ComicID": "CV-148973",
+                    "ComicName": "Aliens Epic Collection",
+                    "IssueName": (
+                        f"Aliens Epic Collection (2023) Vol {number:02}"
+                        if number != 2
+                        else "Volume 2"
+                    ),
+                    "Issue_Number": str(number),
+                    "Location": file_paths[number].name,
+                    "IssueDate": f"{2022 + number}-01-01",
+                }
+                for number, recorded_issue_id, _embedded_issue_id, _page_count in file_specs
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        imported_files = list(
+            await db_session.scalars(
+                sa_select(ImportedFile)
+                .where(ImportedFile.import_job_id == job.id)
+                .order_by(ImportedFile.parsed_issue_number)
+            )
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.files_matched == 2
+        assert series_item.files_no_match == 0
+        assert [item.status for item in imported_files] == [
+            ImportedFileStatus.MATCHED,
+            ImportedFileStatus.MATCHED,
+            ImportedFileStatus.SAFETY_BLOCKED,
+        ]
+        assert imported_files[0].comicvine_issue_id == 978613
+        assert imported_files[0].matched_issue_cv_id == 978613
+        source_metadata = imported_files[0].diagnostics["source_metadata"]
+        assert source_metadata["mylar3_issue_identity_reconciliation"] == {
+            "recorded_comicvine_issue_id": 848973001,
+            "embedded_comicvine_issue_id": 978613,
+            "comicvine_series_id": 148973,
+            "issue_number": 1.0,
+            "method": "corroborated_embedded_comicinfo",
+        }
+        assert "identity_conflicts" not in source_metadata
+
+        await service.allow_safety_blocked_file_once(
+            db_session,
+            job.id,
+            imported_files[2].id,
+        )
+        await service.rematch_imported_series_files(db_session, job.id, series_item.id)
+
+        assert series_item.files_matched == 3
+        assert series_item.files_no_match == 0
+        assert imported_files[2].status == ImportedFileStatus.MATCHED
+        assert imported_files[2].comicvine_issue_id == 1144431
+        assert imported_files[2].matched_issue_cv_id == 1144431
+
+    async def test_agreeing_mylar_sidecar_and_comicinfo_stays_provider_free(
+        self,
+        db_session,
+        tmp_path,
+    ) -> None:
+        class ExplodingProvider:
+            def __getattr__(self, method_name: str):
+                async def fail(*_args, **_kwargs):
+                    raise AssertionError(f"ComicVine method {method_name} must not be called")
+
+                return fail
+
+        series_dir = tmp_path / "comics" / "Batman (2011)"
+        series_dir.mkdir(parents=True)
+        (series_dir / "series.json").write_text('{"comicid": 42721}')
+        _write_cbz(
+            series_dir / "Batman 001.cbz",
+            """<?xml version="1.0"?>
+            <ComicInfo>
+              <Series>Batman</Series>
+              <Number>1</Number>
+              <Notes>[cv_vol_id:42721]</Notes>
+            </ComicInfo>
+            """,
+        )
+        mylar_db = tmp_path / "mylar.db"
+        create_mylar3_db(
+            mylar_db,
+            series=[
+                {
+                    "ComicID": "CV-42721",
+                    "ComicName": "Batman",
+                    "ComicYear": "2011",
+                    "ComicPublisher": "DC Comics",
+                    "ComicLocation": str(series_dir),
+                    "Total": 1,
+                }
+            ],
+        )
+        metadata_service = AsyncMock()
+        metadata_service._provider = ExplodingProvider()
+        service = _make_import_service(
+            series_service=_mock_series_service({}),
+            metadata_service=metadata_service,
+        )
+        job = await service.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(mylar_db),
+                source_type=ImportSourceType.MYLAR3,
+                mylar3_path_map_confirmed=True,
+            ),
+        )
+
+        await service.start_scan(db_session, job.id)
+
+        series_item = await db_session.scalar(
+            sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+        )
+        assert series_item is not None
+        assert series_item.status == ImportSeriesStatus.MATCHED
+        assert series_item.cv_id == 42721
+        assert series_item.cv_match_method == "mylar3_cv_id"
+        assert "identity_conflicts" not in series_item.diagnostics
+
+
+@pytest.mark.parametrize("source_type", list(ImportSourceType))
+@pytest.mark.parametrize("pages", [0, 1, 2])
+async def test_mylar_and_folder_share_sidecar_and_content_review(
+    db_session,
+    tmp_path,
+    source_type,
+    pages,
+) -> None:
+    await _setup_comics_directory(db_session, tmp_path / "destination")
+
+    class OfflineProvider:
+        def __getattr__(self, name):
+            async def fail(*args, **kwargs):
+                raise AssertionError(f"Unexpected provider request: {name}")
+
+            return fail
+
+    folder = tmp_path / "comics" / "Firefly (2018)"
+    folder.mkdir(parents=True)
+    (folder / "series.json").write_text(
+        '{"metadata":{"comicid":115251,"name":"Firefly","year":2018,"total_issues":36}}'
+    )
+    (folder / "cvinfo").write_text(
+        "https://comicvine.gamespot.com/firefly/4050-115251/\nseries_id: 7921\n"
+    )
+    comic = folder / "Firefly 007 (2019).cbz"
+    with zipfile.ZipFile(comic, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Firefly</Series><Number>7</Number><PageCount>27</PageCount></ComicInfo>",
+        )
+        for page in range(pages):
+            archive.writestr(f"page{page}.jpg", b"page")
+    source = tmp_path / "comics"
+    if source_type is ImportSourceType.MYLAR3:
+        source = tmp_path / "mylar.db"
+        create_mylar3_db(
+            source,
+            series=[
+                {
+                    "ComicID": "CV-115251",
+                    "ComicName": "Firefly",
+                    "ComicYear": "2018",
+                    "ComicLocation": str(folder),
+                    "Total": 36,
+                }
+            ],
+        )
+    metadata_service = AsyncMock()
+    metadata_service._provider = OfflineProvider()
+    service = _make_import_service(
+        series_service=_mock_series_service({}),
+        metadata_service=metadata_service,
+    )
+    job = await service.create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source),
+            source_type=source_type,
+            mylar3_path_map_confirmed=source_type is ImportSourceType.MYLAR3,
+        ),
+    )
+    before = comic.read_bytes()
+    await service.start_scan(db_session, job.id)
+    assert job.status is ImportJobStatus.REVIEW
+    item = await db_session.scalar(
+        sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+    )
+    file = await db_session.scalar(
+        sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+    )
+    assert item.status is ImportSeriesStatus.MATCHED
+    assert item.cv_id == 115251
+    assert "identity_conflicts" not in item.diagnostics
+    assert file.status is (
+        ImportedFileStatus.SAFETY_BLOCKED if pages < 2 else ImportedFileStatus.MATCHED
+    )
+    assert not file.include_in_import
+    if pages < 2:
+        assert file.diagnostics["safety_block"]["code"] == (
+            "archive_no_pages" if pages == 0 else "single_page_comic"
+        )
+    assert comic.read_bytes() == before
+
+    # Reproduce a saved review created by the old sidecar parser, then resume
+    # using the ordinary recovery pipeline without inventorying the source again.
+    from pullbox.services.import_review_recheck import prepare_review_recheck
+
+    item.status = ImportSeriesStatus.NO_MATCH
+    item.diagnostics = {"reason": "trusted_source_identity_conflict"}
+    file.status = ImportedFileStatus.NO_MATCH
+    await db_session.flush()
+    await prepare_review_recheck(db_session, job.id, source_roots=[tmp_path / "comics"], apply=True)
+    await db_session.commit()
+    await service.resume_scan_phase(db_session, job.id)
+    await db_session.refresh(job)
+    await db_session.refresh(item)
+    await db_session.refresh(file)
+    assert job.status is ImportJobStatus.REVIEW
+    assert item.status is ImportSeriesStatus.MATCHED
+    assert item.cv_id == 115251
+    assert file.status is (
+        ImportedFileStatus.SAFETY_BLOCKED if pages < 2 else ImportedFileStatus.MATCHED
+    )
+    assert comic.read_bytes() == before
+
+    if pages == 1:
+        from pullbox.core.file_safety import is_resource_safety_exception_allowed
+
+        await service.allow_safety_blocked_file_once(db_session, job.id, file.id)
+        await service.rematch_imported_series_files(db_session, job.id, item.id)
+        assert file.status is ImportedFileStatus.MATCHED
+        assert not file.include_in_import
+        assert not is_resource_safety_exception_allowed(file.diagnostics)
+    elif pages == 0:
+        with pytest.raises(ValidationError, match="cannot be overridden"):
+            await service.allow_safety_blocked_file_once(db_session, job.id, file.id)
 
 
 # ── Scenario C: Deduplication ──────────────────────────────────────────
@@ -1498,6 +2221,13 @@ class TestPartialFailure:
 
 class TestCancel:
     """Scenario E: Cancel an import job from REVIEW state."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     async def test_e_cancel_from_review(self, db_session, tmp_path) -> None:
         """Cancel a REVIEW-state job; confirm_import raises ValidationError."""

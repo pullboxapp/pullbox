@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% from "components/dropdown_select.html" import dropdown_select %}
+{% from "components/mission_control_workspace.html" import mission_control_workspace %}
+{% from "components/search_field.html" import search_field %}
+
+{% block title %}Story Arcs — {{ instance_name() }}{% endblock %}
+{% block page_title %}Story Arcs{% endblock %}
+{% block head %}
+<script>
+  (function() {
+    var view = {{ active_view|tojson }};
+    document.documentElement.setAttribute("data-story-arc-view", view);
+    localStorage.setItem("story_arc_view", view);
+    document.cookie = "story_arc_view=" + encodeURIComponent(view) + "; path=/; max-age=31536000; SameSite=Lax";
+  })();
+</script>
+{% endblock %}
+{% block content_container_classes %}px-4 sm:px-6 pt-4 sm:pt-5{% endblock %}
+
+{% block content %}
+{% set registry = story_arc_page %}
+{% set gauge_circumference = 138.2 %}
+{% set active_pct = ((registry.active_count / registry.total) * 100)|round(0)|int if registry.total > 0 else 0 %}
+{% set monitored_pct = ((registry.monitored_count / registry.total) * 100)|round(0)|int if registry.total > 0 else 0 %}
+{% set attention_total = registry.review_count %}
+{% set attention_pct = ((attention_total / registry.membership_count) * 100)|round(0)|int if registry.membership_count > 0 else 0 %}
+
+<div class="series-page-shell" data-story-arc-active-view="{{ active_view }}" data-testid="story-arcs-page">
+  {% set header_left_html %}
+    <div class="series-registry-title-block">
+      <h2 data-testid="story-arcs-registry-title" class="series-registry-title">
+        STORY ARC <span>REGISTRY</span>
+      </h2>
+      <p class="series-registry-subtitle">
+        {{ registry.total }} result{{ "" if registry.total == 1 else "s" }} ·
+        {{ registry.active_count }} active arc{{ "" if registry.active_count == 1 else "s" }} ·
+        {{ attention_total }} issue{{ "" if attention_total == 1 else "s" }} need attention
+      </p>
+    </div>
+
+    <div class="series-registry-gauges" aria-label="Story Arc registry metrics">
+      <div class="series-registry-gauge">
+        <div class="series-registry-gauge-ring">
+          <svg viewBox="0 0 56 56" aria-hidden="true">
+            <circle class="series-registry-gauge-bg" cx="28" cy="28" r="22"></circle>
+            <circle class="series-registry-gauge-fill series-registry-gauge-fill-success" cx="28" cy="28" r="22"
+                    stroke-dasharray="{{ gauge_circumference }}"
+                    stroke-dashoffset="{{ (gauge_circumference * (100 - active_pct) / 100)|round(1) }}"></circle>
+          </svg>
+          <span class="series-registry-gauge-value text-pb-success">{{ registry.active_count }}</span>
+        </div>
+        <div class="series-registry-gauge-label">Active</div>
+      </div>
+      <div class="series-registry-gauge">
+        <div class="series-registry-gauge-ring">
+          <svg viewBox="0 0 56 56" aria-hidden="true">
+            <circle class="series-registry-gauge-bg" cx="28" cy="28" r="22"></circle>
+            <circle class="series-registry-gauge-fill series-registry-gauge-fill-info" cx="28" cy="28" r="22"
+                    stroke-dasharray="{{ gauge_circumference }}"
+                    stroke-dashoffset="{{ (gauge_circumference * (100 - monitored_pct) / 100)|round(1) }}"></circle>
+          </svg>
+          <span class="series-registry-gauge-value text-pb-interactive">{{ registry.monitored_count }}</span>
+        </div>
+        <div class="series-registry-gauge-label">Monitored</div>
+      </div>
+      <div class="series-registry-gauge">
+        <div class="series-registry-gauge-ring">
+          <svg viewBox="0 0 56 56" aria-hidden="true">
+            <circle class="series-registry-gauge-bg" cx="28" cy="28" r="22"></circle>
+            <circle class="series-registry-gauge-fill series-registry-gauge-fill-warning" cx="28" cy="28" r="22"
+                    stroke-dasharray="{{ gauge_circumference }}"
+                    stroke-dashoffset="{{ (gauge_circumference * (100 - attention_pct) / 100)|round(1) }}"></circle>
+          </svg>
+          <span class="series-registry-gauge-value text-pb-warning">{{ attention_total }}</span>
+        </div>
+        <div class="series-registry-gauge-label">Attention</div>
+      </div>
+    </div>
+  {% endset %}
+
+  {% set header_actions_html %}
+    <a href="/story-arcs/add" data-testid="story-arcs-add-link" class="btn-primary btn-sm series-registry-primary">
+      <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"></path>
+      </svg>
+      Add story arc
+    </a>
+  {% endset %}
+
+  {% set browse_toolbar_html %}
+    <div class="series-toolbar-browse">
+      <div class="series-toolbar-primary">
+        {{ search_field(
+          name="q",
+          value=query,
+          placeholder="Search story arcs...",
+          input_testid="story-arcs-search-input",
+          clear_testid="story-arcs-search-clear",
+          panel_testid="story-arcs-search-history-panel",
+          root_testid="story-arcs-search-field",
+          mode="remote",
+          history_key="pullbox.searchHistory.storyArcs",
+          debounce_ms=250,
+          size="sm",
+          class_name="series-registry-search",
+          aria_label="Search story arcs"
+        ) }}
+
+        <div class="series-toolbar-field">
+          <span class="series-toolbar-label">Lifecycle</span>
+          {{ dropdown_select(
+            name="lifecycle",
+            value=lifecycle_filter,
+            size="sm",
+            options=[("", "All"), ("active", "Active"), ("archived", "Archived")],
+            root_testid="story-arcs-lifecycle-select",
+            hx_get="/story-arcs",
+            hx_target="#story-arcs-results-body",
+            hx_swap="outerHTML",
+            hx_push_url="true",
+            hx_include="#story-arcs-filter-form",
+            class_name="series-registry-dropdown",
+            fit_width=true
+          ) }}
+        </div>
+
+        <div class="series-toolbar-field">
+          <span class="series-toolbar-label">Monitored</span>
+          {{ dropdown_select(
+            name="monitored",
+            value=monitored_filter,
+            size="sm",
+            options=[("", "All"), ("true", "Monitored"), ("false", "Unmonitored")],
+            root_testid="story-arcs-monitored-select",
+            hx_get="/story-arcs",
+            hx_target="#story-arcs-results-body",
+            hx_swap="outerHTML",
+            hx_push_url="true",
+            hx_include="#story-arcs-filter-form",
+            class_name="series-registry-dropdown",
+            fit_width=true
+          ) }}
+        </div>
+
+        <div class="series-toolbar-field">
+          <span class="series-toolbar-label">Per Page</span>
+          {% set per_page_options = [("25", "25"), ("50", "50"), ("100", "100")] %}
+          {% if registry.per_page not in [25, 50, 100] %}
+            {% set per_page_options = [(registry.per_page|string, registry.per_page|string)] + per_page_options %}
+          {% endif %}
+          {{ dropdown_select(
+            name="per_page",
+            value=registry.per_page|string,
+            size="sm",
+            options=per_page_options,
+            root_testid="story-arcs-per-page-select",
+            hx_get="/story-arcs",
+            hx_target="#story-arcs-results-body",
+            hx_swap="outerHTML",
+            hx_push_url="true",
+            hx_include="#story-arcs-filter-form",
+            class_name="series-registry-dropdown",
+            fit_width=true
+          ) }}
+        </div>
+      </div>
+      <div class="series-toolbar-actions">
+        <div class="series-toolbar-view-block">
+          <span class="series-toolbar-label">View</span>
+          <div data-testid="story-arcs-view-toggle" class="series-view-toggle">
+            <button type="submit" name="view_mode" value="list" data-testid="story-arcs-view-list" data-story-arc-view-option="list" data-tip="List view" data-tip-pos="top" data-tip-size="narrow" x-on:click="document.documentElement.setAttribute('data-story-arc-view', 'list'); localStorage.setItem('story_arc_view', 'list'); document.cookie='story_arc_view=list; path=/; max-age=31536000; SameSite=Lax'" class="series-view-toggle-item" aria-label="List view">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M8 6.75h12M8 12h12M8 17.25h12M4.75 6.75h.5M4.75 12h.5M4.75 17.25h.5"></path></svg>
+            </button>
+            <button type="submit" name="view_mode" value="grid" data-testid="story-arcs-view-grid" data-story-arc-view-option="grid" data-tip="Grid view" data-tip-pos="top" data-tip-size="narrow" x-on:click="document.documentElement.setAttribute('data-story-arc-view', 'grid'); localStorage.setItem('story_arc_view', 'grid'); document.cookie='story_arc_view=grid; path=/; max-age=31536000; SameSite=Lax'" class="series-view-toggle-item" aria-label="Grid view">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4.75 4.75h5.5v5.5h-5.5zm9 0h5.5v5.5h-5.5zm-9 9h5.5v5.5h-5.5zm9 0h5.5v5.5h-5.5"></path></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endset %}
+
+  {% set results_html %}{% include "partials/story_arc_results_body.html" %}{% endset %}
+
+  {{ mission_control_workspace(
+    header_testid="story-arcs-registry-header",
+    header_left_html=header_left_html,
+    header_actions_html=header_actions_html,
+    header_actions_testid="story-arcs-registry-actions",
+    toolbar_id="story-arcs-filter-form",
+    toolbar_testid="story-arcs-filter-form",
+    toolbar_frame_testid="story-arcs-toolbar-frame",
+    toolbar_attrs='autocomplete="off" action="/story-arcs" method="get" hx-get="/story-arcs" hx-target="#story-arcs-results-body" hx-swap="outerHTML" hx-push-url="true" hx-trigger="submit"',
+    browse_toolbar_html=browse_toolbar_html,
+    results_id="story-arcs-results",
+    results_testid="story-arcs-results",
+    results_body_id="story-arcs-results-body",
+    results_body_testid="story-arcs-results-body",
+    results_html=results_html
+  ) }}
+</div>
+{% endblock %}
+
+{% block footer_dock %}
+  {% include "partials/story_arc_pagination_mount.html" %}
+{% endblock %}

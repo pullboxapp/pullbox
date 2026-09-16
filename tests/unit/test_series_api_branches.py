@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 from sqlalchemy import select
 
 from pullbox.api.v1 import series as series_api
@@ -17,7 +17,13 @@ from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.publisher import Publisher
 from pullbox.models.search_log import SearchLog
-from pullbox.models.series import Series, SeriesStatus, SeriesStatusOverride, SeriesType
+from pullbox.models.series import (
+    IssueCatalogState,
+    Series,
+    SeriesStatus,
+    SeriesStatusOverride,
+    SeriesType,
+)
 from pullbox.schemas.series import (
     SeriesBulkDelete,
     SeriesCreate,
@@ -98,9 +104,11 @@ async def test_service_builder_seams_delegate(
 @pytest.mark.asyncio
 async def test_load_and_list_series_branches(db_session: AsyncSession) -> None:
     publisher = Publisher(name="DC Comics")
-    db_session.add(publisher)
+    preferred_root = LibraryRoot(name="Future", path="/future", enabled=True)
+    db_session.add_all([publisher, preferred_root])
     await db_session.flush()
     series = await _seed_series(db_session, publisher=publisher, monitored=False)
+    series.preferred_library_root_id = preferred_root.id
     db_session.add_all(
         [
             Issue(series_id=series.id, issue_number=1, status=IssueStatus.OWNED),
@@ -114,6 +122,7 @@ async def test_load_and_list_series_branches(db_session: AsyncSession) -> None:
     assert loaded.publisher_name == "DC Comics"
     assert loaded.owned_count == 1
     assert loaded.wanted_count == 1
+    assert loaded.preferred_library_root_id == preferred_root.id
 
     with pytest.raises(NotFoundError):
         await series_api._load_series_response(db_session, 99999)
@@ -135,6 +144,7 @@ async def test_load_and_list_series_branches(db_session: AsyncSession) -> None:
     assert listed.items[0].publisher_name == "DC Comics"
     assert listed.items[0].owned_count == 1
     assert listed.items[0].wanted_count == 1
+    assert listed.items[0].preferred_library_root_id == preferred_root.id
     assert listed.has_more is False
 
 
@@ -147,6 +157,8 @@ def test_enrich_series_fallback_counts() -> None:
         series_type=SeriesType.STANDARD,
         monitored=True,
         issue_count=2,
+        library_root_id=10,
+        preferred_library_root_id=20,
     )
     series.issues = [
         Issue(series_id=99, issue_number=1, status=IssueStatus.OWNED),
@@ -160,6 +172,8 @@ def test_enrich_series_fallback_counts() -> None:
     assert detail["wanted_count"] == 1
     assert listed["owned_count"] == 1
     assert listed["wanted_count"] == 1
+    assert detail["preferred_library_root_id"] == 20
+    assert listed["preferred_library_root_id"] == 20
 
 
 @pytest.mark.asyncio
@@ -208,7 +222,12 @@ async def test_bulk_delete_and_delete_context_branches(
         _session: AsyncSession,
         series_ids: list[int],
     ) -> SimpleNamespace:
-        return SimpleNamespace(series_count=len(series_ids), linked_file_count=4)
+        return SimpleNamespace(
+            series_count=len(series_ids),
+            linked_file_count=4,
+            managed_file_count=3,
+            referenced_file_count=1,
+        )
 
     monkeypatch.setattr(series_api.SeriesService, "delete", fake_delete)
     monkeypatch.setattr(
@@ -232,6 +251,8 @@ async def test_bulk_delete_and_delete_context_branches(
     )
     assert context.series_count == 2
     assert context.linked_file_count == 4
+    assert context.managed_file_count == 3
+    assert context.referenced_file_count == 1
 
 
 @pytest.mark.asyncio
@@ -315,9 +336,37 @@ async def test_add_update_refresh_and_folder_routes_delegate(
         "new_path": "/comics/Absolute Superman (2025)"
     }
 
-    refreshed = await series_api.refresh_series(10, _user(), db_session)
-    assert refreshed.id == 10
-    metadata_service.refresh_series.assert_awaited_once_with(db_session, 10, force=True)
+    refresh_target = await _seed_series(db_session, title="Refresh Target")
+    refreshed = await series_api.refresh_series(refresh_target.id, _user(), db_session)
+    assert refreshed.id == refresh_target.id
+    metadata_service.refresh_series.assert_awaited_once_with(
+        db_session,
+        refresh_target.id,
+        force=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_series_rejects_duplicate_initial_catalog_sync(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    series = await _seed_series(db_session, title="Hydrating Refresh Target")
+    series.issue_catalog_state = IssueCatalogState.HYDRATING
+    await db_session.commit()
+    metadata_service = SimpleNamespace(refresh_series=AsyncMock())
+    monkeypatch.setattr(
+        series_api,
+        "_build_metadata_service",
+        AsyncMock(return_value=metadata_service),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await series_api.refresh_series(series.id, _user(), db_session)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Initial metadata sync is already in progress."
+    metadata_service.refresh_series.assert_not_awaited()
 
 
 @pytest.mark.asyncio

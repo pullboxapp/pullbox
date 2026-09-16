@@ -6,6 +6,7 @@ reach indexer download URLs directly.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,6 +47,53 @@ def _make_response(
 class TestAddNzb:
     """Tests for SABnzbdClient.add_nzb()."""
 
+    async def test_nzb_fetch_allows_proxy_delay_without_extending_sab_control_timeout(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def transport(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.host == "indexer.test":
+                # Model a proxy that needs more time than a local control API.
+                if request.extensions["timeout"]["read"] < 30:
+                    raise httpx.ReadTimeout("Slow proxy", request=request)
+                return httpx.Response(200, content=_FAKE_NZB_CONTENT)
+            return httpx.Response(200, json={"status": True, "nzo_ids": ["test-id"]})
+
+        client = _make_client()
+        await client._client.aclose()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport), timeout=10) as http:
+            client._client = http
+            assert (
+                await client.add_nzb("https://indexer.test/release.nzb", "Test issue") == "test-id"
+            )
+        assert len(requests) == 2
+        assert requests[0].extensions["timeout"]["read"] == 60
+        assert requests[0].extensions["timeout"]["connect"] == 10
+        assert requests[1].extensions["timeout"]["read"] == 10
+
+    async def test_nzb_fetch_has_total_deadline_and_never_submits_after_timeout(
+        self, monkeypatch
+    ) -> None:
+        from pullbox.providers.download import sabnzbd
+
+        monkeypatch.setattr(sabnzbd, "_NZB_FETCH_DEADLINE", 0.01, raising=False)
+        client = _make_client()
+
+        async def never_finishes(*args: Any, **kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        client._client.get = AsyncMock(side_effect=never_finishes)
+        client._client.post = AsyncMock()
+        try:
+            async with asyncio.timeout(1):
+                with pytest.raises(
+                    SABnzbdError, match="Failed to download NZB from URL: Request timed out"
+                ):
+                    await client.add_nzb("https://indexer.test/slow.nzb", "Test issue")
+            client._client.post.assert_not_awaited()
+        finally:
+            await client._client.aclose()
+
     async def test_add_nzb_downloads_locally_then_uploads_to_sab(self) -> None:
         client = _make_client(category="comics", priority="1", post_processing="3")
         fetch_response = _make_response()
@@ -59,6 +107,7 @@ class TestAddNzb:
         client._client.get.assert_awaited_once_with(  # type: ignore[attr-defined]
             "http://example.com/test.nzb",
             follow_redirects=True,
+            timeout=httpx.Timeout(10.0, read=60.0),
         )
         client._client.post.assert_awaited_once()  # type: ignore[attr-defined]
 

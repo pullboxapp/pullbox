@@ -25,11 +25,13 @@ import os
 import sqlite3
 import sys
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -46,6 +48,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
     ImportSourceType,
 )
+from pullbox.models.library import LibraryRoot
 from pullbox.models.series import Series
 from pullbox.models.user import APIKey, User
 from pullbox.schemas.import_job import (
@@ -54,6 +57,7 @@ from pullbox.schemas.import_job import (
     OrphanRecoveryProgressResponse,
     SeriesSelectionBulkUpdateRequest,
 )
+from pullbox.services import library_root_management
 from pullbox.services.auth_service import AuthService
 
 
@@ -105,6 +109,38 @@ async def _api_key_header(
         session.add(APIKey(user_id=user.id, key_hash=key_hash, name="import-test"))
         await session.commit()
     return raw_key
+
+
+@pytest.fixture
+async def configured_managed_root(
+    _db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LibraryRoot:
+    """Model the application-startup managed-root invariant."""
+    root_path = tmp_path / "api-managed-root"
+    root_path.mkdir()
+    async with _db_factory() as session:
+        root = LibraryRoot(
+            name="API managed root",
+            path=str(root_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        session.add(root)
+        await session.commit()
+        root_id = root.id
+    monkeypatch.setattr(
+        library_root_management.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=100 * 1024**3),
+    )
+    async with _db_factory() as session:
+        persisted = await session.get(LibraryRoot, root_id)
+        assert persisted is not None
+        return persisted
 
 
 @pytest.fixture
@@ -516,8 +552,581 @@ async def _seed_mixed_review_selection_job(
 # ── Tests: POST /import ──────────────────────────────────────────────
 
 
+class TestImportLayoutPreview:
+    """Test POST /api/v1/import/layout-preview."""
+
+    @pytest.mark.asyncio
+    async def test_preview_is_read_only_and_returns_relative_examples(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        series = tmp_path / "DC Comics" / "Batman (2011)"
+        series.mkdir(parents=True)
+        (series / "Issue 001.cbz").write_bytes(b"fixture")
+
+        response = await client.post(
+            "/api/v1/import/layout-preview",
+            json={
+                "source_path": str(tmp_path),
+                "source_type": "filesystem",
+                "layout": {"mode": "auto"},
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["effective_spec"]["mode"] == "auto"
+        assert data["files_considered"] == 1
+        assert data["files_fitting"] == 1
+        assert data["archive_probes"] == 0
+        assert data["can_keep_in_place"] is False
+        assert "source_outside_library_root" in data["warnings"]
+        assert data["clusters"][0]["examples"][0]["relative_path"] == (
+            "DC Comics/Batman (2011)/Issue 001.cbz"
+        )
+        assert str(tmp_path) not in response.text
+
+        from sqlalchemy import func, select
+
+        async with _db_factory() as session:
+            assert await session.scalar(select(func.count(ImportJob.id))) == 0
+
+    @pytest.mark.asyncio
+    async def test_preview_allows_in_place_only_inside_enabled_library_root(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        library_path = tmp_path / "library"
+        source_path = library_path / "Existing Layout"
+        source_path.mkdir(parents=True)
+        (source_path / "Issue 001.cbz").write_bytes(b"fixture")
+        async with _db_factory() as session:
+            session.add(LibraryRoot(name="Library", path=str(library_path), enabled=True))
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/layout-preview",
+            json={
+                "source_path": str(source_path),
+                "source_type": "filesystem",
+                "layout": {"mode": "auto"},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["can_keep_in_place"] is True
+        assert "source_outside_library_root" not in response.json()["warnings"]
+
+    @pytest.mark.asyncio
+    async def test_preview_rejects_invalid_custom_template(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        response = await client.post(
+            "/api/v1/import/layout-preview",
+            json={
+                "source_path": str(tmp_path),
+                "source_type": "filesystem",
+                "layout": {
+                    "mode": "custom",
+                    "series_path_template": "../{Series}",
+                },
+            },
+        )
+
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_preview_requires_authentication(
+        self,
+        unauth_client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        response = await unauth_client.post(
+            "/api/v1/import/layout-preview",
+            json={
+                "source_path": str(tmp_path),
+                "source_type": "filesystem",
+            },
+        )
+
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_preview_handles_source_disappearing_after_validation(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        with patch(
+            "pullbox.api.v1.import_jobs.ImportLayoutAnalyzer.analyze",
+            new_callable=AsyncMock,
+            side_effect=FileNotFoundError(str(tmp_path / "private-source")),
+        ):
+            response = await client.post(
+                "/api/v1/import/layout-preview",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                },
+            )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["message"] == (
+            "The layout preview source is no longer available or readable."
+        )
+        assert "private-source" not in response.text
+
+
+class TestMylarPathPreview:
+    """Test POST /api/v1/import/mylar-path-preview."""
+
+    async def test_report_storage_failure_has_nonblocking_action_plan(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "comics"
+        (root / "Existing").mkdir(parents=True)
+        database = tmp_path / "mylar.db"
+        self._write_mylar_database(database, [str(root / "Existing")])
+        async with _db_factory() as session:
+            session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
+            await session.commit()
+
+        report_directory = tmp_path / "diagnostics" / "mylar-preflight"
+        with (
+            patch(
+                "pullbox.api.v1.import_jobs.path_reports.save_report",
+                side_effect=OSError("disk full"),
+            ),
+            patch(
+                "pullbox.api.v1.import_jobs.path_reports.report_directory",
+                return_value=report_directory,
+            ),
+        ):
+            response = await client.post(
+                "/api/v1/import/mylar-path-preview",
+                json={"source_path": str(database)},
+            )
+
+        assert response.status_code == 200
+        preview = response.json()
+        assert "report_unavailable" in preview["warnings"]
+        attention = next(
+            item for item in preview["attention_items"] if item["code"] == "report_unavailable"
+        )
+        assert attention["blocks_import"] is False
+        assert attention["action"] is None
+        assert attention["details"]["known_paths"] == [str(report_directory)]
+        assert any("free space" in step.lower() for step in attention["details"]["steps"])
+        assert preview["attention_fingerprint"]
+
+    async def test_exception_report_is_paged_searchable_and_downloadable(
+        self,
+        client: AsyncClient,
+        unauth_client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "comics"
+        (root / "Existing").mkdir(parents=True)
+        database = tmp_path / "mylar.db"
+        self._write_mylar_database(
+            database, [str(root / "Existing")] + [str(root / f"Missing {i:02}") for i in range(31)]
+        )
+        async with _db_factory() as session:
+            session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
+            await session.commit()
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview", json={"source_path": str(database)}
+        )
+        assert response.status_code == 200
+        preview = response.json()
+        assert preview.get("report_id")
+        assert preview["exception_count"] == 31
+        assert len(preview["exceptions"]) == 25
+        url = f"/api/v1/import/mylar-path-reports/{preview['report_id']}"
+        second = await client.get(url, params={"page": 2})
+        assert second.status_code == 200
+        assert len(second.json()["items"]) == 6
+        found = await client.get(url, params={"search": "Missing 30"})
+        assert found.json()["total"] == 1
+        exported = await client.get(url + "/export")
+        assert exported.status_code == 200
+        assert "attachment" in exported.headers["content-disposition"]
+        assert len(exported.json()["exceptions"]) == 31
+        assert (await unauth_client.get(url)).status_code == 401
+        assert (
+            await client.get("/api/v1/import/mylar-path-reports/not-a-report")
+        ).status_code == 404
+
+    @staticmethod
+    def _write_mylar_database(path: Path, locations: list[str]) -> None:
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE comics (ComicLocation TEXT)")
+        connection.executemany(
+            "INSERT INTO comics (ComicLocation) VALUES (?)",
+            [(location,) for location in locations],
+        )
+        connection.commit()
+        connection.close()
+
+    @pytest.mark.asyncio
+    async def test_preview_reports_identity_and_two_manual_mappings(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        identity_root = tmp_path / "identity"
+        current_root = tmp_path / "current"
+        archive_root = tmp_path / "archive"
+        (identity_root / "Identity Series").mkdir(parents=True)
+        (current_root / "Current Series").mkdir(parents=True)
+        (archive_root / "Archive Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(
+            db_path,
+            [
+                str(identity_root / "Identity Series"),
+                "/books/current/Current Series",
+                "/books/archive/Archive Series",
+            ],
+        )
+        async with _db_factory() as session:
+            session.add_all(
+                [
+                    LibraryRoot(name="Identity", path=str(identity_root), enabled=True),
+                    LibraryRoot(name="Current", path=str(current_root), enabled=True),
+                    LibraryRoot(name="Archive", path=str(archive_root), enabled=True),
+                ]
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "auto_detect": False,
+                "mappings": [
+                    {
+                        "stored_prefix": "/books/current",
+                        "pullbox_prefix": str(current_root),
+                    },
+                    {
+                        "stored_prefix": "/books/archive",
+                        "pullbox_prefix": str(archive_root),
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"] == {
+            "locations": 3,
+            "identity_resolved": 1,
+            "mapped_existing": 2,
+            "mapped_missing": 0,
+            "missing": 0,
+            "unmapped": 0,
+            "outside_root": 0,
+            "unreadable": 0,
+            "ambiguous": 0,
+            "invalid": 0,
+        }
+        assert data["requires_confirmation"] is True
+        assert data["can_confirm"] is True
+        assert data["path_map"] == {
+            "/books/current": str(current_root),
+            "/books/archive": str(archive_root),
+        }
+        assert [mapping["provenance"] for mapping in data["mappings"]] == [
+            "manual",
+            "manual",
+        ]
+        examples = [
+            example["relative_path"]
+            for mapping in data["mappings"]
+            for example in mapping["examples"]
+        ]
+        assert examples == ["Current Series", "Archive Series"]
+
+        from sqlalchemy import func, select
+
+        async with _db_factory() as session:
+            assert await session.scalar(select(func.count(ImportJob.id))) == 0
+
+    @pytest.mark.asyncio
+    async def test_identity_only_preview_can_be_confirmed_without_mapping_checkbox(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        library_root = tmp_path / "library"
+        (library_root / "Identity Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, [str(library_root / "Identity Series")])
+        async with _db_factory() as session:
+            session.add(LibraryRoot(name="Library", path=str(library_root), enabled=True))
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "auto_detect": True,
+                "mappings": [],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["identity_resolved"] == 1
+        assert data["path_map"] == {}
+        assert data["requires_confirmation"] is False
+        assert data["can_confirm"] is True
+
+    @pytest.mark.asyncio
+    async def test_in_place_preview_rejects_source_paths_in_a_managed_only_root(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        managed_only_root = tmp_path / "managed-only"
+        (managed_only_root / "Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, [str(managed_only_root / "Series")])
+        async with _db_factory() as session:
+            session.add(
+                LibraryRoot(
+                    name="Managed only",
+                    path=str(managed_only_root),
+                    enabled=True,
+                    allow_referenced_registrations=False,
+                    allow_managed_writes=True,
+                )
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "file_handling_mode": "in_place",
+                "auto_detect": True,
+                "mappings": [],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["identity_resolved"] == 0
+        assert data["resolution"]["outside_root"] == 1
+        assert data["can_confirm"] is False
+
+    @pytest.mark.asyncio
+    async def test_managed_copy_preview_accepts_manual_mapping_outside_library_roots(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        external_source = tmp_path / "mylar-comics"
+        (external_source / "Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, ["/stored/comics/Series"])
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "file_handling_mode": "managed_copy",
+                "auto_detect": False,
+                "mappings": [
+                    {
+                        "stored_prefix": "/stored/comics",
+                        "pullbox_prefix": str(external_source),
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["mapped_existing"] == 1
+        assert data["resolution"]["outside_root"] == 0
+        assert data["can_confirm"] is True
+        assert data["mappings"][0]["library_root_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_preview_auto_detects_two_independent_library_prefixes(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        current_root = tmp_path / "current"
+        archive_root = tmp_path / "archive"
+        (current_root / "Current One").mkdir(parents=True)
+        (current_root / "Current Two").mkdir(parents=True)
+        (archive_root / "Archive One").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(
+            db_path,
+            [
+                "/books/current/Current One",
+                "/books/current/Current Two",
+                "/books/archive/Archive One",
+            ],
+        )
+        async with _db_factory() as session:
+            session.add_all(
+                [
+                    LibraryRoot(name="Current", path=str(current_root), enabled=True),
+                    LibraryRoot(name="Archive", path=str(archive_root), enabled=True),
+                ]
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "auto_detect": True,
+                "mappings": [],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["path_map"] == {
+            "/books/current": str(current_root),
+            "/books/archive": str(archive_root),
+        }
+        assert data["resolution"]["mapped_existing"] == 3
+        assert data["resolution"]["ambiguous"] == 0
+        assert data["can_confirm"] is True
+        assert all(mapping["provenance"] == "automatic" for mapping in data["mappings"])
+
+    @pytest.mark.asyncio
+    async def test_identity_wins_and_blocks_a_no_effect_manual_alias(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        identity_root = tmp_path / "identity"
+        alias_root = tmp_path / "alias"
+        (identity_root / "Series").mkdir(parents=True)
+        (alias_root / "Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, [str(identity_root / "Series")])
+        async with _db_factory() as session:
+            session.add_all(
+                [
+                    LibraryRoot(name="Identity", path=str(identity_root), enabled=True),
+                    LibraryRoot(name="Alias", path=str(alias_root), enabled=True),
+                ]
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={
+                "source_path": str(db_path),
+                "source_type": "mylar3",
+                "auto_detect": False,
+                "mappings": [
+                    {
+                        "stored_prefix": str(identity_root),
+                        "pullbox_prefix": str(alias_root),
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["identity_resolved"] == 1
+        assert data["resolution"]["mapped_existing"] == 0
+        assert data["can_confirm"] is False
+        assert data["mappings"][0]["blocking_reasons"] == ["mapping_does_not_improve_coverage"]
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_automatic_targets_block_confirmation(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        first_root = tmp_path / "first"
+        second_root = tmp_path / "second"
+        (first_root / "Series").mkdir(parents=True)
+        (second_root / "Series").mkdir(parents=True)
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, ["/books/Series"])
+        async with _db_factory() as session:
+            session.add_all(
+                [
+                    LibraryRoot(name="First", path=str(first_root), enabled=True),
+                    LibraryRoot(name="Second", path=str(second_root), enabled=True),
+                ]
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={"source_path": str(db_path), "source_type": "mylar3"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["resolution"]["ambiguous"] == 1
+        assert data["path_map"] == {}
+        assert data["can_confirm"] is False
+        assert "ambiguous_mapping_candidates" in data["warnings"]
+
+    @pytest.mark.asyncio
+    async def test_preview_requires_authentication(
+        self,
+        unauth_client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "mylar.db"
+        self._write_mylar_database(db_path, [])
+
+        response = await unauth_client.post(
+            "/api/v1/import/mylar-path-preview",
+            json={"source_path": str(db_path), "source_type": "mylar3"},
+        )
+
+        assert response.status_code == 401
+
+
 class TestCreateImportJob:
     """Test POST /api/v1/import."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_create_job(
@@ -540,6 +1149,19 @@ class TestCreateImportJob:
         data = resp.json()
         assert data["status"] == "pending"
         assert data["source_type"] == "filesystem"
+        assert data["file_handling_mode"] == "managed_copy"
+        assert data["source_layout_snapshot"] == {
+            "schema_version": 1,
+            "mode": "auto",
+            "preset": None,
+            "series_path_template": None,
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        }
+        assert data["future_layout_requested"] is False
+        assert data["future_root_policy_snapshot"] is None
+        assert data["future_root_policy_applied_at"] is None
         mock_trigger.assert_called_once_with(data["id"])
 
     @pytest.mark.asyncio
@@ -558,6 +1180,62 @@ class TestCreateImportJob:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
+    async def test_create_job_accepts_selected_layout_with_automatic_fallback(
+        self,
+        client: AsyncClient,
+        tmp_path: object,
+    ) -> None:
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            resp = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                    "source_layout": {
+                        "mode": "preset",
+                        "preset": "publisher_series",
+                        "fallback_to_auto": True,
+                    },
+                },
+            )
+
+        assert resp.status_code == 201
+        assert resp.json()["source_layout_snapshot"] == {
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "series_path_template": "{Publisher}/{Series}",
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        }
+        mock_trigger.assert_called_once_with(resp.json()["id"])
+
+    @pytest.mark.asyncio
+    async def test_create_job_accepts_selected_layout_with_review_only_outliers(
+        self,
+        client: AsyncClient,
+        tmp_path: object,
+    ) -> None:
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            resp = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                    "source_layout": {
+                        "mode": "preset",
+                        "preset": "publisher_series",
+                        "fallback_to_auto": False,
+                    },
+                },
+            )
+
+        assert resp.status_code == 201
+        assert resp.json()["source_layout_snapshot"]["fallback_to_auto"] is False
+        mock_trigger.assert_called_once_with(resp.json()["id"])
+
+    @pytest.mark.asyncio
     async def test_create_job_invalid_source_type(
         self,
         client: AsyncClient,
@@ -572,6 +1250,148 @@ class TestCreateImportJob:
             },
         )
         assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_create_job_accepts_in_place_source_inside_enabled_root(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        library_path = tmp_path / "library"
+        source_path = library_path / "Existing Layout"
+        source_path.mkdir(parents=True)
+        async with _db_factory() as session:
+            existing_roots = list((await session.scalars(select(LibraryRoot))).all())
+            for existing_root in existing_roots:
+                await session.delete(existing_root)
+            await session.flush()
+            root = LibraryRoot(
+                name="Library",
+                path=str(library_path),
+                enabled=True,
+                is_default_managed_destination=True,
+            )
+            session.add(root)
+            await session.commit()
+
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            resp = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(source_path),
+                    "source_type": "filesystem",
+                    "file_handling_mode": "in_place",
+                },
+            )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["file_handling_mode"] == "in_place"
+        assert data["target_library_root_id"] is None
+        assert data["move_to_library"] is False
+        assert data["convert_to_preferred_format"] is False
+        assert data["update_embedded_comicinfo_from_match"] is False
+        mock_trigger.assert_called_once_with(data["id"])
+
+    @pytest.mark.asyncio
+    async def test_create_job_accepts_future_layout_for_selected_root(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        library_path = tmp_path / "future-library"
+        library_path.mkdir()
+        async with _db_factory() as session:
+            root = LibraryRoot(name="Future Library", path=str(library_path), enabled=True)
+            session.add(root)
+            await session.commit()
+            root_id = root.id
+
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            response = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                    "target_library_root_id": root_id,
+                    "future_layout_requested": True,
+                    "future_root_policy": {
+                        "schema_version": 1,
+                        "series_path_template": "{Publisher}/{Series} ({Year})",
+                        "comic_file_template": ("{Series} {IssueTitle} Issue {Issue:03d}"),
+                        "annual_file_template": "{Series} Annual Issue {Issue:03d}",
+                        "non_standard_file_template": (
+                            "{Series} {Type} {Volume:02d} - {IssueTitle}"
+                        ),
+                        "single_non_standard_file_template": ("{Series} {Type} - {IssueTitle}"),
+                        "replace_illegal_characters": True,
+                        "colon_replacement": "dash",
+                    },
+                },
+            )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["target_library_root_id"] == root_id
+        assert data["future_layout_requested"] is True
+        assert data["future_root_policy_snapshot"]["series_path_template"] == (
+            "{Publisher}/{Series} ({Year})"
+        )
+        assert data["future_root_policy_applied_at"] is None
+        mock_trigger.assert_called_once_with(data["id"])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            (
+                {
+                    "future_layout_requested": True,
+                    "future_root_policy": {
+                        "schema_version": 1,
+                        "series_path_template": "{Publisher}/{Series} ({Year})",
+                        "comic_file_template": "{Series} {IssueTitle} Issue {Issue:03d}",
+                        "annual_file_template": "{Series} Annual Issue {Issue:03d}",
+                        "non_standard_file_template": (
+                            "{Series} {Type} {Volume:02d} - {IssueTitle}"
+                        ),
+                        "single_non_standard_file_template": ("{Series} {Type} - {IssueTitle}"),
+                        "replace_illegal_characters": True,
+                        "colon_replacement": "dash",
+                    },
+                },
+                "No managed library destination is configured",
+            ),
+        ],
+    )
+    async def test_create_job_rejects_not_yet_safe_execution_modes(
+        self,
+        client: AsyncClient,
+        _db_factory: async_sessionmaker[AsyncSession],
+        tmp_path: object,
+        overrides: dict[str, object],
+        message: str,
+    ) -> None:
+        async with _db_factory() as session:
+            roots = list((await session.scalars(select(LibraryRoot))).all())
+            for root in roots:
+                await session.delete(root)
+            await session.commit()
+        with patch("pullbox.api.v1.import_jobs.trigger_import_scan") as mock_trigger:
+            resp = await client.post(
+                "/api/v1/import",
+                json={
+                    "source_path": str(tmp_path),
+                    "source_type": "filesystem",
+                    **overrides,
+                },
+            )
+
+        assert resp.status_code == 409
+        assert message in resp.json()["detail"]
+        mock_trigger.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_job_rejects_existing_active_import(
@@ -816,6 +1636,13 @@ class TestGetPreview:
 
 class TestConfirmImport:
     """Test POST /api/v1/import/{id}/confirm."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_confirm_succeeds(
@@ -1388,6 +2215,31 @@ class TestCancelImportJob:
 
         resp = await client.delete(f"/api/v1/import/{job_id}")
         assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_delete_returns_202_when_story_arc_rollback_is_still_pending(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """DELETE must not report success while a live placement still owns its fence."""
+        service = MagicMock()
+        service.cancel_job = AsyncMock(return_value="rollback_pending")
+
+        with patch(
+            "pullbox.api.v1.import_jobs._make_import_service",
+            return_value=service,
+        ):
+            resp = await client.delete("/api/v1/import/42")
+
+        assert resp.status_code == 202
+        assert resp.json() == {
+            "status": "rollback_pending",
+            "message": (
+                "Rollback is still stopping an in-progress Story Arc placement. "
+                "The import remains in history; delete it again after rollback finishes."
+            ),
+        }
+        service.cancel_job.assert_awaited_once_with(ANY, 42)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2235,8 +3087,59 @@ class TestRetryFailedEndpoint:
 # ── Tests: POST /import/{id}/retry ───────────────────────────────────
 
 
+class TestRetryStoryArcPlacementsEndpoint:
+    """Test stalled import-owned Story Arc placement recovery."""
+
+    @pytest.mark.asyncio
+    async def test_retry_story_arc_placements_commits_before_scheduler_nudge(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        job = MagicMock(id=41)
+        service = MagicMock()
+        service.retry_story_arc_placements = AsyncMock(return_value=(job, 2))
+
+        with patch(
+            "pullbox.api.v1.import_jobs._make_import_service",
+            return_value=service,
+        ):
+            resp = await client.post("/api/v1/import/41/story-arc-placements/retry")
+
+        assert resp.status_code == 202
+        assert resp.json() == {"job_id": 41, "retrying_count": 2}
+        service.retry_story_arc_placements.assert_awaited_once_with(ANY, 41)
+        service.schedule_story_arc_sync.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_retry_story_arc_placements_rejects_ineligible_job_without_nudge(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        service = MagicMock()
+        service.retry_story_arc_placements = AsyncMock(
+            side_effect=ValidationError("Import job is not stalled on Story Arc placements.")
+        )
+
+        with patch(
+            "pullbox.api.v1.import_jobs._make_import_service",
+            return_value=service,
+        ):
+            resp = await client.post("/api/v1/import/41/story-arc-placements/retry")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Import job is not stalled on Story Arc placements."
+        service.schedule_story_arc_sync.assert_not_called()
+
+
 class TestRetryImportEndpoint:
     """Test fresh retry API endpoint."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_retry_import_creates_new_job_and_redirect(
@@ -2333,6 +3236,7 @@ class TestAuthRequired:
             ("POST", "/api/v1/import/orphaned/1/assign"),
             ("POST", "/api/v1/import/orphaned/1/dismiss"),
             ("POST", "/api/v1/import/1/retry-failed"),
+            ("POST", "/api/v1/import/1/story-arc-placements/retry"),
             ("POST", "/api/v1/import/1/retry"),
             # File-level endpoints (R-6)
             ("GET", "/api/v1/import/1/series/1/files"),
@@ -2356,6 +3260,13 @@ class TestAuthRequired:
 
 class TestHandlersDirect:
     """Call route functions directly for coverage of handler bodies."""
+
+    @pytest.fixture(autouse=True)
+    async def _configured_managed_root(
+        self,
+        configured_managed_root: LibraryRoot,
+    ) -> None:
+        _ = configured_managed_root
 
     @pytest.mark.asyncio
     async def test_create_job_direct(
@@ -2867,6 +3778,46 @@ class TestHandlersDirect:
             assert result is not None
             assert result.status == ImportJobStatus.ROLLING_BACK
             assert result.control_request == ImportControlRequest.CANCEL
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_placement_wait_commits_and_triggers_rollback(
+        self,
+        _db_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A placement-wait cancel must not strand the job in CANCELLING."""
+        from pullbox.api.v1.import_jobs import request_cancel_import_job
+        from pullbox.models.import_job import ImportControlRequest
+
+        job_id = await _seed_import_job(_db_factory, status=ImportJobStatus.IMPORTING)
+        async with _db_factory() as session:
+            job = await session.get(ImportJob, job_id)
+            assert job is not None
+            job.import_started_at = datetime.now(UTC)
+            job.progress_snapshot = {
+                "status": ImportJobStatus.IMPORTING.value,
+                "mode": "import",
+                "phase": "story_arc_placements",
+                "progress": 99,
+            }
+            await session.commit()
+
+        with patch("pullbox.api.v1.import_jobs.trigger_import_rollback") as trigger_rollback:
+            async with _db_factory() as session:
+                result = await request_cancel_import_job(
+                    job_id=job_id,
+                    _user=MagicMock(),
+                    session=session,
+                )
+
+        assert result is not None
+        assert result.status is ImportJobStatus.ROLLING_BACK
+        assert result.control_request is ImportControlRequest.CANCEL
+        trigger_rollback.assert_called_once_with(job_id)
+
+        async with _db_factory() as session:
+            persisted = await session.get(ImportJob, job_id)
+        assert persisted is not None
+        assert persisted.status is ImportJobStatus.ROLLING_BACK
 
     @pytest.mark.asyncio
     async def test_override_direct(

@@ -363,5 +363,5 @@ class DashboardPriorityBuilder:
                 snapshot.computed_at,
             ),
             cta_label="Review unmatched",
-            cta_href="/import?tab=unmatched",
+            cta_href="/import?tab=follow-up",
         )

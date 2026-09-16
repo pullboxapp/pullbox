@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.core.exceptions import ProviderError
@@ -15,7 +16,11 @@ from pullbox.models import Base
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
     DirectAcquisitionState,
+    DirectArtifactAttempt,
     DirectArtifactFailureClass,
+    DirectArtifactHostKind,
+    DirectArtifactRouteKind,
+    DirectArtifactState,
     DirectProviderConfig,
     DirectProviderState,
     DirectProviderTrustLevel,
@@ -572,3 +577,314 @@ async def test_non_intervention_direct_failure_without_fallback_does_not_queue_r
     assert routed.queued == 0
     assert routed.action_status == "source_unavailable"
     intervention_service.create_direct_pending_match.assert_not_awaited()
+
+
+async def test_ineligible_scope_never_creates_discoveries_or_queues_sources(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, provider, search_log_id = await _seed(db_factory)
+    download_service = AsyncMock()
+    intervention_service = AsyncMock()
+    runner = SimpleNamespace(dispatch=AsyncMock())
+    planner = AsyncMock()
+    async with db_factory() as session:
+        routed = await route_search_acquisition(
+            session,
+            outcome=_outcome_with_indexer_fallback(target, provider),
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=download_service,
+            intervention_service=intervention_service,
+            runner=runner,
+            planner=planner,
+            eligibility_check=AsyncMock(return_value=False),
+        )
+        assert list(await session.scalars(select(DirectAcquisitionAttempt))) == []
+    assert (routed.grabbed, routed.queued, routed.action_status) == (0, 0, "no_longer_eligible")
+    download_service.send_to_client.assert_not_awaited()
+    intervention_service.create_pending_match.assert_not_awaited()
+    intervention_service.create_direct_pending_match.assert_not_awaited()
+    planner.assert_not_awaited()
+    runner.dispatch.assert_not_awaited()
+
+
+async def test_scope_revoked_during_direct_resolution_cancels_plan_before_dispatch(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, provider, search_log_id = await _seed(db_factory)
+    runner = SimpleNamespace(dispatch=AsyncMock())
+    download_service = AsyncMock()
+    intervention_service = AsyncMock()
+
+    async def plan(session: AsyncSession, *, acquisition_id: int):
+        attempt = await session.get(DirectAcquisitionAttempt, acquisition_id)
+        assert attempt is not None
+        attempt.state = DirectAcquisitionState.PLANNED
+        artifact = DirectArtifactAttempt(
+            acquisition_attempt_id=attempt.id,
+            sequence_no=0,
+            artifact_identity="opaque-route",
+            route_kind=DirectArtifactRouteKind.DIRECT,
+            host_kind=DirectArtifactHostKind.GENERIC_HTTPS,
+            state=DirectArtifactState.PLANNED,
+            is_selected=True,
+        )
+        session.add(artifact)
+        await session.commit()
+        # Model a user action while provider resolution is in flight.
+        async with db_factory() as changed:
+            issue = await changed.get(Issue, target.issue_id)
+            assert issue is not None
+            issue.manual_skip = True
+            await changed.commit()
+        return SimpleNamespace(attempt=attempt, selected_artifact=artifact, initial_source=None)
+
+    async with db_factory() as session:
+
+        async def eligible() -> bool:
+            return (
+                await session.scalar(select(Issue.manual_skip).where(Issue.id == target.issue_id))
+                is False
+            )
+
+        routed = await route_search_acquisition(
+            session,
+            outcome=_outcome_with_indexer_fallback(target, provider),
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=download_service,
+            intervention_service=intervention_service,
+            runner=runner,
+            source_priority=["direct", "torrent", "usenet"],
+            planner=plan,
+            eligibility_check=eligible,
+        )
+        await session.commit()
+    assert routed.action_status == "no_longer_eligible"
+    runner.dispatch.assert_not_awaited()
+    download_service.send_to_client.assert_not_awaited()
+    intervention_service.create_direct_pending_match.assert_not_awaited()
+    async with db_factory() as session:
+        attempt = await session.scalar(select(DirectAcquisitionAttempt))
+        artifact = await session.scalar(select(DirectArtifactAttempt))
+        config = await session.get(DirectProviderConfig, provider.provider_config_id)
+        assert attempt is not None and artifact is not None and config is not None
+        assert attempt.state is DirectAcquisitionState.CANCELLED
+        assert artifact.state is DirectArtifactState.CANCELLED
+        assert attempt.failure_class is DirectArtifactFailureClass.USER_ACTION
+        assert attempt.failure_code == "no_longer_eligible"
+        assert artifact.failure_class is DirectArtifactFailureClass.USER_ACTION
+        assert attempt.completed_at is not None and artifact.completed_at is not None
+        assert attempt.progress_snapshot["stage"] == "cancelled"
+        assert config.state is DirectProviderState.HEALTHY
+
+
+@pytest.mark.parametrize("intervention", [False, True])
+async def test_scope_revoked_during_direct_failure_prevents_review_and_fallback(
+    db_factory: async_sessionmaker[AsyncSession], intervention: bool
+) -> None:
+    target, provider, search_log_id = await _seed(db_factory)
+    is_eligible = True
+    download_service = AsyncMock()
+    intervention_service = AsyncMock()
+    runner = SimpleNamespace(dispatch=AsyncMock())
+
+    async def eligible() -> bool:
+        return is_eligible
+
+    async def fail(session: AsyncSession, *, acquisition_id: int):
+        nonlocal is_eligible
+        attempt = await session.get(DirectAcquisitionAttempt, acquisition_id)
+        assert attempt is not None
+        # A real planner records its failure state before raising.
+        attempt.state = (
+            DirectAcquisitionState.INTERVENTION if intervention else DirectAcquisitionState.FAILED
+        )
+        attempt.failure_class = DirectArtifactFailureClass.PROVIDER_UNAVAILABLE
+        attempt.failure_code = "provider_unavailable"
+        is_eligible = False
+        raise DirectAcquisitionPlanningError(
+            "provider_unavailable", "Unavailable", intervention=intervention
+        )
+
+    async with db_factory() as session:
+        routed = await route_search_acquisition(
+            session,
+            outcome=_outcome_with_indexer_fallback(target, provider),
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=download_service,
+            intervention_service=intervention_service,
+            runner=runner,
+            source_priority=["direct", "torrent", "usenet"],
+            planner=fail,
+            eligibility_check=eligible,
+        )
+        await session.commit()
+        attempt = await session.scalar(select(DirectAcquisitionAttempt))
+        assert attempt is not None
+        if intervention:
+            assert attempt.state is DirectAcquisitionState.CANCELLED
+            assert attempt.failure_class is DirectArtifactFailureClass.USER_ACTION
+        else:
+            assert attempt.state is DirectAcquisitionState.FAILED
+            assert attempt.failure_code == "provider_unavailable"
+    assert routed.action_status == "no_longer_eligible"
+    download_service.send_to_client.assert_not_awaited()
+    intervention_service.create_direct_pending_match.assert_not_awaited()
+    runner.dispatch.assert_not_awaited()
+
+
+async def test_eligibility_is_rechecked_before_fallback_after_indexer_network_failure(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, _provider, search_log_id = await _seed(db_factory)
+    is_eligible = True
+
+    async def eligible() -> bool:
+        return is_eligible
+
+    async def failed_send(*_args):
+        nonlocal is_eligible
+        is_eligible = False
+        raise ProviderError("download", "No NZB client")
+
+    download_service = AsyncMock()
+    download_service.send_to_client.side_effect = failed_send
+    async with db_factory() as session:
+        routed = await route_search_acquisition(
+            session,
+            outcome=_outcome_with_indexer_queue_fallback(target),
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=download_service,
+            intervention_service=AsyncMock(),
+            runner=None,
+            eligibility_check=eligible,
+        )
+    assert routed.action_status == "no_longer_eligible"
+    download_service.send_to_client.assert_awaited_once()
+
+
+async def test_eligible_scope_keeps_normal_indexer_acquisition(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, _provider, search_log_id = await _seed(db_factory)
+    download_service = AsyncMock()
+    download_service.send_to_client.return_value = SimpleNamespace(state=DownloadState.SENT)
+    async with db_factory() as session:
+        routed = await route_search_acquisition(
+            session,
+            outcome=_outcome_with_indexer_queue_fallback(target),
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=download_service,
+            intervention_service=AsyncMock(),
+            runner=None,
+            eligibility_check=AsyncMock(return_value=True),
+        )
+    assert routed.action_status == "downloading"
+    assert routed.grabbed == 1
+    download_service.send_to_client.assert_awaited_once()
+
+
+async def test_scope_revoked_after_discovery_does_not_leave_intervention_orphans(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, provider, search_log_id = await _seed(db_factory)
+    intervention_service = AsyncMock()
+    async with db_factory() as session:
+        routed = await route_search_acquisition(
+            session,
+            outcome=_outcome(target, provider),
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "never"},
+            download_service=AsyncMock(),
+            intervention_service=intervention_service,
+            runner=None,
+            eligibility_check=AsyncMock(side_effect=[True, False]),
+        )
+        attempt = await session.scalar(select(DirectAcquisitionAttempt))
+        assert attempt is not None
+        assert attempt.state is DirectAcquisitionState.CANCELLED
+        assert attempt.failure_class is DirectArtifactFailureClass.USER_ACTION
+    assert routed.action_status == "no_longer_eligible"
+    intervention_service.create_direct_pending_match.assert_not_awaited()
+
+
+async def test_scope_revoked_during_pending_lookup_does_not_queue_new_review(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, _provider, search_log_id = await _seed(db_factory)
+    is_eligible = True
+    intervention_service = AsyncMock()
+
+    async def eligible() -> bool:
+        return is_eligible
+
+    async def pending_lookup(*_args) -> bool:
+        nonlocal is_eligible
+        is_eligible = False
+        return False
+
+    intervention_service.has_pending_for_issue.side_effect = pending_lookup
+    async with db_factory() as session:
+        routed = await route_search_acquisition(
+            session,
+            outcome=_outcome_with_indexer_queue_fallback(target),
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "never"},
+            download_service=AsyncMock(),
+            intervention_service=intervention_service,
+            runner=None,
+            eligibility_check=eligible,
+        )
+    assert routed.action_status == "no_longer_eligible"
+    intervention_service.create_pending_match.assert_not_awaited()
+
+
+async def test_eligible_scope_keeps_direct_dispatch_without_open_read_transaction(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target, provider, search_log_id = await _seed(db_factory)
+    planner = AsyncMock(
+        return_value=SimpleNamespace(
+            attempt=SimpleNamespace(id=1),
+            selected_artifact=SimpleNamespace(id=22),
+            initial_source=None,
+        )
+    )
+    async with db_factory() as session:
+
+        async def eligible() -> bool:
+            return (
+                await session.scalar(select(Issue.manual_skip).where(Issue.id == target.issue_id))
+                is False
+            )
+
+        async def dispatch(*_args, **_kwargs) -> bool:
+            assert not session.in_transaction()
+            return True
+
+        runner = SimpleNamespace(dispatch=AsyncMock(side_effect=dispatch))
+        routed = await route_search_acquisition(
+            session,
+            outcome=_outcome(target, provider),
+            search_log_id=search_log_id,
+            eval_kwargs={},
+            type_thresholds={"issue": "high"},
+            download_service=AsyncMock(),
+            intervention_service=AsyncMock(),
+            runner=runner,
+            planner=planner,
+            eligibility_check=eligible,
+        )
+    assert routed.action_status == "downloading"
+    runner.dispatch.assert_awaited_once_with(1, 22, initial_source=None)

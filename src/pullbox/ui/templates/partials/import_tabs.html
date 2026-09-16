@@ -1,11 +1,14 @@
 {% set current_view = view|default("all") %}
 {% set current_page = page|default(1) %}
-{% set unmatched_href = "/import?tab=unmatched" %}
+{% set follow_up_href = "/import?tab=follow-up" %}
 {% if current_view == "dismissed" %}
-  {% set unmatched_href = unmatched_href ~ "&view=dismissed" %}
+  {% set follow_up_href = follow_up_href ~ "&view=dismissed" %}
 {% endif %}
-{% if current_page > 1 and tab == "unmatched" %}
-  {% set unmatched_href = unmatched_href ~ "&page=" ~ current_page %}
+{% if selected_follow_up_job %}
+  {% set follow_up_href = follow_up_href ~ "&job_id=" ~ selected_follow_up_job.id %}
+{% endif %}
+{% if current_page > 1 and tab == "follow-up" %}
+  {% set follow_up_href = follow_up_href ~ "&page=" ~ current_page %}
 {% endif %}
 
 <div id="import-tabs" data-testid="import-tabs" class="downloads-tab-rail">
@@ -22,16 +25,16 @@
     Collection
   </a>
   <a
-    href="{{ unmatched_href }}"
-    data-testid="import-tab-unmatched"
-    hx-get="{{ unmatched_href }}"
+    href="{{ follow_up_href }}"
+    data-testid="import-tab-follow-up"
+    hx-get="{{ follow_up_href }}"
     hx-target="#import-content"
     hx-swap="outerHTML"
     hx-push-url="true"
-    aria-current="{{ 'page' if tab == 'unmatched' else 'false' }}"
-    class="downloads-tab-btn{% if tab == 'unmatched' %} is-active{% endif %}"
+    aria-current="{{ 'page' if tab == 'follow-up' else 'false' }}"
+    class="downloads-tab-btn{% if tab == 'follow-up' %} is-active{% endif %}"
   >
-    Unmatched
+    Follow-up
   </a>
   <a
     href="/import?tab=history"

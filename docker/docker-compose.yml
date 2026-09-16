@@ -42,6 +42,7 @@ services:
       - PULLBOX_LIBRARY_ROOT=/comics
       - PULLBOX_COVERS_DIR=/comics/.covers
       - PULLBOX_READER_ENABLED=${PULLBOX_READER_ENABLED:-true}
+      - PULLBOX_STORY_ARC_MANUAL_CREATE_ENABLED=${PULLBOX_STORY_ARC_MANUAL_CREATE_ENABLED:-false}
       # Optional overrides (config.xml handles the rest):
       # - PULLBOX_PORT=8585
       # - PULLBOX_BASE_URL=https://comics.example.com

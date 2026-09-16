@@ -27,6 +27,8 @@ async def _seed_reading_items(
     count: int,
     mode: str,
     unavailable_last: bool = False,
+    last_page_index: int = 1,
+    page_count: int = 5,
 ) -> list[int]:
     now = datetime.now(UTC)
     async with factory() as session:
@@ -72,9 +74,13 @@ async def _seed_reading_items(
                 IssueReaderState(
                     user_id=user.id,
                     issue_id=issue.id,
-                    last_page_index=1 if mode == "continue" else (4 if mode == "read" else None),
+                    last_page_index=(
+                        last_page_index
+                        if mode == "continue"
+                        else (page_count - 1 if mode == "read" else None)
+                    ),
                     content_revision="revision" if mode in {"continue", "read"} else None,
-                    page_count=5 if mode in {"continue", "read"} else None,
+                    page_count=page_count if mode in {"continue", "read"} else None,
                     progress_updated_at=opened_at if mode in {"continue", "read"} else None,
                     last_opened_at=opened_at if mode in {"continue", "read"} else None,
                     completed_at=opened_at if mode == "read" else None,

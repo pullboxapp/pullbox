@@ -1,0 +1,70 @@
+<div
+  class="modal-shell"
+  x-data="{ open: true }"
+  x-show="open"
+  data-testid="import-misplaced-source-cleanup-bulk-modal"
+  @keydown.escape.window="open = false; closeImportCvSearchModal()"
+>
+  <div class="modal-backdrop" @click="open = false; closeImportCvSearchModal()"></div>
+  <div class="modal-panel max-w-xl" @click.outside="open = false; closeImportCvSearchModal()">
+    <div class="modal-header">
+      <div class="space-y-1">
+        <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-warning">Optional source cleanup</p>
+        <h3 class="text-base font-semibold text-pb-text">Move all verified files</h3>
+        <p class="text-xs leading-5 text-pb-text-dim">{{ "{:,}".format(preview.affected_count) }} exact file{{ '' if preview.affected_count == 1 else 's' }} ready to organize</p>
+      </div>
+      <button type="button" class="icon-btn icon-btn-sm" @click="open = false; closeImportCvSearchModal()" aria-label="Close source cleanup dialog">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="space-y-4 px-5 py-5">
+        <div class="inline-alert inline-alert-warning">
+          <div>
+            <p class="font-semibold text-pb-text">This changes the source library.</p>
+            <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+              Pullbox will move only files with exact embedded ComicVine identity to the missing paths already recorded by Mylar. This one-time confirmation does not enable managed writes for the root or change the Mylar database.
+            </p>
+          </div>
+        </div>
+        {% if preview.examples %}
+        <div>
+          <p class="text-xs font-medium text-pb-text-muted">Examples</p>
+          <ul class="mt-2 space-y-1 text-xs text-pb-text">
+            {% for name in preview.examples %}<li class="break-all font-mono">{{ name }}</li>{% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+        {% if preview.unavailable_count %}
+        <div class="inline-alert inline-alert-info">
+          {{ "{:,}".format(preview.unavailable_count) }} additional candidate{{ '' if preview.unavailable_count == 1 else 's' }} will remain unchanged because the source, destination, or Pullbox reference cannot be safely revalidated.
+        </div>
+        {% endif %}
+        {% if preview.preview_token %}
+        <form
+          method="post"
+          action="/import/{{ preview.job_id }}/misplaced-source-cleanup/restore-recorded-path/apply-all"
+          hx-post="/import/{{ preview.job_id }}/misplaced-source-cleanup/restore-recorded-path/apply-all"
+          hx-target="#import-orphaned-results"
+          hx-swap="outerHTML"
+          hx-sync="#import-orphaned-results:replace"
+          hx-on::after-request="if(event.detail.successful){ open = false; closeImportCvSearchModal(); }"
+        >
+          <input type="hidden" name="preview_token" value="{{ preview.preview_token }}">
+          <div class="flex flex-wrap justify-end gap-2">
+            <button type="button" class="btn-ghost btn-sm" @click="open = false; closeImportCvSearchModal()">Cancel</button>
+            <button type="submit" class="btn-warning btn-sm">Move all verified files</button>
+          </div>
+        </form>
+        {% else %}
+        <div class="inline-alert inline-alert-info">No verified files are currently available to move.</div>
+        <div class="flex justify-end">
+          <button type="button" class="btn-ghost btn-sm" @click="open = false; closeImportCvSearchModal()">Close</button>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>

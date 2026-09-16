@@ -117,6 +117,8 @@ class ScanReviewProgressPlan:
     analysis_weights: tuple[float, ...]
     series_match_weights: tuple[float, ...]
     file_match_weights: tuple[float, ...]
+    progress_start: int = _SCAN_REVIEW_PROGRESS_START
+    progress_end: int = _SCAN_REVIEW_PROGRESS_END
 
     @property
     def analysis_weight(self) -> float:
@@ -168,6 +170,27 @@ class ImportGroupProgressPlan:
         return max(
             self.metadata_weight + sum(weight for _file_id, weight in self.file_weights),
             1.0,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ImportWorkProgress:
+    """Keep measured work precise even when its display percentage rounds to zero."""
+
+    completed_weight: float
+    total_weight: float
+
+    @property
+    def progress_pct(self) -> int:
+        if self.total_weight <= 0:
+            return 0
+        return max(0, min(round(self.completed_weight / self.total_weight * 100), 99))
+
+    def remaining_seconds(self, started_at: datetime | None) -> int | None:
+        return estimate_remaining_work_seconds(
+            started_at,
+            completed_units=self.completed_weight,
+            total_units=self.total_weight,
         )
 
 
@@ -276,6 +299,11 @@ def scan_review_progress_plan(
     )
 
 
+def scan_review_analysis_weight(series_count: int) -> float:
+    """Return aggregate analysis work without allocating one entry per series."""
+    return max(series_count, 0) * _ANALYSIS_SERIES_WEIGHT
+
+
 def scan_review_series_match_weight(profile: ScanReviewSeriesMatchProfile) -> float:
     """Estimate relative Step 2 cost for one series-level match."""
     base = _SERIES_MATCH_DIRECT_WEIGHT if profile.direct_match else _SERIES_MATCH_SEARCH_WEIGHT
@@ -288,6 +316,13 @@ def scan_review_file_target_weight(profile: ScanReviewFileMatchProfile) -> float
     issue_count = max(int(profile.issue_count or 0), 0)
     issue_bonus = min(issue_count / 250, _FILE_TARGET_MAX_ISSUE_BONUS)
     return max(_FILE_TARGET_BASE_WEIGHT + issue_bonus, 0.1)
+
+
+def scan_review_file_match_weight(profile: ScanReviewFileMatchProfile) -> float:
+    """Return aggregate file-match work without allocating one entry per file."""
+    return scan_review_file_target_weight(profile) + (
+        max(profile.file_count, 0) * _FILE_MATCH_FILE_WEIGHT
+    )
 
 
 def scan_review_completed_weight(
@@ -324,10 +359,8 @@ def scan_review_completed_weight(
 def scan_review_progress_pct(plan: ScanReviewProgressPlan, *, completed_weight: float) -> int:
     """Scale weighted Step 2 review-prep work into the canonical 35-99 range."""
     fraction = min(max(completed_weight / plan.total_weight, 0.0), 1.0)
-    progress = _SCAN_REVIEW_PROGRESS_START + (
-        (_SCAN_REVIEW_PROGRESS_END - _SCAN_REVIEW_PROGRESS_START) * fraction
-    )
-    return max(_SCAN_REVIEW_PROGRESS_START, min(round(progress), _SCAN_REVIEW_PROGRESS_END))
+    progress = plan.progress_start + ((plan.progress_end - plan.progress_start) * fraction)
+    return max(plan.progress_start, min(round(progress), plan.progress_end))
 
 
 def _weighted_completed(
@@ -387,8 +420,19 @@ def import_group_metadata_progress_pct(
     metadata_progress_pct: int | float,
 ) -> int:
     """Return current group progress while series metadata is being prepared."""
-    completed = plan.metadata_weight * (_clamped_pct(metadata_progress_pct) / 100)
+    completed = import_group_metadata_completed_weight(
+        plan, metadata_progress_pct=metadata_progress_pct
+    )
     return _clamped_pct((completed / plan.total_weight) * 100)
+
+
+def import_group_metadata_completed_weight(
+    plan: ImportGroupProgressPlan,
+    *,
+    metadata_progress_pct: int | float,
+) -> float:
+    """Measure metadata work without rounding its share of the group."""
+    return plan.metadata_weight * (_clamped_pct(metadata_progress_pct) / 100)
 
 
 def import_group_file_progress_pct(
@@ -398,6 +442,19 @@ def import_group_file_progress_pct(
     current_file_pct: int | float,
 ) -> int:
     """Return current group progress while an importable file is being processed."""
+    completed = import_group_file_completed_weight(
+        plan, file_index=file_index, current_file_pct=current_file_pct
+    )
+    return _clamped_pct((completed / plan.total_weight) * 100)
+
+
+def import_group_file_completed_weight(
+    plan: ImportGroupProgressPlan,
+    *,
+    file_index: int,
+    current_file_pct: int | float,
+) -> float:
+    """Measure completed file work without rounding its share of the group."""
     completed = plan.metadata_weight
     safe_index = max(file_index, 1)
     for idx, (_file_id, weight) in enumerate(plan.file_weights, start=1):
@@ -407,7 +464,7 @@ def import_group_file_progress_pct(
         if idx == safe_index:
             completed += weight * (_clamped_pct(current_file_pct) / 100)
             break
-    return _clamped_pct((completed / plan.total_weight) * 100)
+    return completed
 
 
 def weighted_import_progress_pct(
@@ -417,16 +474,31 @@ def weighted_import_progress_pct(
     current_group_progress_pct: int | float,
 ) -> int:
     """Return whole-job Step 4 progress across weighted review groups."""
-    if not group_weights:
-        return 0
     safe_index = max(current_group_index, 0)
-    total_weight = max(sum(max(weight, 1.0) for weight in group_weights), 1.0)
+    current_weight = max(group_weights[safe_index], 1.0) if safe_index < len(group_weights) else 0.0
+    return import_work_progress(
+        group_weights,
+        current_group_index=safe_index,
+        current_group_completed_weight=current_weight
+        * (_clamped_pct(current_group_progress_pct) / 100),
+    ).progress_pct
+
+
+def import_work_progress(
+    group_weights: list[float] | tuple[float, ...],
+    *,
+    current_group_index: int,
+    current_group_completed_weight: float,
+) -> ImportWorkProgress:
+    """Use one unrounded work position for both the display and Step 4 ETA."""
+    safe_index = max(current_group_index, 0)
+    total_weight = sum(max(weight, 1.0) for weight in group_weights)
     completed = sum(max(weight, 1.0) for weight in group_weights[:safe_index])
     if safe_index < len(group_weights):
-        completed += max(group_weights[safe_index], 1.0) * (
-            _clamped_pct(current_group_progress_pct) / 100
+        completed += min(
+            max(current_group_completed_weight, 0.0), max(group_weights[safe_index], 1.0)
         )
-    return max(0, min(round((completed / total_weight) * 100), 99))
+    return ImportWorkProgress(completed_weight=completed, total_weight=total_weight)
 
 
 def _clamped_pct(value: int | float | None) -> int:

@@ -70,6 +70,70 @@ class TestScanFilesGrouping:
         assert result[0].raw_year == 2024
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("folder_name", "file_names", "expected_series", "expected_year"),
+        [
+            (
+                "Absolute Batman 2024",
+                [
+                    "Issue 14 Abomination, Conclusion.cbz",
+                    "Issue 15 The Joker.cbz",
+                ],
+                "Absolute Batman",
+                2024,
+            ),
+            (
+                "Batman (2011)",
+                [
+                    "Batman The Court of Owls, Part One Issue 001.cbz",
+                    "Batman The City of Owls, Part Two Issue 002.cbz",
+                ],
+                "Batman",
+                2011,
+            ),
+        ],
+    )
+    async def test_issue_title_files_use_series_folder_in_focused_scan(
+        self,
+        tmp_path: Path,
+        folder_name: str,
+        file_names: list[str],
+        expected_series: str,
+        expected_year: int,
+    ) -> None:
+        folder = tmp_path / folder_name
+        files = [_create_test_cbz(folder / file_name) for file_name in file_names]
+
+        scanner = CollectionScanner(min_file_count=1)
+        result = await scanner.scan_files([str(file_path) for file_path in files])
+
+        assert len(result) == 1
+        assert result[0].raw_series_name == expected_series
+        assert result[0].raw_year == expected_year
+        assert result[0].file_count == 2
+
+    @pytest.mark.asyncio
+    async def test_issue_only_comicinfo_does_not_block_folder_series_identity(
+        self, tmp_path: Path
+    ) -> None:
+        folder = tmp_path / "Batman (2011)"
+        first = _create_test_cbz(
+            folder / "Batman The Court of Owls, Part One Issue 001.cbz",
+            comicinfo_xml="<ComicInfo><Number>1</Number></ComicInfo>",
+        )
+        second = _create_test_cbz(
+            folder / "Batman The City of Owls, Part Two Issue 002.cbz",
+            comicinfo_xml="<ComicInfo><Number>2</Number></ComicInfo>",
+        )
+
+        scanner = CollectionScanner(min_file_count=1)
+        result = await scanner.scan_files([str(first), str(second)])
+
+        assert len(result) == 1
+        assert result[0].raw_series_name == "Batman"
+        assert result[0].file_count == 2
+
+    @pytest.mark.asyncio
     async def test_multiple_folders(self, tmp_path: Path) -> None:
         """Files in different folders produce separate DiscoveredSeries."""
         folder_a = tmp_path / "Batman (2024)"

@@ -23,6 +23,7 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.models.download import DownloadClientType
 from pullbox.models.indexer import IndexerConfig, IndexerType
+from pullbox.models.library import LibraryRoot
 from pullbox.utilities.settings import resolve_utility_directory
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -440,10 +441,10 @@ class TestSettingsRouteContracts:
         response = await authenticated_client.get("/settings?tab=media")
 
         assert response.status_code == 200
-        assert "previewNaming('{{ std_tmpl }}'" not in response.text
-        assert "\\u0027); window.__pullboxXss = true; //" in response.text
-        assert "escapeHtml(ex.input || '')" in response.text
-        assert "escapeHtml(ex.output || '')" in response.text
+        # Templates are loaded as JSON, not interpolated into executable HTML/JS.
+        assert "window.__pullboxXss" not in response.text
+        assert 'x-text="example.input"' in response.text
+        assert 'x-text="example.output"' in response.text
 
     async def test_settings_media_import_save_uses_enabled_pointer_cursor(
         self,
@@ -463,14 +464,101 @@ class TestSettingsRouteContracts:
         response = await authenticated_client.get("/settings?tab=media")
 
         assert response.status_code == 200
-        assert response.text.count("settings-media-preview-panel") == 5
+        assert response.text.count('class="info-panel settings-media-preview-panel') == 6
+        assert 'data-testid="arc-files-preview"' in response.text
         assert 'data-preview-ready="false"' in response.text
         assert 'aria-live="polite"' in response.text
-        assert 'aria-busy="false"' in response.text
-        assert "this.namingPreviewRequests" in response.text
-        assert "lockNamingPreviewHeight(el)" in response.text
-        assert "el.dataset.previewReady !==" in response.text
+        assert ":aria-busy=\"namingPreviewLoading ? 'true' : 'false'\"" in response.text
+        assert "this.namingPreviewSequence" in response.text
+        assert "panel.style.minHeight" in response.text
+        assert "snapshot === this.namingSnapshot()" in response.text
         assert "settings-media-preview-panel min-h-[2rem]" not in response.text
+
+    async def test_settings_media_exposes_per_library_naming_scope_controls(
+        self,
+        authenticated_client,
+        sec_db,
+        tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        root_path = tmp_path / "root-policy-ui"
+        root_path.mkdir()
+        async with sec_db() as session:
+            session.add(LibraryRoot(name="Primary Comics", path=str(root_path), enabled=True))
+            await session.commit()
+
+        response = await authenticated_client.get("/settings?tab=media")
+
+        assert response.status_code == 200
+        assert 'data-testid="settings-naming-editor"' in response.text
+        assert 'data-testid="settings-naming-scope"' in response.text
+        assert "Primary Comics" in response.text
+        assert "Use global defaults" in response.text
+        assert "Save for this library" in response.text
+        assert "/api/v1/config/naming/preview" in response.text
+        assert "expected_fingerprint: this.namingState.fingerprint" in response.text
+
+    async def test_settings_media_exposes_safe_multi_library_root_management(
+        self,
+        authenticated_client,
+        sec_db,
+        tmp_path,
+    ) -> None:  # type: ignore[no-untyped-def]
+        root_path = tmp_path / "managed-library"
+        root_path.mkdir()
+        async with sec_db() as session:
+            session.add(LibraryRoot(name="Managed Library", path=str(root_path), enabled=True))
+            await session.commit()
+
+        response = await authenticated_client.get("/settings?tab=media")
+
+        assert response.status_code == 200
+        assert 'data-testid="settings-media-library-roots"' in response.text
+        assert 'data-testid="settings-media-library-root-add"' in response.text
+        assert 'data-testid="settings-media-library-root-name"' in response.text
+        assert 'data-testid="settings-media-library-root-path"' in response.text
+        assert 'data-testid="settings-media-library-root-reference-role"' in response.text
+        assert 'data-testid="settings-media-library-root-managed-role"' in response.text
+        assert 'data-testid="settings-media-library-root-default"' in response.text
+        assert 'data-testid="settings-media-library-root-actions"' in response.text
+        assert 'class="flex flex-wrap justify-end gap-2 sm:col-span-2"' in response.text
+        assert 'data-testid="settings-media-library-root-make-default"' in response.text
+        assert 'data-testid="settings-media-library-root-toggle-enabled"' in response.text
+        make_default_start = response.text.index(
+            'data-testid="settings-media-library-root-make-default"'
+        )
+        toggle_enabled_start = response.text.index(
+            'data-testid="settings-media-library-root-toggle-enabled"'
+        )
+        assert (
+            'class="btn-ghost btn-sm"'
+            in response.text[make_default_start : make_default_start + 180]
+        )
+        assert (
+            'class="btn-ghost btn-sm"'
+            in response.text[toggle_enabled_start : toggle_enabled_start + 180]
+        )
+        assert "Reference existing files" in response.text
+        assert "Allow managed files" in response.text
+        assert "Default managed destination" in response.text
+        assert 'libraryRootRequest("/api/v1/config/library-roots/preview"' in response.text
+        assert 'libraryRootRequest("/api/v1/config/library-roots"' in response.text
+        assert 'method: "PATCH"' in response.text
+        assert 'data-testid="settings-media-library-root-rebind"' in response.text
+        assert "Preview rebind" in response.text
+        assert "Confirm rebind" in response.text
+        assert "/rebind/preview" in response.text
+        assert 'confirmation: "REBIND"' in response.text
+        assert 'data-testid="settings-media-library-root-removal"' in response.text
+        assert 'confirmation: "REMOVE"' in response.text
+        assert "No folders or files will be deleted." in response.text
+        assert 'method: "DELETE"' in response.text
+        assert "Delete library root" not in response.text
+        assert "ordinary edits cannot change them" in response.text
+        assert "bootstraps the default managed destination" in response.text
+        assert (
+            "All imports and download handoff work eventually target this library root"
+            not in response.text
+        )
 
     async def test_settings_renders_standardized_shell(
         self,

@@ -8,6 +8,7 @@ import runpy
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -220,6 +221,136 @@ def test_run_process_streams_output_forwards_signals_and_restores_handlers(
         (signal.Signals.SIGINT, "old-SIGINT"),
         (signal.Signals.SIGTERM, "old-SIGTERM"),
     ]
+
+
+def test_run_process_exits_zero_after_forwarded_sigterm_shuts_down_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pullbox.docker_entrypoint as entrypoint
+
+    captured_handlers: dict[signal.Signals, object] = {}
+    process = _FakeProcess(return_code=-int(signal.Signals.SIGTERM))
+    _FakeProcess.sent_signals = []
+
+    def _fake_signal(signum: signal.Signals, handler: object) -> None:
+        if callable(handler):
+            captured_handlers[signum] = handler
+
+    def _invoke_forwarded_signal() -> None:
+        handler = captured_handlers[signal.Signals.SIGTERM]
+        assert callable(handler)
+        handler(int(signal.Signals.SIGTERM), None)
+
+    process.stdout = _FakeStdout(_invoke_forwarded_signal)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: signal.SIG_DFL)
+    monkeypatch.setattr(signal, "signal", _fake_signal)
+
+    with pytest.raises(SystemExit) as exc_info:
+        entrypoint._run_process(["pullbox-test"])
+
+    assert exc_info.value.code == 0
+    assert _FakeProcess.sent_signals == [int(signal.Signals.SIGTERM)]
+
+
+def test_run_process_force_kills_and_reaps_child_after_shutdown_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pullbox.docker_entrypoint as entrypoint
+
+    captured_handlers: dict[signal.Signals, object] = {}
+    killed = threading.Event()
+
+    class _BlockingStdout:
+        def __iter__(self):
+            handler = captured_handlers[signal.Signals.SIGTERM]
+            assert callable(handler)
+            handler(int(signal.Signals.SIGTERM), None)
+            killed.wait(timeout=0.25)
+            return
+            yield  # pragma: no cover
+
+    class _BlockingProcess:
+        stdout = _BlockingStdout()
+
+        def __init__(self) -> None:
+            self.return_code = -int(signal.Signals.SIGTERM)
+            self.sent_signals: list[int] = []
+            self.kill_calls = 0
+            self.wait_calls = 0
+
+        def poll(self) -> int | None:
+            return self.return_code if killed.is_set() else None
+
+        def send_signal(self, signum: int) -> None:
+            self.sent_signals.append(signum)
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.return_code = -int(signal.Signals.SIGKILL)
+            killed.set()
+
+        def wait(self) -> int:
+            self.wait_calls += 1
+            return self.return_code
+
+    process = _BlockingProcess()
+
+    def _fake_signal(signum: signal.Signals, handler: object) -> None:
+        if callable(handler):
+            captured_handlers[signum] = handler
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: signal.SIG_DFL)
+    monkeypatch.setattr(signal, "signal", _fake_signal)
+    monkeypatch.setattr(entrypoint, "CHILD_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+
+    assert entrypoint._run_process(["pullbox-test"]) == -int(signal.Signals.SIGKILL)
+    assert process.sent_signals == [int(signal.Signals.SIGTERM)]
+    assert process.kill_calls == 1
+    assert process.wait_calls == 1
+
+
+def test_run_process_preserves_unexpected_signaled_child_failure_after_sigterm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pullbox.docker_entrypoint as entrypoint
+
+    captured_handlers: dict[signal.Signals, object] = {}
+
+    def _fake_signal(signum: signal.Signals, handler: object) -> None:
+        if callable(handler):
+            captured_handlers[signum] = handler
+
+    def _invoke_forwarded_signal() -> None:
+        handler = captured_handlers[signal.Signals.SIGTERM]
+        assert callable(handler)
+        handler(int(signal.Signals.SIGTERM), None)
+
+    process = _FakeProcess(
+        _invoke_forwarded_signal,
+        return_code=-int(signal.Signals.SIGABRT),
+    )
+    _FakeProcess.sent_signals = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: signal.SIG_DFL)
+    monkeypatch.setattr(signal, "signal", _fake_signal)
+
+    assert entrypoint._run_process(["pullbox-test"]) == -int(signal.Signals.SIGABRT)
+    assert _FakeProcess.sent_signals == [int(signal.Signals.SIGTERM)]
+
+
+def test_run_process_preserves_sigterm_failure_without_forwarded_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pullbox.docker_entrypoint as entrypoint
+
+    process = _FakeProcess(return_code=-int(signal.Signals.SIGTERM))
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: signal.SIG_DFL)
+    monkeypatch.setattr(signal, "signal", lambda _signum, _handler: None)
+
+    assert entrypoint._run_process(["pullbox-test"]) == -int(signal.Signals.SIGTERM)
 
 
 def test_run_process_returns_127_when_process_cannot_launch(

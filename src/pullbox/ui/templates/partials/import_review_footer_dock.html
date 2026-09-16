@@ -3,7 +3,7 @@
 {% if import_review_footer_mode == "conflicts" %}
   {% set conflict_pagination_base_url = conflict_footer_base_url|default("/import/" ~ job.id ~ "/review-partial?status=conflicts&sort=" ~ sort) %}
   {% set conflict_pagination_target = conflict_footer_hx_target|default("#import-step-review-shell") %}
-  {% set conflict_pagination_swap = conflict_footer_hx_swap|default("outerHTML") %}
+  {% set conflict_pagination_swap = conflict_footer_hx_swap|default("morph:outerHTML") %}
   {% set conflict_pagination_sync = conflict_footer_hx_sync|default("#import-step-review-shell:replace") %}
   <div data-testid="import-conflicts-pagination" class="px-4 sm:px-6">
     {{ page_dock(
@@ -20,6 +20,27 @@
       hx_select="",
       hx_base_url=conflict_pagination_base_url,
       hx_sync=conflict_pagination_sync,
+      hx_push_url="false"
+    ) }}
+  </div>
+{% elif import_review_footer_mode == "story_arcs" %}
+  {% set story_arc_total_pages = ((story_arc_total - 1) // page_size) + 1 if story_arc_total > 0 else 1 %}
+  {% set story_arc_pagination_base_url = "/import/" ~ job.id ~ "/review-partial?status=story_arcs&story_arc_id=" ~ (story_arc_selected_id or '') ~ "&arc_entry_state=" ~ story_arc_entry_state_filter.value ~ "&arc_entry_page=1" %}
+  <div data-testid="import-story-arc-pagination" class="px-4 sm:px-6">
+    {{ page_dock(
+      page=page,
+      total_pages=story_arc_total_pages,
+      base_url=story_arc_pagination_base_url,
+      status_items=[
+        {"label": "visible", "value": story_arc_items|length|string},
+        {"label": "arcs", "value": story_arc_total|string},
+        {"label": "per page", "value": page_size|string},
+      ],
+      hx_target="#import-step-review-shell",
+      hx_swap="morph:outerHTML",
+      hx_select="",
+      hx_base_url=story_arc_pagination_base_url,
+      hx_sync="#import-step-review-shell:replace",
       hx_push_url="false"
     ) }}
   </div>
@@ -40,7 +61,7 @@
         {"label": "per page", "value": page_size|string},
       ],
       hx_target="#import-step-review-shell",
-      hx_swap="outerHTML",
+      hx_swap="morph:outerHTML",
       hx_select="",
       hx_base_url=review_pagination_base_url,
       hx_sync="#import-step-review-shell:replace",

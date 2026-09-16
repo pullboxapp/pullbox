@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from pullbox.models.download import DownloadHistory
     from pullbox.providers.artifact_hosts.contract import HostResolutionRequest
     from pullbox.providers.base import ReleaseResult
+    from pullbox.services.airdcpp_search_types import DcValidatedCandidate
     from pullbox.services.direct_search_coordinator import DirectValidatedCandidate
     from pullbox.services.download_service import DownloadService
     from pullbox.services.release_validator import ValidationResult
@@ -185,6 +186,30 @@ class InterventionService:
             release_title=release.title,
         )
         return pm
+
+    async def create_dc_pending_match(
+        self,
+        session: AsyncSession,
+        issue_id: int,
+        result: DcValidatedCandidate,
+        search_log_id: int,
+    ) -> PendingMatch | None:
+        """Use the shared review UI while preserving the exact client/file route."""
+        from pullbox.services.airdcpp_search_acquisition import dc_review_snapshot
+
+        pending = await self.create_pending_match(
+            session, issue_id, result.release, result.validation
+        )
+        if pending is not None:
+            pending.match_details = {
+                **pending.match_details,
+                "source_kind": "dc",
+                "dc_route_snapshot": dc_review_snapshot(
+                    result, issue_id=issue_id, search_log_id=search_log_id
+                ),
+            }
+            await session.flush()
+        return pending
 
     async def create_direct_pending_match(
         self,
@@ -333,6 +358,26 @@ class InterventionService:
             raise ValueError(f"Pending match {pending_id} not found")
         if pm.status != PendingMatchStatus.PENDING:
             raise ValueError(f"Pending match {pending_id} is not pending (status={pm.status})")
+
+        if pm.match_details.get("source_kind") == "dc":
+            from pullbox.services.airdcpp_search_acquisition import (
+                acquire_dc_candidate,
+                dc_review_candidate,
+            )
+
+            candidate, search_log_id = dc_review_candidate(pm)
+            download, _created = await acquire_dc_candidate(
+                session,
+                candidate=candidate,
+                issue_id=pm.issue_id,
+                search_log_id=search_log_id,
+                request_key=f"dc-review:{pm.id}",
+                automatic=False,
+            )
+            pm.status = PendingMatchStatus.APPROVED
+            pm.resolved_at = datetime.now(UTC)
+            pm.resolved_by = "user"
+            return download
 
         direct_attempt_id = _direct_attempt_id(pm)
         if direct_attempt_id is not None:

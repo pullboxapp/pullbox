@@ -7,6 +7,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-15
+
+Minor release adding Story Arc management, an optional local Comic Vine catalog,
+multi-root and in-place library imports, and substantial large-library import
+performance and recovery improvements.
+
+### Added
+
+- Added an optional local Comic Vine catalog for series searches and import
+  matching without live metadata requests. Download it from Metadata settings
+  with progress, resumable transfers, signed verification, and daily updates.
+  Failed updates preserve the installed catalog; full metadata enrichment still
+  uses the user's Comic Vine API key.
+- Added import source-layout previews for series folders, publisher/series
+  folders, and custom folder and issue naming patterns.
+- Added independent options to keep existing files in place and use an approved
+  layout for future managed files without reorganizing an existing library.
+- Added first-class Story Arcs with ordered memberships, local issue selection,
+  monitoring, Mylar Story Arc import, and folder-based arc evidence.
+- Added optional separate Story Arc copies or links, reading-order filename
+  prefixes, and safe previewed reordering while preserving canonical files and
+  user-owned arc references.
+- Added category-scoped bulk import safety review with bounded previews and
+  audit evidence.
+- Added a dedicated import Follow-up workspace for remaining matching, recovery,
+  and cleanup decisions without restarting a completed import.
+- Added previewed clean-library builds with background progress, configurable
+  naming and conversion, and explicit safeguards for source files and destinations.
+- Added safe removal of disabled library roots with dependency checks before
+  deleting their configuration.
+- Added Comic Vine Story Arc discovery, reviewed member ordering, canonical
+  series/issue reuse, provider-change review, and arc-scoped missing-issue search.
+- Added Mylar in-place adoption and original-filename arc copies with optional
+  leading reading-order numbers. Initial copies can run independently of future
+  synchronization and expose resumable progress and explicit retries.
+- Added a guarded, manually published signed development-image channel for
+  isolated testing without a general-availability release.
+
+### Changed
+
+- Grouped Mylar library-access problems by their underlying root and offered
+  explicit resolution, skip, or detailed repair actions instead of presenting
+  every affected series as a separate configuration problem.
+- Unified Comic Vine series and Story Arc discovery, added a selectable header
+  Add action, and simplified Story Arc reading-order review and reordering.
+- Centralized library naming and Story Arc file policies, including independent
+  permissions for referenced existing files and managed library destinations.
+
+### Fixed
+
+- Improved completed-import recovery for trusted legacy identities, misplaced
+  files, and deferred outcomes. Bounded retries preserve successful imports,
+  revalidate changed sources and approved roots, and resume interrupted work
+  without losing matching evidence or repeating completed actions.
+- Reconciled stale Mylar issue identifiers, renamed files, and unqualified volume
+  identities when independent evidence proves the target. Mixed folders no longer
+  require treating every file as belonging to the folder's series.
+- Restored actionable recovery controls on completed jobs and kept safety-approved
+  items, archived history, background activity, and import counters consistent.
+- Preserved file ownership and dependent records during in-place adoption and
+  clean-library execution, and corrected folder imports' reference-root setup.
+- Sent torrent metadata through Pullbox to download clients rather than requiring
+  remote clients to fetch private Prowlarr or indexer download URLs themselves.
+- Corrected reader progress display for large compendiums.
+- Improved Mylar and folder scan throughput with resource-capped archive
+  inspection, batched review inserts, and fewer unnecessary duplicate checks.
+  Corrected current-item scan progress and unknown time estimates, and bounded
+  pending file-processing work without weakening cancellation or archive safety.
+- Reconciled stale Mylar filenames with uniquely verified same-folder comic
+  files, including `#1` versus `001` naming changes, without weakening identity
+  or archive safety checks. Added a dry-run-first offline repair for saved
+  reviews that preserves matches and source files, and clarified missing-path
+  errors without claiming the source changed after scanning.
+- Automatic searches now distinguish valid matches that could not be queued
+  from empty results. Search history counts only validation rejections, not
+  unused alternatives or failed downloads.
+- Opted-in AirDC++ automatic searches now hand accepted matches to the durable
+  queue, with restart-safe intervention for lower-confidence matches and
+  duplicate-download and blocklist checks.
+- SABnzbd NZB retrieval now allows slow indexer proxies a separate bounded
+  timeout without delaying normal client-control requests.
+- Recognized unmarked four-digit issue numbers for known series such as 2000 AD
+  without treating numeric series names as issue numbers. Search confidence now
+  uses known issue publication/store dates instead of comparing every issue to
+  the series start year; undated continuing issues use a medium-confidence,
+  bounded year window while issue, series, and type checks remain required.
+- Corrected Mylar `series.json` metadata wrappers and `cvinfo` volume URL
+  parsing in both Mylar and folder imports, without interpreting another
+  application's unqualified `series_id` as a ComicVine identity.
+- Isolated metadata-only and possible cover-only comic archives in import
+  review while preserving valid series identities. Single-page approval is
+  explicit and does not bypass archive safety limits.
+- Added an offline, dry-run-first `recheck-import` maintenance command for
+  affected saved reviews, preserving manual decisions and source files without
+  repeating the directory scan.
+- Raised the database-size health warning to above 1 GiB and the critical
+  threshold to above 2 GiB to accommodate large collections and retained logs.
+  Disk-space, integrity, latency, and database-bloat checks remain unchanged.
+- Preserved supported Unicode spaces, joiners, and direction marks in Mylar
+  source paths across preview, mapping, and import without renaming files or
+  relaxing root-containment protections. Invalid path text no longer reports
+  a misleading outside-root error.
+- Kept Mylar scan counters, progress bars, and saved checkpoints in sync during
+  file checks and source-page preparation instead of waiting for the full scan.
+- Reconciled unambiguous Mylar filename format, case, and spacing changes within
+  the same folder while retaining original-path evidence and leaving ambiguous
+  or unavailable files for review. Source files and the Mylar database stay untouched.
+- Made Mylar path preflight show searchable, exportable exceptions with exact
+  paths and repair guidance, distinguishing missing folders from bad mappings.
+  Added explicit, revalidated continuation with available sources while retaining
+  unavailable records for review and keeping permission and safety failures blocked.
+- Included recent Mylar preflight evidence in diagnostic packages even when an
+  import cannot start.
+- Matched issue-only filenames using series-folder context and handled issue
+  titles embedded in filenames without treating the title as a new series.
+- Preserved exact issue-number identity for large and special issue numbers
+  instead of allowing floating-point or scientific-notation drift.
+- Preserved exact issue numbers in managed filenames, embedded ComicInfo, and
+  the reader, including suffixes and fractional padded filenames.
+- Preserved other series' in-place files when deleting or trashing a shared
+  folder, without treating literal folder-name characters as SQL wildcards.
+- Applied sensitive-directory restrictions to import previews and preserved
+  literal special characters when opening Mylar databases read-only.
+- Preserved Mylar, ComicInfo, and supported series sidecar evidence through
+  import review and matching without silently overriding stronger identities.
+- Rechecked arc search eligibility after provider waits so newly skipped or
+  removed members cannot be queued from stale search results.
+- Fixed import-conflict review queries overflowing the parser stack on older
+  SQLite builds while retaining server-side sorting and bounded pagination.
+- Preserved replaced or edited Story Arc files during failed-publication
+  cleanup instead of relying only on filesystem device and inode identifiers.
+
+### Performance
+
+- Prioritized visible catalog hydration after import while keeping ComicInfo
+  writes in separate background work. Improved restart recovery and progress
+  reporting, and prevented duplicate manual refreshes during initial metadata sync.
+- Reduced large-library scan and review overhead with bounded worker budgets,
+  compact projections, and batched database work. Import, rollback, and hydration
+  progress now use clearer phase-aware completion and time estimates.
+- Streamed complete import-review safety summaries using one narrow-field query
+  instead of repeatedly scanning and sorting blocked files for every batch.
+  Category counts, examples, and bulk-approval eligibility remain unchanged.
+- Moved import archive safety checks off the application event loop and added
+  throttled progress and cancellation checkpoints between Mylar file checks.
+- Removed recursive comic-library sizing from diagnostic generation and moved
+  blocking filesystem, database snapshot, and ZIP work off the application event
+  loop. Mylar preflight filesystem analysis also runs on a worker thread.
+- Bounded Mylar staging, file matching, and conflict rebuilding so large jobs do
+  not retain complete ORM result sets or unbounded task queues.
+- Moved filesystem inventory and source ordering to a private temporary SQLite
+  spool, with bounded active workers, archive tasks, progress delivery, and
+  cooperative cancellation cleanup.
+
 ## [1.2.1] - 2026-08-28
 
 Patch release hardening AirDC++ acquisition recovery so retries, cancellation,

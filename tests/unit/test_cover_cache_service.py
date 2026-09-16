@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from pullbox.core.library_file_ownership import build_managed_placement_signature
 from pullbox.services import cover_cache_service
 
 if TYPE_CHECKING:
@@ -197,10 +198,108 @@ async def test_cache_imported_series_cover_copies_source_without_modifying_it(
         source,
     )
 
-    assert resolved == covers_base / "42" / "series.jpg"
-    assert resolved.read_bytes() == b"mylar-cover"
+    assert resolved is not None
+    assert resolved.path == covers_base / "42" / "series.jpg"
+    assert resolved.path.read_bytes() == b"mylar-cover"
+    assert resolved.artifact_created is True
+    assert resolved.artifact_signature == build_managed_placement_signature(resolved.path)
+    assert resolved.ownership_boundary_path == tmp_path
+    assert resolved.created_directory_paths == (covers_base, covers_base / "42")
     assert source.read_bytes() == b"mylar-cover"
     assert series.cover_path == "/api/v1/series/42/cover"
+
+
+@pytest.mark.asyncio
+async def test_cache_imported_series_cover_does_not_claim_preexisting_cover_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "mylar" / "cover.jpg"
+    source.parent.mkdir()
+    source.write_bytes(b"mylar-cover")
+    covers_base = tmp_path / "covers"
+    covers_base.mkdir()
+    series = SimpleNamespace(id=42, cover_path=None)
+    monkeypatch.setattr(
+        cover_cache_service,
+        "resolve_covers_dir",
+        AsyncMock(return_value=covers_base),
+    )
+
+    resolved = await cover_cache_service.cache_imported_series_cover(
+        AsyncMock(),
+        series,
+        source,
+    )
+
+    assert resolved is not None
+    assert resolved.ownership_boundary_path == covers_base
+    assert resolved.created_directory_paths == (covers_base / "42",)
+
+
+@pytest.mark.asyncio
+async def test_cache_imported_series_cover_does_not_claim_preexisting_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "mylar" / "cover.jpg"
+    source.parent.mkdir()
+    source.write_bytes(b"mylar-cover")
+    covers_base = tmp_path / "covers"
+    cover_path = covers_base / "42" / "series.jpg"
+    cover_path.parent.mkdir(parents=True)
+    cover_path.write_bytes(b"existing-cover")
+    series = SimpleNamespace(id=42, cover_path=None)
+    monkeypatch.setattr(
+        cover_cache_service,
+        "resolve_covers_dir",
+        AsyncMock(return_value=covers_base),
+    )
+
+    resolved = await cover_cache_service.cache_imported_series_cover(
+        AsyncMock(),
+        series,
+        source,
+    )
+
+    assert resolved is not None
+    assert resolved.path == cover_path
+    assert resolved.path.read_bytes() == b"existing-cover"
+    assert resolved.artifact_created is False
+    assert resolved.artifact_signature is None
+    assert resolved.created_directory_paths == ()
+
+
+@pytest.mark.asyncio
+async def test_cache_imported_series_cover_creates_and_claims_nested_missing_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "mylar" / "cover.jpg"
+    source.parent.mkdir()
+    source.write_bytes(b"mylar-cover")
+    covers_base = tmp_path / "nested" / "cache" / "covers"
+    series = SimpleNamespace(id=42, cover_path=None)
+    monkeypatch.setattr(
+        cover_cache_service,
+        "resolve_covers_dir",
+        AsyncMock(return_value=covers_base),
+    )
+
+    resolved = await cover_cache_service.cache_imported_series_cover(
+        AsyncMock(),
+        series,
+        source,
+    )
+
+    assert resolved is not None
+    assert resolved.ownership_boundary_path == tmp_path
+    assert resolved.created_directory_paths == (
+        tmp_path / "nested",
+        tmp_path / "nested" / "cache",
+        covers_base,
+        covers_base / "42",
+    )
 
 
 @pytest.mark.asyncio

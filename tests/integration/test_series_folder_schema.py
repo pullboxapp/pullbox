@@ -7,7 +7,8 @@ behavior without touching the real database or Alembic migrations.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryRoot
@@ -68,6 +69,31 @@ class TestSeriesPath:
         assert series.library_root_id == root.id
         assert series.library_root is root
 
+    async def test_series_preferred_library_root_relationship(self, db_session) -> None:
+        """A series can choose a future managed destination independently."""
+        current_root = LibraryRoot(name="Existing", path="/existing", enabled=True)
+        preferred_root = LibraryRoot(name="Future", path="/future", enabled=True)
+        db_session.add_all([current_root, preferred_root])
+        await db_session.flush()
+
+        series = Series(
+            title="Saga",
+            sort_title="Saga",
+            path="/existing/Saga (2012)",
+            library_root_id=current_root.id,
+            preferred_library_root_id=preferred_root.id,
+            status=SeriesStatus.CONTINUING,
+            issue_count=0,
+        )
+        db_session.add(series)
+        await db_session.flush()
+
+        assert series.library_root is current_root
+        assert series.preferred_library_root is preferred_root
+
+        await db_session.refresh(preferred_root, attribute_names=["preferred_series"])
+        assert preferred_root.preferred_series == [series]
+
     async def test_library_root_series_backref(self, db_session) -> None:
         """LibraryRoot.series returns all series in that root."""
         root = LibraryRoot(name="Comics", path="/comics", enabled=True)
@@ -91,8 +117,9 @@ class TestSeriesPath:
         titles = {s.title for s in root.series}
         assert titles == {"Batman", "Saga", "Invincible"}
 
-    async def test_series_library_root_set_null_on_delete(self, db_session) -> None:
-        """Deleting a library root sets series.library_root_id to NULL."""
+    async def test_series_library_root_prevents_deletion(self, db_session) -> None:
+        """A root cannot silently detach the series still using it."""
+        await db_session.execute(text("PRAGMA foreign_keys=ON"))
         root = LibraryRoot(name="Comics", path="/comics", enabled=True)
         db_session.add(root)
         await db_session.flush()
@@ -108,13 +135,17 @@ class TestSeriesPath:
         await db_session.flush()
 
         series_id = series.id
-        await db_session.delete(root)
-        await db_session.flush()
+        root_id = root.id
+        await db_session.commit()
+        with pytest.raises(IntegrityError):
+            await db_session.delete(root)
+            await db_session.flush()
+        await db_session.rollback()
 
         # Re-fetch the series
         reloaded = await db_session.get(Series, series_id)
         assert reloaded is not None
-        assert reloaded.library_root_id is None
+        assert reloaded.library_root_id == root_id
 
     async def test_multiple_series_in_same_root(self, db_session) -> None:
         """Multiple series can reference the same library root."""

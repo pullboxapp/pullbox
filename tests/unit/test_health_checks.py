@@ -70,6 +70,23 @@ def settings(tmp_path) -> MagicMock:
     return s
 
 
+async def test_run_check_rolls_back_failed_session_before_persisting(
+    settings: MagicMock,
+) -> None:
+    session = MagicMock(spec=AsyncSession)
+    session.is_active = False
+    session.rollback = AsyncMock()
+    service = _make_service(settings)
+    service._check_database = AsyncMock(side_effect=RuntimeError("database is locked"))
+    service._persist_outcomes = AsyncMock()
+
+    outcomes = await service.run_check(session, "database")
+
+    assert outcomes[0].status == HealthStatus.UNHEALTHY
+    session.rollback.assert_awaited_once_with()
+    service._persist_outcomes.assert_awaited_once_with(session, outcomes)
+
+
 @pytest.fixture
 def mock_scheduler() -> MagicMock:
     sched = MagicMock()
@@ -221,13 +238,14 @@ class TestDatabaseSizeCheck:
         return session
 
     @pytest.mark.asyncio
-    async def test_healthy_small_db(self, settings: MagicMock) -> None:
-        """Database size below 500 MB -> healthy sub-check."""
+    @pytest.mark.parametrize("size_mb", [100, 719, 1000])
+    async def test_healthy_small_db(self, settings: MagicMock, size_mb: int) -> None:
+        """Large collections below 1 GB do not trigger a size warning."""
         session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
         service = _make_service(settings)
 
         mock_stat = MagicMock()
-        mock_stat.st_size = 100 * 1024 * 1024  # 100 MB
+        mock_stat.st_size = size_mb * 1024 * 1024
 
         with patch("pathlib.Path.stat", return_value=mock_stat):
             result = await service._check_db_size(session)
@@ -235,41 +253,66 @@ class TestDatabaseSizeCheck:
         assert result is not None
         assert result.status == HealthStatus.HEALTHY
         assert result.name == "Database size"
-        assert "100.0 MB" in result.message
+        assert f"{size_mb:.1f} MB" in result.message
 
     @pytest.mark.asyncio
-    async def test_degraded_large_db(self, settings: MagicMock) -> None:
-        """Database size 500-1000 MB -> degraded sub-check."""
+    @pytest.mark.parametrize(
+        ("size_bytes", "expected_status"),
+        [
+            (1024**3 - 1, HealthStatus.HEALTHY),
+            (1024**3, HealthStatus.HEALTHY),
+            (1024**3 + 1, HealthStatus.HEALTHY),
+            (2 * 1024**3, HealthStatus.HEALTHY),
+            (2 * 1024**3 + 1, HealthStatus.HEALTHY),
+        ],
+    )
+    async def test_size_threshold_boundaries(
+        self, settings: MagicMock, size_bytes: int, expected_status: HealthStatus
+    ) -> None:
         session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
         service = _make_service(settings)
-
-        mock_stat = MagicMock()
-        mock_stat.st_size = 600 * 1024 * 1024  # 600 MB
+        mock_stat = MagicMock(st_size=size_bytes)
 
         with patch("pathlib.Path.stat", return_value=mock_stat):
             result = await service._check_db_size(session)
 
         assert result is not None
-        assert result.status == HealthStatus.DEGRADED
-        assert "600 MB" in result.message
-        assert "threshold: 500 MB" in result.message
+        assert result.status == expected_status
 
     @pytest.mark.asyncio
-    async def test_unhealthy_very_large_db(self, settings: MagicMock) -> None:
-        """Database size above 1000 MB -> unhealthy sub-check."""
+    async def test_large_db_size_is_informational(self, settings: MagicMock) -> None:
+        """A large valid database does not degrade system health by size alone."""
         session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
         service = _make_service(settings)
 
         mock_stat = MagicMock()
-        mock_stat.st_size = 1200 * 1024 * 1024  # 1200 MB
+        mock_stat.st_size = 1200 * 1024 * 1024
 
         with patch("pathlib.Path.stat", return_value=mock_stat):
             result = await service._check_db_size(session)
 
         assert result is not None
-        assert result.status == HealthStatus.UNHEALTHY
-        assert "1200 MB" in result.message
-        assert "threshold: 1000 MB" in result.message
+        assert result.status == HealthStatus.HEALTHY
+        assert "1200.0 MB" in result.message
+        assert "informational" in result.message
+
+    @pytest.mark.asyncio
+    async def test_very_large_db_size_is_informational(self, settings: MagicMock) -> None:
+        """Integrity, latency, bloat, and free space determine database health."""
+        session = self._make_session_with_url("sqlite+aiosqlite:////data/pullbox.db")
+        service = _make_service(settings)
+
+        mock_stat = MagicMock()
+        mock_stat.st_size = 2500 * 1024 * 1024
+
+        with patch("pathlib.Path.stat", return_value=mock_stat):
+            result = await service._check_db_size(session)
+
+        assert result is not None
+        assert result.status == HealthStatus.HEALTHY
+        assert "2500.0 MB" in result.message
+        assert result.details["size_bytes"] == 2500 * 1024 * 1024
+        assert result.details["classification"] == "informational"
 
     @pytest.mark.asyncio
     async def test_skipped_for_non_sqlite(self, settings: MagicMock) -> None:
@@ -307,7 +350,7 @@ class TestDatabaseSizeCheck:
         size_result = {
             "name": "Database size",
             "status": "degraded",
-            "message": "600 MB (threshold: 500 MB)",
+            "message": "1200 MB (threshold: 1024 MB)",
         }
         with patch.object(
             service, "_check_db_size", new_callable=AsyncMock, return_value=size_result
@@ -330,7 +373,7 @@ class TestDatabaseSizeCheck:
         size_result = {
             "name": "Database size",
             "status": "unhealthy",
-            "message": "1200 MB (threshold: 1000 MB)",
+            "message": "2500 MB (threshold: 2048 MB)",
         }
         with patch.object(
             service, "_check_db_size", new_callable=AsyncMock, return_value=size_result
@@ -487,6 +530,44 @@ class TestFilesystemCheck:
         assert outcomes[0].status == HealthStatus.UNHEALTHY
         assert "not writable" in outcomes[0].message.lower()
         assert any("not writable" in c["message"].lower() for c in outcomes[0].details["checks"])
+
+    @pytest.mark.asyncio
+    async def test_reference_only_root_requires_read_access_without_write_probe(
+        self, db_session: AsyncSession, tmp_path
+    ) -> None:
+        root_path = tmp_path / "reference-library"
+        root_path.mkdir()
+        root = LibraryRoot(
+            name="Reference Library",
+            path=str(root_path),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=False,
+        )
+        db_session.add(root)
+        await db_session.flush()
+
+        with patch("pullbox.services.health_service.tempfile.mkstemp") as write_probe:
+            service = _make_service()
+            outcomes = await service.run_check(db_session, "filesystem")
+
+        write_probe.assert_not_called()
+        assert outcomes[0].status == HealthStatus.HEALTHY
+        assert outcomes[0].message == "All paths meet configured access requirements"
+        assert outcomes[0].details["checks"] == [
+            {
+                "check_name": "Library Root: Reference Library",
+                "name": "Library Root: Reference Library",
+                "status": "healthy",
+                "message": "Readable (reference-only)",
+                "response_time_ms": outcomes[0].details["checks"][0]["response_time_ms"],
+                "details": {
+                    "path": str(root_path),
+                    "required_access": "read",
+                    "issue": "ok",
+                },
+            }
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -2458,6 +2539,29 @@ class TestCrossCutting:
         outcomes = await service._safe_run(exploding_check(), "test", "explode")
         assert outcomes[0].status == HealthStatus.UNHEALTHY
         assert "boom" in outcomes[0].message.lower()
+
+    @pytest.mark.asyncio
+    async def test_failed_check_always_rolls_back_before_persistence(
+        self,
+        settings: MagicMock,
+    ) -> None:
+        service = _make_service(settings)
+        session = MagicMock()
+        session.is_active = True
+        session.rollback = AsyncMock()
+
+        async def cancelled_database_check() -> CheckOutcome:
+            raise TimeoutError
+
+        outcomes = await service._safe_run(
+            cancelled_database_check(),
+            "database",
+            "connectivity",
+            session=session,
+        )
+
+        assert outcomes[0].status == HealthStatus.UNHEALTHY
+        session.rollback.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_actionable_guidance_present(self, db_session: AsyncSession) -> None:

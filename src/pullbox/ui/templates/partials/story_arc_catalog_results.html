@@ -1,0 +1,51 @@
+{% from "components/comicvine_result_cover.html" import comicvine_result_cover %}
+{% from "components/comicvine_result_card.html" import comicvine_result_card, comicvine_in_library_badge %}
+<div data-testid="story-arc-catalog-results" class="space-y-3">
+  {% if error_message %}
+    <p role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 p-3 text-sm text-pb-text">{{ error_message }}</p>
+  {% elif query|length < 2 %}
+    <div data-testid="story-arc-add-empty-state" class="add-series-empty-state">
+      <p class="add-series-empty-title">Search Comic Vine</p>
+      <p class="add-series-empty-copy">Enter at least two characters to search Comic Vine and review a reading order.</p>
+    </div>
+  {% elif not results %}
+    <div data-testid="story-arc-add-empty-state" class="add-series-empty-state">
+      <p class="add-series-empty-title">No Comic Vine matches</p>
+      <p class="add-series-empty-copy">Try another event name or a shorter search.</p>
+    </div>
+  {% else %}
+    <ul class="add-series-results-list" aria-label="Comic Vine Story Arcs">
+      {% for result in results %}
+        <li>
+        {% set library_href = "/story-arcs/" ~ result.existing_id if result.existing_id else none %}
+        {% call(slot) comicvine_result_card("cv-story-arc-result-" ~ result.metadata.provider_id, "story-arc-result-card", is_static=result.existing_id) %}
+          {% if slot == "cover" %}
+            {{ comicvine_result_cover(result.metadata.cover_url, result.metadata.title, href=library_href, link_testid="story-arc-existing-cover-link" if library_href else none) }}
+          {% elif slot == "details" %}
+            <h3 class="add-series-result-title">
+              {% if library_href %}
+                <a href="{{ library_href }}" data-testid="story-arc-existing-title-link" class="transition-colors hover:text-pb-text-link">{{ result.metadata.title }}</a>
+              {% else %}
+                {{ result.metadata.title }}
+              {% endif %}
+            </h3>
+            <div class="add-series-result-meta">
+              {% if result.metadata.publisher %}<span>{{ result.metadata.publisher }}</span>{% endif %}
+              {% if result.metadata.declared_issue_count is not none %}<span>{{ result.metadata.declared_issue_count }} issues</span>{% endif %}
+            </div>
+            {% if result.metadata.description %}
+              <p class="add-series-result-description">{{ result.metadata.description|striptags|truncate(260) }}</p>
+            {% endif %}
+          {% elif slot == "actions" %}
+            {% if result.existing_id %}
+              {{ comicvine_in_library_badge() }}
+            {% else %}
+              <a href="/story-arcs/catalog/{{ result.metadata.provider_id }}" class="btn-primary btn-sm add-series-result-add" aria-label="Preview {{ result.metadata.title }}">Preview members</a>
+            {% endif %}
+          {% endif %}
+        {% endcall %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>

@@ -18,6 +18,18 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.issue import Issue
+from pullbox.services.import_job_execution_items import (
+    ensure_target_issue_summary_for_import_file,
+)
+from pullbox.services.import_managed_copy_preflight import (
+    ManagedCopyPreflightError,
+    reopen_review_after_managed_copy_preflight_failure,
+    validate_managed_copy_preflight,
+)
+from pullbox.services.import_split_series import (
+    require_preferred_managed_root_for_selected_split_series,
+)
+from pullbox.services.import_story_arc_review import confirm_import_story_arcs
 from pullbox.services.import_workflow_state import initialize_progress_snapshot
 
 if TYPE_CHECKING:
@@ -84,6 +96,16 @@ async def confirm_import_job(
 
     items = await _load_confirmed_series(session, job_id, request)
 
+    await require_preferred_managed_root_for_selected_split_series(
+        session,
+        job,
+        preferred_library_root_id=(
+            request.target_library_root_id
+            if request.target_library_root_id is not None
+            else job.target_library_root_id
+        ),
+    )
+
     for item in items:
         item.status = ImportSeriesStatus.CONFIRMED
         item.selected_for_import = False
@@ -101,21 +123,48 @@ async def confirm_import_job(
     await apply_confirm_policy(session, job, request)
 
     duplicate_selected_count = await _count_selected_duplicate_files(session, job_id)
-    if not items and duplicate_selected_count == 0:
+    confirmed_story_arc_count = await confirm_import_story_arcs(
+        session,
+        job_id,
+        story_arc_ids=request.story_arc_ids,
+        decisions=[
+            (
+                decision.imported_story_arc_id,
+                decision.action,
+                decision.proposed_story_arc_id,
+            )
+            for decision in request.story_arc_decisions
+        ],
+    )
+    if not items and duplicate_selected_count == 0 and confirmed_story_arc_count == 0:
         raise ValidationError(
-            "Select at least one matched series or duplicate importable file before importing"
+            "Select at least one matched series, duplicate importable file, or story arc "
+            "before importing"
         )
+
+    try:
+        capacity_snapshot = await validate_managed_copy_preflight(
+            session,
+            job,
+            stage="confirmation",
+        )
+    except ManagedCopyPreflightError as exc:
+        await reopen_review_after_managed_copy_preflight_failure(session, job, exc)
+        raise
 
     job.status = ImportJobStatus.IMPORTING
     job.control_request = ImportControlRequest.NONE
-    job.progress_snapshot = initialize_progress_snapshot(
+    progress_snapshot = initialize_progress_snapshot(
         job,
         mode="import",
         phase="queued",
         progress=0,
-        message="Preparing the selected series for import...",
+        message="Preparing the selected import items...",
         status=ImportJobStatus.IMPORTING,
     )
+    if capacity_snapshot is not None:
+        progress_snapshot["managed_copy_capacity"] = capacity_snapshot.as_dict()
+    job.progress_snapshot = progress_snapshot
     await session.flush()
 
     await log_event(
@@ -125,10 +174,12 @@ async def confirm_import_job(
         "import_confirmed",
         message=(
             f"User confirmed {len(items)} series and "
-            f"{duplicate_selected_count} duplicate-series files for import"
+            f"{duplicate_selected_count} duplicate-series files and "
+            f"{confirmed_story_arc_count} story arcs for import"
         ),
         confirmed_count=len(items),
         duplicate_file_count=duplicate_selected_count,
+        story_arc_count=confirmed_story_arc_count,
     )
 
     return job
@@ -160,11 +211,65 @@ async def _load_confirmed_series(
             item.selected_for_import = True
         await session.flush()
 
+    persisted_item_ids = [item.id for item in persisted_items]
+    series_ids_with_files = (
+        set(
+            (
+                await session.scalars(
+                    sa_select(ImportedFile.import_series_id)
+                    .where(ImportedFile.import_series_id.in_(persisted_item_ids))
+                    .distinct()
+                )
+            ).all()
+        )
+        if persisted_item_ids
+        else set()
+    )
+    importable_series_ids = (
+        set(
+            (
+                await session.scalars(
+                    sa_select(ImportedFile.import_series_id)
+                    .where(
+                        ImportedFile.import_series_id.in_(persisted_item_ids),
+                        ImportedFile.status.in_(
+                            [ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]
+                        ),
+                    )
+                    .distinct()
+                )
+            ).all()
+        )
+        if persisted_item_ids
+        else set()
+    )
+    conflict_series_ids = (
+        set(
+            (
+                await session.scalars(
+                    sa_select(ImportedFile.import_series_id)
+                    .where(
+                        ImportedFile.import_series_id.in_(persisted_item_ids),
+                        ImportedFile.status == ImportedFileStatus.CONFLICT,
+                    )
+                    .distinct()
+                )
+            ).all()
+        )
+        if persisted_item_ids
+        else set()
+    )
+
     valid_items: list[ImportedSeries] = []
     invalid_items: list[ImportedSeries] = []
     has_unresolved_conflicts = False
     for item in persisted_items:
-        if item.status == ImportSeriesStatus.MATCHED and (item.files_conflict or 0) == 0:
+        no_persisted_files = item.id not in series_ids_with_files
+        if item.status == ImportSeriesStatus.MATCHED and (
+            item.id in importable_series_ids
+            or no_persisted_files
+            or item.id not in conflict_series_ids
+        ):
             valid_items.append(item)
             continue
         if (item.files_conflict or 0) > 0:
@@ -261,6 +366,11 @@ async def _confirm_matched_files(
         )
     )
     for matched_file in matched_result.scalars().all():
+        if not ensure_target_issue_summary_for_import_file(matched_file):
+            matched_file.status = ImportedFileStatus.NO_MATCH
+            matched_file.include_in_import = False
+            affected_series_ids.add(matched_file.import_series_id)
+            continue
         matched_file.status = ImportedFileStatus.CONFIRMED
         affected_series_ids.add(matched_file.import_series_id)
     await session.flush()

@@ -23,6 +23,7 @@ class IssueResponse(BaseModel):
     comicvine_id: int | None = None
     series_id: int
     issue_number: float
+    issue_number_text: str
     title: str | None = None
     description: str | None = None
     release_date: date | None = None
@@ -109,6 +110,7 @@ class IssueListResponse(BaseModel):
     id: int
     series_id: int
     issue_number: float
+    issue_number_text: str
     title: str | None = None
     release_date: date | None = None
     status: IssueStatus

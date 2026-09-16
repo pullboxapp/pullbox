@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import ColumnElement, and_, case, func, or_, select
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -95,6 +96,7 @@ def _safety_blocked_files_filter() -> ColumnElement[bool]:
     return (
         select(ImportedFile.id)
         .where(
+            ImportedFile.import_job_id == ImportedSeries.import_job_id,
             ImportedFile.import_series_id == ImportedSeries.id,
             ImportedFile.status.in_(
                 [ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED]
@@ -226,9 +228,7 @@ def _format_import_review_issue_number(issue_number: object) -> str | None:
         numeric_issue = float(issue_number)
     except (TypeError, ValueError):
         return str(issue_number).strip() or None
-    if numeric_issue.is_integer():
-        return str(int(numeric_issue))
-    return f"{numeric_issue:g}"
+    return format_issue_number(numeric_issue)
 
 
 def _comicvine_issue_url(issue_cv_id: int) -> str:
@@ -238,6 +238,7 @@ def _comicvine_issue_url(issue_cv_id: int) -> str:
 
 async def _load_import_review_matched_file_targets(
     session: AsyncSession,
+    job_id: int,
     series_ids: list[int],
 ) -> dict[int, list[dict[str, object]]]:
     """Load compact matched file-target rows for visible Step 3 review rows."""
@@ -247,6 +248,7 @@ async def _load_import_review_matched_file_targets(
     files_result = await session.execute(
         select(ImportedFile)
         .where(
+            ImportedFile.import_job_id == job_id,
             ImportedFile.import_series_id.in_(series_ids),
             ImportedFile.status.in_(_IMPORT_REVIEW_MATCHED_FILE_TARGET_STATUSES),
         )
@@ -392,6 +394,7 @@ def _import_review_file_group_key(
 
 async def _load_import_review_file_detail_groups(
     session: AsyncSession,
+    job_id: int,
     series_items: list[ImportedSeries],
 ) -> dict[int, list[dict[str, object]]]:
     """Load grouped per-file details for visible Step 3 review rows."""
@@ -402,7 +405,10 @@ async def _load_import_review_file_detail_groups(
     series_ids = list(series_by_id)
     files_result = await session.execute(
         select(ImportedFile)
-        .where(ImportedFile.import_series_id.in_(series_ids))
+        .where(
+            ImportedFile.import_job_id == job_id,
+            ImportedFile.import_series_id.in_(series_ids),
+        )
         .order_by(
             ImportedFile.import_series_id.asc(),
             case(

@@ -1,0 +1,21 @@
+{# Shared navigation action for a read-only provider update check. #}
+{% macro provider_update_link(url, label="Check for updates", testid="") %}
+<a
+  href="{{ url }}"
+  class="btn-ghost"
+  {% if testid %}data-testid="{{ testid }}"{% endif %}
+  x-data="{ checking: false }"
+  @htmx:before-request="checking = true"
+  @htmx:after-request="checking = false"
+  :aria-busy="checking.toString()"
+  :aria-disabled="checking.toString()"
+  hx-sync="this:drop"
+>
+  <svg class="h-3.5 w-3.5 shrink-0" :class="{ 'animate-spin': checking }" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992V4.356m-1.5 1.5a9 9 0 10.49 11.815M21 9a9 9 0 00-1.485-3.144" />
+  </svg>
+  <span x-show="!checking">{{ label }}</span>
+  <span x-show="checking" x-cloak>Checking…</span>
+  <span class="sr-only" role="status" x-text="checking ? 'Checking Comic Vine for updates' : ''"></span>
+</a>
+{% endmacro %}

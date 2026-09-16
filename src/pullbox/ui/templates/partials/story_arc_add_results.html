@@ -1,0 +1,6 @@
+{% from "components/comicvine_search_loading.html" import comicvine_search_loading %}
+
+<section id="story-arc-add-results" data-testid="story-arc-add-results" class="add-series-results-shell space-y-3">
+  {{ comicvine_search_loading("story-arc-add-results-loading", "story-arc-add-results-loading") }}
+  {% include "partials/story_arc_catalog_results.html" %}
+</section>

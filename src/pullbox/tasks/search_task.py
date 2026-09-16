@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy.exc import OperationalError
 
+from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry, load_airdcpp_search_clients
 from pullbox.composition.events import build_domain_event_bus
 from pullbox.config import get_settings
 from pullbox.core.config_resolver import get_int_setting, load_system_config_values, parse_bool
@@ -70,6 +71,7 @@ from pullbox.services.search_service import (
     load_wanted_issue_search_targets,
 )
 from pullbox.services.search_source_selection import select_search_source
+from pullbox.services.story_arc_search_targets import load_story_arc_missing_search_targets
 from pullbox.services.wanted_search_sweep import (
     WantedSearchSweepState,
     checkpoint_wanted_search_items,
@@ -230,6 +232,7 @@ async def _ensure_pending_series_search_logs(
     *,
     series_id: int,
     existing_log_ids_by_issue: dict[int, int],
+    story_arc_id: int | None = None,
 ) -> dict[int, int]:
     """Expose missing bulk-search rows before a series search starts."""
 
@@ -250,8 +253,17 @@ async def _ensure_pending_series_search_logs(
             details={
                 "run_state": "running",
                 "action_status": "searching",
-                "task_id": f"search_series_{series_id}",
+                "task_id": (
+                    f"search_story_arc_{story_arc_id}"
+                    if story_arc_id is not None
+                    else f"search_series_{series_id}"
+                ),
                 "trigger_type": "automated",
+                **(
+                    {"story_arc_id": story_arc_id, "search_scope": "story_arc"}
+                    if story_arc_id is not None
+                    else {}
+                ),
             },
         )
         session.add(search_log)
@@ -286,13 +298,7 @@ async def _persist_wanted_search_outcome(
     issue_grabbed = 0
     issue_queued = 0
     best_confidence: str | None = None
-    direct_outcome = outcome.direct_outcome
-    direct_results = (
-        len(direct_outcome.matched) + len(direct_outcome.rejected) if direct_outcome else 0
-    )
-    dc_outcome = outcome.dc_outcome
-    dc_results = len(dc_outcome.matched) + len(dc_outcome.rejected) if dc_outcome else 0
-    total_results = len(outcome.raw_results) + direct_results + dc_results
+    total_results = outcome.results_found_count
     action_status = "no_results" if total_results == 0 else "no_match"
     try:
         search_log = await session.get(SearchLog, pending_log_id) if pending_log_id else None
@@ -338,10 +344,7 @@ async def _persist_wanted_search_outcome(
         search_log.results_found = total_results
         search_log.results_grabbed = issue_grabbed
         search_log.results_queued = issue_queued
-        search_log.results_rejected = max(
-            0,
-            total_results - issue_grabbed - issue_queued,
-        )
+        search_log.results_rejected = outcome.results_rejected_count
         search_log.details = _merge_search_log_details(
             existing_details=search_log.details or {},
             next_details=next_details,
@@ -377,7 +380,7 @@ async def _persist_wanted_search_outcome(
                     results_found=total_results,
                     results_grabbed=0,
                     results_queued=0,
-                    results_rejected=total_results,
+                    results_rejected=outcome.results_rejected_count,
                     details=_merge_search_log_details(
                         existing_details=None,
                         next_details=outcome.search_details,
@@ -402,6 +405,7 @@ async def _persist_series_search_outcome(
     runtime: SearchRuntime,
     download_svc: DownloadService,
     intervention_svc: InterventionService,
+    story_arc_id: int | None = None,
 ) -> tuple[int, int, int]:
     """Route and persist one completed series-search outcome."""
 
@@ -411,6 +415,21 @@ async def _persist_series_search_outcome(
         validator_kwargs=runtime.validator_kwargs,
     )
     target = primary_outcome.target
+
+    async def arc_eligible() -> bool:
+        assert story_arc_id is not None
+        return bool(
+            await load_story_arc_missing_search_targets(
+                session, story_arc_id, series_id=target.series_id, issue_ids=[target.issue_id]
+            )
+        )
+
+    if story_arc_id is not None and not await arc_eligible():
+        if pending_log_id is not None:
+            await _complete_pending_bulk_search_logs(
+                session, {target.issue_id: pending_log_id}, action_status="no_longer_eligible"
+            )
+        return 0, 0, 0
     issue_log = log.bind(issue_id=target.issue_id, issue_number=target.issue_number)
     issue_log.info(
         "search_series_issue_results",
@@ -479,6 +498,7 @@ async def _persist_series_search_outcome(
             runner=(get_direct_acquisition_runner() if runtime.direct_providers else None),
             source_priority=runtime.source_priority,
             planner=plan_direct_acquisition,
+            eligibility_check=arc_eligible if story_arc_id is not None else None,
         )
         issue_grabbed = routed.grabbed
         issue_queued = routed.queued
@@ -493,7 +513,7 @@ async def _persist_series_search_outcome(
             )
         elif routed.source_kind == "dc":
             issue_log.info(
-                "search_series_issue_dc_evaluated",
+                "search_series_issue_dc_routed",
                 action_status=routed.action_status,
                 confidence=routed.best_confidence,
                 search_pass=selected_pass,
@@ -560,14 +580,18 @@ async def _persist_series_search_outcome(
         if routed.source_kind is not None:
             details["acquisition_method"] = routed.source_kind
 
+        rejected_count = selected_outcome.results_rejected_count
+        if fallback_outcome is not None:
+            other_pass = primary_outcome if selected_pass == 2 else fallback_outcome
+            rejected_count += len(other_pass.rejected)
         await _persist_bulk_search_log(
             session,
             target=target,
-            pending_log_id=pending_log_id,
+            pending_log_id=search_log.id,
             results_found=total_found,
             results_grabbed=issue_grabbed,
             results_queued=issue_queued,
-            results_rejected=max(0, total_found - issue_grabbed - issue_queued),
+            results_rejected=rejected_count,
             details=details,
             best_confidence=routed.best_confidence,
             action_status=(
@@ -654,6 +678,11 @@ async def _build_task_search_runtime(
     include_download_clients: bool = True,
 ) -> SearchRuntime | None:
     """Build task runtime state using the task module's registry patch point."""
+    registry = get_airdcpp_supervisor_registry()
+    has_automatic_dc = bool(
+        registry is not None
+        and await load_airdcpp_search_clients(session, registry, automatic=True)
+    )
     return await _search_runtime.build_search_runtime(
         session,
         include_download_clients=include_download_clients,
@@ -661,6 +690,7 @@ async def _build_task_search_runtime(
         default_type_thresholds=DEFAULT_TYPE_THRESHOLDS,
         eval_kwargs_builder=build_eval_kwargs,
         include_direct_providers=True,
+        allow_empty_registry=has_automatic_dc,
     )
 
 
@@ -916,16 +946,22 @@ async def search_series_issues(
     series_id: int,
     *,
     pending_log_ids_by_issue: dict[int, int] | None = None,
+    story_arc_id: int | None = None,
+    issue_ids: list[int] | None = None,
 ) -> dict[str, int]:
-    """Search indexers for all wanted issues of a single series.
+    """Search wanted series issues, or an explicit bounded arc-member batch.
 
     Obtains its own DB session so it can be called from event subscribers
     and background tasks without sharing caller state.
+    An arc scope never widens to the rest of its parent series, and eligibility
+    is checked again after provider work before routing a download.
 
     Returns:
         Dict with ``wanted``, ``sent``, and ``queued`` counts.
     """
-    log = logger.bind(series_id=series_id)
+    if (story_arc_id is None) != (issue_ids is None):
+        raise ValueError("Arc-scoped searches require both the arc and its issue-ID batch")
+    log = logger.bind(series_id=series_id, story_arc_id=story_arc_id)
     log.info("search_series_issues_start")
     remaining_pending_log_ids = dict(pending_log_ids_by_issue or {})
 
@@ -958,7 +994,13 @@ async def search_series_issues(
                 log.warning("search_series_issues_not_found")
                 return {"wanted": 0, "sent": 0, "queued": 0}
 
-            targets = await load_series_wanted_search_targets(session, series_id)
+            targets = (
+                await load_series_wanted_search_targets(session, series_id)
+                if story_arc_id is None
+                else await load_story_arc_missing_search_targets(
+                    session, story_arc_id, series_id=series_id, issue_ids=issue_ids
+                )
+            )
             if not targets:
                 if remaining_pending_log_ids:
                     await _complete_pending_bulk_search_logs(
@@ -974,6 +1016,7 @@ async def search_series_issues(
                 targets,
                 series_id=series_id,
                 existing_log_ids_by_issue=remaining_pending_log_ids,
+                story_arc_id=story_arc_id,
             )
             preload_ms = int((time.monotonic() - preload_started_at) * 1000)
             log.info(
@@ -1013,6 +1056,20 @@ async def search_series_issues(
                 routing_started_at = time.monotonic()
                 # Preserve provider health even if downstream routing rolls back.
                 await session.commit()
+                if story_arc_id is not None:
+                    current = await load_story_arc_missing_search_targets(
+                        session, story_arc_id, series_id=series_id, issue_ids=[issue_id]
+                    )
+                    if not current:
+                        pending_id = remaining_pending_log_ids.pop(issue_id, None)
+                        if pending_id is not None:
+                            await _complete_pending_bulk_search_logs(
+                                session,
+                                {issue_id: pending_id},
+                                action_status="no_longer_eligible",
+                            )
+                        processed_issue_ids.add(issue_id)
+                        return
                 issue_sent, issue_queued, issue_failed = await _persist_series_search_outcome(
                     session,
                     log=log,
@@ -1022,6 +1079,7 @@ async def search_series_issues(
                     runtime=runtime,
                     download_svc=download_svc,
                     intervention_svc=intervention_svc,
+                    story_arc_id=story_arc_id,
                 )
                 sent += issue_sent
                 queued += issue_queued

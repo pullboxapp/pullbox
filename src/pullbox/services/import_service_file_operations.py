@@ -232,6 +232,7 @@ class ImportServiceFileOperationsMixin:
         comicinfo_payload: dict[str, Any],
         *,
         transfer_method: str,
+        temp_path: Path | None = None,
         progress_callback: Callable[[str, int, int, str], Awaitable[None] | None] | None = None,
     ) -> bool:
         """Run a killable combined CBZ materialization and ComicInfo write."""
@@ -242,6 +243,7 @@ class ImportServiceFileOperationsMixin:
             target_path,
             comicinfo_payload,
             transfer_method=transfer_method,
+            temp_path=temp_path,
             progress_callback=progress_callback,
             raise_if_cancelled_immediately=self._raise_if_job_cancelled_immediately,
         )

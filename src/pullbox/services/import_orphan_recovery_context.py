@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -18,7 +19,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
-from pullbox.services.import_orphans import is_active_orphan_row
+from pullbox.services.import_orphans import is_active_orphan_row, requires_orphan_issue_decision
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,7 +40,7 @@ async def load_orphan_recovery_item(
     if job is None:
         raise NotFoundError("ImportJob", item.import_job_id)
     if job.status != ImportJobStatus.COMPLETED:
-        raise ValidationError("Unmatched recovery is only available for completed imports.")
+        raise ValidationError("Import follow-up is only available for completed imports.")
     has_live_issue_recovery = False
     if item.status == ImportSeriesStatus.IMPORTED:
         has_live_issue_recovery = bool(
@@ -160,7 +161,7 @@ def _build_recovery_file_rows(
     for option in issue_options:
         issue_cv_id = int(option["issue_cv_id"])
         issue_number = float(option["issue_number"])
-        label = f"#{issue_number:g}"
+        label = f"#{format_issue_number(issue_number)}"
         if option.get("title"):
             label = f"{label} - {option['title']}"
         issue_label_by_cv_id[issue_cv_id] = label
@@ -185,10 +186,7 @@ def _build_recovery_file_rows(
         ):
             suggested_issue_cv_id = issue_number_to_cv_ids[imp_file.parsed_issue_number][0]
 
-        decision_locked = imp_file.status in {
-            ImportedFileStatus.IMPORTED,
-            ImportedFileStatus.SKIPPED,
-        }
+        decision_locked = not requires_orphan_issue_decision(imp_file)
         if decision_locked:
             files_completed += 1
         else:

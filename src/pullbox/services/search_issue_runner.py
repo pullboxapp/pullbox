@@ -150,6 +150,7 @@ async def search_issue_target(
         wanted_series=target.series_title,
         wanted_issue=target.issue_number,
         wanted_year=target.search_year,
+        year_context=target.year_context,
         wanted_issue_type=target.issue_type,
         alternate_names=target.alternate_names,
         wanted_issue_title=target.issue_title,

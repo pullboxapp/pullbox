@@ -532,6 +532,14 @@ Pullbox also includes sidecar recovery logic for stale or corrupt `-wal` and
 
 ### 5.2 Maintenance Coordination
 
+Database-size health thresholds allow for large collections and retained logs:
+the size sub-check reports the current file size as informational data. Database
+health is determined by integrity, representative latency, bloat, and available
+storage rather than a fixed size threshold. The file-size observation does not
+impose a storage limit or an automatic cleanup policy. Disk-space, integrity, query
+latency, and database-bloat checks remain independent; a smaller database does
+not suppress failures in those checks.
+
 **Current Pullbox implementation**
 
 - Database maintenance windows coordinate app traffic through the shared

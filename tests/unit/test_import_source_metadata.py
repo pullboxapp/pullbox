@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from pullbox.core.archive import ArchiveReader
 from pullbox.core.source_metadata import MetadataSignal, SourceMetadata
 from pullbox.models.import_job import ImportedFile, ImportedSeries, ImportJob, ImportSourceType
 from pullbox.models.issue import IssueType
@@ -686,6 +687,280 @@ async def test_load_deferred_source_metadata_for_import_file_reads_archive_metad
     assert metadata.comicvine_series_id == 97508
     assert metadata.diagnostics["archive_metadata_loaded"] is True
     assert metadata.diagnostics["archive_metadata_deferred"] is False
+
+
+@pytest.mark.asyncio
+async def test_deferred_comicinfo_reconciles_stale_mylar_issue_identity(
+    tmp_path: Path,
+) -> None:
+    file_path = tmp_path / "Dark Nights - Death Metal Omnibus 01.cbz"
+    with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("page001.jpg", b"page")
+        archive.writestr("page002.jpg", b"page")
+        archive.writestr(
+            "ComicInfo.xml",
+            (
+                "<?xml version='1.0'?>"
+                "<ComicInfo>"
+                "<Series>Dark Nights: Death Metal Omnibus</Series>"
+                "<Number>1</Number>"
+                "<Title>HC</Title>"
+                "<Format>Trade Paper Back</Format>"
+                "<Notes>[cv_vol_id:166912] [cv_issue_id:1132072]</Notes>"
+                "</ComicInfo>"
+            ),
+        )
+
+    imp_series = ImportedSeries(
+        raw_series_name="Dark Nights - Death Metal Omnibus",
+        raw_year=2023,
+        cv_id=166912,
+        cv_match_method="mylar3_cv_id",
+        diagnostics={"source_issue_type": IssueType.OMNIBUS.value},
+    )
+    imp_file = ImportedFile(
+        file_path=str(file_path),
+        file_name=file_path.name,
+        parsed_series="Dark Nights - Death Metal Omnibus",
+        parsed_issue_number=1.0,
+        parsed_year=2023,
+        comicvine_issue_id=899000001,
+        diagnostics={
+            "comicvine_series_id": 166912,
+            "source_issue_type": IssueType.OMNIBUS.value,
+            "metadata_signals": {
+                "comicvine_series_id": MetadataSignal.MYLAR3.value,
+                "comicvine_issue_id": MetadataSignal.MYLAR3.value,
+                "issue_number": MetadataSignal.MYLAR3.value,
+            },
+            "source_metadata": {
+                "archive_metadata_loaded": False,
+                "archive_metadata_deferred": True,
+                "has_comicinfo": False,
+            },
+        },
+    )
+
+    metadata = await load_deferred_source_metadata_for_import_file(imp_series, imp_file)
+
+    assert metadata.comicvine_issue_id == 1132072
+    assert metadata.signals["comicvine_issue_id"] == MetadataSignal.COMICINFO
+    assert "identity_conflicts" not in metadata.diagnostics
+    assert metadata.diagnostics["mylar3_issue_identity_reconciliation"] == {
+        "recorded_comicvine_issue_id": 899000001,
+        "embedded_comicvine_issue_id": 1132072,
+        "comicvine_series_id": 166912,
+        "issue_number": 1.0,
+        "method": "corroborated_embedded_comicinfo",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("embedded_series_id", "embedded_issue_number", "embedded_format"),
+    [
+        (999999, "1", "Trade Paper Back"),
+        (166912, "2", "Trade Paper Back"),
+        (166912, "1", "Annual"),
+    ],
+)
+async def test_deferred_comicinfo_keeps_uncorroborated_mylar_issue_conflict(
+    tmp_path: Path,
+    embedded_series_id: int,
+    embedded_issue_number: str,
+    embedded_format: str,
+) -> None:
+    file_path = tmp_path / "Dark Nights - Death Metal 01.cbz"
+    with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("page001.jpg", b"page")
+        archive.writestr("page002.jpg", b"page")
+        archive.writestr(
+            "ComicInfo.xml",
+            (
+                "<?xml version='1.0'?>"
+                "<ComicInfo>"
+                "<Series>Dark Nights: Death Metal Omnibus</Series>"
+                f"<Number>{embedded_issue_number}</Number>"
+                f"<Format>{embedded_format}</Format>"
+                f"<Notes>[cv_vol_id:{embedded_series_id}] "
+                "[cv_issue_id:1132072]</Notes>"
+                "</ComicInfo>"
+            ),
+        )
+
+    imp_series = ImportedSeries(
+        raw_series_name="Dark Nights - Death Metal Omnibus",
+        raw_year=2023,
+        cv_id=166912,
+        cv_match_method="mylar3_cv_id",
+        diagnostics={"source_issue_type": IssueType.OMNIBUS.value},
+    )
+    imp_file = ImportedFile(
+        file_path=str(file_path),
+        file_name=file_path.name,
+        parsed_series="Dark Nights - Death Metal Omnibus",
+        parsed_issue_number=1.0,
+        parsed_year=2023,
+        comicvine_issue_id=899000001,
+        diagnostics={
+            "comicvine_series_id": 166912,
+            "source_issue_type": IssueType.OMNIBUS.value,
+            "metadata_signals": {
+                "comicvine_series_id": MetadataSignal.MYLAR3.value,
+                "comicvine_issue_id": MetadataSignal.MYLAR3.value,
+                "issue_number": MetadataSignal.MYLAR3.value,
+            },
+            "source_metadata": {
+                "archive_metadata_loaded": False,
+                "archive_metadata_deferred": True,
+                "has_comicinfo": False,
+            },
+        },
+    )
+
+    metadata = await load_deferred_source_metadata_for_import_file(imp_series, imp_file)
+
+    assert metadata.comicvine_issue_id == 899000001
+    assert metadata.signals["comicvine_issue_id"] == MetadataSignal.MYLAR3
+    assert "mylar3_issue_identity_reconciliation" not in metadata.diagnostics
+    assert any(
+        conflict.get("field") == "comicvine_issue_id"
+        for conflict in metadata.diagnostics["identity_conflicts"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_deferred_comicinfo_quarantines_unrecorded_foreign_mylar_file(
+    tmp_path: Path,
+) -> None:
+    file_path = tmp_path / "unknown-001.cbz"
+    with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            (
+                "<?xml version='1.0'?>"
+                "<ComicInfo>"
+                "<Series>Action Comics</Series>"
+                "<Number>969</Number>"
+                "<Volume>2016</Volume>"
+                "</ComicInfo>"
+            ),
+        )
+
+    imp_series = ImportedSeries(raw_series_name="Fritzi Ritz", raw_year=1953)
+    imp_file = ImportedFile(
+        file_path=str(file_path),
+        file_name=file_path.name,
+        parsed_series="Fritzi Ritz",
+        parsed_issue_number=1.0,
+        parsed_year=1953,
+        diagnostics={
+            "metadata_signals": {"series_name": MetadataSignal.MYLAR3.value},
+            "source_metadata": {
+                "archive_metadata_loaded": False,
+                "archive_metadata_deferred": True,
+                "has_comicinfo": False,
+                "mylar3_unrecorded_file": {"expected_series": "Fritzi Ritz"},
+            },
+        },
+    )
+
+    metadata = await load_deferred_source_metadata_for_import_file(imp_series, imp_file)
+    conflict = build_import_metadata_conflict(
+        metadata=metadata,
+        target_series_title="Fritzi Ritz",
+        target_series_year=1953,
+        target_issue_number=1.0,
+        target_issue_cv_id=None,
+        target_issue_title=None,
+    )
+
+    assert metadata.diagnostics["mylar3_folder_scope_conflict"] == {
+        "expected_series": "Fritzi Ritz",
+        "parsed_series": "Action Comics",
+        "recorded_issue": False,
+        "signal": "comicinfo",
+    }
+    assert conflict is not None
+    assert conflict["kind"] == "source_scope_review"
+    assert conflict["preserve_series_match"] is True
+
+
+@pytest.mark.asyncio
+async def test_load_deferred_source_metadata_reuses_safety_evidence_without_reopening_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_path = tmp_path / "Batman 001.cbz"
+    file_path.write_bytes(b"archive contents are intentionally not read")
+    imp_series = ImportedSeries(
+        raw_series_name="Batman",
+        raw_year=2011,
+        cv_id=42721,
+        cv_match_method="mylar3_cv_id",
+    )
+    imp_file = ImportedFile(
+        file_path=str(file_path),
+        file_name=file_path.name,
+        parsed_series="Batman",
+        parsed_issue_number=1.0,
+        parsed_year=2011,
+        diagnostics={
+            "comicvine_series_id": 42721,
+            "metadata_signals": {
+                "comicvine_series_id": MetadataSignal.MYLAR3.value,
+            },
+            "archive_member_evidence": {
+                "member_index_scanned": True,
+                "comicinfo_entry_count": 1,
+                "comicinfo_entry": "ComicInfo.xml",
+                "comicinfo": {
+                    "series": "Batman",
+                    "number": "1",
+                    "notes": "[cv_vol_id:99999]",
+                },
+            },
+            "source_metadata": {
+                "archive_metadata_loaded": False,
+                "archive_metadata_deferred": True,
+                "mylar3_folder_metadata_scanned": True,
+                "sidecar_snapshot": {
+                    "files_present": ["series.json"],
+                    "series_id": None,
+                    "series_id_source": None,
+                    "issue_id": None,
+                    "booktype": IssueType.TPB.value,
+                    "series_status": "Ended",
+                    "issue_count": 12,
+                    "series_name": "Batman",
+                    "year": 2011,
+                    "identity_conflicts": [],
+                },
+            },
+        },
+    )
+
+    def fail_archive_read(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("cached safety evidence must avoid reopening the archive")
+
+    monkeypatch.setattr(ArchiveReader, "list_files", fail_archive_read)
+    monkeypatch.setattr(ArchiveReader, "read_file", fail_archive_read)
+
+    metadata = await load_deferred_source_metadata_for_import_file(imp_series, imp_file)
+
+    assert metadata.comicvine_series_id == 42721
+    assert metadata.signals["comicvine_series_id"] == MetadataSignal.MYLAR3
+    assert metadata.issue_type == IssueType.TPB
+    assert metadata.series_status == "Ended"
+    assert metadata.issue_count_hint == 12
+    assert metadata.diagnostics["archive_member_index_reused"] is True
+    assert metadata.diagnostics["identity_conflicts"] == [
+        {
+            "field": "comicvine_series_id",
+            "first": 42721,
+            "conflicting": 99999,
+        }
+    ]
 
 
 @pytest.mark.asyncio

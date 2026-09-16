@@ -226,7 +226,7 @@ async def persist_direct_search_discoveries(
     """Persist redacted candidate evidence and return server-issued IDs."""
     pending: list[tuple[DirectAcquisitionAttempt, DirectValidatedCandidate, bool]] = []
     fingerprint_groups: list[tuple[DirectAcquisitionAttempt, list[DirectAcquisitionAttempt]]] = []
-    issue_number = f"{target.issue_number:g}"
+    issue_number = target.effective_issue_number_text
     volume = _target_volume(target)
     for primary in (*outcome.matched, *outcome.rejected):
         group_attempts: list[DirectAcquisitionAttempt] = []
@@ -487,6 +487,7 @@ def _validate_direct_candidate(
             wanted_series=target.series_title,
             wanted_issue=target.issue_number,
             wanted_year=target.search_year,
+            year_context=target.year_context,
             wanted_issue_type=target.issue_type,
             alternate_names=_validation_alternate_names(target, candidate),
             wanted_issue_title=target.issue_title,
@@ -520,7 +521,7 @@ def _is_explicit_direct_pack_for_target(
     candidate: DirectCandidate,
     target: IssueSearchTarget,
 ) -> bool:
-    target_issue = f"{target.issue_number:g}"
+    target_issue = target.effective_issue_number_text
     return (
         len(candidate.parsed.issue_numbers) > 1 and target_issue in candidate.parsed.issue_numbers
     )
@@ -532,7 +533,7 @@ def _direct_pack_member_title(
 ) -> str:
     year = candidate.parsed.year or target.search_year
     suffix = f" ({year})" if year is not None else ""
-    return f"{candidate.parsed.series_title} #{target.issue_number:g}{suffix}"
+    return f"{candidate.parsed.series_title} #{target.effective_issue_number_text}{suffix}"
 
 
 def _validation_alternate_names(
@@ -609,7 +610,7 @@ def _resolver_retry_allowed(exc: DirectProviderClientError) -> bool:
 
 
 def _build_intent(target: IssueSearchTarget) -> DirectSearchIntent:
-    issue_number = f"{target.issue_number:g}"
+    issue_number = target.effective_issue_number_text
     return DirectSearchIntent(
         series_title=target.series_title,
         normalized_title=NameMatcher.normalize(target.series_title),
@@ -630,7 +631,7 @@ def _target_volume(target: IssueSearchTarget) -> str | None:
     """Map collection issue numbering onto provider volume coverage."""
     if issue_type_family(target.issue_type) is not TypeFamily.COLLECTION:
         return None
-    return collection_title_number(target.issue_title) or f"{target.issue_number:g}"
+    return collection_title_number(target.issue_title) or target.effective_issue_number_text
 
 
 def _candidate_release(

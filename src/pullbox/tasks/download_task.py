@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from pullbox.composition.events import build_domain_event_bus
 from pullbox.composition.providers import register_download_clients
+from pullbox.core.sqlite_lock import run_sqlite_transaction_with_retry
 from pullbox.database import get_session_factory
 from pullbox.models.download import DownloadClientType
 from pullbox.models.issue import Issue, IssueStatus
@@ -336,11 +337,12 @@ async def monitor_downloads() -> None:
             event_logger=logger,
         )
 
-    # ── Phase 3: Write — apply updates and run throttled recovery checks ──
-    async with factory() as session:
-        try:
-            if updates:
-                apply_result = await _apply_monitor_updates(
+    # ── Phase 3: Write — short, independently retryable DB transactions ──
+    if updates:
+        async with factory() as session:
+
+            async def apply_updates() -> _download_monitor_apply.MonitorApplyResult:
+                return await _apply_monitor_updates(
                     session,
                     updates,
                     first_active_observed_at=_first_active_observed_at,
@@ -350,19 +352,32 @@ async def monitor_downloads() -> None:
                     event_logger=logger,
                     publish_progress=project_download_operation_progress,
                 )
-                completed = apply_result.completed
-                failed = apply_result.failed
 
-            # Throttle expensive recovery checks to ~every 30s
-            if recovery_due:
-                retried += await _process_retry_pending(factory, download_svc)
-                recovered = await _recover_orphaned_downloads(session)
-                _last_recovery_check = recovery_checked_at
+            apply_result = await run_sqlite_transaction_with_retry(
+                session,
+                apply_updates,
+                event_name="download_monitor_write",
+                logger=logger,
+            )
+            completed = apply_result.completed
+            failed = apply_result.failed
 
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+    # Throttle expensive recovery checks to ~every 30s. Network retries run
+    # outside this transaction; only the local orphan-recovery write is retried.
+    if recovery_due:
+        retried += await _process_retry_pending(factory, download_svc)
+        async with factory() as session:
+
+            async def recover_orphans() -> int:
+                return await _recover_orphaned_downloads(session)
+
+            recovered = await run_sqlite_transaction_with_retry(
+                session,
+                recover_orphans,
+                event_name="download_orphan_recovery",
+                logger=logger,
+            )
+        _last_recovery_check = recovery_checked_at
 
     duration_ms = (time.monotonic() - start) * 1000
     log_kwargs = {

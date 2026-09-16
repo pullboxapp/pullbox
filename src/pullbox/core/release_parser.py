@@ -18,6 +18,8 @@ import html
 import re
 from dataclasses import dataclass
 
+from pullbox.core.issue_numbers import parse_issue_number_text
+from pullbox.core.name_matcher import NameMatcher
 from pullbox.models.issue import IssueType
 
 # ---------------------------------------------------------------------------
@@ -135,10 +137,20 @@ _YEAR_BRACKET_RE = re.compile(r"\[(?:[A-Za-z]{3}\s+)?(\d{4})\]")
 _YEAR_PAREN_RE = re.compile(r"\((\d{4})\)")
 
 # Issue number with hash prefix: #045, #5, #5.1
-_ISSUE_HASH_RE = re.compile(r"#(\d+(?:\.\d+)?)")
+_ISSUE_HASH_RE = re.compile(r"#(\d+(?:\.\d+)?[A-Za-z]*)")
+
+# DC's One Million event used the literal issue number 1,000,000 across
+# multiple ongoing titles. Keep this exact exception narrow so arbitrary long
+# numeric title tokens do not become issue numbers.
+_DC_ONE_MILLION_ISSUE_RE = re.compile(r"(?<=\s)(1000000)(?=\s|$)")
 
 # Long-running UK weekly anthologies often label issue numbers as "Prog 2483".
 _PROG_ISSUE_RE = re.compile(r"\bProg(?:ramme)?\.?\s*#?\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE)
+
+# Bare four-digit issues are unambiguous only at the end of the stripped title.
+_LONG_POSITIONAL_ISSUE_RE = re.compile(r"(?<=\s)(\d{4}(?:\.\d+)?[A-Za-z]*)\s*$")
+_RANGE_OR_COUNT_PREFIX_RE = re.compile(r"(?:\d\s*[-\u2013\u2014]|\bof)\s*$", re.IGNORECASE)
+_VOLUME_YEAR_RE = re.compile(r"\b(?:v|vol(?:ume)?\.?)\s*((?:19|20)\d{2})\b", re.IGNORECASE)
 
 # Limited series marker: (of 05)
 _LIMITED_SERIES_RE = re.compile(r"\(of\s+\d+\)", re.IGNORECASE)
@@ -248,6 +260,8 @@ class ParsedRelease:
     file_format: str | None
     is_pack: bool
     pack_range: str | None
+    issue_number_text: str | None = None
+    volume_year: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +343,9 @@ def issues_match(wanted: float, found: float | None, tolerance: float = 0.001) -
 # ---------------------------------------------------------------------------
 
 
-def parse_release_title(title: str) -> ParsedRelease | None:
+def parse_release_title(
+    title: str, *, expected_series: tuple[str, ...] = ()
+) -> ParsedRelease | None:
     """Parse an NZB release title or local filename into structured components.
 
     Handles all common naming conventions:
@@ -399,6 +415,13 @@ def parse_release_title(title: str) -> ParsedRelease | None:
         working,
     ).strip()
 
+    # An explicit v1977 is series identity, not a collection volume or issue date.
+    volume_year = None
+    volume_year_match = _VOLUME_YEAR_RE.search(working)
+    if volume_year_match:
+        volume_year = int(volume_year_match[1])
+        working = working[: volume_year_match.start()] + working[volume_year_match.end() :]
+
     # Step e: Detect issue type
     issue_type = _detect_type(working)
 
@@ -413,7 +436,9 @@ def parse_release_title(title: str) -> ParsedRelease | None:
     pre_issue_is_pack, pre_issue_pack_range = _detect_pack(working)
 
     # Step h: Extract issue number
-    issue_number, working = _extract_issue_number(working, issue_type)
+    issue_number, working, issue_number_text = _extract_issue_number(
+        working, issue_type, expected_series=expected_series
+    )
 
     # Step h½: Reclassify as VOLUME when volume is present but no issue
     # number was found and no other type was explicitly detected.
@@ -440,6 +465,8 @@ def parse_release_title(title: str) -> ParsedRelease | None:
         file_format=file_format,
         is_pack=is_pack,
         pack_range=pack_range,
+        issue_number_text=issue_number_text,
+        volume_year=volume_year,
     )
 
 
@@ -707,10 +734,15 @@ _WORD_NUMBER_RE = re.compile(
 )
 
 
-def _extract_issue_number(title: str, issue_type: IssueType) -> tuple[float | None, str]:
+def _extract_issue_number(
+    title: str,
+    issue_type: IssueType,
+    *,
+    expected_series: tuple[str, ...] = (),
+) -> tuple[float | None, str, str | None]:
     """Step h: Extract issue number from the title.
 
-    Returns (issue_number, remaining_title).
+    Returns (numeric issue number, remaining title, exact issue designation).
     """
     # Remove limited series markers first: (of 05)
     clean = _LIMITED_SERIES_RE.sub("", title).strip()
@@ -719,68 +751,98 @@ def _extract_issue_number(title: str, issue_type: IssueType) -> tuple[float | No
     m = _WORD_NUMBER_RE.search(clean)
     if m:
         num = float(_WORD_NUMBERS[m.group(1).lower()])
+        _, exact_text = parse_issue_number_text(num)
         remaining = clean[: m.start()] + clean[m.end() :]
-        return num, remaining.strip()
+        return num, remaining.strip(), exact_text
 
     # Priority 1: Hash prefix — #045, #5, #5.1
     m = _ISSUE_HASH_RE.search(clean)
     if m:
-        num = float(m.group(1))
+        num, exact_text = parse_issue_number_text(m.group(1))
         remaining = clean[: m.start()] + clean[m.end() :]
-        return num, remaining.strip()
+        return num, remaining.strip(), exact_text
 
-    # Priority 2: Anthology "Prog" marker — supports long-running series
+    # Priority 2: DC One Million's literal issue 1,000,000 without a hash.
+    m = _DC_ONE_MILLION_ISSUE_RE.search(clean)
+    if m:
+        num, exact_text = parse_issue_number_text(m.group(1))
+        remaining = clean[: m.start()] + clean[m.end() :]
+        return num, remaining.strip(), exact_text
+
+    # Priority 3: Anthology "Prog" marker — supports long-running series
     # whose issue numbers exceed the usual 2-3 digit positional heuristic.
     m = _PROG_ISSUE_RE.search(clean)
     if m:
-        num = float(m.group(1))
+        num, exact_text = parse_issue_number_text(m.group(1))
         remaining = clean[: m.start()] + clean[m.end() :]
-        return num, remaining.strip()
+        return num, remaining.strip(), exact_text
 
-    # Priority 3: "No." pattern from dot-separated titles
+    # Priority 4: "No." pattern from dot-separated titles
     m = _DOT_NO_ISSUE_RE.search(clean)
     if m:
-        num = float(m.group(1))
+        num, exact_text = parse_issue_number_text(m.group(1))
         remaining = clean[: m.start()] + clean[m.end() :]
-        return num, remaining.strip()
+        return num, remaining.strip(), exact_text
 
-    # Priority 4: Inline limited-series marker — "02 of 03".  The first number
+    # Priority 5: Inline limited-series marker — "02 of 03".  The first number
     # is the issue; the second is the total issue count.
     m = _INLINE_LIMITED_SERIES_RE.search(clean)
     if m:
-        num = float(m.group(1))
+        num, exact_text = parse_issue_number_text(m.group(1))
         remaining = clean[: m.start()] + clean[m.end() :]
-        return num, remaining.strip()
+        return num, remaining.strip(), exact_text
 
-    # Priority 5: Positional number — a 2-3 digit number that sits between
+    # Priority 6: Long-running series may omit "Prog" or "#" before issue 2487.
+    # Require a known series prefix: a title such as Marvel 1602 is not issue 1602.
+    m = _LONG_POSITIONAL_ISSUE_RE.search(clean)
+    if m and expected_series:
+        token = m.group(1)
+        prefix = clean[: m.start()].rstrip()
+        prefix_names = {
+            NameMatcher.normalize(name).replace(" ", "")
+            for name in (prefix, _clean_series_name(prefix, issue_type) or "")
+            if name
+        }
+        if (
+            any(
+                NameMatcher.normalize(name).replace(" ", "") in prefix_names
+                for name in expected_series
+            )
+            and not _RESOLUTION_TAG_RE.fullmatch(token)
+            and not _RANGE_OR_COUNT_PREFIX_RE.search(prefix)
+        ):
+            num, exact_text = parse_issue_number_text(token)
+            return num, prefix, exact_text
+
+    # Priority 7: Positional number — a 2-3 digit number that sits between
     # the series name and metadata (year/brackets)
     # Match a number preceded by space (or after series-name text)
     # but NOT part of an alphanumeric word like "D4VE2" or "Spider-Man 2099"
     positional_matches = list(
         re.finditer(
-            r"(?<=\s)(\d{2,3})(?:\.\d+)?(?=\s|$)",
+            r"(?<=\s)(\d{2,3}(?:\.\d+)?[A-Za-z]*)(?=\s|$)",
             clean,
         )
     )
     m = _select_positional_issue_match(positional_matches)
     if m:
         num_str = m.group(0)
-        num = float(num_str)
+        num, exact_text = parse_issue_number_text(num_str)
         # Avoid treating large numbers that could be years as issue numbers
         if num < 500:
             remaining = clean[: m.start()] + clean[m.end() :]
-            return num, remaining.strip()
+            return num, remaining.strip(), exact_text
         # If num >= 500, check if it might still be a valid issue (e.g., long-running series)
         # but only if there's no year already found and the number doesn't look like a year
         if num >= 1900:
-            return None, clean
+            return None, clean, None
         # Numbers 500-1899 — treat as issue for very long-running series
         remaining = clean[: m.start()] + clean[m.end() :]
-        return num, remaining.strip()
+        return num, remaining.strip(), exact_text
 
-    # Priority 6: Single digit number at word boundary after text
+    # Priority 8: Single digit number at word boundary after text
     # Must NOT be followed by a word (e.g. "4 Covers" is a count, not issue #4)
-    m = re.search(r"(?<=\s)(\d)(?=\s|$)", clean)
+    m = re.search(r"(?<=\s)(\d[A-Za-z]*)(?=\s|$)", clean)
     if m:
         # Check the word after the digit — if it's alphabetic, this is likely
         # a count or descriptor (e.g. "4 Covers", "3 Stories"), not an issue number
@@ -788,11 +850,11 @@ def _extract_issue_number(title: str, issue_type: IssueType) -> tuple[float | No
         if after and after[0].isalpha():
             pass  # skip — looks like "N <word>", not an issue number
         else:
-            num = float(m.group(1))
+            num, exact_text = parse_issue_number_text(m.group(1))
             remaining = clean[: m.start()] + clean[m.end() :]
-            return num, remaining.strip()
+            return num, remaining.strip(), exact_text
 
-    return None, clean
+    return None, clean, None
 
 
 def _select_positional_issue_match(matches: list[re.Match[str]]) -> re.Match[str] | None:

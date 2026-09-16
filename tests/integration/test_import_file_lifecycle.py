@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import zipfile
+import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -27,13 +29,20 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
+    ImportJobAction,
     ImportJobStatus,
     ImportSeriesStatus,
     ImportSourceType,
 )
 from pullbox.models.issue import Issue, IssueStatus, IssueType
-from pullbox.models.library import LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series, SeriesStatus
 from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
@@ -44,6 +53,7 @@ from pullbox.schemas.import_job import (
     ImportJobCreate,
 )
 from pullbox.services.import_service import ImportService
+from scripts.mylar3_import_fixture import create_mylar3_db
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-r10")
 
@@ -260,12 +270,36 @@ def _write_comic_file(path: Path, size: int = 100) -> None:
     if ext in {".cbz", ".zip", ".epub"}:
         with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("page001.jpg", payload)
+            archive.writestr("page002.jpg", payload)
         return
     if ext == ".pdf":
         path.write_bytes(b"%PDF-1.4\n%" + payload)
         return
     if ext == ".cbr":
-        path.write_bytes(b"Rar!\x1a\x07\x00" + payload)
+        # Stored RAR3 entries make the inventory real without an external writer.
+        def header(kind: int, flags: int, body: bytes) -> bytes:
+            data = struct.pack("<BHH", kind, flags, 7 + len(body)) + body
+            return struct.pack("<H", zlib.crc32(data) & 0xFFFF) + data
+
+        archive = b"Rar!\x1a\x07\x00" + header(0x73, 0, b"\x00" * 6)
+        for name in (b"page001.jpg", b"page002.jpg"):
+            file_header = (
+                struct.pack(
+                    "<LLBLLBBHL",
+                    len(payload),
+                    len(payload),
+                    3,
+                    zlib.crc32(payload),
+                    (40 << 25) | (1 << 21) | (1 << 16),
+                    20,
+                    0x30,
+                    len(name),
+                    0o100644,
+                )
+                + name
+            )
+            archive += header(0x74, 0x8000, file_header) + payload
+        path.write_bytes(archive + header(0x7B, 0, b""))
         return
     path.write_bytes(payload)
 
@@ -318,7 +352,30 @@ async def _run_full_pipeline(
                 series_id = fixture_series_ids.get(series_name)
                 if isinstance(series_id, int):
                     sidecar_path.write_text(json.dumps({"comicid": series_id}))
-    request = ImportJobCreate(source_path=source_path, source_type=source_type)
+    target_root = await session.scalar(
+        sa_select(LibraryRoot).where(LibraryRoot.is_default_managed_destination.is_(True)).limit(1)
+    )
+    if target_root is None:
+        target_root = await session.scalar(sa_select(LibraryRoot).order_by(LibraryRoot.id).limit(1))
+    if target_root is None:
+        source = Path(source_path)
+        test_library = source.parent / f".{source.name}-pullbox-library"
+        test_library.mkdir(parents=True, exist_ok=True)
+        target_root = LibraryRoot(
+            name="Lifecycle managed destination",
+            path=str(test_library),
+            enabled=True,
+            allow_referenced_registrations=True,
+            allow_managed_writes=True,
+            is_default_managed_destination=True,
+        )
+        session.add(target_root)
+        await session.flush()
+    request = ImportJobCreate(
+        source_path=source_path,
+        source_type=source_type,
+        target_library_root_id=target_root.id,
+    )
     job = await svc.create_job(session, request)
     await svc.start_scan(session, job.id)
     await session.refresh(job)
@@ -667,8 +724,12 @@ class TestFullImportWithFiles:
 
         assert job.total_files_found == 0
 
-    async def test_ra_mixed_file_formats(self, db_session: AsyncSession, tmp_path: Path) -> None:
+    async def test_ra_mixed_file_formats(
+        self, db_session: AsyncSession, tmp_path: Path, monkeypatch
+    ) -> None:
         """Files with various formats (CBZ, CBR, PDF, EPUB) all get processed."""
+        # Header inspection is pure Python; this lifecycle test needs no extraction backend.
+        monkeypatch.setattr("pullbox.core.archive.configure_rarfile_backend", lambda: None)
         comics_dir = tmp_path / "library"
         await _setup_comics_directory(db_session, comics_dir)
 
@@ -1110,7 +1171,7 @@ class TestImportLeaveInPlace:
         )
 
         for i, issue in enumerate(issues):
-            src = tmp_path / "source" / f"Batman #{i + 1:03d}.cbz"
+            src = comics_dir / "Existing Batman Layout" / f"Batman #{i + 1:03d}.cbz"
             src.parent.mkdir(parents=True, exist_ok=True)
             _write_comic_file(src, size=200)
 
@@ -1125,7 +1186,7 @@ class TestImportLeaveInPlace:
             # File stays at source
             assert src.exists()
             assert lf.file_path == str(src)
-            assert str(comics_dir) not in lf.file_path
+            assert lf.storage_mode == LibraryFileStorageMode.REFERENCED
 
         # Issues marked OWNED
         await db_session.refresh(issues[0])
@@ -1192,11 +1253,254 @@ class TestImportLeaveInPlace:
         lf = lf_result.scalars().first()
         assert lf is not None
         assert str(comics_dir) in lf.file_path
+        registered_action = (
+            await db_session.scalars(
+                sa_select(ImportJobAction).where(
+                    ImportJobAction.import_job_id == job.id,
+                    ImportJobAction.action_type == "library_file_registered",
+                )
+            )
+        ).one()
+        assert registered_action.payload["destination_signature"] == lf.source_signature
+        assert registered_action.payload["destination_signature"]["schema_version"] == 1
+        placement_action = (
+            await db_session.scalars(
+                sa_select(ImportJobAction).where(
+                    ImportJobAction.import_job_id == job.id,
+                    ImportJobAction.action_type == "library_file_placement_started",
+                )
+            )
+        ).one()
+        assert placement_action.payload["placement_completed"] is True
+        assert placement_action.payload["destination_signature"] == lf.source_signature
+        assert placement_action.payload["temp_paths"]
+        assert all(not Path(path).exists() for path in placement_action.payload["temp_paths"])
 
         # Source file preserved for source-safe collection imports
         source_files = list((source / "Batman (2016)").glob("*.cbz"))
         assert len(source_files) == 1
         assert source_files[0].exists()
+
+    @pytest.mark.parametrize(
+        ("source_type", "source_changed"),
+        [
+            (ImportSourceType.FILESYSTEM, False),
+            (ImportSourceType.MYLAR3, False),
+            (ImportSourceType.MYLAR3, True),
+        ],
+    )
+    async def test_rc_wizard_in_place_import_registers_without_mutation(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+        source_type: ImportSourceType,
+        source_changed: bool,
+    ) -> None:
+        comics_dir = tmp_path / "library"
+        root = await _setup_comics_directory(db_session, comics_dir)
+        db_session.add_all(
+            [
+                SystemConfig(key="rename_on_import", value="true", value_type="bool"),
+                SystemConfig(
+                    key="convert_to_preferred_format_on_import",
+                    value="true",
+                    value_type="bool",
+                ),
+                SystemConfig(
+                    key="update_embedded_comicinfo_from_match_on_import",
+                    value="true",
+                    value_type="bool",
+                ),
+                SystemConfig(key="library_permissions_enabled", value="true", value_type="bool"),
+            ]
+        )
+        await db_session.flush()
+        source = comics_dir / "Existing Layout"
+        _make_comic_dirs(
+            source,
+            [("Batman (2016)", ["original issue name 001.cbz"])],
+        )
+        series_folder = source / "Batman (2016)"
+        sidecar = series_folder / "series.json"
+        sidecar.write_text(json.dumps({"comicid": 97508}), encoding="utf-8")
+        source_file = series_folder / "original issue name 001.cbz"
+        before_bytes = source_file.read_bytes()
+        before_stat = source_file.stat()
+        before_tree = sorted(str(path.relative_to(source)) for path in source.rglob("*"))
+        before_sidecar = sidecar.read_bytes(), sidecar.stat().st_mtime_ns, sidecar.stat().st_mode
+        database = tmp_path / "mylar.db"
+        database_before: tuple[bytes, int, int] | None = None
+        if source_type == ImportSourceType.MYLAR3:
+            create_mylar3_db(
+                database,
+                series=[
+                    {
+                        "ComicID": "CV-97508",
+                        "ComicName": "Batman",
+                        "ComicYear": "2016",
+                        "ComicPublisher": "DC Comics",
+                        "ComicLocation": "/comics/Batman (2016)",
+                        "Total": 1,
+                    }
+                ],
+                issues=[
+                    {
+                        "IssueID": "100001",
+                        "ComicID": "97508",
+                        "Issue_Number": "1",
+                        "Location": source_file.name,
+                    }
+                ],
+            )
+            database_before = (
+                database.read_bytes(),
+                database.stat().st_mtime_ns,
+                database.stat().st_mode,
+            )
+
+        mock_provider = _mock_cv_provider(
+            search_map={
+                "Batman": [_cv_search_result(provider_id="97508", title="Batman", year=2016)]
+            },
+            issues_map={"97508": [_issue_summary(provider_id="100001", issue_number=1.0)]},
+        )
+        mock_metadata = AsyncMock()
+        mock_metadata._provider = mock_provider
+        cv_to_series: dict[int, object] = {}
+        mock_series_svc = _mock_series_service(cv_to_series)
+        svc = _make_service(series_service=mock_series_svc, metadata_service=mock_metadata)
+
+        job = await svc.create_job(
+            db_session,
+            ImportJobCreate(
+                source_path=str(database if source_type == ImportSourceType.MYLAR3 else source),
+                source_type=source_type,
+                file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+                target_library_root_id=root.id,
+                mylar3_path_map=(
+                    {"/comics": str(source)} if source_type == ImportSourceType.MYLAR3 else {}
+                ),
+                mylar3_path_map_confirmed=source_type == ImportSourceType.MYLAR3,
+            ),
+        )
+        await svc.start_scan(db_session, job.id)
+        await db_session.refresh(job)
+        imported_series = list(
+            (
+                await db_session.execute(
+                    sa_select(ImportedSeries).where(ImportedSeries.import_job_id == job.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        await svc.confirm_import(
+            db_session,
+            job.id,
+            ConfirmImportRequest(series_ids=[item.id for item in imported_series]),
+        )
+        cv_to_series[97508] = (
+            await _create_series_with_issues(
+                db_session,
+                "Batman",
+                2016,
+                97508,
+                [(1.0, 100001)],
+            )
+        )[0]
+
+        if source_changed:
+            source_file.write_bytes(before_bytes + b"changed after scan")
+        await svc.run_import(db_session, job.id)
+        await db_session.refresh(job)
+
+        if source_changed:
+            file_row = (
+                await db_session.scalars(
+                    sa_select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+                )
+            ).one()
+            assert file_row.status == ImportedFileStatus.FAILED
+            assert file_row.include_in_import is False
+            assert file_row.diagnostics["source_revalidation"]["code"] == "source_changed"
+            assert await db_session.scalar(sa_select(LibraryFile.id)) is None
+            assert source_file.read_bytes() == before_bytes + b"changed after scan"
+            return
+
+        library_file = (
+            (
+                await db_session.execute(
+                    sa_select(LibraryFile).where(LibraryFile.issue_id.is_not(None))
+                )
+            )
+            .scalars()
+            .one()
+        )
+        action = (
+            (
+                await db_session.execute(
+                    sa_select(ImportJobAction).where(
+                        ImportJobAction.import_job_id == job.id,
+                        ImportJobAction.action_type == "library_file_registered",
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+        after_stat = source_file.stat()
+
+        assert job.status == ImportJobStatus.COMPLETED
+        assert job.target_library_root_id == root.id
+        assert job.move_to_library is False
+        assert job.effective_transfer_method == "leave_in_place"
+        assert job.convert_to_preferred_format is False
+        assert job.update_embedded_comicinfo_from_match is False
+        assert library_file.file_path == str(source_file.resolve())
+        assert library_file.storage_mode == LibraryFileStorageMode.REFERENCED
+        assert action.payload["storage_mode"] == "referenced"
+        assert action.payload["transfer_method"] == "leave_in_place"
+        assert source_file.read_bytes() == before_bytes
+        assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
+        assert after_stat.st_mode == before_stat.st_mode
+        assert sorted(str(path.relative_to(source)) for path in source.rglob("*")) == before_tree
+        assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns, sidecar.stat().st_mode) == (
+            before_sidecar
+        )
+        if source_type == ImportSourceType.MYLAR3:
+            mock_provider.search_series.assert_not_awaited()
+            mock_provider.get_series.assert_not_awaited()
+            mock_provider.get_issues_for_series.assert_not_awaited()
+            assert (
+                database.read_bytes(),
+                database.stat().st_mtime_ns,
+                database.stat().st_mode,
+            ) == database_before
+            await svc.rollback_import(db_session, job.id)
+            assert await db_session.get(LibraryFile, library_file.id) is None
+            assert source_file.read_bytes() == before_bytes
+            assert source_file.stat().st_mtime_ns == before_stat.st_mtime_ns
+            assert source_file.stat().st_mode == before_stat.st_mode
+            assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns, sidecar.stat().st_mode) == (
+                before_sidecar
+            )
+            assert (
+                sorted(str(path.relative_to(source)) for path in source.rglob("*")) == before_tree
+            )
+            frozen_policy = dict(job.ingest_policy_snapshot)
+            db_session.add(
+                SystemConfig(key="post_processing_method", value="hardlink", value_type="string")
+            )
+            await db_session.flush()
+            retry = await svc.retry_job(db_session, job.id)
+            assert retry.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+            assert retry.ingest_policy_snapshot == frozen_policy
+            assert retry.target_library_root_id == root.id
+            assert retry.mylar3_path_map == {"/comics": str(source)}
+            assert retry.effective_transfer_method == "leave_in_place"
+            assert retry.move_to_library is False
+            assert retry.convert_to_preferred_format is False
+            assert retry.update_embedded_comicinfo_from_match is False
 
 
 # ── Scenario R-D: Import with Rename ─────────────────────────────────
@@ -1288,9 +1592,10 @@ class TestImportWithRename:
             assert Path(lf.file_path).exists()
 
     async def test_rd_rename_preserves_file_extension(
-        self, db_session: AsyncSession, tmp_path: Path
+        self, db_session: AsyncSession, tmp_path: Path, monkeypatch
     ) -> None:
         """Rename keeps original file extension (.cbz stays .cbz, .cbr stays .cbr)."""
+        monkeypatch.setattr("pullbox.core.archive.configure_rarfile_backend", lambda: None)
         comics_dir = tmp_path / "library"
         await _setup_comics_directory(db_session, comics_dir)
         db_session.add(SystemConfig(key="rename_on_import", value="true", value_type="bool"))
@@ -1447,7 +1752,7 @@ class TestManualIssueImport:
         )
         issue = issues[0]
 
-        src = tmp_path / "downloads" / "Batman 017 (2016).cbz"
+        src = comics_dir / "Existing Batman Layout" / "Batman 017 (2016).cbz"
         src.parent.mkdir(parents=True)
         _write_comic_file(src, size=200)
 
@@ -1568,7 +1873,7 @@ class TestManualIssueImport:
             [(1.0, 100001)],
         )
 
-        src = tmp_path / "downloads" / "Batman 001.cbz"
+        src = comics_dir / "Existing Batman Layout" / "Batman 001.cbz"
         src.parent.mkdir(parents=True)
         _write_comic_file(src)
 
@@ -1616,7 +1921,8 @@ class TestManualIssueImport:
                 strict=True,
             )
         ):
-            src = tmp_path / f"file_{i}.cbz"
+            src = comics_dir / "Existing Batman Layout" / f"file_{i}.cbz"
+            src.parent.mkdir(parents=True, exist_ok=True)
             _write_comic_file(src)
 
             lf = await register_library_file(
@@ -1775,6 +2081,7 @@ class TestPhase1Regression:
     ) -> None:
         """Attempting to confirm a non-REVIEW job raises ValidationError."""
         svc = _make_service()
+        await _setup_comics_directory(db_session, tmp_path / "managed-library")
         request = ImportJobCreate(
             source_path=str(tmp_path), source_type=ImportSourceType.FILESYSTEM
         )
@@ -2075,6 +2382,7 @@ class TestEdgeCases:
     ) -> None:
         """Confirming non-existent series IDs → ValidationError."""
         svc = _make_service()
+        await _setup_comics_directory(db_session, tmp_path / "managed-library")
 
         dir_a = tmp_path / "a"
         dir_a.mkdir()

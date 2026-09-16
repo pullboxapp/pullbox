@@ -17,15 +17,20 @@ if TYPE_CHECKING:
 async def resolve_dashboard_storage_path(session: AsyncSession) -> Path:
     """Return the filesystem path dashboard storage cards should measure.
 
-    The dashboard is library-focused, so prefer the primary enabled library
-    root. Runtime settings provide a safe fallback for first-run installs before
-    a database-backed root exists.
+    The dashboard is library-focused, so prefer the explicit default managed
+    destination. A managed-capable root is the fallback before a default has
+    been selected; reference-only roots are measured last. Runtime settings
+    remain the first-run fallback before a database-backed root exists.
     """
     root_path = (
         await session.execute(
             select(LibraryRoot.path)
             .where(LibraryRoot.enabled.is_(True))
-            .order_by(LibraryRoot.id)
+            .order_by(
+                LibraryRoot.is_default_managed_destination.desc(),
+                LibraryRoot.allow_managed_writes.desc(),
+                LibraryRoot.id,
+            )
             .limit(1)
         )
     ).scalar_one_or_none()

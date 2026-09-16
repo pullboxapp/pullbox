@@ -5,16 +5,559 @@ from __future__ import annotations
 import json
 import re
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.pages.import_page import ImportPage
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Page, Route
 
 pytestmark = pytest.mark.e2e
 
 
 class TestImportCollectionTab:
     """Behavior-first E2E checks for the Import workspace collection tab."""
+
+    def test_source_destination_dropdowns_follow_shared_contract(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        from playwright.sync_api import expect
+
+        page = ImportPage(authed_page, seeded_server)
+        page.goto(tab="collection")
+        page.show_collection_source_step()
+        page.source_filesystem_card.click()
+
+        advanced_options = authed_page.get_by_test_id("import-advanced-options")
+        advanced_options.locator("summary").first.click()
+        destination_section = authed_page.get_by_test_id("import-advanced-file-management")
+        authed_page.evaluate(
+            """() => {
+                const root = document.querySelector("[data-testid='import-collection-source']");
+                const data = window.Alpine.$data(root);
+                const selectedRootId = Number(data.targetLibraryRootId);
+                data.libraryRoots = data.libraryRoots.filter(
+                    item => Number(item.id) === selectedRootId
+                );
+            }"""
+        )
+        expect(destination_section).to_be_hidden()
+
+        authed_page.evaluate(
+            """() => {
+                const root = document.querySelector("[data-testid='import-collection-source']");
+                const data = window.Alpine.$data(root);
+                data.libraryRoots = data.libraryRoots.concat([{
+                    id: 987654,
+                    name: "Overflow Library",
+                    path: "/tmp/pullbox-e2e-overflow",
+                    enabled: true,
+                    allow_referenced_registrations: true,
+                    allow_managed_writes: true,
+                    available: true,
+                    readable: true,
+                    writable: true,
+                    is_default_managed_destination: false,
+                }]);
+            }"""
+        )
+        expect(destination_section).to_be_visible()
+        expect(destination_section).to_contain_text("Where new files go")
+        destination_section.locator("summary").click()
+
+        managed_root = page.dropdown("import-managed-library-root")
+        expect(managed_root).to_be_visible()
+        expect(managed_root).to_have_attribute("data-dropdown-select-contract", "v1")
+        expect(managed_root.locator("select")).to_have_count(0)
+        managed_root.locator("[data-dropdown-select-trigger]").click()
+        panel = authed_page.locator("[data-dropdown-select-panel]:visible").first
+        expect(panel).to_contain_text("Overflow Library")
+        panel.locator("[data-dropdown-option][data-value]:not([data-value=''])").first.click()
+        expect(managed_root.locator("[data-dropdown-select-input]")).not_to_have_value("")
+
+        page.file_handling_in_place.click()
+        in_place_root = page.dropdown("import-in-place-library-root")
+        expect(in_place_root).to_be_visible()
+        expect(in_place_root.locator("[data-dropdown-select-trigger-label]")).to_have_text(
+            "No preferred destination"
+        )
+
+    def test_folder_in_place_resolution_registers_source_as_reference_root(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        from playwright.sync_api import expect
+
+        source_path = "/imports/pullbox-real-world-import-lab/profiles/folder/source/comics"
+        root_created = False
+        preview_requests: list[dict[str, object]] = []
+        create_requests: list[dict[str, object]] = []
+
+        def fulfill_layout_preview(route: Route) -> None:
+            response = {
+                "effective_spec": {
+                    "schema_version": 1,
+                    "mode": "auto",
+                    "preset": None,
+                    "series_path_template": None,
+                    "issue_filename_template": None,
+                    "selected_cluster_id": None,
+                    "fallback_to_auto": True,
+                },
+                "classification": "series_folders",
+                "clusters": [],
+                "directories_considered": 3,
+                "files_considered": 12,
+                "files_fitting": 12,
+                "files_ambiguous": 0,
+                "files_outside_root": 0,
+                "archive_probes": 0,
+                "can_keep_in_place": root_created,
+                "can_apply_future_policy": False,
+                "partial": False,
+                "warnings": [] if root_created else ["source_outside_library_root"],
+            }
+            route.fulfill(json=response)
+
+        def fulfill_root_preview(route: Route) -> None:
+            preview_requests.append(route.request.post_data_json)
+            route.fulfill(
+                json={
+                    "can_create": True,
+                    "blocking_reasons": [],
+                    "warnings": [],
+                    "normalized_path": source_path,
+                }
+            )
+
+        def fulfill_roots(route: Route) -> None:
+            nonlocal root_created
+            if route.request.method == "POST":
+                create_requests.append(route.request.post_data_json)
+                root_created = True
+                route.fulfill(status=201, json={"id": 91, **route.request.post_data_json})
+                return
+            roots = [
+                {
+                    "id": 1,
+                    "name": "Comics Directory",
+                    "path": "/comics",
+                    "enabled": True,
+                    "allow_referenced_registrations": True,
+                    "allow_managed_writes": True,
+                    "available": True,
+                    "readable": True,
+                    "writable": True,
+                    "is_default_managed_destination": True,
+                }
+            ]
+            if root_created:
+                roots.append(
+                    {
+                        "id": 91,
+                        "name": "Existing files - comics",
+                        "path": source_path,
+                        "enabled": True,
+                        "allow_referenced_registrations": True,
+                        "allow_managed_writes": False,
+                        "available": True,
+                        "readable": True,
+                        "writable": True,
+                        "is_default_managed_destination": False,
+                    }
+                )
+            route.fulfill(json=roots)
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_layout_preview)
+        authed_page.route("**/api/v1/config/library-roots/preview", fulfill_root_preview)
+        authed_page.route("**/api/v1/config/library-roots", fulfill_roots)
+
+        page = ImportPage(authed_page, seeded_server)
+        page.goto(tab="collection")
+        page.show_collection_source_step()
+        page.source_filesystem_card.click()
+        page.source_path_input.fill(source_path)
+        page.file_handling_in_place.click()
+
+        advanced = authed_page.get_by_test_id("import-advanced-options")
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("1")
+        advanced.locator("summary").first.click()
+        issue = advanced.locator("article").filter(
+            has_text="Register this folder for existing files"
+        )
+        expect(issue).to_contain_text(source_path)
+        issue.get_by_role("button", name="Resolve").click()
+
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_be_hidden()
+        expect(page.file_handling_in_place).to_have_attribute("aria-pressed", "true")
+        expect(page.start_scan_button).to_be_enabled()
+        assert preview_requests == [
+            {
+                "name": f"Existing files - comics - {source_path}",
+                "path": source_path,
+                "allow_referenced_registrations": True,
+                "allow_managed_writes": False,
+                "is_default_managed_destination": False,
+            }
+        ]
+        assert create_requests == preview_requests
+
+    def test_advanced_attention_distinguishes_repairs_skips_and_manual_fixes(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        from playwright.sync_api import expect
+
+        preview = self._identity_mylar_path_response(3)
+        preview.update(
+            can_confirm=False,
+            can_continue_with_unresolved=True,
+            requires_unresolved_acknowledgement=True,
+            unresolved_fingerprint="b" * 64,
+            attention_fingerprint="c" * 64,
+            attention_items=[
+                {
+                    "key": "d" * 64,
+                    "code": "missing",
+                    "blocks_import": False,
+                    "reason": "One stored Mylar location is missing.",
+                    "suggested_action": "Skip this stale reference for this import.",
+                    "root_path": "/mnt/comics/missing",
+                    "action": {
+                        "kind": "acknowledge_unavailable",
+                        "fingerprint": "e" * 64,
+                        "root_path": "/mnt/comics/missing",
+                    },
+                    "details": {
+                        "title": "Review missing Mylar locations",
+                        "series_count": 1,
+                        "location_count": 1,
+                        "known_paths": ["/mnt/comics/missing"],
+                        "steps": ["Check whether /mnt/comics/missing was renamed."],
+                    },
+                },
+                {
+                    "key": "f" * 64,
+                    "code": "invalid",
+                    "blocks_import": True,
+                    "reason": "One stored Mylar path is unsafe.",
+                    "suggested_action": "Correct the stored path, then recheck it.",
+                    "root_path": "/mnt/comics/unsafe",
+                    "action": None,
+                    "details": {
+                        "title": "Correct unsafe Mylar paths",
+                        "series_count": 1,
+                        "location_count": 1,
+                        "known_paths": ["/mnt/comics/unsafe"],
+                        "steps": ["Correct /mnt/comics/unsafe in Mylar."],
+                    },
+                },
+                {
+                    "key": "a" * 64,
+                    "code": "ineffective_mapping",
+                    "blocks_import": False,
+                    "reason": "One manual mapping no longer changes any paths.",
+                    "suggested_action": "Remove the unused mapping.",
+                    "root_path": "/mnt/comics",
+                    "action": {
+                        "kind": "remove_ineffective_mapping",
+                        "fingerprint": "9" * 64,
+                        "stored_prefix": "/old/comics",
+                        "pullbox_prefix": "/mnt/comics",
+                    },
+                    "details": {
+                        "title": "Remove an unused mapping",
+                        "series_count": 0,
+                        "location_count": 0,
+                        "known_paths": ["/old/comics", "/mnt/comics"],
+                        "steps": ["Remove the mapping and recheck the import setup."],
+                    },
+                },
+            ],
+            mappings=[
+                {
+                    "stored_prefix": "/old/comics",
+                    "pullbox_prefix": "/mnt/comics",
+                }
+            ],
+        )
+        analysis_count = 0
+
+        def analyze(route: Route) -> None:
+            nonlocal analysis_count
+            analysis_count += 1
+            response = json.loads(json.dumps(preview))
+            if route.request.post_data_json.get("auto_detect") is False:
+                response["mappings"] = []
+                response["attention_items"] = [
+                    item
+                    for item in response["attention_items"]
+                    if item["code"] != "ineffective_mapping"
+                ]
+            route.fulfill(json=response)
+
+        authed_page.route("**/api/v1/import/mylar-path-preview", analyze)
+        page = ImportPage(authed_page, seeded_server)
+        page.goto(tab="collection")
+        page.show_collection_source_step()
+        page.source_mylar3_card.click()
+        page.source_path_input.fill("/imports/mylar.db")
+
+        advanced = authed_page.get_by_test_id("import-advanced-options")
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("3")
+        advanced.locator("summary").first.click()
+        expect(advanced.get_by_role("button", name="Recheck import setup")).to_be_visible()
+        expect(authed_page.get_by_test_id("import-mylar-path-analyze")).to_have_count(0)
+        missing = advanced.locator("article").filter(has_text="One stored Mylar location")
+        unsafe = advanced.locator("article").filter(has_text="One stored Mylar path is unsafe")
+        repair = advanced.locator("article").filter(has_text="One manual mapping")
+        skip = missing.get_by_role("button", name="Skip for this import")
+        missing_details = missing.get_by_role("button", name="Details")
+        details = unsafe.get_by_role("button", name="Details")
+        resolve = repair.get_by_role("button", name="Resolve")
+        expect(skip).to_be_visible()
+        expect(skip).to_have_class(re.compile(r"\bbtn-ghost\b"))
+        expect(missing_details).to_be_visible()
+        expect(missing.get_by_role("button", name="Resolve")).to_have_count(0)
+        expect(resolve).to_be_visible()
+        expect(resolve).to_have_class(re.compile(r"\bbtn-primary\b"))
+        expect(details).to_be_visible()
+        expect(details).to_have_class(re.compile(r"\bbtn-ghost\b"))
+
+        unsafe.get_by_role("button", name="Details").click()
+        modal = authed_page.get_by_test_id("import-attention-details-modal")
+        expect(modal).to_be_visible()
+        expect(modal).to_contain_text("Correct unsafe Mylar paths")
+        expect(modal).to_contain_text("/mnt/comics/unsafe")
+        expect(modal).to_contain_text("Blocks import")
+        modal.get_by_role("button", name="OK", exact=True).click()
+        expect(modal).to_be_hidden()
+
+        resolve.click()
+        expect(repair).to_be_hidden()
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("2")
+
+        skip.click()
+        expect(missing).to_be_hidden()
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("1")
+        assert analysis_count >= 2
+
+        authed_page.reload()
+        page = ImportPage(authed_page, seeded_server)
+        page.show_collection_source_step()
+        page.source_mylar3_card.click()
+        page.source_path_input.fill("/imports/mylar.db")
+        advanced = authed_page.get_by_test_id("import-advanced-options")
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("2")
+        advanced.locator("summary").first.click()
+        expect(
+            advanced.locator("article").filter(has_text="One stored Mylar location")
+        ).to_be_hidden()
+        expect(authed_page.get_by_test_id("import-mylar-path-exceptions")).to_have_count(0)
+
+        preview["attention_fingerprint"] = "8" * 64
+        advanced.get_by_role("button", name="Recheck import setup").click()
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("3")
+        expect(
+            advanced.locator("article").filter(has_text="One stored Mylar location")
+        ).to_be_visible()
+
+    def test_mylar_preflight_refreshes_without_flashing_existing_controls(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        from playwright.sync_api import expect
+
+        preview = self._identity_mylar_path_response(3)
+        preview.update(
+            can_confirm=False,
+            can_continue_with_unresolved=True,
+            attention_fingerprint="c" * 64,
+            attention_items=[
+                {
+                    "key": "missing",
+                    "code": "missing",
+                    "blocks_import": False,
+                    "reason": "One stored Mylar location is missing.",
+                    "suggested_action": "Skip this stale reference for this import.",
+                    "root_path": "/mnt/comics/missing",
+                    "action": {
+                        "kind": "acknowledge_unavailable",
+                        "fingerprint": "e" * 64,
+                    },
+                    "details": {"title": "Missing", "steps": []},
+                },
+                {
+                    "key": "unsafe",
+                    "code": "invalid",
+                    "blocks_import": True,
+                    "reason": "One stored Mylar path is unsafe.",
+                    "suggested_action": "Correct the stored path, then recheck it.",
+                    "root_path": "/mnt/comics/unsafe",
+                    "action": None,
+                    "details": {"title": "Unsafe", "steps": []},
+                },
+                {
+                    "key": "mapping",
+                    "code": "ineffective_mapping",
+                    "blocks_import": False,
+                    "reason": "One manual mapping no longer changes any paths.",
+                    "suggested_action": "Remove the unused mapping.",
+                    "root_path": "/mnt/comics",
+                    "action": {
+                        "kind": "remove_ineffective_mapping",
+                        "fingerprint": "9" * 64,
+                        "stored_prefix": "/old/comics",
+                        "pullbox_prefix": "/mnt/comics",
+                    },
+                    "details": {"title": "Mapping", "steps": []},
+                },
+            ],
+            mappings=[
+                {
+                    "stored_prefix": "/old/comics",
+                    "pullbox_prefix": "/mnt/comics",
+                }
+            ],
+        )
+        requests: list[dict[str, object]] = []
+
+        def analyze(route: Route) -> None:
+            requests.append(route.request.post_data_json)
+            route.fulfill(json=preview)
+
+        authed_page.route("**/api/v1/import/mylar-path-preview", analyze)
+        page = ImportPage(authed_page, seeded_server)
+        page.goto(tab="collection")
+        page.show_collection_source_step()
+        page.source_mylar3_card.click()
+        page.source_path_input.fill("/imports/mylar.db")
+
+        advanced = authed_page.get_by_test_id("import-advanced-options")
+        expect(advanced.get_by_test_id("import-advanced-options-attention-count")).to_have_text("3")
+        advanced.locator("summary").first.click()
+        page.mylar_path_section.locator("summary").click()
+        expect(advanced.get_by_role("button", name="Restore automatic proposals")).to_be_visible()
+
+        authed_page.evaluate(
+            """() => {
+                const root = document.querySelector("[data-testid='import-advanced-options']");
+                const stableRegions = [
+                    root.querySelector("[data-testid='import-advanced-options-attention-list']"),
+                    root.querySelector("[data-testid='import-mylar-path-section']"),
+                ];
+                const controls = stableRegions.flatMap(region =>
+                    Array.from(region.querySelectorAll("button, input, summary, [role='button']"))
+                ).filter(control => control.getClientRects().length > 0);
+                const required = [
+                    "[data-testid='import-setup-recheck']",
+                    "[data-testid='import-attention-details']",
+                    "[data-testid='import-attention-skip']",
+                    "[data-testid='import-attention-resolve']",
+                ];
+                if (
+                    required.some(selector => !root.querySelector(selector)) ||
+                    !controls.some(
+                        control => control.textContent.trim() === "Restore automatic proposals"
+                    )
+                ) {
+                    throw new Error("Expected every Mylar preflight control before observing refreshes.");
+                }
+                controls.forEach((control, index) => {
+                    control.dataset.noFlashControl = String(index);
+                });
+                window.__importStableControls = controls;
+                window.__importControlMutations = [];
+                window.__importControlObserver = new MutationObserver(records => {
+                    const selectors = controls.map(
+                        (_control, index) => `[data-no-flash-control="${index}"]`
+                    );
+                    const touchesControl = node => {
+                        if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+                        return selectors.some(selector =>
+                            node.matches(selector) ||
+                            node.closest(selector) ||
+                            node.querySelector(selector)
+                        );
+                    };
+                    records.forEach(record => {
+                        const nodes = [record.target, ...record.addedNodes, ...record.removedNodes];
+                        if (nodes.some(touchesControl)) {
+                            window.__importControlMutations.push({
+                                type: record.type,
+                                attribute: record.attributeName || "",
+                            });
+                        }
+                    });
+                });
+                window.__importControlObserver.observe(root, {
+                    subtree: true,
+                    childList: true,
+                    characterData: true,
+                    attributes: true,
+                    attributeFilter: ["class", "disabled", "hidden", "style"],
+                });
+            }"""
+        )
+
+        page.file_handling_in_place.click()
+        authed_page.wait_for_timeout(750)
+        page.file_handling_managed.click()
+        authed_page.wait_for_timeout(750)
+        advanced.get_by_role("button", name="Recheck import setup").click()
+        expect(advanced.get_by_role("button", name="Recheck import setup")).to_be_visible()
+        advanced.get_by_role("button", name="Restore automatic proposals").click()
+        expect(advanced.get_by_role("button", name="Restore automatic proposals")).to_be_visible()
+        assert len(requests) >= 5
+        assert requests[-1]["auto_detect"] is True
+        assert requests[-1]["mappings"] == []
+
+        stability = authed_page.evaluate(
+            """() => {
+                window.__importControlObserver.disconnect();
+                return {
+                    mutations: window.__importControlMutations,
+                    sameNodes: window.__importStableControls.every(
+                        (control, index) =>
+                            control.isConnected &&
+                            document.querySelector(`[data-no-flash-control="${index}"]`) === control
+                    ),
+                };
+            }"""
+        )
+        assert stability == {"mutations": [], "sameNodes": True}
+
+    @staticmethod
+    def _identity_mylar_path_response(locations: int = 1) -> dict[str, object]:
+        return {
+            "source_type": "mylar3",
+            "resolution": {
+                "locations": locations,
+                "identity_resolved": locations,
+                "mapped_existing": 0,
+                "mapped_missing": 0,
+                "unmapped": 0,
+                "outside_root": 0,
+                "unreadable": 0,
+                "ambiguous": 0,
+                "invalid": 0,
+            },
+            "identity_groups": [],
+            "mappings": [],
+            "path_map": {},
+            "requires_confirmation": False,
+            "can_confirm": True,
+            "partial": False,
+            "warnings": [],
+        }
 
     @staticmethod
     def _active_review_job_id(page) -> int | None:  # type: ignore[no-untyped-def]
@@ -764,20 +1307,39 @@ class TestImportCollectionTab:
         import_page.wait_for_htmx()
         import_page.results_panel.wait_for(state="visible", timeout=5000)
 
+        assert import_page.retry_failed_button.count() == 0
+        import_page.review_follow_up_button.click()
+        import_page.wait_for_htmx()
         assert import_page.retry_failed_button.is_visible()
 
-        import_page.retry_failed_button.click()
-        authed_page.wait_for_function(
-            """() => {
-                const progress = document.querySelector("[data-testid='import-collection-progress']");
-                const results = document.querySelector("[data-testid='import-collection-results']");
-                const isVisible = (el) => !!el && el.offsetParent !== null;
-                return isVisible(progress) || isVisible(results);
-            }""",
-            timeout=5000,
+        original_job = authed_page.request.get(
+            f"{seeded_server}/api/v1/import/{completed_job_id}"
+        ).json()
+        authed_page.route(
+            f"**/api/v1/import/{completed_job_id}/retry-failed",
+            lambda route: route.fulfill(
+                status=202,
+                content_type="application/json",
+                body=json.dumps({"job_id": completed_job_id, "retrying_count": 1}),
+            ),
         )
+        with authed_page.expect_response(
+            f"**/api/v1/import/{completed_job_id}/retry-failed"
+        ) as retry_response:
+            import_page.retry_failed_button.click()
+        assert retry_response.value.status == 202
+        assert retry_response.value.request.method == "POST"
+        import_page.progress_panel.wait_for(state="visible", timeout=5000)
 
         assert page_errors == []
+
+        # This UI transition must not consume the completed session fixture
+        # used by the separate finish/results tests.
+        current_job = authed_page.request.get(
+            f"{seeded_server}/api/v1/import/{completed_job_id}"
+        ).json()
+        for key in ("status", "series_failed", "series_imported"):
+            assert current_job[key] == original_job[key]
 
     def test_import_collection_completed_import_requires_explicit_finish_to_show_results(
         self,
@@ -866,13 +1428,17 @@ class TestImportCollectionTab:
             """() => {
                 const results = document.querySelector("[data-testid='import-collection-results']");
                 const children = Array.from(results.children).filter((el) => el.nodeType === Node.ELEMENT_NODE);
-                const sectionCardIndices = children
-                    .map((el, index) => el.classList.contains("section-card") ? index : -1)
+                const detailCardIndices = children
+                    .map((el, index) => (
+                        el.classList.contains("section-card") &&
+                        el.dataset.testid !== "import-results-follow-up-action"
+                    ) ? index : -1)
                     .filter((index) => index >= 0);
                 return {
+                    followUpIndex: children.findIndex((el) => el.dataset.testid === "import-results-follow-up-action"),
                     actionIndex: children.findIndex((el) => el.dataset.testid === "import-results-action-bar"),
                     notesIndex: children.findIndex((el) => el.dataset.testid === "import-results-follow-up-notes"),
-                    sectionCardIndices,
+                    detailCardIndices,
                     leftActions: Array.from(
                         results.querySelectorAll("[data-testid='import-results-action-bar-left'] > *"),
                     ).map((el) => (el.textContent || "").trim()),
@@ -891,15 +1457,16 @@ class TestImportCollectionTab:
             }"""
         )
 
-        assert state["actionIndex"] == 0
+        assert state["followUpIndex"] == 0
+        assert state["actionIndex"] == 1
         if state["notesIndex"] >= 0:
-            assert state["notesIndex"] == 1
-            assert state["sectionCardIndices"][0] > state["notesIndex"]
+            assert state["notesIndex"] == 2
+            assert state["detailCardIndices"][0] > state["notesIndex"]
         else:
-            assert state["sectionCardIndices"][0] > state["actionIndex"]
+            assert state["detailCardIndices"][0] > state["actionIndex"]
         assert "Rollback import" in state["leftActions"][0]
         assert "View import history" in state["leftActions"]
-        assert state["rightActions"] == ["View series library"]
+        assert state["rightActions"] == ["Archive results", "View series library"]
         assert state["hasImportAnother"] is False
         assert state["hasResultsSubcopy"] is False
         assert state["hasSourcePill"] is False
@@ -932,7 +1499,7 @@ class TestImportCollectionTab:
         assert import_page.progress_phase_label.text_content() == "Complete"
         assert "Preparing to scan" not in (import_page.progress_summary.text_content() or "")
         assert import_page.progress_continue_button.is_visible()
-        assert import_page.progress_recent_log.is_visible()
+        assert import_page.progress_log_download.is_visible()
         assert authed_page.locator("[data-testid='page-dock-pagination']").count() == 0
         assert authed_page.locator("[data-testid='import-review-pagination']").count() == 0
         assert authed_page.locator("[data-testid='import-conflicts-pagination']").count() == 0
@@ -1077,30 +1644,22 @@ class TestImportCollectionTab:
         state["terminal"] = True
         authed_page.wait_for_url(re.compile(r"/import\?tab=collection$"), timeout=5000)
 
-    def test_import_collection_progress_log_viewer_renders_entries(
+    def test_import_collection_progress_offers_log_download_without_loading_entries(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
-        self._goto_review_step(import_page, authed_page, seeded_server)
+        review_job_id = self._goto_review_step(import_page, authed_page, seeded_server)
 
         import_page.review_back_button.click()
         import_page.progress_panel.wait_for(state="visible", timeout=5000)
 
-        body = authed_page.locator("[data-testid='import-progress-recent-log-body']").first
-        body.wait_for(state="visible", timeout=5000)
-        authed_page.wait_for_function(
-            """() => {
-                const body = document.querySelector("[data-testid='import-progress-recent-log-body']");
-                return !!body && body.textContent && body.textContent.trim().length > 0 && !body.textContent.includes("Loading...");
-            }""",
-            timeout=5000,
-        )
-
-        body_text = body.text_content() or ""
-        assert "No log entries yet." not in body_text
-        assert "INFO" in body_text or "WARN" in body_text or "ERROR" in body_text
+        download = import_page.progress_log_download
+        download.wait_for(state="visible", timeout=5000)
+        assert download.text_content() and "Download full log" in download.text_content()
+        assert download.get_attribute("href") == (f"/api/v1/import/{review_job_id}/logs/download")
+        assert authed_page.locator("[data-testid='import-progress-recent-log']").count() == 0
 
     def test_import_collection_active_progress_hydrates_without_stream(
         self,
@@ -1130,7 +1689,7 @@ class TestImportCollectionTab:
         )
         assert (import_page.progress_phase_detail.text_content() or "").strip() != ""
         assert import_page.progress_eta.is_visible()
-        assert import_page.progress_recent_log.is_visible()
+        assert import_page.progress_log_download.is_visible()
 
     def test_import_collection_progress_navigation_does_not_pause_or_resume_runs(
         self,
@@ -1282,6 +1841,186 @@ class TestImportCollectionTab:
 
         assert f"resume_job_id={expected_resume['resumeJobId']}" in authed_page.url
         assert f"resume_step={expected_resume['resumeStep']}" in authed_page.url
+
+    def test_import_collection_story_arc_placement_retry_has_truthful_busy_and_success_state(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+
+        state = authed_page.evaluate(
+            """async () => {
+                const originalFetch = window.fetch;
+                try {
+                    const controller = window.importProgressData(
+                        42,
+                        5,
+                        "filesystem",
+                        {
+                            job_id: 42,
+                            status: "stalled",
+                            mode: "import",
+                            phase: "story_arc_placements",
+                            progress: 99,
+                            message: "One or more story-arc placements failed.",
+                            control_state: {
+                                can_pause: false,
+                                can_resume: false,
+                                can_cancel: true,
+                                can_retry_story_arc_placements: true,
+                                requested_action: "none",
+                            },
+                        },
+                        "import",
+                    );
+                    controller.hydrateFromSnapshot();
+                    let pollStarts = 0;
+                    let sseStarts = 0;
+                    let request = null;
+                    let finishFetch = null;
+                    controller.startClock = function () {};
+                    controller.startPolling = function () { pollStarts += 1; };
+                    controller.connectSSE = function () { sseStarts += 1; };
+                    window.fetch = function (url, options) {
+                        request = { url, options };
+                        return new Promise(function (resolve) {
+                            finishFetch = function () {
+                                resolve({
+                                    ok: true,
+                                    json: async function () {
+                                        return { job_id: 42, retrying_count: 2 };
+                                    },
+                                });
+                            };
+                        });
+                    };
+
+                    const pending = controller.retryStoryArcPlacements();
+                    await Promise.resolve();
+                    const busy = {
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                    };
+                    finishFetch();
+                    await pending;
+
+                    return {
+                        busy,
+                        requestUrl: request.url,
+                        requestMethod: request.options.method,
+                        hasCsrf: Boolean(request.options.headers["X-CSRF-Token"]),
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                        canRetry: controller.controlState.can_retry_story_arc_placements,
+                        status: controller.jobStatus,
+                        phase: controller.phase,
+                        progress: controller.progress,
+                        message: controller.message,
+                        success: controller.storyArcPlacementRetrySuccess,
+                        error: controller.storyArcPlacementRetryError,
+                        pollStarts,
+                        sseStarts,
+                    };
+                } finally {
+                    window.fetch = originalFetch;
+                }
+            }"""
+        )
+
+        assert state == {
+            "busy": {"retrying": True, "visible": True},
+            "requestUrl": "/api/v1/import/42/story-arc-placements/retry",
+            "requestMethod": "POST",
+            "hasCsrf": True,
+            "retrying": False,
+            "visible": False,
+            "canRetry": False,
+            "status": "importing",
+            "phase": "story_arc_placements",
+            "progress": 99,
+            "message": "Retrying 2 Story Arc placements...",
+            "success": "Retry requested for 2 Story Arc placements.",
+            "error": "",
+            "pollStarts": 1,
+            "sseStarts": 1,
+        }
+
+    def test_import_collection_story_arc_placement_retry_keeps_recovery_on_error(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+
+        state = authed_page.evaluate(
+            """async () => {
+                const originalFetch = window.fetch;
+                try {
+                    const controller = window.importProgressData(
+                        42,
+                        5,
+                        "filesystem",
+                        {
+                            job_id: 42,
+                            status: "stalled",
+                            mode: "import",
+                            phase: "story_arc_placements",
+                            progress: 99,
+                            control_state: {
+                                can_pause: false,
+                                can_resume: false,
+                                can_cancel: true,
+                                can_retry_story_arc_placements: true,
+                                requested_action: "none",
+                            },
+                        },
+                        "import",
+                    );
+                    controller.hydrateFromSnapshot();
+                    let pollStarts = 0;
+                    let sseStarts = 0;
+                    controller.startPolling = function () { pollStarts += 1; };
+                    controller.connectSSE = function () { sseStarts += 1; };
+                    window.fetch = async function () {
+                        return {
+                            ok: false,
+                            json: async function () {
+                                return { detail: "Placement provenance changed; retry refused." };
+                            },
+                        };
+                    };
+
+                    await controller.retryStoryArcPlacements();
+
+                    return {
+                        retrying: controller.retryingStoryArcPlacements,
+                        visible: controller.showRetryStoryArcPlacementsAction(),
+                        canRetry: controller.controlState.can_retry_story_arc_placements,
+                        status: controller.jobStatus,
+                        error: controller.storyArcPlacementRetryError,
+                        success: controller.storyArcPlacementRetrySuccess,
+                        pollStarts,
+                        sseStarts,
+                    };
+                } finally {
+                    window.fetch = originalFetch;
+                }
+            }"""
+        )
+
+        assert state == {
+            "retrying": False,
+            "visible": True,
+            "canRetry": True,
+            "status": "stalled",
+            "error": "Placement provenance changed; retry refused.",
+            "success": "",
+            "pollStarts": 0,
+            "sseStarts": 0,
+        }
 
     def test_import_collection_pause_swaps_to_resume_without_button_gap(
         self,
@@ -2387,3 +3126,711 @@ class TestImportCollectionTab:
         import_page.source_browse_button.click()
         import_page.file_browser_modal.wait_for(state="visible", timeout=5000)
         assert import_page.file_browser_title.text_content() == "Browse Files"
+
+    def test_switching_collection_source_clears_the_previous_path(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        from playwright.sync_api import expect
+
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/imports/comics")
+        import_page.source_mylar3_card.click()
+        expect(import_page.source_path_input).to_have_value("")
+
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.source_filesystem_card.click()
+        expect(import_page.source_path_input).to_have_value("")
+
+    def test_import_collection_source_step_previews_selected_layout(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "preset",
+                            "preset": "publisher_series",
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "publisher_series",
+                        "clusters": [
+                            {
+                                "cluster_id": "publisher-series",
+                                "classification": "publisher_series",
+                                "file_count": 2,
+                                "directory_count": 2,
+                                "confidence": "high",
+                                "proposed_series_path_template": "{Publisher}/{Series}",
+                                "proposed_issue_filename_template": None,
+                                "examples": [
+                                    {
+                                        "relative_path": "DC Comics/Batman (2011)/Issue 001.cbz",
+                                        "publisher": "DC Comics",
+                                        "series": "Batman",
+                                        "year": 2011,
+                                        "issue_number": "1",
+                                        "issue_title": None,
+                                        "evidence": ["source_layout"],
+                                        "warnings": [],
+                                    }
+                                ],
+                            }
+                        ],
+                        "directories_considered": 2,
+                        "files_considered": 2,
+                        "files_fitting": 2,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": False,
+                        "can_apply_future_policy": False,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/imports")
+        import_page.open_layout_options()
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+
+        assert requests[-1] == {
+            "source_path": "/imports",
+            "source_type": "filesystem",
+            "layout": {
+                "schema_version": 1,
+                "mode": "preset",
+                "preset": "publisher_series",
+                "fallback_to_auto": True,
+            },
+        }
+        assert "Publisher Series" in (import_page.source_layout_preview.text_content() or "")
+        assert "2 of 2 sampled files fit" in (
+            import_page.source_layout_preview.text_content() or ""
+        )
+        assert "DC Comics/Batman (2011)/Issue 001.cbz" in (
+            import_page.source_layout_preview.text_content() or ""
+        )
+
+        import_page.source_layout_fallback_checkbox.uncheck()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+        assert requests[-1]["layout"] == {
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "fallback_to_auto": False,
+        }
+
+        import_page.source_layout_custom.click()
+        import_page.source_layout_custom_fields.wait_for(state="visible", timeout=5000)
+
+    def test_import_collection_submits_selected_layout_for_mylar_without_folder_preview(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        from playwright.sync_api import expect
+
+        created_requests: list[dict[str, object]] = []
+        layout_preview_requests: list[dict[str, object]] = []
+        mylar_path_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            layout_preview_requests.append(route.request.post_data_json)
+            route.fulfill(status=500, content_type="application/json", body="{}")
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 322, "status": "pending"}),
+            )
+
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            mylar_path_preview_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(self._identity_mylar_path_response(3)),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.open_layout_options()
+        import_page.source_layout_section.wait_for(state="visible", timeout=5000)
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_fallback_checkbox.uncheck()
+        expect(import_page.start_scan_button).to_be_enabled(timeout=5000)
+
+        assert import_page.source_layout_analyze_button.is_hidden()
+        assert import_page.start_scan_button.is_enabled()
+        assert_no_axe_violations(
+            authed_page,
+            name="Mylar source layout controls",
+            include=["[data-testid='import-layout-advanced']"],
+        )
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert layout_preview_requests == []
+        assert mylar_path_preview_requests
+        assert created_requests
+        assert created_requests[-1]["source_type"] == "mylar3"
+        assert created_requests[-1]["source_layout"] == {
+            "schema_version": 1,
+            "mode": "preset",
+            "preset": "publisher_series",
+            "fallback_to_auto": False,
+        }
+        assert created_requests[-1]["mylar3_path_map"] == {}
+        assert created_requests[-1]["mylar3_path_map_confirmed"] is True
+
+    def test_mylar_in_place_allows_explicit_optional_future_root_without_folder_preview(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        from playwright.sync_api import expect
+
+        created_requests: list[dict[str, object]] = []
+        layout_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            layout_preview_requests.append(route.request.post_data_json)
+            route.fulfill(status=500, content_type="application/json", body="{}")
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 323, "status": "pending"}),
+            )
+
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(self._identity_mylar_path_response()),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        import_page.file_handling_in_place.wait_for(state="visible", timeout=5000)
+        import_page.file_handling_in_place.click()
+        expect(import_page.start_scan_button).to_be_enabled(timeout=5000)
+
+        import_page.open_file_management_options()
+        root_selector = import_page.dropdown("import-in-place-library-root")
+        root_selector.wait_for(state="visible", timeout=5000)
+        root_selector.locator("[data-dropdown-select-trigger]").click()
+        root_panel = authed_page.locator("[data-dropdown-select-panel]:visible").first
+        root_value = root_panel.locator(
+            "[data-dropdown-option][data-value]:not([data-value=''])"
+        ).first.get_attribute("data-value")
+        root_panel.locator("[data-dropdown-option][data-value='']").click()
+        assert root_value
+        assert import_page.dropdown_value("import-in-place-library-root") == ""
+        assert import_page.start_scan_button.is_enabled()
+        import_page.select_dropdown_option("import-in-place-library-root", root_value)
+        assert import_page.start_scan_button.is_enabled()
+        assert import_page.source_layout_analyze_button.is_hidden()
+        assert "after path mapping" in (
+            authed_page.get_by_test_id("import-mylar-in-place-review").text_content() or ""
+        )
+        assert_no_axe_violations(
+            authed_page,
+            name="Mylar in-place controls",
+            include=["[data-testid='import-file-handling-section']"],
+        )
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert layout_preview_requests == []
+        assert created_requests
+        assert created_requests[-1]["source_type"] == "mylar3"
+        assert created_requests[-1]["file_handling_mode"] == "in_place"
+        assert created_requests[-1]["target_library_root_id"] == int(root_value)
+        assert created_requests[-1]["future_layout_requested"] is False
+        assert created_requests[-1]["mylar3_path_map"] == {}
+        assert created_requests[-1]["mylar3_path_map_confirmed"] is True
+
+    def test_mylar_mapping_preview_submits_validated_frozen_map_without_extra_confirmation(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        preview_requests: list[dict[str, object]] = []
+        frozen_map = {
+            "/books/current": "/comics/current",
+            "/books/archive": "/comics/archive",
+        }
+
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            preview_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "source_type": "mylar3",
+                        "resolution": {
+                            "locations": 5,
+                            "identity_resolved": 1,
+                            "mapped_existing": 4,
+                            "mapped_missing": 0,
+                            "unmapped": 0,
+                            "outside_root": 0,
+                            "unreadable": 0,
+                            "ambiguous": 0,
+                            "invalid": 0,
+                        },
+                        "identity_groups": [],
+                        "mappings": [
+                            {
+                                "stored_prefix": stored,
+                                "pullbox_prefix": visible,
+                                "library_root_id": index + 1,
+                                "library_root_name": f"Library {index + 1}",
+                                "provenance": "automatic",
+                                "status": "ready",
+                                "resolution": {
+                                    "locations": 2,
+                                    "identity_resolved": 0,
+                                    "mapped_existing": 2,
+                                    "mapped_missing": 0,
+                                    "unmapped": 0,
+                                    "outside_root": 0,
+                                    "unreadable": 0,
+                                    "ambiguous": 0,
+                                    "invalid": 0,
+                                },
+                                "examples": [],
+                                "warnings": [],
+                                "blocking_reasons": [],
+                            }
+                            for index, (stored, visible) in enumerate(frozen_map.items())
+                        ],
+                        "path_map": frozen_map,
+                        "requires_confirmation": True,
+                        "can_confirm": True,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 324, "status": "pending"}),
+            )
+
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+
+        import_page.open_mylar_path_options()
+        import_page.mylar_path_mapping_rows.first.wait_for(state="visible", timeout=5000)
+        assert import_page.mylar_path_mapping_rows.count() == 2
+        assert import_page.start_scan_button.is_enabled()
+        assert_no_axe_violations(
+            authed_page,
+            name="Mylar path mapping controls",
+            include=["[data-testid='import-mylar-path-section']"],
+        )
+
+        first_visible_path = import_page.mylar_path_mapping_rows.first.get_by_label(
+            "Path visible inside Pullbox"
+        )
+        first_visible_path.fill("/comics/edited")
+        authed_page.wait_for_timeout(750)
+        assert import_page.start_scan_button.is_enabled()
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert preview_requests
+        assert created_requests[-1]["mylar3_path_map"] == frozen_map
+        assert created_requests[-1]["mylar3_path_map_confirmed"] is True
+
+    def test_import_collection_defers_story_arc_choices_from_collection_import(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        from playwright.sync_api import expect
+
+        created_requests: list[dict[str, object]] = []
+
+        def fulfill_arc_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "source_type": "mylar3",
+                        "evidence_detected": True,
+                        "arcs_detected": 2,
+                        "entries_detected": 3,
+                        "resolution": {
+                            "resolved": 0,
+                            "pending": 2,
+                            "missing": 1,
+                            "ambiguous": 0,
+                            "conflicts": 0,
+                            "duplicates": 0,
+                        },
+                        "existing_arc_files_detected": True,
+                        "existing_arc_folders_detected": True,
+                        "pattern_summary": "Mylar Story Arc rows and saved ordering",
+                        "settings": [
+                            {"key": "STORYARCDIR", "value": True, "used_default": False},
+                            {
+                                "key": "STORYARC_LOCATION",
+                                "value": "Configured",
+                                "used_default": False,
+                            },
+                        ],
+                        "examples": [
+                            {
+                                "story_arc": "Knightfall",
+                                "series": "Batman",
+                                "issue_number": "497",
+                                "issue_title": "Broken Bat",
+                                "reading_order": "1",
+                                "status": "Downloaded",
+                                "relative_path": None,
+                            }
+                        ],
+                        "provider_calls_required": False,
+                        "provider_call_summary": (
+                            "No provider calls are needed for trusted Mylar data."
+                        ),
+                        "proposed_policy": {
+                            "mode": "copy",
+                            "destination_root_configured": True,
+                            "folder_template": "{StoryArc}",
+                            "file_template": (
+                                "{ReadingOrder:03d} - {Series} {IssueNumber}{IssueTitleOptional}"
+                            ),
+                            "reading_order_prefix": True,
+                            "synchronize": True,
+                            "requires_confirmation": True,
+                        },
+                        "readlist_present": True,
+                        "readlist_count": 4,
+                        "readlist_import_state": "deferred_v1.5.0",
+                        "archive_probes": 0,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 323, "status": "pending"}),
+            )
+
+        def fulfill_mylar_path_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(self._identity_mylar_path_response()),
+            )
+
+        authed_page.route(
+            "**/api/v1/import/mylar-path-preview",
+            fulfill_mylar_path_preview,
+        )
+        authed_page.route("**/api/v1/import/story-arc-preview", fulfill_arc_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_mylar3_card.click()
+        import_page.source_path_input.fill("/imports/mylar.db")
+        expect(import_page.start_scan_button).to_be_enabled(timeout=5000)
+        assert import_page.story_arc_section.count() == 0
+
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        assert created_requests[-1]["story_arc_import_requested"] is False
+        assert created_requests[-1]["story_arc_materialization_requested"] is False
+
+    def test_import_collection_submits_validated_in_place_mode(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+
+        def fulfill_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "auto",
+                            "preset": None,
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "series_folders",
+                        "clusters": [],
+                        "directories_considered": 1,
+                        "files_considered": 1,
+                        "files_fitting": 1,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": True,
+                        "can_apply_future_policy": False,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 321, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_preview)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/comics/Existing Layout")
+        import_page.file_handling_in_place.click()
+        import_page.open_file_management_options()
+        import_page.open_layout_options()
+        import_page.source_layout_analyze_button.click()
+        import_page.file_handling_in_place_ready.wait_for(state="visible", timeout=5000)
+
+        assert import_page.start_scan_button.is_enabled()
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        assert created_requests[-1]["file_handling_mode"] == "in_place"
+        assert created_requests[-1]["source_path"] == "/comics/Existing Layout"
+
+    def test_import_collection_defers_future_root_policy_from_collection_import(
+        self,
+        authed_page,
+        seeded_server: str,  # type: ignore[no-untyped-def]
+    ) -> None:
+        created_requests: list[dict[str, object]] = []
+        policy_preview_requests: list[dict[str, object]] = []
+
+        def fulfill_layout_preview(route) -> None:  # type: ignore[no-untyped-def]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "effective_spec": {
+                            "schema_version": 1,
+                            "mode": "preset",
+                            "preset": "publisher_series",
+                            "series_path_template": None,
+                            "issue_filename_template": None,
+                            "selected_cluster_id": None,
+                            "fallback_to_auto": True,
+                        },
+                        "classification": "normal_library",
+                        "clusters": [
+                            {
+                                "cluster_id": "publisher-series",
+                                "classification": "normal_library",
+                                "file_count": 2,
+                                "directory_count": 2,
+                                "confidence": "high",
+                                "proposed_series_path_template": "{Publisher}/{Series}",
+                                "proposed_issue_filename_template": (
+                                    "{Series} {IssueTitle} Issue {Issue:03d}"
+                                ),
+                                "examples": [
+                                    {
+                                        "relative_path": (
+                                            "DC Comics/Batman/Issue 017 - The Brave and the Bold.cbz"
+                                        ),
+                                        "publisher": "DC Comics",
+                                        "series": "Batman",
+                                        "year": 2024,
+                                        "issue_number": "17",
+                                        "issue_title": "The Brave and the Bold",
+                                        "evidence": ["selected_layout_match"],
+                                        "warnings": [],
+                                    }
+                                ],
+                            }
+                        ],
+                        "directories_considered": 2,
+                        "files_considered": 2,
+                        "files_fitting": 2,
+                        "files_ambiguous": 0,
+                        "files_outside_root": 0,
+                        "archive_probes": 0,
+                        "can_keep_in_place": False,
+                        "can_apply_future_policy": True,
+                        "partial": False,
+                        "warnings": [],
+                    }
+                ),
+            )
+
+        def fulfill_policy_requests(route) -> None:  # type: ignore[no-untyped-def]
+            if route.request.url.endswith("/preview"):
+                policy_preview_requests.append(route.request.post_data_json)
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "current_scope": "global_default",
+                            "current_series_paths": ["Batman (2024)"],
+                            "proposed_series_paths": ["DC Comics/Batman"],
+                            "current_file_names": ["Batman (2024) #017.cbz"],
+                            "proposed_file_names": ["Batman The Brave and the Bold Issue 017.cbz"],
+                        }
+                    ),
+                )
+                return
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "library_root_id": 1,
+                        "library_root_name": "E2E Library",
+                        "scope": "global_default",
+                        "policy_id": None,
+                        "revision": 0,
+                        "effective_policy": {
+                            "schema_version": 1,
+                            "series_path_template": "{Series} ({Year})",
+                            "series_folder_template": "{Series} ({Year})",
+                            "comic_file_template": "{Series} ({Year}) #{Issue:03d}",
+                            "annual_file_template": "{Series} ({Year}) Annual #{Issue:03d}",
+                            "non_standard_file_template": (
+                                "{Series} ({Year}) {Type} {Volume:02d} - {Title}"
+                            ),
+                            "single_non_standard_file_template": (
+                                "{Series} ({Year}) {Type} - {Title}"
+                            ),
+                            "replace_illegal_characters": True,
+                            "colon_replacement": "dash",
+                            "source": "global_default",
+                            "source_import_job_id": None,
+                        },
+                    }
+                ),
+            )
+
+        def fulfill_create(route) -> None:  # type: ignore[no-untyped-def]
+            created_requests.append(route.request.post_data_json)
+            route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({"id": 654, "status": "pending"}),
+            )
+
+        authed_page.route("**/api/v1/import/layout-preview", fulfill_layout_preview)
+        authed_page.route("**/api/v1/config/library-roots/**", fulfill_policy_requests)
+        authed_page.route("**/api/v1/import", fulfill_create)
+        import_page = ImportPage(authed_page, seeded_server)
+        import_page.goto(tab="collection")
+        import_page.show_collection_source_step()
+
+        import_page.source_filesystem_card.click()
+        import_page.source_path_input.fill("/imports")
+        import_page.open_layout_options()
+        import_page.source_layout_publisher_series.click()
+        import_page.source_layout_analyze_button.click()
+        import_page.source_layout_preview.wait_for(state="visible", timeout=5000)
+        assert import_page.future_layout_toggle.count() == 0
+        assert policy_preview_requests == []
+
+        import_page.start_scan_button.click()
+        authed_page.wait_for_timeout(100)
+
+        assert created_requests
+        payload = created_requests[-1]
+        assert payload["future_layout_requested"] is False
+        assert isinstance(payload["target_library_root_id"], int)
+        assert payload["future_root_policy"] is None

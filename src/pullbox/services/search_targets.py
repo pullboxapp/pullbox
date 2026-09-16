@@ -5,14 +5,25 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING, Any, Protocol
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 
+from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.release_year_matching import ReleaseYearContext
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
+from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
+from pullbox.models.library import LibraryFile
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcLifecycle,
+    StoryArcResolutionState,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,11 +45,25 @@ class IssueSearchTarget:
     series_title: str
     issue_number: float
     issue_type: IssueType
+    issue_number_text: str | None = None
     issue_title: str | None = None
     series_year: int | None = None
     release_year: int | None = None
     alternate_names: list[str] | None = None
     series_issue_count: int | None = None
+    store_year: int | None = None
+    series_continuing: bool = False
+
+    @property
+    def year_context(self) -> ReleaseYearContext:
+        """Use existing catalog dates for confidence, not extra provider lookups."""
+        return ReleaseYearContext(
+            series_year=self.series_year,
+            publication_years=tuple(
+                sorted({year for year in (self.release_year, self.store_year) if year is not None})
+            ),
+            series_continuing=self.series_continuing,
+        )
 
     @property
     def search_year(self) -> int | None:
@@ -46,6 +71,11 @@ class IssueSearchTarget:
         if issue_type_family(self.issue_type) is TypeFamily.COLLECTION:
             return self.release_year or self.series_year
         return self.series_year
+
+    @property
+    def effective_issue_number_text(self) -> str:
+        """Return the canonical search identity with legacy numeric fallback."""
+        return self.issue_number_text or format_issue_number(self.issue_number)
 
 
 @dataclass(frozen=True)
@@ -67,8 +97,103 @@ class IssueSearchOutcome:
     direct_outcome: DirectSearchOutcome | None = None
     dc_outcome: DcSearchOutcome | None = None
 
+    @property
+    def results_found_count(self) -> int:
+        """Count discovered candidates, independently of acquisition success."""
+        return len(self.raw_results) + sum(
+            len(outcome.matched) + len(outcome.rejected)
+            for outcome in (self.direct_outcome, self.dc_outcome)
+            if outcome is not None
+        )
+
+    @property
+    def results_rejected_count(self) -> int:
+        """Only validation rejections count, not unused or unavailable matches."""
+        return len(self.rejected) + sum(
+            len(outcome.rejected)
+            for outcome in (self.direct_outcome, self.dc_outcome)
+            if outcome is not None
+        )
+
 
 SearchOutcomeCallback = Callable[[IssueSearchOutcome], Awaitable[None]]
+
+
+def arc_issue_release_filter(*, today: date | None = None) -> Any:
+    """Track upcoming members now, but search on/after their publication date.
+
+    Store date takes precedence over Comic Vine's later cover date. Undated
+    issues remain eligible; a legacy upcoming flag never bypasses this rule.
+    """
+    publication_date = func.coalesce(Issue.store_date, Issue.release_date)
+    return or_(publication_date.is_(None), publication_date <= (today or date.today()))
+
+
+def wanted_issue_eligibility_filter(*, today: date | None = None) -> Any:
+    """Return the shared series-or-story-arc wanted-search eligibility filter.
+
+    Story arcs only widen the existing target gate. A resolved arc member may
+    retain the canonical series-owned SKIPPED state, but it still enters the
+    normal wanted-search runner, so provider cooldowns, result selection,
+    pending intervention suppression, and duplicate acquisition remain shared.
+    """
+    monitored_story_arc = exists().where(
+        and_(
+            IssueStoryArc.issue_id == Issue.id,
+            IssueStoryArc.story_arc_id == StoryArc.id,
+            IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+            StoryArc.lifecycle == StoryArcLifecycle.ACTIVE,
+            StoryArc.monitored.is_(True),
+        )
+    )
+    return and_(
+        Issue.manual_skip.is_(False),
+        or_(
+            and_(
+                Issue.status == IssueStatus.WANTED,
+                Series.monitored.is_(True),
+            ),
+            and_(
+                arc_issue_acquisition_filter(today=today),
+                monitored_story_arc,
+            ),
+        ),
+    )
+
+
+def arc_issue_acquisition_filter(*, today: date | None = None) -> Any:
+    """One missing-issue contract for manual and scheduled arc searches."""
+    active_download = exists().where(
+        DownloadHistory.issue_id == Issue.id,
+        or_(
+            DownloadHistory.state.in_(
+                (
+                    DownloadState.QUEUED,
+                    DownloadState.SENT,
+                    DownloadState.DOWNLOADING,
+                    DownloadState.FINALIZING,
+                    DownloadState.PAUSED,
+                    DownloadState.RETRY_PENDING,
+                    DownloadState.POST_PROCESSING,
+                )
+            ),
+            and_(
+                DownloadHistory.state == DownloadState.COMPLETED,
+                DownloadHistory.imported_at.is_(None),
+            ),
+        ),
+    )
+    return and_(
+        arc_issue_release_filter(today=today),
+        Issue.status.in_((IssueStatus.WANTED, IssueStatus.SKIPPED)),
+        Issue.manual_skip.is_(False),
+        ~exists().where(LibraryFile.issue_id == Issue.id),
+        ~active_download,
+        ~exists().where(
+            PendingMatch.issue_id == Issue.id,
+            PendingMatch.status == PendingMatchStatus.PENDING,
+        ),
+    )
 
 
 class SearchIssueTargetFunc(Protocol):
@@ -94,15 +219,22 @@ def _target_from_row(row: Any) -> IssueSearchTarget:
     """Build a search target from a SQLAlchemy row with the expected labels."""
     release_date = getattr(row, "release_date", None) or getattr(row, "store_date", None)
     series_issue_count = getattr(row, "series_issue_count", None)
+    store_date = getattr(row, "store_date", None)
+    lifecycle = getattr(row, "status_override", None) or getattr(row, "series_status", None)
     return IssueSearchTarget(
         issue_id=int(row.issue_id),
         series_id=int(row.series_id),
         series_title=str(row.series_title),
         issue_number=float(row.issue_number),
         issue_type=IssueType(str(row.issue_type)) if row.issue_type else IssueType.ISSUE,
+        issue_number_text=(
+            str(row.issue_number_text) if getattr(row, "issue_number_text", None) else None
+        ),
         issue_title=str(row.issue_title) if row.issue_title else None,
         series_year=int(row.series_year) if row.series_year else None,
         release_year=release_date.year if release_date is not None else None,
+        store_year=store_date.year if store_date is not None else None,
+        series_continuing=str(lifecycle).casefold() == "continuing",
         alternate_names=list(row.alternate_names) if row.alternate_names else None,
         series_issue_count=(int(series_issue_count) if series_issue_count is not None else None),
     )
@@ -118,6 +250,7 @@ async def load_issue_search_target(
             Issue.id.label("issue_id"),
             Issue.series_id.label("series_id"),
             Issue.issue_number.label("issue_number"),
+            Issue.issue_number_text.label("issue_number_text"),
             Issue.issue_type.label("issue_type"),
             Issue.title.label("issue_title"),
             Issue.release_date.label("release_date"),
@@ -126,6 +259,8 @@ async def load_issue_search_target(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(Issue.id == issue_id)
@@ -147,6 +282,7 @@ async def load_series_wanted_search_targets(
             Issue.id.label("issue_id"),
             Issue.series_id.label("series_id"),
             Issue.issue_number.label("issue_number"),
+            Issue.issue_number_text.label("issue_number_text"),
             Issue.issue_type.label("issue_type"),
             Issue.title.label("issue_title"),
             Issue.release_date.label("release_date"),
@@ -155,11 +291,13 @@ async def load_series_wanted_search_targets(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(Issue.series_id == series_id)
         .where(Issue.status == IssueStatus.WANTED)
-        .order_by(Issue.issue_number)
+        .order_by(Issue.issue_number, Issue.issue_number_text, Issue.id)
     )
     return [_target_from_row(row) for row in result.all()]
 
@@ -217,8 +355,7 @@ async def load_wanted_issue_search_targets(
 ) -> list[IssueSearchTarget]:
     """Load wanted issue targets for the global sweep."""
     filters = [
-        Issue.status == IssueStatus.WANTED,
-        Series.monitored.is_(True),
+        wanted_issue_eligibility_filter(),
         ~exists().where(
             and_(
                 PendingMatch.issue_id == Issue.id,
@@ -245,6 +382,7 @@ async def load_wanted_issue_search_targets(
             Issue.id.label("issue_id"),
             Issue.series_id.label("series_id"),
             Issue.issue_number.label("issue_number"),
+            Issue.issue_number_text.label("issue_number_text"),
             Issue.issue_type.label("issue_type"),
             Issue.title.label("issue_title"),
             Issue.release_date.label("release_date"),
@@ -253,6 +391,8 @@ async def load_wanted_issue_search_targets(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(*filters)
@@ -274,6 +414,7 @@ async def load_wanted_issue_search_targets_by_ids(
             Issue.id.label("issue_id"),
             Issue.series_id.label("series_id"),
             Issue.issue_number.label("issue_number"),
+            Issue.issue_number_text.label("issue_number_text"),
             Issue.issue_type.label("issue_type"),
             Issue.title.label("issue_title"),
             Issue.release_date.label("release_date"),
@@ -282,12 +423,13 @@ async def load_wanted_issue_search_targets_by_ids(
             Series.year_start.label("series_year"),
             Series.alternate_names.label("alternate_names"),
             Series.issue_count.label("series_issue_count"),
+            Series.status.label("series_status"),
+            Series.status_override.label("status_override"),
         )
         .join(Series, Series.id == Issue.series_id)
         .where(
             Issue.id.in_(issue_ids),
-            Issue.status == IssueStatus.WANTED,
-            Series.monitored.is_(True),
+            wanted_issue_eligibility_filter(),
             ~exists().where(
                 and_(
                     PendingMatch.issue_id == Issue.id,

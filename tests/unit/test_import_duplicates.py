@@ -170,6 +170,28 @@ def test_file_sort_and_duplicate_target_keys_prefer_existing_contracts() -> None
     assert duplicate_target_key(parsed_only) == ("parsed_issue", 4.0)
 
 
+def test_file_sort_prefers_exact_mylar_cross_folder_canonical() -> None:
+    canonical = ImportedFile(
+        id=20,
+        has_comicinfo=True,
+        match_confidence="medium",
+        file_size=1024,
+        diagnostics={
+            "mylar3_cross_folder_reconciliation": {
+                "role": "canonical",
+            }
+        },
+    )
+    ordinary = ImportedFile(
+        id=10,
+        has_comicinfo=True,
+        match_confidence="high",
+        file_size=8192,
+    )
+
+    assert max([ordinary, canonical], key=preferred_file_sort_key) is canonical
+
+
 def test_import_service_duplicate_shims_remain_available() -> None:
     item = ImportedSeries(status=ImportSeriesStatus.DUPLICATE, series_id=123)
 

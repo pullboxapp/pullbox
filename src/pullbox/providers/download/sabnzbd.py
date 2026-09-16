@@ -9,6 +9,7 @@ SABnzbd API docs: https://sabnzbd.org/wiki/advanced/api
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -21,6 +22,8 @@ from pullbox.providers.base import ClientOptions, DownloadStatus, ProviderHealth
 logger = structlog.get_logger(__name__)
 
 _REQUEST_TIMEOUT = 10.0
+_NZB_FETCH_TIMEOUT = httpx.Timeout(10.0, read=60.0)
+_NZB_FETCH_DEADLINE = 90.0
 
 
 class SABnzbdError(Exception):
@@ -111,9 +114,13 @@ class SABnzbdClient:
     async def _download_nzb_bytes(self, url: str) -> bytes:
         """Fetch NZB bytes locally so SAB does not need direct indexer access."""
         try:
-            response = await self._client.get(url, follow_redirects=True)
+            # Indexer proxies may retry upstream; keep local SAB control calls short.
+            async with asyncio.timeout(_NZB_FETCH_DEADLINE):
+                response = await self._client.get(
+                    url, follow_redirects=True, timeout=_NZB_FETCH_TIMEOUT
+                )
             response.raise_for_status()
-        except httpx.TimeoutException:
+        except (TimeoutError, httpx.TimeoutException):
             raise SABnzbdError("Failed to download NZB from URL: Request timed out") from None
         except httpx.HTTPStatusError as exc:
             raise SABnzbdError(

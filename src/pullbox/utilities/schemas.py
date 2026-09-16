@@ -244,7 +244,9 @@ class MassRenamePreviewItem(BaseModel):
     template_key: str | None = None
     template_label: str | None = None
     actionable: bool = Field(description="Whether this item would attempt a rename")
-    status: str = Field(description="Preview status: ready, unchanged, unmatched, conflict")
+    status: str = Field(
+        description="Preview status: ready, unchanged, unmatched, conflict, blocked"
+    )
     reason: str | None = Field(default=None, description="Optional warning or skip reason")
 
 

@@ -34,7 +34,24 @@ SCAN_PROGRESS_MATCH_END = 80
 SCAN_PROGRESS_FILE_MATCH_START = 80
 SCAN_PROGRESS_FILE_MATCH_END = 99
 WORKFLOW_SNAPSHOT_VERSION = 2
+_PERSISTENT_IMPORT_CONTEXT_KEYS = (
+    "deferred_recovery",
+    "clean_library_adoption",
+    "clean_library_adoption_prepared",
+    "clean_library_source_snapshot",
+    "source_import_job_id",
+)
 ImportProgressMode = Literal["scan", "import", "rollback"]
+
+
+def deferred_recovery_scope(job: ImportJob) -> tuple[int, ...] | None:
+    """A prepared follow-up authorizes only its own series groups, not the old review."""
+    state = dict(dict(job.progress_snapshot or {}).get("deferred_recovery") or {})
+    if state.get("state") != "prepared":
+        return None
+    return tuple(int(value) for value in state.get("series_ids", []))
+
+
 _INVENTORY_PROGRESS_THRESHOLDS: tuple[tuple[int, int], ...] = (
     (1, 1),
     (10, 2),
@@ -278,6 +295,22 @@ def import_control_state_for_job(job: ImportJob) -> dict[str, object]:
     """Return durable UI control affordances for the current job state."""
     requested_action = snapshot_requested_action_for_job(job)
     action_pending = requested_action != ImportControlRequest.NONE
+    snapshot = dict(job.progress_snapshot or {})
+    placement_wait = (
+        job.status in {ImportJobStatus.IMPORTING, ImportJobStatus.STALLED}
+        and snapshot.get("phase") == "story_arc_placements"
+    )
+    failed_placements = snapshot.get("story_arc_placements_failed")
+    cancelled_placements = snapshot.get("story_arc_placements_cancelled")
+    has_retryable_terminal_placements = (
+        isinstance(failed_placements, int)
+        and not isinstance(failed_placements, bool)
+        and failed_placements >= 0
+        and isinstance(cancelled_placements, int)
+        and not isinstance(cancelled_placements, bool)
+        and cancelled_placements >= 0
+        and failed_placements + cancelled_placements > 0
+    )
     can_pause = (
         job.status
         in {
@@ -288,10 +321,11 @@ def import_control_state_for_job(job: ImportJob) -> dict[str, object]:
             ImportJobStatus.IMPORTING,
         }
         and not action_pending
+        and not placement_wait
     )
-    can_resume = job.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED} or (
-        job.status == ImportJobStatus.REVIEW and job.import_started_at is None
-    )
+    can_resume = (
+        job.status in {ImportJobStatus.PAUSED, ImportJobStatus.STALLED} and not placement_wait
+    ) or (job.status == ImportJobStatus.REVIEW and job.import_started_at is None)
     can_cancel = (
         job.status
         in ACTIVE_IMPORT_JOB_STATUSES
@@ -327,6 +361,13 @@ def import_control_state_for_job(job: ImportJob) -> dict[str, object]:
         ImportJobStatus.CANCELLED,
         ImportJobStatus.ROLLED_BACK,
     }
+    can_retry_story_arc_placements = bool(
+        job.status is ImportJobStatus.STALLED
+        and job.import_started_at is not None
+        and placement_wait
+        and not action_pending
+        and has_retryable_terminal_placements
+    )
     can_rollback = bool(job.import_started_at) and job.status in {
         ImportJobStatus.COMPLETED,
         ImportJobStatus.FAILED,
@@ -339,6 +380,7 @@ def import_control_state_for_job(job: ImportJob) -> dict[str, object]:
         "can_delete": can_delete,
         "can_view_results": can_view_results,
         "can_retry": can_retry,
+        "can_retry_story_arc_placements": can_retry_story_arc_placements,
         "can_rollback": can_rollback,
         "transfer_method": job.transfer_method,
         "convert_to_preferred_format": job.convert_to_preferred_format,
@@ -463,6 +505,13 @@ def runtime_snapshot_payload(
         "total_files_no_match": job.total_files_no_match,
         "total_files_imported": job.total_files_imported,
         "total_files_failed": job.total_files_failed,
+        "story_arc_placements_total": snapshot.get("story_arc_placements_total"),
+        "story_arc_placements_queued": snapshot.get("story_arc_placements_queued"),
+        "story_arc_placements_running": snapshot.get("story_arc_placements_running"),
+        "story_arc_placements_retry_wait": snapshot.get("story_arc_placements_retry_wait"),
+        "story_arc_placements_failed": snapshot.get("story_arc_placements_failed"),
+        "story_arc_placements_completed": snapshot.get("story_arc_placements_completed"),
+        "story_arc_placements_cancelled": snapshot.get("story_arc_placements_cancelled"),
         "review_summary": (
             review_summary if review_summary is not None else snapshot.get("review_summary")
         ),
@@ -473,7 +522,21 @@ def runtime_snapshot_payload(
         ),
         "control_state": import_control_state_for_job(job),
     }
+    for key in _PERSISTENT_IMPORT_CONTEXT_KEYS:
+        if key in snapshot:
+            runtime[key] = snapshot[key]
     return runtime
+
+
+def _scale_clean_library_progress(job: ImportJob, event: ImportProgressEvent) -> None:
+    """Reserve the first five percent for clean-library plan preparation."""
+    snapshot = dict(job.progress_snapshot or {})
+    if (
+        snapshot.get("clean_library_adoption") is not True
+        or event.phase == "clean_library_preparing"
+    ):
+        return
+    event.progress = min(100, 5 + round(event.progress * 0.95))
 
 
 def initialize_progress_snapshot(
@@ -596,7 +659,11 @@ async def persist_progress_snapshot(
     event: ImportProgressEvent,
 ) -> None:
     """Persist the latest progress payload on the job for recovery/UI hydration."""
+    existing_snapshot = dict(job.progress_snapshot or {})
     payload = event.model_dump(mode="json")
+    for key in _PERSISTENT_IMPORT_CONTEXT_KEYS:
+        if key in existing_snapshot:
+            payload[key] = existing_snapshot[key]
     if int(payload.get("progress_revision") or 0) <= 0:
         payload["progress_revision"] = next_progress_revision(job)
     else:
@@ -641,7 +708,9 @@ def apply_progress_event_contract(
     if event.current_item_stage_label is None:
         event.current_item_stage_label = stage_label(event.current_item_stage)
 
-    if event.current_item_progress_pct is None:
+    if event.current_item_kind == "scan" and event.current_item_stage == "inventory":
+        event.current_item_progress_pct = None
+    elif event.current_item_progress_pct is None:
         if event.current_file_progress_pct is not None:
             event.current_item_progress_pct = event.current_file_progress_pct
         elif event.current_item_kind is not None:
@@ -662,6 +731,7 @@ async def emit_live_progress(
     """Publish an explicit live-only event without writing a durable snapshot."""
     if job.status in _PROTECTED_RUNTIME_STATUSES and event.status != job.status:
         return
+    _scale_clean_library_progress(job, event)
 
     highest_revision = max(
         int(revision_state.get("value") or 0),
@@ -699,6 +769,7 @@ async def emit_progress(
     """
     if job.status in _PROTECTED_RUNTIME_STATUSES and event.status != job.status:
         return
+    _scale_clean_library_progress(job, event)
     event.mode = cast("ImportProgressMode", snapshot_mode_for_job(job, default=event.mode))
     if event.progress_revision <= 0:
         event.progress_revision = next_progress_revision(job)

@@ -110,6 +110,8 @@ class TestImportJobModel:
         cols = {c.name: c for c in ImportJob.__table__.columns}
         assert cols["mylar3_path_map"].default.is_callable
         assert str(cols["mylar3_path_map"].server_default.arg) == "{}"
+        assert cols["mylar3_path_map_confirmed"].default.arg is False
+        assert str(cols["mylar3_path_map_confirmed"].server_default.arg) == "0"
 
 
 class TestImportedSeriesModel:

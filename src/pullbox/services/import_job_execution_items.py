@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select as sa_select
@@ -10,14 +11,28 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportSeriesStatus,
 )
+from pullbox.models.issue import IssueType
 from pullbox.models.series import Series
 from pullbox.providers.base import IssueSummary
 from pullbox.services.import_catalog_hydration import schedule_catalog_hydration
+from pullbox.services.import_file_issue_signals import (
+    candidate_issue_number,
+    candidate_issue_number_text,
+)
 from pullbox.services.import_file_resolution import load_importable_files
+from pullbox.services.import_job_actions import (
+    build_series_cover_cache_action_payload,
+    build_series_cover_path_updated_action_payload,
+    build_series_created_action_payload,
+    build_series_folder_created_action_payload,
+    build_series_monitoring_updated_action_payload,
+)
 from pullbox.services.import_job_execution_progress import progress_session_factory_for_runtime
+from pullbox.services.import_split_series import apply_import_preferred_series_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -71,6 +86,9 @@ async def execute_new_series(
 
     importable_files = await load_importable_files(session, item)
     if not importable_files:
+        if await retain_imported_series_outcome(session, item):
+            await session.flush()
+            return 0, 0, imported_count + 1, failed_count, True
         item.status = ImportSeriesStatus.FAILED
         item.error_message = "No eligible files available for import"
         failed_count += 1
@@ -91,8 +109,36 @@ async def execute_new_series(
     # are running. That prevents autoflush from opening a SQLite write
     # transaction before the slow work is finished.
     with session.no_autoflush:
-        existing_series_id = await session.scalar(
-            sa_select(Series.id).where(Series.comicvine_id == cv_id)
+        current_library_root_id = (
+            None
+            if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+            else job.target_library_root_id
+        )
+        existing_series_row = (
+            await session.execute(
+                sa_select(
+                    Series.id,
+                    Series.cover_path,
+                    Series.path,
+                    Series.library_root_id,
+                    Series.preferred_library_root_id,
+                    Series.monitored,
+                ).where(Series.comicvine_id == cv_id)
+            )
+        ).one_or_none()
+        existing_series_id = existing_series_row[0] if existing_series_row is not None else None
+        existing_series_cover_path = (
+            existing_series_row[1] if existing_series_row is not None else None
+        )
+        existing_series_path = existing_series_row[2] if existing_series_row is not None else None
+        existing_series_library_root_id = (
+            existing_series_row[3] if existing_series_row is not None else None
+        )
+        existing_series_preferred_root_id = (
+            existing_series_row[4] if existing_series_row is not None else None
+        )
+        existing_series_monitored = (
+            bool(existing_series_row[5]) if existing_series_row is not None else False
         )
         targeted_descriptor = getattr(
             type(series_service),
@@ -112,7 +158,7 @@ async def execute_new_series(
             new_series = await add_from_import_review_targeted(
                 session,
                 import_series=item,
-                library_root_id=job.target_library_root_id,
+                library_root_id=current_library_root_id,
                 search_on_add=job.search_on_add,
                 issue_summaries=targeted_issue_summaries_for_import_files(importable_files),
             )
@@ -125,7 +171,7 @@ async def execute_new_series(
             new_series = await add_from_comicvine_prefetched(
                 session,
                 comicvine_id=cv_id,
-                library_root_id=job.target_library_root_id,
+                library_root_id=current_library_root_id,
                 search_on_add=job.search_on_add,
                 series_meta=series_meta,
                 issue_summaries=issue_summaries,
@@ -134,19 +180,93 @@ async def execute_new_series(
             new_series = await series_service.add_from_comicvine(
                 session,
                 comicvine_id=cv_id,
-                library_root_id=job.target_library_root_id,
+                library_root_id=current_library_root_id,
                 search_on_add=job.search_on_add,
             )
     new_series_id = new_series.id
+    # Persist the review-row ownership link before file work begins. A
+    # cooperative cancellation can interrupt that work, and the rollback
+    # journal must still be able to prove which import created this series.
+    item.series_id = new_series_id
 
+    await apply_import_preferred_series_root(
+        session,
+        job,
+        series_id=new_series_id,
+        record_action=record_action,
+    )
     if existing_series_id is None:
         await record_action(
             session,
             job,
             phase="import",
             action_type="series_created",
-            payload={"series_id": new_series_id, "import_series_id": item_id},
+            payload=await build_series_created_action_payload(
+                session,
+                series_id=new_series_id,
+                import_series_id=item_id,
+            ),
         )
+    else:
+        monitoring_action_payload = await build_series_monitoring_updated_action_payload(
+            session,
+            series_id=new_series_id,
+            import_series_id=item_id,
+            previous_monitored=existing_series_monitored,
+        )
+        if monitoring_action_payload is not None:
+            await record_action(
+                session,
+                job,
+                phase="import",
+                action_type="series_monitoring_updated",
+                payload=monitoring_action_payload,
+            )
+        folder_action_payload = await build_series_folder_created_action_payload(
+            session,
+            series_id=new_series_id,
+            import_series_id=item_id,
+            previous_series_path=existing_series_path,
+            previous_library_root_id=existing_series_library_root_id,
+            previous_preferred_library_root_id=existing_series_preferred_root_id,
+        )
+        if folder_action_payload is not None:
+            await record_action(
+                session,
+                job,
+                phase="import",
+                action_type="series_folder_created",
+                payload=folder_action_payload,
+            )
+        cover_action_payload = await build_series_cover_cache_action_payload(
+            session,
+            series_id=new_series_id,
+            import_series_id=item_id,
+            previous_cover_path=existing_series_cover_path,
+        )
+        if cover_action_payload is not None:
+            await record_action(
+                session,
+                job,
+                phase="import",
+                action_type="series_cover_cache_created",
+                payload=cover_action_payload,
+            )
+        else:
+            cover_path_action_payload = await build_series_cover_path_updated_action_payload(
+                session,
+                series_id=new_series_id,
+                import_series_id=item_id,
+                previous_cover_path=existing_series_cover_path,
+            )
+            if cover_path_action_payload is not None:
+                await record_action(
+                    session,
+                    job,
+                    phase="import",
+                    action_type="series_cover_path_updated",
+                    payload=cover_path_action_payload,
+                )
 
     await log_event(
         session,
@@ -195,6 +315,9 @@ async def execute_new_series(
             queue_or_schedule_catalog_hydration()
             await session.flush()
             return files_ok, files_err, imported_count, failed_count, True
+        if await retain_imported_series_outcome(session, item):
+            await session.flush()
+            return files_ok, files_err, imported_count + 1, failed_count, True
         item.status = ImportSeriesStatus.FAILED
         item.error_message = "No eligible files available for import"
         failed_count += 1
@@ -218,6 +341,30 @@ async def execute_new_series(
     return files_ok, files_err, imported_count, failed_count, True
 
 
+async def retain_imported_series_outcome(session: AsyncSession, item: ImportedSeries) -> bool:
+    """An exhausted retry must not erase an earlier successful partial import."""
+    if item.series_id is None:
+        return False
+    imported_file_id = await session.scalar(
+        sa_select(ImportedFile.id)
+        .where(
+            ImportedFile.import_series_id == item.id,
+            ImportedFile.status == ImportedFileStatus.IMPORTED,
+        )
+        .limit(1)
+    )
+    if imported_file_id is None:
+        return False
+    if item.error_message:
+        item.diagnostics = {
+            **dict(item.diagnostics or {}),
+            "previous_series_error": item.error_message,
+        }
+    item.status = ImportSeriesStatus.IMPORTED
+    item.error_message = None
+    return True
+
+
 async def has_safety_blocked_files(session: AsyncSession, imported_series_id: int) -> bool:
     """Return whether a review row has deferred resource-safety file decisions."""
     safety_file_id = await session.scalar(
@@ -235,14 +382,14 @@ def targeted_issue_summaries_for_import_files(files: list[ImportedFile]) -> list
     """Build Step 4 issue summaries from review-time file matches."""
     summaries: list[IssueSummary] = []
     seen_provider_ids: set[str] = set()
-    seen_numbers: set[float] = set()
+    seen_issue_keys: set[str] = set()
     for imp_file in files:
+        if not ensure_target_issue_summary_for_import_file(imp_file):
+            continue
         diagnostics = imp_file.diagnostics if isinstance(imp_file.diagnostics, dict) else {}
         summary_payload = diagnostics.get("target_issue_summary")
         issue_number: float | None
         if not isinstance(summary_payload, dict):
-            if imp_file.matched_issue_cv_id is not None and imp_file.matched_issue_id is None:
-                raise ValueError("Import file is missing required target_issue_summary diagnostics")
             continue
 
         provider_id = str(summary_payload.get("provider_id") or "").strip()
@@ -254,14 +401,16 @@ def targeted_issue_summaries_for_import_files(files: list[ImportedFile]) -> list
         release_date = summary_payload.get("release_date")
         cover_url = summary_payload.get("cover_url")
         issue_type = str(summary_payload["issue_type"])
+        issue_number_text = str(summary_payload.get("issue_number_text") or "").strip() or None
 
         if not provider_id or issue_number is None:
             continue
         number_key = float(issue_number)
-        if provider_id in seen_provider_ids or number_key in seen_numbers:
+        issue_key = issue_number_text or str(number_key)
+        if provider_id in seen_provider_ids or issue_key in seen_issue_keys:
             continue
         seen_provider_ids.add(provider_id)
-        seen_numbers.add(number_key)
+        seen_issue_keys.add(issue_key)
         summaries.append(
             IssueSummary(
                 provider_id=provider_id,
@@ -270,9 +419,63 @@ def targeted_issue_summaries_for_import_files(files: list[ImportedFile]) -> list
                 release_date=str(release_date) if release_date else None,
                 cover_url=str(cover_url) if cover_url else None,
                 issue_type=issue_type,
+                issue_number_text=issue_number_text,
             )
         )
     return summaries
+
+
+def ensure_target_issue_summary_for_import_file(imp_file: ImportedFile) -> bool:
+    """Repair the cached issue target needed to create a new series in Step 4."""
+    if imp_file.matched_issue_id is not None or imp_file.matched_issue_cv_id is None:
+        return True
+
+    diagnostics = dict(imp_file.diagnostics or {})
+    existing = diagnostics.get("target_issue_summary")
+    payload = dict(existing) if isinstance(existing, dict) else {}
+    provider_id = str(payload.get("provider_id") or imp_file.matched_issue_cv_id).strip()
+    raw_issue_number = payload.get("issue_number")
+    issue_number: float | None = None
+    if raw_issue_number is not None:
+        with suppress(ValueError):
+            issue_number = float(str(raw_issue_number))
+    if issue_number is None:
+        issue_number = candidate_issue_number(imp_file)
+    if not provider_id or issue_number is None:
+        diagnostics.update(
+            {
+                "reason": "target_issue_summary_unavailable",
+                "rejection_reason": (
+                    "The matched issue target is incomplete and must be reviewed before import."
+                ),
+            }
+        )
+        imp_file.diagnostics = diagnostics
+        return False
+
+    raw_issue_type = payload.get("issue_type") or diagnostics.get("source_issue_type")
+    try:
+        issue_type = IssueType(str(raw_issue_type or IssueType.ISSUE.value))
+    except ValueError:
+        issue_type = IssueType.ISSUE
+    issue_number_text = str(payload.get("issue_number_text") or "").strip()
+    if not issue_number_text:
+        issue_number_text = candidate_issue_number_text(imp_file) or ""
+    repaired = {
+        "provider_id": provider_id,
+        "issue_number": issue_number,
+        "title": payload.get("title"),
+        "release_date": payload.get("release_date"),
+        "cover_url": payload.get("cover_url"),
+        "issue_type": issue_type.value,
+    }
+    if issue_number_text:
+        repaired["issue_number_text"] = issue_number_text
+    diagnostics["target_issue_summary"] = repaired
+    diagnostics.pop("reason", None)
+    diagnostics.pop("rejection_reason", None)
+    imp_file.diagnostics = diagnostics
+    return True
 
 
 def schedule_catalog_hydration_for_series(
@@ -297,6 +500,7 @@ async def execute_duplicate_series_merge(
     item: ImportedSeries,
     *,
     process_series_files: ProcessSeriesFilesFunc,
+    record_action: RecordActionFunc,
     log_event: LogEventFunc,
     report_file_progress: ReportFileProgressFunc | None = None,
 ) -> tuple[int, int, bool]:
@@ -305,6 +509,13 @@ async def execute_duplicate_series_merge(
     if item.series_id is None:
         await session.commit()
         return 0, 0, False
+
+    await apply_import_preferred_series_root(
+        session,
+        job,
+        series_id=item.series_id,
+        record_action=record_action,
+    )
 
     await log_event(
         session,

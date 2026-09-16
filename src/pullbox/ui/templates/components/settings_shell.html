@@ -58,10 +58,10 @@
   </div>
 {%- endmacro %}
 
-{% macro settings_row(label, help="", title_tag="label", row_class="", body_class="", attrs="") -%}
+{% macro settings_row(label, help="", title_tag="label", row_class="", body_class="", attrs="", label_for="") -%}
   <div class="settings-row {{ row_class }}" {{ attrs|safe }}>
     <div class="settings-row-meta">
-      <{{ title_tag }} class="settings-row-label">{{ label }}</{{ title_tag }}>
+      <{{ title_tag }} class="settings-row-label"{% if label_for %} for="{{ label_for }}"{% endif %}>{{ label }}</{{ title_tag }}>
       {% if help %}
         <p class="settings-row-help">{{ help|safe }}</p>
       {% endif %}

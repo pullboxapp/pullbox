@@ -113,7 +113,9 @@ node_modules/
 # Playwright test artifacts
 test-results/
 .playwright-cli/
+output/playwright/
 
 # Local security artifacts
 bandit-report.json
 safety-report.json
+dependency-audit-report.json

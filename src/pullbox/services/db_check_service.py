@@ -13,9 +13,17 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 
 from pullbox.core.comicinfo_reader import read_comicinfo
+from pullbox.core.exceptions import ValidationError
+from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.release_parser import normalize_issue_number, parse_release_title
 from pullbox.models.issue import Issue
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.series import Series
 
 if TYPE_CHECKING:
@@ -338,6 +346,15 @@ async def register_stale_library_file(
             "folder": str(file_path.parent),
             "reason": "File is not inside any configured library root.",
         }
+    if not library_root.allow_referenced_registrations:
+        return {
+            "file_path": file_path_str,
+            "folder": str(file_path.parent),
+            "reason": (
+                "The containing library root does not allow referenced registrations. "
+                "DB Check cannot prove that an untracked file was created by Pullbox."
+            ),
+        }
 
     parent_folder = normalize_library_path(file_path.parent)
     if parent_folder is None:
@@ -364,13 +381,14 @@ async def register_stale_library_file(
     confidence = MatchConfidence.UNMATCHED
 
     if series is not None and parsed and parsed.issue_number is not None:
-        issue_result = await session.execute(
-            select(Issue).where(
-                Issue.series_id == series.id,
-                Issue.issue_number == parsed.issue_number,
-            )
-        )
-        issue = issue_result.scalar_one_or_none()
+        issue_filters = [Issue.series_id == series.id]
+        if parsed.issue_number_text is not None:
+            issue_filters.append(Issue.issue_number_text == parsed.issue_number_text)
+        else:
+            issue_filters.append(Issue.issue_number == parsed.issue_number)
+        issue_result = await session.execute(select(Issue).where(*issue_filters).limit(2))
+        issue_candidates = list(issue_result.scalars().all())
+        issue = issue_candidates[0] if len(issue_candidates) == 1 else None
         if issue is not None:
             issue_id = issue.id
             confidence = MatchConfidence.HIGH
@@ -399,6 +417,8 @@ async def register_stale_library_file(
         parsed_year=parsed.year if parsed else None,
         issue_id=issue_id,
         library_root_id=library_root.id,
+        storage_mode=LibraryFileStorageMode.REFERENCED,
+        source_signature=build_file_identity_signature(file_path),
     )
     session.add(library_file)
     return None
@@ -442,8 +462,9 @@ async def repair_series_path(
         if next_path is not None:
             library_file.file_path = next_path
             library_file.file_name = Path(next_path).name
-        if target_root is not None:
-            library_file.library_root_id = target_root.id
+        repaired_root = resolve_enabled_root_for_path(library_file.file_path, enabled_roots)
+        if repaired_root is not None:
+            library_file.library_root_id = repaired_root.id
         await refresh_library_file_filesystem_fields(library_file)
 
 
@@ -456,6 +477,11 @@ async def repair_series_root_id(
     """Repair Series.library_root_id when the path maps to a different root."""
     series = await session.get(Series, series_id)
     if series is not None:
+        await _require_repair_root_contains_path(
+            session,
+            target_root_id=target_root_id,
+            path_value=series.path,
+        )
         series.library_root_id = target_root_id
 
 
@@ -469,8 +495,28 @@ async def repair_library_file_root_id(
     library_file = await session.get(LibraryFile, library_file_id)
     if library_file is None:
         return
+    await _require_repair_root_contains_path(
+        session,
+        target_root_id=target_root_id,
+        path_value=library_file.file_path,
+    )
     library_file.library_root_id = target_root_id
     await refresh_library_file_filesystem_fields(library_file)
+
+
+async def _require_repair_root_contains_path(
+    session: AsyncSession,
+    *,
+    target_root_id: int,
+    path_value: str | Path | None,
+) -> LibraryRoot:
+    """Validate client-carried DB Check repair context against live root identity."""
+    root = await session.get(LibraryRoot, target_root_id)
+    if root is None or not root.enabled:
+        raise ValidationError("The DB Check repair target library root is unavailable.")
+    if resolve_enabled_root_for_path(path_value, [root]) is None:
+        raise ValidationError("The DB Check repair target root does not contain the record path.")
+    return root
 
 
 async def reindex_library_root(

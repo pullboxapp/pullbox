@@ -1,0 +1,51 @@
+{% from "components/mission_control_table.html" import mission_control_table %}
+
+{% if error_message %}
+  <div role="alert" class="inline-alert inline-alert-danger">{{ error_message }}</div>
+{% endif %}
+
+{% if story_arc_page.items %}
+  {% if active_view == "grid" %}
+    <section data-testid="story-arcs-collector-wall-view" class="series-collector-wall-shell">
+      <div class="series-collector-wall-grid">
+        {% for item in story_arc_page.items %}
+          {% include "partials/story_arc_grid_card.html" %}
+        {% endfor %}
+      </div>
+    </section>
+  {% else %}
+    <section data-testid="story-arcs-mission-control-view" class="series-mission-control-shell">
+      {% call mission_control_table("story-arcs-mission-control-table") %}
+        <thead>
+          <tr>
+            <th class="c" style="width: 36px">SYS</th>
+            <th>Story Arc</th>
+            <th class="c" style="width: 92px">Status</th>
+            <th class="c" style="width: 78px">Owned</th>
+            <th style="width: 220px">Acquisition</th>
+            <th class="c" style="width: 112px">Needs Review</th>
+            <th class="r" style="width: 88px">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in story_arc_page.items %}
+            {% include "partials/story_arc_list_row.html" %}
+          {% endfor %}
+        </tbody>
+      {% endcall %}
+    </section>
+  {% endif %}
+{% else %}
+  <div data-testid="story-arcs-empty-state" class="series-empty-state">
+    <svg class="h-12 w-12 text-pb-text-dim" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 3.75h9m-9 16.5h9M6 6.75h12A2.25 2.25 0 0120.25 9v6A2.25 2.25 0 0118 17.25H6A2.25 2.25 0 013.75 15V9A2.25 2.25 0 016 6.75z"></path>
+    </svg>
+    {% if query %}
+      <p class="series-empty-state-title">No story arcs matching “{{ query }}”</p>
+      <p class="series-empty-state-copy">Try a shorter name or loosen the lifecycle and monitoring filters.</p>
+    {% else %}
+      <p class="series-empty-state-title">Nothing in the registry yet</p>
+      <p class="series-empty-state-copy">Add a Story Arc from Comic Vine to start tracking its reading order.</p>
+    {% endif %}
+  </div>
+{% endif %}

@@ -9,6 +9,7 @@ import pytest
 
 from pullbox.core.naming import detect_issue_type, format_series_folder
 from pullbox.models.library import LibraryRoot
+from pullbox.models.series import Series
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. Issue type detection from filenames
@@ -134,14 +135,15 @@ class TestRenameSeriesFolder:
         old_folder.mkdir()
 
         # Mock series
-        series = MagicMock()
-        series.id = 1
-        series.title = "Batman"
-        series.year_start = 2024
-        series.comicvine_id = 12345
-        series.publisher_id = None
-        series.path = str(old_folder)
-        series.library_root_id = 1
+        series = Series(
+            id=1,
+            title="Batman",
+            sort_title="Batman",
+            year_start=2024,
+            comicvine_id=12345,
+            path=str(old_folder),
+            library_root_id=1,
+        )
 
         # Mock library root
         root = MagicMock()
@@ -160,11 +162,17 @@ class TestRenameSeriesFolder:
         )
 
         # Mock _load_naming_config
-        with patch.object(
-            series_svc.__class__,
-            "_load_naming_config",
-            new_callable=AsyncMock,
-            return_value=config_data,
+        with (
+            patch.object(
+                series_svc.__class__,
+                "_load_naming_config",
+                new_callable=AsyncMock,
+                return_value=config_data,
+            ),
+            patch(
+                "pullbox.services.series_service.require_mutable_library_target",
+                new_callable=AsyncMock,
+            ),
         ):
             new_path = await series_svc.rename_series_folder(session, 1)
 
@@ -179,14 +187,15 @@ class TestRenameSeriesFolder:
         folder = tmp_path / "Batman (2024)"
         folder.mkdir()
 
-        series = MagicMock()
-        series.id = 1
-        series.title = "Batman"
-        series.year_start = 2024
-        series.comicvine_id = 12345
-        series.publisher_id = None
-        series.path = str(folder)
-        series.library_root_id = 1
+        series = Series(
+            id=1,
+            title="Batman",
+            sort_title="Batman",
+            year_start=2024,
+            comicvine_id=12345,
+            path=str(folder),
+            library_root_id=1,
+        )
 
         root = MagicMock()
         root.path = str(tmp_path)
@@ -236,14 +245,15 @@ class TestRenameSeriesFolder:
         target = tmp_path / "Batman (2024)"
         target.mkdir()
 
-        series = MagicMock()
-        series.id = 1
-        series.title = "Batman"
-        series.year_start = 2024
-        series.comicvine_id = 99999
-        series.publisher_id = None
-        series.path = str(old_folder)
-        series.library_root_id = 1
+        series = Series(
+            id=1,
+            title="Batman",
+            sort_title="Batman",
+            year_start=2024,
+            comicvine_id=99999,
+            path=str(old_folder),
+            library_root_id=1,
+        )
 
         root = MagicMock()
         root.path = str(tmp_path)
@@ -259,11 +269,17 @@ class TestRenameSeriesFolder:
             side_effect=lambda cls, id: series if cls is not LibraryRoot else root,
         )
 
-        with patch.object(
-            series_svc.__class__,
-            "_load_naming_config",
-            new_callable=AsyncMock,
-            return_value=config_data,
+        with (
+            patch.object(
+                series_svc.__class__,
+                "_load_naming_config",
+                new_callable=AsyncMock,
+                return_value=config_data,
+            ),
+            patch(
+                "pullbox.services.series_service.require_mutable_library_target",
+                new_callable=AsyncMock,
+            ),
         ):
             new_path = await series_svc.rename_series_folder(session, 1)
 

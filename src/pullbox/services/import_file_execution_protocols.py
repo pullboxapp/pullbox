@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from pullbox.core.library_policy import LibraryIngestPolicy
     from pullbox.models.import_job import ImportedFile, ImportJob, ImportJobAction
     from pullbox.models.issue import Issue
-    from pullbox.models.library import LibraryFile, MatchConfidence
+    from pullbox.models.library import LibraryFile, LibraryFileStorageMode, MatchConfidence
     from pullbox.services.import_file_preparation import PreparedImportFile
 
 
@@ -107,6 +107,8 @@ class RegisterLibraryFileFunc(Protocol):
         confidence: MatchConfidence,
         *,
         move_to_library: bool,
+        storage_mode: LibraryFileStorageMode,
+        expected_source_signature: dict[str, object] | None,
         library_root_id: int | None,
         transfer_method: str | None,
         normalize_to_cbz: bool | None = None,
@@ -119,7 +121,14 @@ class RegisterLibraryFileFunc(Protocol):
         | None = None,
         comicinfo_progress_callback: Callable[[str, int, int, str], Awaitable[None] | None]
         | None = None,
+        recovery_imported_file_id: int | None = None,
+        recovery_original_source_path: Path | None = None,
         placement_started_callback: Callable[..., Awaitable[None] | None] | None = None,
+        replace_existing_library_file: bool = False,
+        replacement_trash_dir: Path | None = None,
+        preserve_replaced_artifact: bool = False,
+        source_scan_root: Path | None = None,
+        strict_import_target: bool = False,
     ) -> LibraryFile | LibraryFileRegistrationOutcome: ...
 
 

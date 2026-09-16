@@ -141,6 +141,47 @@ async def test_override_file_match_updates_file_and_logs_event(
     assert log.data["issue_id"] == issue.id
 
 
+@pytest.mark.parametrize("repair", [False, True])
+async def test_manual_match_cannot_bypass_archive_content_review(
+    db_session: AsyncSession,
+    repair: bool,
+) -> None:
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    imported_series = await _create_imported_series(db_session, job)
+    issue = await _create_library_issue(db_session)
+    imported_file = _make_imported_file(job, imported_series)
+    imported_file.status = ImportedFileStatus.SAFETY_BLOCKED
+    imported_file.diagnostics = {
+        "safety_block": {"code": "archive_no_pages", "overrideable": False}
+    }
+    db_session.add(imported_file)
+    await db_session.flush()
+    with pytest.raises(ValidationError, match="safety review"):
+        await service.override_file_match(
+            db_session,
+            job.id,
+            imported_file.id,
+            issue.id,
+            repair_source_metadata=repair,
+        )
+    assert imported_file.status is ImportedFileStatus.SAFETY_BLOCKED
+    assert not imported_file.include_in_import
+
+
+async def test_low_level_manual_match_cannot_bypass_safety_review(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    item = await _create_imported_series(db_session, job)
+    issue = await _create_library_issue(db_session)
+    file = _make_imported_file(job, item)
+    file.status = ImportedFileStatus.SAFETY_BLOCKED
+    db_session.add(file)
+    await db_session.flush()
+    with pytest.raises(ValidationError, match="safety review"):
+        await service._apply_manual_file_match(db_session, file, issue, method="manual_override")
+
+
 async def test_override_file_match_rejects_non_actionable_duplicate_series(
     db_session: AsyncSession,
 ) -> None:

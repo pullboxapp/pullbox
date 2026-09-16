@@ -126,17 +126,19 @@ async def test_run_issue_search_returns_shared_bundle_and_log(
     )
     release = _make_release()
     validation = SimpleNamespace(release=release, confidence=MatchConfidence.HIGH)
+    rejected_release = _make_release("Absolute Superman 010")
+    rejected_validation = SimpleNamespace(release=rejected_release, confidence=MatchConfidence.LOW)
     outcome = IssueSearchOutcome(
         target=target,
         mode="deep",
         query_count=2,
-        raw_results=[release],
-        filtered_results=[release],
+        raw_results=[release, rejected_release],
+        filtered_results=[release, rejected_release],
         matched=[validation],
-        rejected=[],
+        rejected=[rejected_validation],
         best_release=release,
         best_validation=validation,
-        search_details={"results_count": 1, "query_count": 2},
+        search_details={"results_count": 2, "query_count": 2},
         elapsed_ms=12,
         used_fallback=True,
     )
@@ -182,7 +184,7 @@ async def test_run_issue_search_returns_shared_bundle_and_log(
 
     search_log = issues_api._build_issue_search_log(bundle)
     assert search_log.search_type == SearchType.MANUAL
-    assert search_log.results_found == 1
+    assert search_log.results_found == 2
     assert search_log.results_rejected == 1
     assert search_log.best_confidence == MatchConfidence.HIGH.value
 
@@ -573,7 +575,14 @@ async def test_issue_response_and_search_log_grab_helpers(
         session.add(library_file)
         await session.flush()
 
+        # Simulate a row written by an older image that does not know the
+        # additive exact-text column yet.
+        issue.issue_number_text = None
+        await session.flush()
+
         response = await issues_api._load_issue_response(session, issue.id)
+        assert response.issue_number == 9.0
+        assert response.issue_number_text == "9"
         assert response.series_title == "Absolute Superman"
         assert response.has_file is True
         assert (await issues_api.get_issue(issue.id, object(), session)).id == issue.id

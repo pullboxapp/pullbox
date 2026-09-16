@@ -3,20 +3,32 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import event
 
 from pullbox.core.exceptions import JobPausedError
-from pullbox.models.import_job import ImportedFile, ImportJob, ImportJobStatus
+from pullbox.models.import_job import (
+    ImportedFile,
+    ImportedFileStatus,
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSeriesStatus,
+    ImportSourceType,
+)
 from pullbox.services.import_active_file_progress import ActiveFileProgressSettings
 from pullbox.services.import_job_execution_progress import (
     await_prefetch_with_metadata_progress,
+    build_import_group_progress_plans,
     build_report_file_progress_callback,
     build_series_metadata_progress_emitter,
 )
+from pullbox.services.import_job_execution_types import ExecutionItemPlan
 from pullbox.services.import_progress_runtime import (
+    ImportGroupProgressPlan,
     ImportProgressFileProfile,
     ImportProgressSettings,
     import_group_progress_plan,
@@ -63,9 +75,9 @@ def _callback_kwargs(**overrides: Any) -> dict[str, Any]:
         "job_id": 42,
         "job": _job(),
         "job_started_at": datetime(2026, 6, 9, 12, 0, tzinfo=UTC),
+        "work_started_at": datetime.now(UTC) - timedelta(seconds=20),
         "progress_callback": object(),
         "progress_session_factory": None,
-        "estimate_remaining_seconds": lambda _started_at, _progress: 123,
         "group_progress_plans": {7: plan},
         "shared_progress_settings": settings,
         "group_progress_weights": [plan.total_weight],
@@ -98,6 +110,267 @@ def _callback_kwargs(**overrides: Any) -> dict[str, Any]:
     }
     kwargs.update(overrides)
     return kwargs
+
+
+@pytest.mark.parametrize("large_group", [False, True])
+@pytest.mark.parametrize("live_only", [False, True])
+async def test_file_eta_is_available_before_display_reaches_one_percent(
+    large_group: bool, live_only: bool
+) -> None:
+    events = []
+
+    async def capture_active(*_args, **kwargs):
+        events.append(kwargs["event"])
+
+    async def capture_live(_job, event, **_kwargs):
+        events.append(event)
+
+    kwargs = _callback_kwargs(
+        work_started_at=datetime.now(UTC) - timedelta(seconds=20),
+        emit_active_file_progress=capture_active,
+        emit_live_progress=capture_live,
+    )
+    if large_group:
+        plan = ImportGroupProgressPlan(2.0, tuple((99 + idx, 3.5) for idx in range(2000)))
+        kwargs["group_progress_plans"] = {7: plan}
+        kwargs["group_progress_weights"] = [plan.total_weight]
+    else:
+        kwargs["group_progress_weights"] *= 50_000
+        kwargs["total_groups"] = 50_000
+    callback = build_report_file_progress_callback(**kwargs)
+    await callback(
+        imp_file=_file(),
+        file_index=1,
+        total_files=2000 if large_group else 1,
+        stage="finalizing",
+        current=1,
+        total=1,
+        unit="file",
+        live_only=live_only,
+    )
+
+    assert events[-1].progress == 0
+    assert events[-1].estimated_seconds_remaining is not None
+    assert events[-1].estimated_seconds_remaining > 0
+
+
+@pytest.mark.parametrize("live_only", [False, True])
+async def test_metadata_eta_is_available_before_display_reaches_one_percent(
+    live_only: bool,
+) -> None:
+    events = []
+    kwargs = _callback_kwargs()
+
+    async def capture(_session, _job, event, _callback):
+        events.append(event)
+
+    async def capture_live(_job, event, **_kwargs):
+        events.append(event)
+
+    emitter = build_series_metadata_progress_emitter(
+        session=kwargs["session"],
+        job_id=42,
+        job=kwargs["job"],
+        job_started_at=datetime.now(UTC) - timedelta(seconds=20),
+        work_started_at=datetime.now(UTC) - timedelta(seconds=20),
+        progress_callback=kwargs["progress_callback"],
+        emit_progress=capture,
+        emit_live_progress=capture_live,
+        group_progress_plans=kwargs["group_progress_plans"],
+        shared_progress_settings=kwargs["shared_progress_settings"],
+        group_progress_weights=kwargs["group_progress_weights"] * 50_000,
+        stats=lambda: kwargs["stats"],
+        series_found=50_000,
+        revision_state=kwargs["revision_state"],
+    )
+    await emitter(
+        group_index=1,
+        total_groups=50_000,
+        series_id=7,
+        series_name="Alpha",
+        message="Preparing series records",
+        current_item_stage="series_records",
+        current_item_progress_pct=10,
+        live_only=live_only,
+    )
+
+    assert events[-1].progress == 0
+    assert events[-1].estimated_seconds_remaining is not None
+    assert events[-1].estimated_seconds_remaining > 0
+
+
+@pytest.mark.asyncio
+async def test_build_import_group_progress_plans_batches_large_selections(
+    async_engine,
+    db_session,
+) -> None:  # type: ignore[no-untyped-def]
+    job = ImportJob(
+        source_path="/imports",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.IMPORTING,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    series_items = [
+        ImportedSeries(
+            import_job_id=job.id,
+            raw_series_name=f"Scale Series {index:04d}",
+            status=ImportSeriesStatus.CONFIRMED,
+        )
+        for index in range(600)
+    ]
+    db_session.add_all(series_items)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=item.id,
+                file_path=f"/imports/{item.raw_series_name}.cbz",
+                file_name=f"{item.raw_series_name}.cbz",
+                file_size=1024,
+                file_format="cbz",
+                status=ImportedFileStatus.MATCHED,
+            )
+            for item in series_items
+        ]
+    )
+    await db_session.flush()
+    execution_items = [
+        ExecutionItemPlan(
+            mode="new",
+            item_id=item.id,
+            raw_series_name=item.raw_series_name,
+            cv_id=None,
+            existing_series_id=None,
+        )
+        for item in series_items
+    ]
+
+    selects: list[str] = []
+
+    def record_select(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", record_select)
+    try:
+        plans = await build_import_group_progress_plans(
+            db_session,
+            execution_items,
+            ImportProgressSettings(
+                move_to_library=True,
+                convert_to_preferred_format=False,
+                update_embedded_comicinfo_from_match=False,
+            ),
+        )
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", record_select)
+
+    assert len(plans) == 600
+    assert all(len(plan.file_weights) == 1 for plan in plans.values())
+    assert len(selects) <= 2, f"progress preparation issued {len(selects)} SELECTs"
+
+
+@pytest.mark.asyncio
+async def test_build_import_group_progress_plans_preserves_file_selection_rules(
+    db_session,
+) -> None:  # type: ignore[no-untyped-def]
+    job = ImportJob(
+        source_path="/imports",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.IMPORTING,
+    )
+    new_item = ImportedSeries(
+        import_job=job,
+        raw_series_name="New Series",
+        status=ImportSeriesStatus.CONFIRMED,
+    )
+    duplicate_item = ImportedSeries(
+        import_job=job,
+        raw_series_name="Existing Series",
+        status=ImportSeriesStatus.DUPLICATE,
+    )
+    db_session.add_all([job, new_item, duplicate_item])
+    await db_session.flush()
+
+    new_match = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=new_item.id,
+        file_path="/imports/New 001.cbz",
+        file_name="New 001.cbz",
+        file_size=101,
+        file_format="cbz",
+        status=ImportedFileStatus.MATCHED,
+    )
+    new_preferred_conflict = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=new_item.id,
+        file_path="/imports/New 002 preferred.cbz",
+        file_name="New 002 preferred.cbz",
+        file_size=102,
+        file_format="cbz",
+        status=ImportedFileStatus.CONFLICT,
+        is_preferred=True,
+    )
+    duplicate_selected = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=duplicate_item.id,
+        file_path="/imports/Existing 001.cbz",
+        file_name="Existing 001.cbz",
+        file_size=201,
+        file_format="cbz",
+        status=ImportedFileStatus.CONFIRMED,
+        include_in_import=True,
+    )
+    duplicate_unselected = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=duplicate_item.id,
+        file_path="/imports/Existing 002.cbz",
+        file_name="Existing 002.cbz",
+        file_size=202,
+        file_format="cbz",
+        status=ImportedFileStatus.MATCHED,
+        include_in_import=False,
+    )
+    db_session.add_all(
+        [
+            new_match,
+            new_preferred_conflict,
+            duplicate_selected,
+            duplicate_unselected,
+        ]
+    )
+    await db_session.flush()
+
+    plans = await build_import_group_progress_plans(
+        db_session,
+        [
+            ExecutionItemPlan("new", new_item.id, "New Series", None, None),
+            ExecutionItemPlan("duplicate", duplicate_item.id, "Existing Series", None, None),
+        ],
+        ImportProgressSettings(
+            move_to_library=True,
+            convert_to_preferred_format=False,
+            update_embedded_comicinfo_from_match=False,
+        ),
+    )
+
+    assert [file_id for file_id, _weight in plans[new_item.id].file_weights] == [
+        new_match.id,
+        new_preferred_conflict.id,
+    ]
+    assert [file_id for file_id, _weight in plans[duplicate_item.id].file_weights] == [
+        duplicate_selected.id
+    ]
 
 
 @pytest.mark.asyncio
@@ -146,7 +419,7 @@ async def test_report_file_progress_persists_durable_stage_boundary() -> None:
     assert event.series_found == 3
     assert event.total_files_imported == 4
     assert event.total_files_failed == 5
-    assert event.estimated_seconds_remaining == 123
+    assert event.estimated_seconds_remaining is None  # All planned file work is complete.
     assert event.current_item_kind == "file"
     assert event.current_item_stage == "finalizing"
     assert event.current_item_progress_pct == event.current_file_progress_pct
@@ -257,10 +530,10 @@ async def test_series_metadata_progress_emitter_persists_durable_event() -> None
         job_id=42,
         job=kwargs["job"],
         job_started_at=kwargs["job_started_at"],
+        work_started_at=kwargs["work_started_at"],
         progress_callback=kwargs["progress_callback"],
         emit_progress=emit_progress,
         emit_live_progress=emit_live_progress,
-        estimate_remaining_seconds=kwargs["estimate_remaining_seconds"],
         group_progress_plans=kwargs["group_progress_plans"],
         shared_progress_settings=kwargs["shared_progress_settings"],
         group_progress_weights=kwargs["group_progress_weights"],
@@ -319,10 +592,10 @@ async def test_series_metadata_progress_emitter_emits_live_heartbeat() -> None:
         job_id=42,
         job=kwargs["job"],
         job_started_at=kwargs["job_started_at"],
+        work_started_at=kwargs["work_started_at"],
         progress_callback=kwargs["progress_callback"],
         emit_progress=emit_progress,
         emit_live_progress=emit_live_progress,
-        estimate_remaining_seconds=kwargs["estimate_remaining_seconds"],
         group_progress_plans=kwargs["group_progress_plans"],
         shared_progress_settings=kwargs["shared_progress_settings"],
         group_progress_weights=kwargs["group_progress_weights"],
@@ -364,10 +637,10 @@ async def test_series_metadata_progress_emitter_noops_without_progress_callback(
         job_id=42,
         job=kwargs["job"],
         job_started_at=kwargs["job_started_at"],
+        work_started_at=kwargs["work_started_at"],
         progress_callback=None,
         emit_progress=lambda *args, **kwargs: persisted_events.append((args, kwargs)),
         emit_live_progress=lambda *args, **kwargs: live_events.append((args, kwargs)),
-        estimate_remaining_seconds=kwargs["estimate_remaining_seconds"],
         group_progress_plans=kwargs["group_progress_plans"],
         shared_progress_settings=kwargs["shared_progress_settings"],
         group_progress_weights=kwargs["group_progress_weights"],

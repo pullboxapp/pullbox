@@ -33,6 +33,12 @@ from pullbox.core.library_comicinfo import (
 from pullbox.core.library_comicinfo import (
     prepare_source_artifact as _prepare_source_artifact,
 )
+from pullbox.core.library_file_ownership import (
+    build_file_identity_signature,
+    build_managed_placement_signature,
+    resolve_referenced_library_root,
+    validate_file_identity_signature,
+)
 from pullbox.core.library_leave_in_place import handle_leave_in_place as _handle_leave_in_place
 from pullbox.core.library_materialization import (
     paths_on_same_filesystem,
@@ -42,10 +48,8 @@ from pullbox.core.library_naming import (
     build_naming_snapshot as _build_naming_snapshot,
 )
 from pullbox.core.library_naming import (
-    build_series_folder_name as _build_series_folder_name,
-)
-from pullbox.core.library_naming import (
-    compute_target_filename as _compute_target_filename,
+    build_series_folder_name,
+    compute_target_filename,
 )
 from pullbox.core.library_naming import (
     resolve_naming_issue_type as _resolve_naming_issue_type,
@@ -53,7 +57,11 @@ from pullbox.core.library_naming import (
 from pullbox.core.library_permission_application import (
     apply_materialized_file_permissions as _apply_materialized_file_permissions,
 )
-from pullbox.core.library_policy import LibraryIngestPolicy, load_library_ingest_policy
+from pullbox.core.library_policy import (
+    LibraryIngestPolicy,
+    load_effective_library_ingest_policy,
+    load_library_ingest_policy,
+)
 from pullbox.core.library_root_resolution import materialize_series_path as _materialize_series_path
 from pullbox.core.library_root_resolution import path_is_inside_root as _path_is_inside_root
 from pullbox.core.library_root_resolution import resolve_library_root as _resolve_library_root
@@ -66,8 +74,15 @@ from pullbox.core.library_target_paths import (
 from pullbox.core.library_transfer import safe_move as _library_safe_move
 from pullbox.core.library_transfer import transfer_into_library as _transfer_into_library
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.series import Series
+from pullbox.services.library_root_management import validate_managed_library_root
 from pullbox.services.series_delete_targets import trash_relative_path
 from pullbox.utilities.executors.file_converter import convert_file
 from pullbox.utilities.settings import move_file_to_utility_trash, restore_file_from_utility_trash
@@ -79,9 +94,33 @@ if TYPE_CHECKING:
     from pullbox.core.library_permissions import LibraryPermissionPolicy
     from pullbox.models.download import DownloadClientType
 
+_build_series_folder_name = build_series_folder_name
+_compute_target_filename = compute_target_filename
+
 logger = structlog.get_logger(__name__)
 
 _DEFERRED_REPLACEMENT_STASHES_KEY = "pullbox_deferred_replacement_stashes"
+
+
+async def _enqueue_story_arc_sync_safely(
+    session: AsyncSession,
+    library_file: LibraryFile,
+) -> None:
+    """Persist automatic arc work without allowing outbox failure to abort ingestion."""
+    from pullbox.services.story_arc_sync_queue import enqueue_story_arc_sync_work
+
+    try:
+        async with session.begin_nested():
+            await enqueue_story_arc_sync_work(session, library_file)
+    except Exception:
+        # The scheduled discrepancy pass can recover missing work. Canonical
+        # registration must remain durable even when this optional producer fails.
+        logger.warning(
+            "story_arc_sync_enqueue_deferred",
+            library_file_id=library_file.id,
+            issue_id=library_file.issue_id,
+            exc_info=True,
+        )
 
 
 def _safe_move(src: Path, dst: Path) -> None:
@@ -96,6 +135,8 @@ class LibraryFileRegistrationOutcome:
     library_file: LibraryFile
     series_folder_created: bool
     series_folder_path: Path | None
+    created_directory_paths: tuple[Path, ...] = ()
+    directory_ownership_boundary_path: Path | None = None
     permission_results: tuple[PermissionChangeResult, ...] = ()
 
 
@@ -118,6 +159,8 @@ def _pending_replacement_stashes(session: AsyncSession) -> list[_ReplacementStas
 @event.listens_for(AsyncSession.sync_session_class, "after_commit")
 def _cleanup_deferred_replacement_stashes(session: Any) -> None:
     """Discard staged originals only after the database commit succeeds."""
+    if session.in_nested_transaction():
+        return
     stashes = session.info.pop(_DEFERRED_REPLACEMENT_STASHES_KEY, [])
     for stash in stashes:
         _discard_replacement_stash_sync(stash)
@@ -126,6 +169,8 @@ def _cleanup_deferred_replacement_stashes(session: Any) -> None:
 @event.listens_for(AsyncSession.sync_session_class, "after_rollback")
 def _restore_deferred_replacement_stashes(session: Any) -> None:
     """Restore staged originals when a caller rolls back after registration."""
+    if session.in_nested_transaction():
+        return
     stashes = session.info.pop(_DEFERRED_REPLACEMENT_STASHES_KEY, [])
     for stash in reversed(stashes):
         _restore_replacement_stash_sync(stash)
@@ -169,9 +214,9 @@ async def resolve_library_destination(
     library_root_id: int | None = None,
 ) -> tuple[Path, LibraryRoot]:
     """Resolve the canonical library destination path for an issue/source pair."""
-    ingest_policy = await load_library_ingest_policy(session)
+    global_ingest_policy = await load_library_ingest_policy(session)
     if rename is None:
-        rename = ingest_policy.rename_on_import
+        rename = global_ingest_policy.rename_on_import
 
     loaded_issue = await _load_issue_with_series_and_publisher(session, issue)
     series = loaded_issue.series
@@ -182,24 +227,18 @@ async def resolve_library_destination(
         library_root_id,
         series=series,
     )
-    if isinstance(series, Series) and series.path:
-        series_folder = Path(series.path)
-    else:
-        series_folder = Path(root.path) / _build_series_folder_name(series, ingest_policy)
-
-    if rename:
-        effective_issue_type = await _resolve_naming_issue_type(session, loaded_issue)
-        target_name = _compute_target_filename(
-            loaded_issue,
-            series,
-            source_path,
-            ingest_policy,
-            issue_type_override=effective_issue_type,
-        )
-    else:
-        target_name = source_path.name
-
-    return series_folder / target_name, root
+    await validate_managed_library_root(root)
+    ingest_policy = await load_effective_library_ingest_policy(session, root)
+    target_path = await _predict_library_target_path(
+        session,
+        source_path,
+        loaded_issue,
+        series,
+        root,
+        ingest_policy,
+        bool(rename),
+    )
+    return target_path, root
 
 
 async def register_library_file(
@@ -209,6 +248,8 @@ async def register_library_file(
     confidence: MatchConfidence,
     *,
     move_to_library: bool = True,
+    storage_mode: LibraryFileStorageMode | None = None,
+    expected_source_signature: dict[str, object] | None = None,
     rename: bool | None = None,
     library_root_id: int | None = None,
     transfer_method: str | None = None,
@@ -226,9 +267,15 @@ async def register_library_file(
     artifact_transfer: Callable[..., Any] | None = None,
     comicinfo_materializer: Callable[..., Any] | None = None,
     placement_started_callback: Callable[..., Any] | None = None,
+    placement_completed_callback: Callable[..., Any] | None = None,
+    placement_temp_paths: Callable[[Path, Path], tuple[Path, ...]] | None = None,
     allow_resource_safety_exception: bool = False,
     replace_existing_library_file: bool = False,
     replacement_trash_dir: Path | None = None,
+    preserve_replaced_artifact: bool = False,
+    source_scan_root: Path | None = None,
+    strict_import_target: bool = False,
+    recover_existing_managed_artifact: bool = False,
 ) -> LibraryFile:
     """Register a file in the library, optionally moving/renaming it."""
     outcome = await register_library_file_with_metadata(
@@ -237,6 +284,8 @@ async def register_library_file(
         issue,
         confidence,
         move_to_library=move_to_library,
+        storage_mode=storage_mode,
+        expected_source_signature=expected_source_signature,
         rename=rename,
         library_root_id=library_root_id,
         transfer_method=transfer_method,
@@ -254,9 +303,15 @@ async def register_library_file(
         artifact_transfer=artifact_transfer,
         comicinfo_materializer=comicinfo_materializer,
         placement_started_callback=placement_started_callback,
+        placement_completed_callback=placement_completed_callback,
+        placement_temp_paths=placement_temp_paths,
         allow_resource_safety_exception=allow_resource_safety_exception,
         replace_existing_library_file=replace_existing_library_file,
         replacement_trash_dir=replacement_trash_dir,
+        preserve_replaced_artifact=preserve_replaced_artifact,
+        source_scan_root=source_scan_root,
+        strict_import_target=strict_import_target,
+        recover_existing_managed_artifact=recover_existing_managed_artifact,
     )
     return outcome.library_file
 
@@ -268,6 +323,8 @@ async def register_library_file_with_metadata(
     confidence: MatchConfidence,
     *,
     move_to_library: bool = True,
+    storage_mode: LibraryFileStorageMode | None = None,
+    expected_source_signature: dict[str, object] | None = None,
     rename: bool | None = None,
     library_root_id: int | None = None,
     transfer_method: str | None = None,
@@ -285,9 +342,15 @@ async def register_library_file_with_metadata(
     artifact_transfer: Callable[..., Any] | None = None,
     comicinfo_materializer: Callable[..., Any] | None = None,
     placement_started_callback: Callable[..., Any] | None = None,
+    placement_completed_callback: Callable[..., Any] | None = None,
+    placement_temp_paths: Callable[[Path, Path], tuple[Path, ...]] | None = None,
     allow_resource_safety_exception: bool = False,
     replace_existing_library_file: bool = False,
     replacement_trash_dir: Path | None = None,
+    preserve_replaced_artifact: bool = False,
+    source_scan_root: Path | None = None,
+    strict_import_target: bool = False,
+    recover_existing_managed_artifact: bool = False,
 ) -> LibraryFileRegistrationOutcome:
     """Register a file in the library, optionally moving/renaming it.
 
@@ -318,6 +381,38 @@ async def register_library_file_with_metadata(
     comicinfo_already_embedded = False
     replacement_stash: _ReplacementStash | None = None
     replacement_finalized = False
+    requested_rename = rename
+    requested_transfer_method = transfer_method
+    requested_normalize_to_cbz = normalize_to_cbz
+    requested_comicinfo_update = update_embedded_comicinfo_from_match
+    effective_storage_mode = storage_mode or (
+        LibraryFileStorageMode.MANAGED
+        if move_to_library or recover_existing_managed_artifact
+        else LibraryFileStorageMode.REFERENCED
+    )
+    referenced_signature: dict[str, int | str] | None = None
+    managed_placement_signature: dict[str, int | str] | None = None
+    placement_started = False
+    created_directory_paths: tuple[Path, ...] = ()
+    directory_ownership_boundary_path: Path | None = None
+
+    if effective_storage_mode == LibraryFileStorageMode.REFERENCED and move_to_library:
+        raise ConfigurationError("Referenced storage cannot materialize a managed library file.")
+    if recover_existing_managed_artifact and move_to_library:
+        raise ConfigurationError(
+            "Managed artifact recovery registers an existing destination without a transfer."
+        )
+    if (
+        recover_existing_managed_artifact
+        and effective_storage_mode != LibraryFileStorageMode.MANAGED
+    ):
+        raise ConfigurationError("Recovered Pullbox artifacts must retain managed ownership.")
+    if (
+        effective_storage_mode == LibraryFileStorageMode.MANAGED
+        and not move_to_library
+        and not recover_existing_managed_artifact
+    ):
+        raise ConfigurationError("Managed storage requires library materialization.")
 
     async def notify_placement_started(
         *,
@@ -325,11 +420,18 @@ async def register_library_file_with_metadata(
         target_path: Path,
         effective_transfer_method: str,
         series_folder_created: bool,
+        created_directories: tuple[Path, ...],
+        directory_ownership_boundary: Path | None,
     ) -> None:
+        nonlocal placement_started
         if placement_started_callback is None:
             return
-        temp_paths: list[Path] = []
-        if (
+        temp_paths = (
+            list(placement_temp_paths(artifact_source, target_path))
+            if placement_temp_paths is not None
+            else []
+        )
+        if placement_temp_paths is None and (
             update_embedded_comicinfo_from_match
             and artifact_source.suffix.lower() == ".cbz"
             and target_path.suffix.lower() == ".cbz"
@@ -342,7 +444,23 @@ async def register_library_file_with_metadata(
             transfer_method=effective_transfer_method,
             series_folder_created=series_folder_created,
             series_folder_path=target_path.parent,
+            created_directory_paths=created_directories,
+            directory_ownership_boundary_path=directory_ownership_boundary,
             temp_paths=tuple(temp_paths),
+        )
+        if inspect.isawaitable(callback_result):
+            await callback_result
+        placement_started = True
+
+    async def notify_placement_completed(target_path: Path) -> None:
+        nonlocal managed_placement_signature
+        if placement_completed_callback is None or not placement_started:
+            return
+        destination_signature = build_managed_placement_signature(target_path)
+        managed_placement_signature = destination_signature
+        callback_result = placement_completed_callback(
+            target_path=target_path,
+            destination_signature=destination_signature,
         )
         if inspect.isawaitable(callback_result):
             await callback_result
@@ -366,6 +484,53 @@ async def register_library_file_with_metadata(
                     effective_ingest_policy.update_embedded_comicinfo_from_match
                 )
 
+            if effective_storage_mode == LibraryFileStorageMode.REFERENCED:
+                if requested_rename is True:
+                    raise ConfigurationError("Referenced library files cannot rename source files.")
+                if requested_normalize_to_cbz is True:
+                    raise ConfigurationError(
+                        "Referenced library files cannot normalize or convert source files."
+                    )
+                if requested_comicinfo_update is True:
+                    raise ConfigurationError(
+                        "Referenced library files cannot update embedded ComicInfo.xml."
+                    )
+                if replace_existing_library_file:
+                    raise ConfigurationError(
+                        "Referenced library files cannot replace an existing artifact."
+                    )
+                if requested_transfer_method not in {None, "leave_in_place", "referenced"}:
+                    raise ConfigurationError(
+                        "Referenced library files cannot use a transfer method."
+                    )
+                rename = False
+                normalize_to_cbz = False
+                update_embedded_comicinfo_from_match = False
+                transfer_method = "leave_in_place"
+            elif recover_existing_managed_artifact:
+                if requested_rename is True:
+                    raise ConfigurationError("Recovered managed artifacts cannot be renamed.")
+                if requested_normalize_to_cbz is True:
+                    raise ConfigurationError(
+                        "Recovered managed artifacts cannot be normalized or converted."
+                    )
+                if requested_comicinfo_update is True:
+                    raise ConfigurationError(
+                        "Recovered managed artifacts cannot rewrite embedded ComicInfo.xml."
+                    )
+                if requested_transfer_method not in {None, "recovered"}:
+                    raise ConfigurationError(
+                        "Recovered managed artifacts cannot use a transfer method."
+                    )
+                if replace_existing_library_file:
+                    raise ConfigurationError(
+                        "Recovered managed artifacts cannot replace an existing artifact."
+                    )
+                rename = False
+                normalize_to_cbz = False
+                update_embedded_comicinfo_from_match = False
+                transfer_method = "recovered"
+
             # 4. Load series with publisher (need for naming and root resolution)
             effective_issue = (
                 await _load_issue_with_series_and_publisher(session, issue)
@@ -375,19 +540,38 @@ async def register_library_file_with_metadata(
             series = effective_issue.series
 
             # 5. Resolve library root
-            root = await _resolve_library_root(
-                session,
-                source_path,
-                library_root_id,
-                series=series,
-            )
+            if effective_storage_mode == LibraryFileStorageMode.REFERENCED:
+                root, source_path, referenced_signature = await resolve_referenced_library_root(
+                    session,
+                    source_path,
+                    library_root_id,
+                )
+                if expected_source_signature is not None:
+                    validate_file_identity_signature(
+                        expected_source_signature,
+                        referenced_signature,
+                    )
+                prepared_source = source_path
+            else:
+                root = await _resolve_library_root(
+                    session,
+                    source_path,
+                    library_root_id,
+                    series=series,
+                )
+                await validate_managed_library_root(root)
+                if ingest_policy is None:
+                    effective_ingest_policy = await load_effective_library_ingest_policy(
+                        session,
+                        root,
+                    )
             replace_existing_path = (
                 Path(effective_issue.library_file.file_path)
                 if replace_existing_library_file and effective_issue.library_file is not None
                 else None
             )
 
-            if not source_path.exists():
+            if not source_path.exists() and not strict_import_target:
                 recovered = await _recover_materialized_target_without_source(
                     session,
                     source_path=source_path,
@@ -402,6 +586,7 @@ async def register_library_file_with_metadata(
                 )
                 if recovered is not None:
                     return recovered
+            if not source_path.exists():
                 raise FileNotFoundError(f"Source file not found: {source_path}")
 
             seed_safe_torrent_import = (
@@ -451,6 +636,8 @@ async def register_library_file_with_metadata(
                         effective_ingest_policy,
                         rename,
                         replace_existing_path=replace_existing_path,
+                        source_scan_root=source_scan_root,
+                        strict_import=strict_import_target,
                     )
                     target_path = target.path
                     replacement_stash = await _stage_replacement_file(
@@ -458,6 +645,7 @@ async def register_library_file_with_metadata(
                         prepared_source,
                         replace_existing_library_file=replace_existing_library_file,
                         replacement_trash_dir=replacement_trash_dir,
+                        preserve_replaced_artifact=preserve_replaced_artifact,
                     )
                     same_filesystem = await asyncio.to_thread(
                         paths_on_same_filesystem,
@@ -478,6 +666,8 @@ async def register_library_file_with_metadata(
                         target_path=target_path,
                         effective_transfer_method=transfer_method,
                         series_folder_created=target.series_folder_created,
+                        created_directories=target.created_directory_paths,
+                        directory_ownership_boundary=target.directory_ownership_boundary_path,
                     )
                     final_path = await transfer_artifact(
                         prepared_source,
@@ -486,6 +676,8 @@ async def register_library_file_with_metadata(
                         transfer_progress_callback=transfer_progress_callback,
                     )
                     series_folder_created = target.series_folder_created
+                    created_directory_paths = target.created_directory_paths
+                    directory_ownership_boundary_path = target.directory_ownership_boundary_path
                 else:
                     target = await _resolve_library_target_path(
                         session,
@@ -496,12 +688,15 @@ async def register_library_file_with_metadata(
                         effective_ingest_policy,
                         rename,
                         replace_existing_path=replace_existing_path,
+                        source_scan_root=source_scan_root,
+                        strict_import=strict_import_target,
                     )
                     replacement_stash = await _stage_replacement_file(
                         effective_issue,
                         prepared_source,
                         replace_existing_library_file=replace_existing_library_file,
                         replacement_trash_dir=replacement_trash_dir,
+                        preserve_replaced_artifact=preserve_replaced_artifact,
                     )
                     if _can_materialize_cbz_with_comicinfo(
                         prepared_source,
@@ -524,6 +719,8 @@ async def register_library_file_with_metadata(
                             target_path=target.path,
                             effective_transfer_method=transfer_method,
                             series_folder_created=target.series_folder_created,
+                            created_directories=target.created_directory_paths,
+                            directory_ownership_boundary=target.directory_ownership_boundary_path,
                         )
                         materialize_result = materializer(
                             prepared_source,
@@ -537,6 +734,8 @@ async def register_library_file_with_metadata(
                             await materialize_result
                         final_path = target.path
                         series_folder_created = target.series_folder_created
+                        created_directory_paths = target.created_directory_paths
+                        directory_ownership_boundary_path = target.directory_ownership_boundary_path
                         comicinfo_already_embedded = True
                     else:
                         await notify_placement_started(
@@ -544,6 +743,8 @@ async def register_library_file_with_metadata(
                             target_path=target.path,
                             effective_transfer_method=transfer_method,
                             series_folder_created=target.series_folder_created,
+                            created_directories=target.created_directory_paths,
+                            directory_ownership_boundary=target.directory_ownership_boundary_path,
                         )
                         final_path = await transfer_artifact(
                             prepared_source,
@@ -552,6 +753,15 @@ async def register_library_file_with_metadata(
                             transfer_progress_callback=transfer_progress_callback,
                         )
                         series_folder_created = target.series_folder_created
+                        created_directory_paths = target.created_directory_paths
+                        directory_ownership_boundary_path = target.directory_ownership_boundary_path
+            elif recover_existing_managed_artifact:
+                if not _path_is_inside_root(prepared_source, root):
+                    raise ConfigurationError(
+                        "Recovered managed artifacts must be inside their managed library root."
+                    )
+                final_path = prepared_source.resolve(strict=True)
+                series_folder_created = False
             else:
                 final_path = await _handle_leave_in_place(
                     session,
@@ -590,9 +800,15 @@ async def register_library_file_with_metadata(
                 )
                 if inspect.isawaitable(embed_result):
                     await embed_result
+            await notify_placement_completed(final_path)
             effective_issue_type = await _resolve_naming_issue_type(session, effective_issue)
             if move_to_library or _path_is_inside_root(final_path, root):
-                _materialize_series_path(series, final_path.parent, root)
+                _materialize_series_path(
+                    series,
+                    final_path.parent,
+                    root,
+                    storage_mode=effective_storage_mode,
+                )
             naming_snapshot = _build_naming_snapshot(
                 source_path=source_path,
                 prepared_source=prepared_source,
@@ -604,12 +820,20 @@ async def register_library_file_with_metadata(
                 rename=bool(rename),
                 effective_issue_type=effective_issue_type,
                 transfer_method=transfer_method,
-                move_to_library=move_to_library,
+                move_to_library=move_to_library or recover_existing_managed_artifact,
                 normalized_source=normalized_source,
                 update_embedded_comicinfo_from_match=bool(update_embedded_comicinfo_from_match),
                 normalize_to_cbz=bool(normalize_to_cbz),
             )
             if existing is not None:
+                if existing.issue_id is not None and existing.issue_id != effective_issue.id:
+                    raise ConfigurationError(
+                        "This library path is already registered to a different issue."
+                    )
+                if existing.storage_mode != effective_storage_mode:
+                    raise ConfigurationError(
+                        "Existing library-file ownership cannot be changed during registration."
+                    )
                 # Update match info on existing record
                 await _update_existing_library_file_from_path(
                     existing,
@@ -619,6 +843,13 @@ async def register_library_file_with_metadata(
                     root=root,
                     confidence=confidence,
                     naming_snapshot=naming_snapshot,
+                    storage_mode=effective_storage_mode,
+                    source_signature=(
+                        referenced_signature
+                        if referenced_signature is not None
+                        else managed_placement_signature
+                        or build_file_identity_signature(final_path)
+                    ),
                 )
                 await _finalize_replacement_stash_db_state(
                     session,
@@ -626,6 +857,7 @@ async def register_library_file_with_metadata(
                     registered_file=existing,
                 )
                 await session.flush()
+                await _enqueue_story_arc_sync_safely(session, existing)
                 _defer_replacement_stash_cleanup(session, replacement_stash)
                 replacement_finalized = True
                 logger.info(
@@ -644,6 +876,8 @@ async def register_library_file_with_metadata(
                     library_file=existing,
                     series_folder_created=series_folder_created,
                     series_folder_path=final_path.parent,
+                    created_directory_paths=created_directory_paths,
+                    directory_ownership_boundary_path=directory_ownership_boundary_path,
                 )
 
             permission_results = await _apply_materialized_file_permissions(
@@ -661,21 +895,44 @@ async def register_library_file_with_metadata(
         extension = final_path.suffix.lstrip(".").lower()
         file_format = _FORMAT_MAP.get(extension, FileFormat.CBZ)
 
-        lf = LibraryFile(
-            file_path=str(final_path),
-            file_name=final_path.name,
-            file_size=stat.st_size,
-            file_format=file_format,
-            file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
-            match_confidence=confidence,
-            parsed_series=series.title if series else None,
-            parsed_issue_number=effective_issue.issue_number,
-            parsed_year=series.year_start if series else None,
-            issue_id=issue.id,
-            library_root_id=root.id,
-            naming_snapshot=naming_snapshot,
+        registered_signature = (
+            referenced_signature
+            if referenced_signature is not None
+            else managed_placement_signature or build_file_identity_signature(final_path)
         )
-        session.add(lf)
+        if replacement_stash is not None:
+            # Keep the canonical row identity so every dependent FK survives a
+            # path-changing replacement, including clean-library adoption.
+            lf = replacement_stash.library_file
+            await _update_existing_library_file_from_path(
+                lf,
+                final_path,
+                issue=effective_issue,
+                series=series,
+                root=root,
+                confidence=confidence,
+                naming_snapshot=naming_snapshot,
+                storage_mode=effective_storage_mode,
+                source_signature=registered_signature,
+            )
+        else:
+            lf = LibraryFile(
+                file_path=str(final_path),
+                file_name=final_path.name,
+                file_size=stat.st_size,
+                file_format=file_format,
+                file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                match_confidence=confidence,
+                parsed_series=series.title if series else None,
+                parsed_issue_number=effective_issue.issue_number,
+                parsed_year=series.year_start if series else None,
+                issue_id=issue.id,
+                library_root_id=root.id,
+                naming_snapshot=naming_snapshot,
+                storage_mode=effective_storage_mode,
+                source_signature=registered_signature,
+            )
+            session.add(lf)
 
         # 10. Set Issue status to OWNED
         issue.status = IssueStatus.OWNED
@@ -688,6 +945,7 @@ async def register_library_file_with_metadata(
         )
 
         await session.flush()
+        await _enqueue_story_arc_sync_safely(session, lf)
         _defer_replacement_stash_cleanup(session, replacement_stash)
         replacement_finalized = True
 
@@ -709,6 +967,8 @@ async def register_library_file_with_metadata(
             library_file=lf,
             series_folder_created=series_folder_created,
             series_folder_path=final_path.parent,
+            created_directory_paths=created_directory_paths,
+            directory_ownership_boundary_path=directory_ownership_boundary_path,
             permission_results=permission_results,
         )
     except asyncio.CancelledError:
@@ -755,6 +1015,7 @@ async def _stage_replacement_file(
     *,
     replace_existing_library_file: bool,
     replacement_trash_dir: Path | None,
+    preserve_replaced_artifact: bool = False,
 ) -> _ReplacementStash | None:
     """Move an existing issue file aside before materializing a replacement."""
     if not replace_existing_library_file or issue.library_file is None:
@@ -762,6 +1023,12 @@ async def _stage_replacement_file(
 
     library_file = issue.library_file
     original_path = Path(library_file.file_path)
+    if preserve_replaced_artifact:
+        return _ReplacementStash(
+            library_file=library_file,
+            original_path=original_path,
+            staged_path=None,
+        )
     if not await asyncio.to_thread(original_path.exists):
         return _ReplacementStash(
             library_file=library_file,
@@ -875,6 +1142,8 @@ async def _update_existing_library_file_from_path(
     root: LibraryRoot,
     confidence: MatchConfidence,
     naming_snapshot: dict[str, Any],
+    storage_mode: LibraryFileStorageMode,
+    source_signature: dict[str, int | str],
 ) -> None:
     """Refresh an existing LibraryFile row from the current artifact on disk."""
     stat = await asyncio.to_thread(final_path.stat)
@@ -892,6 +1161,8 @@ async def _update_existing_library_file_from_path(
     library_file.issue_id = issue.id
     library_file.library_root_id = root.id
     library_file.naming_snapshot = naming_snapshot
+    library_file.storage_mode = storage_mode
+    library_file.source_signature = source_signature
     issue.status = IssueStatus.OWNED
 
 
@@ -948,7 +1219,12 @@ async def _recover_materialized_target_without_source(
         return None
 
     effective_issue_type = await _resolve_naming_issue_type(session, issue)
-    _materialize_series_path(series, target_path.parent, root)
+    _materialize_series_path(
+        series,
+        target_path.parent,
+        root,
+        storage_mode=LibraryFileStorageMode.MANAGED,
+    )
     naming_snapshot = _build_naming_snapshot(
         source_path=source_path,
         prepared_source=recovery_source,

@@ -30,6 +30,7 @@ from pullbox.models.base import Base, IdentityMixin, TimestampMixin, UTCDateTime
 if TYPE_CHECKING:
     from pullbox.models.library import LibraryRoot
     from pullbox.models.series import Series
+    from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 
 
 class ImportSourceType(enum.StrEnum):
@@ -37,6 +38,13 @@ class ImportSourceType(enum.StrEnum):
 
     FILESYSTEM = "filesystem"
     MYLAR3 = "mylar3"
+
+
+class ImportFileHandlingMode(enum.StrEnum):
+    """How files selected by an import become Pullbox library files."""
+
+    MANAGED_COPY = "managed_copy"
+    IN_PLACE = "in_place"
 
 
 class ImportJobStatus(enum.StrEnum):
@@ -122,6 +130,21 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     """
 
     __tablename__ = "import_jobs"
+    __table_args__ = (
+        Index(
+            "ix_import_jobs_story_arc_followup",
+            "status",
+            "story_arc_placement_followup_pending",
+            "id",
+        ),
+        Index(
+            "ix_import_jobs_story_arc_rollback_waiting",
+            "status",
+            "story_arc_rollback_waiting_work_id",
+            "id",
+        ),
+        Index("ix_import_jobs_archived_created", "archived_at", "created_at"),
+    )
 
     # Source
     source_path: Mapped[str] = mapped_column(String(1000), nullable=False)
@@ -167,6 +190,7 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     match_completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     import_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     import_completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=False)
 
     # Error
     error_message: Mapped[str | None] = mapped_column(Text)
@@ -180,11 +204,20 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
         server_default=ImportControlRequest.NONE.value,
         nullable=False,
     )
+    story_arc_placement_followup_pending: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
+    story_arc_rollback_waiting_work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("story_arc_sync_work.id", ondelete="SET NULL")
+    )
 
     # Import settings (captured from wizard)
     target_library_root_id: Mapped[int | None] = mapped_column(
-        ForeignKey("library_roots.id", ondelete="SET NULL")
+        ForeignKey("library_roots.id", ondelete="RESTRICT")
     )
+    removed_library_root_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))  # type: ignore[type-arg]
     monitored: Mapped[bool] = mapped_column(default=False)
     search_on_add: Mapped[bool] = mapped_column(default=False)
     move_to_library: Mapped[bool] = mapped_column(default=True)
@@ -204,6 +237,52 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     ingest_policy_snapshot: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}"
     )
+    file_handling_mode: Mapped[ImportFileHandlingMode] = mapped_column(
+        SQLAlchemyEnum(
+            ImportFileHandlingMode,
+            values_callable=_enum_values,
+            native_enum=False,
+            create_constraint=True,
+        ),
+        default=ImportFileHandlingMode.MANAGED_COPY,
+        server_default=ImportFileHandlingMode.MANAGED_COPY.value,
+        nullable=False,
+    )
+    source_layout_snapshot: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
+        JSON,
+        default=lambda: {
+            "schema_version": 1,
+            "mode": "auto",
+            "preset": None,
+            "series_path_template": None,
+            "issue_filename_template": None,
+            "selected_cluster_id": None,
+            "fallback_to_auto": True,
+        },
+        server_default=(
+            '{"schema_version":1,"mode":"auto","preset":null,'
+            '"series_path_template":null,"issue_filename_template":null,'
+            '"selected_cluster_id":null,"fallback_to_auto":true}'
+        ),
+        nullable=False,
+    )
+    future_layout_requested: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
+    future_root_policy_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # type: ignore[type-arg]
+    future_root_policy_applied_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    story_arc_import_requested: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
+    story_arc_materialization_requested: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
 
     # Per-job configuration
     cv_match_threshold: Mapped[float] = mapped_column(Float, default=0.70)
@@ -216,24 +295,41 @@ class ImportJob(Base, IdentityMixin, TimestampMixin):
     mylar3_path_map: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}"
     )
+    mylar3_path_map_confirmed: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
 
     # Relationships
     series: Mapped[list[ImportedSeries]] = relationship(
-        back_populates="import_job", cascade="all, delete-orphan"
+        back_populates="import_job",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     files: Mapped[list[ImportedFile]] = relationship(
-        back_populates="import_job", cascade="all, delete-orphan"
+        back_populates="import_job",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     target_library_root: Mapped[LibraryRoot | None] = relationship()
     logs: Mapped[list[ImportJobLog]] = relationship(
         back_populates="import_job",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="ImportJobLog.logged_at",
     )
     actions: Mapped[list[ImportJobAction]] = relationship(
         back_populates="import_job",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="ImportJobAction.sequence_no",
+    )
+    story_arcs: Mapped[list[ImportedStoryArc]] = relationship(
+        back_populates="import_job",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ImportedStoryArc.id",
     )
 
 
@@ -272,6 +368,7 @@ class ImportJobAction(Base, IdentityMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_import_job_actions_job_seq", "import_job_id", "sequence_no"),
         Index("ix_import_job_actions_job_status", "import_job_id", "status"),
+        Index("ix_import_job_actions_job_id_keyset", "import_job_id", "id"),
     )
 
     import_job_id: Mapped[int] = mapped_column(
@@ -362,7 +459,9 @@ class ImportedSeries(Base, IdentityMixin, TimestampMixin):
     import_job: Mapped[ImportJob] = relationship(back_populates="series")
     series: Mapped[Series | None] = relationship()
     files: Mapped[list[ImportedFile]] = relationship(
-        back_populates="import_series", cascade="all, delete-orphan"
+        back_populates="import_series",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -374,7 +473,19 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     """
 
     __tablename__ = "import_files"
-    __table_args__ = (Index("ix_import_files_job_series", "import_job_id", "import_series_id"),)
+    __table_args__ = (
+        Index("ix_import_files_job_series", "import_job_id", "import_series_id"),
+        Index("ix_import_files_import_series_id", "import_series_id"),
+        Index("ix_import_files_matched_issue_id", "matched_issue_id"),
+        Index("ix_import_files_duplicate_of_file_id", "duplicate_of_file_id"),
+        Index(
+            "ix_import_files_job_cohort_order",
+            "import_job_id",
+            "source_folder_cohort_key",
+            "source_ordinal",
+            "id",
+        ),
+    )
 
     # Parent references
     import_job_id: Mapped[int] = mapped_column(
@@ -424,6 +535,11 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     is_preferred: Mapped[bool] = mapped_column(default=False)
     include_in_import: Mapped[bool] = mapped_column(default=False, server_default="0")
     content_hash: Mapped[str | None] = mapped_column(String(64))
+    source_signature: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    source_folder_cohort_key: Mapped[str | None] = mapped_column(String(1000))
+    source_ordinal: Mapped[int | None] = mapped_column(Integer)
 
     # Import outcome
     library_file_id: Mapped[int | None] = mapped_column(
@@ -437,3 +553,7 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     # Relationships
     import_job: Mapped[ImportJob] = relationship(back_populates="files")
     import_series: Mapped[ImportedSeries] = relationship(back_populates="files")
+    story_arc_entries: Mapped[list[ImportedStoryArcEntry]] = relationship(
+        back_populates="import_file",
+        foreign_keys="ImportedStoryArcEntry.import_file_id",
+    )

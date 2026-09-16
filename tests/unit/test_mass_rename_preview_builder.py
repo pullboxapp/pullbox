@@ -10,7 +10,13 @@ from sqlalchemy import select
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.issue import Issue, IssueStatus, IssueType
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series, SeriesStatus
 from pullbox.utilities import preview_builders
@@ -47,6 +53,7 @@ async def _create_library_file_fixture(
     file_path: Path,
     *,
     issue_number: float = 1.0,
+    storage_mode: LibraryFileStorageMode = LibraryFileStorageMode.MANAGED,
 ) -> None:
     root = (
         await session.execute(select(LibraryRoot).where(LibraryRoot.path == str(root_path)))
@@ -85,6 +92,7 @@ async def _create_library_file_fixture(
         file_format=FileFormat.CBZ,
         file_modified_at=datetime.now(tz=UTC),
         match_confidence=MatchConfidence.HIGH,
+        storage_mode=storage_mode,
     )
     session.add(library_file)
     await session.flush()
@@ -193,6 +201,50 @@ async def test_mass_rename_preview_manual_file_reports_ready_and_conflict_status
     assert conflict_preview.actionable_count == 1
     assert conflict_preview.items[0].status == "conflict"
     assert conflict_preview.items[0].reason == "Target already exists: Batman 001.cbz"
+
+
+@pytest.mark.asyncio
+async def test_mass_rename_preview_blocks_referenced_file_and_parent_folder(
+    monkeypatch,  # type: ignore[no-untyped-def]
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    await _stub_naming_config(monkeypatch)
+    root_path = tmp_path / "library"
+    folder = root_path / "Batman"
+    folder.mkdir(parents=True)
+    source_file = folder / "Wrong Name.cbz"
+    source_file.write_bytes(b"reference")
+    await _create_library_file_fixture(
+        db_session,
+        root_path,
+        source_file,
+        storage_mode=LibraryFileStorageMode.REFERENCED,
+    )
+
+    file_preview = await build_mass_rename_preview(
+        MassRenamePreviewRequest(
+            target="files",
+            scope="manual",
+            file_paths=[str(source_file)],
+        ),
+        session=db_session,
+    )
+    folder_preview = await build_mass_rename_preview(
+        MassRenamePreviewRequest(
+            target="folders",
+            scope="manual",
+            file_paths=[str(folder)],
+        ),
+        session=db_session,
+    )
+
+    assert file_preview.actionable_count == 0
+    assert file_preview.items[0].status == "blocked"
+    assert file_preview.items[0].reason == "Referenced library files stay unchanged on disk."
+    assert folder_preview.actionable_count == 0
+    assert folder_preview.items[0].status == "blocked"
+    assert "contains referenced files" in (folder_preview.items[0].reason or "")
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ from sqlalchemy.orm import joinedload, selectinload
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
 from pullbox.core.acquisition import AcquisitionProtocol
-from pullbox.core.exceptions import NotFoundError
+from pullbox.core.exceptions import NotFoundError, ProviderError
 from pullbox.models.blocklist import BlocklistReason
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
@@ -15,6 +15,7 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.providers.base import DownloadClient, ProviderRegistry
 from pullbox.providers.download.qbittorrent import QBittorrentError
 from pullbox.providers.indexer.newznab import NewznabError
+from pullbox.providers.indexer.prowlarr import ProwlarrError
 from pullbox.schemas.blocklist import BlocklistEntryResponse
 from pullbox.schemas.download import (
     DirectSourceAlternative,
@@ -853,7 +854,7 @@ async def retry_download(
                 status_code=409,
                 detail=f"Unsupported acquisition protocol: {protocol.value}",
             )
-    except (NewznabError, QBittorrentError) as exc:
+    except (NewznabError, ProwlarrError, QBittorrentError, ProviderError) as exc:
         logger.warning(
             "download_retry_client_rejected",
             download_id=download.id,

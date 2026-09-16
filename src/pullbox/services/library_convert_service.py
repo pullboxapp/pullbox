@@ -11,6 +11,7 @@ import structlog
 from sqlalchemy import select
 
 from pullbox.core.exceptions import ValidationError
+from pullbox.core.library_file_ownership import require_mutable_library_target
 from pullbox.models.library import FileFormat, LibraryFile
 from pullbox.utilities.executors.file_converter import convert_file
 from pullbox.utilities.settings import move_file_to_utility_trash, restore_file_from_utility_trash
@@ -77,6 +78,12 @@ async def convert_library_file(
     trash_path: Path | None = None
 
     try:
+        await require_mutable_library_target(
+            session,
+            source,
+            include_descendants=False,
+            operation="converted",
+        )
         converted_path = await convert_file(source, "cbz")
         trash_path = move_file_to_utility_trash(
             source,

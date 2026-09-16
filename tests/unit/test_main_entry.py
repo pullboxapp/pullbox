@@ -105,6 +105,31 @@ class TestEnsureHostSecret:
 class TestMainRuntimeSettings:
     """main() should launch uvicorn from runtime-managed settings."""
 
+    def test_main_bounds_graceful_shutdown_for_long_lived_connections(self, tmp_path: Path) -> None:
+        """An open SSE connection must not hold container shutdown forever."""
+        from unittest.mock import MagicMock, patch
+
+        from pullbox.__main__ import GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, main
+
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:////data/pullbox.db"
+        settings.data_dir = tmp_path
+        settings.bind_address = "127.0.0.1"
+        settings.port = 8585
+
+        with (
+            patch("pullbox.config.get_settings", return_value=settings),
+            patch("pullbox.__main__.ensure_host_secret"),
+            patch("uvicorn.run") as uvicorn_run,
+        ):
+            main()
+
+        assert GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS <= 5
+        assert (
+            uvicorn_run.call_args.kwargs["timeout_graceful_shutdown"]
+            == GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+        )
+
     def test_main_uses_runtime_bind_and_port(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock, patch
 
@@ -131,6 +156,7 @@ class TestMainRuntimeSettings:
             host="192.168.1.1",
             port=9999,
             factory=True,
+            timeout_graceful_shutdown=5,
         )
 
     def test_main_passes_https_ssl_kwargs_when_enabled(self, tmp_path: Path) -> None:
@@ -171,6 +197,7 @@ class TestMainRuntimeSettings:
             host="0.0.0.0",
             port=8585,
             factory=True,
+            timeout_graceful_shutdown=5,
             ssl_certfile=str(cert),
             ssl_keyfile=str(key),
         )
@@ -207,4 +234,5 @@ class TestMainRuntimeSettings:
             host="127.0.0.1",
             port=8585,
             factory=True,
+            timeout_graceful_shutdown=5,
         )

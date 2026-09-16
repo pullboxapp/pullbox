@@ -6,18 +6,225 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import case, func, select
 
+from pullbox.core.library_policy import load_effective_library_ingest_policy
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
     ImportJob,
+    ImportJobAction,
+    ImportJobActionStatus,
+    ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
+from pullbox.models.issue import Issue
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.models.series import IssueCatalogState, Series
+from pullbox.models.story_arc import (
+    ImportedStoryArcStatus,
+    IssueStoryArc,
+    StoryArcPlacement,
+    StoryArcPlacementMode,
+    StoryArcPlacementOwnership,
+    StoryArcPlacementState,
+    StoryArcResolutionState,
+    StoryArcSourceKind,
+)
+from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
+from pullbox.services.import_completed_cleanup import (
+    CompletedImportCleanupAction,
+    summarize_completed_import_cleanup_scope,
+)
+from pullbox.services.import_misplaced_source_cleanup import (
+    MisplacedSourceCleanupAction,
+    count_misplaced_source_cleanup_files,
+)
+from pullbox.services.import_safety_diagnostics import (
+    ImportSafetyCategory,
+    import_safety_category_label,
+)
+from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
 from pullbox.services.import_workflow_state import import_control_state_for_job
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+_STORY_ARC_ACTION_PAGE_SIZE = 1_000
+_FAILED_SAFETY_DETAIL_LIMIT = 100
+_STORY_ARC_MANAGED_ACTION = "story_arc_managed_placement_requested"
+_STORY_ARC_REFERENCE_ACTION = "story_arc_referenced_placement_attached"
+_MANAGED_PAYLOAD_KEYS = frozenset(
+    {
+        "schema_version",
+        "sync_work_id",
+        "membership_id",
+        "desired_generation",
+        "imported_story_arc_id",
+        "imported_story_arc_entry_id",
+        "source_import_job_id",
+    }
+)
+_REFERENCE_PAYLOAD_KEYS = frozenset(
+    {
+        "schema_version",
+        "journal_state",
+        "placement_id",
+        "issue_story_arc_id",
+        "imported_story_arc_entry_id",
+        "placement_path",
+        "source_kind",
+        "source_import_job_id",
+        "expected_after",
+    }
+)
+_MANAGED_PLACEMENT_MODES = frozenset(
+    {
+        StoryArcPlacementMode.COPY,
+        StoryArcPlacementMode.HARDLINK,
+        StoryArcPlacementMode.SYMLINK,
+    }
+)
+
+
+def _library_paths_overlap(first: str, second: str) -> bool:
+    from pathlib import Path
+
+    first_path = Path(first).resolve(strict=False)
+    second_path = Path(second).resolve(strict=False)
+    return (
+        first_path == second_path
+        or first_path.is_relative_to(second_path)
+        or second_path.is_relative_to(first_path)
+    )
+
+
+async def load_clean_library_summary(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[str, object]:
+    active_clean_job: ImportJob | None = None
+    active_jobs = list(
+        (
+            await session.scalars(
+                select(ImportJob)
+                .where(
+                    ImportJob.status.in_(
+                        {
+                            ImportJobStatus.IMPORTING,
+                            ImportJobStatus.PAUSING,
+                            ImportJobStatus.PAUSED,
+                            ImportJobStatus.STALLED,
+                            ImportJobStatus.CANCELLING,
+                            ImportJobStatus.ROLLING_BACK,
+                        }
+                    )
+                )
+                .order_by(ImportJob.id.desc())
+            )
+        ).all()
+    )
+    for candidate in active_jobs:
+        progress = dict(candidate.progress_snapshot or {})
+        if (
+            progress.get("clean_library_adoption") is True
+            and int(progress.get("source_import_job_id") or 0) == job_id
+        ):
+            active_clean_job = candidate
+            break
+    active_payload = (
+        {
+            "id": int(active_clean_job.id),
+            "status": active_clean_job.status.value,
+            "progress_snapshot": dict(active_clean_job.progress_snapshot or {}),
+        }
+        if active_clean_job is not None
+        else None
+    )
+    eligibility = (
+        ImportedFile.import_job_id == job_id,
+        ImportedFile.status == ImportedFileStatus.IMPORTED,
+        ImportedFile.matched_issue_id == Issue.id,
+        ImportedFile.library_file_id == LibraryFile.id,
+        LibraryFile.issue_id == Issue.id,
+        LibraryFile.storage_mode == LibraryFileStorageMode.REFERENCED,
+        LibraryFile.file_path == ImportedFile.file_path,
+    )
+    count_row = (
+        await session.execute(
+            select(
+                func.count(ImportedFile.id),
+                func.count(func.distinct(Issue.series_id)),
+                func.coalesce(func.sum(LibraryFile.file_size), 0),
+            )
+            .select_from(ImportedFile)
+            .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+            .join(Issue, Issue.id == LibraryFile.issue_id)
+            .where(*eligibility)
+        )
+    ).one()
+    reference_count = int(count_row[0] or 0)
+    if reference_count == 0:
+        active_snapshot = dict(active_clean_job.progress_snapshot or {}) if active_clean_job else {}
+        source_snapshot = active_snapshot.get("clean_library_source_snapshot")
+        source_snapshot = source_snapshot if isinstance(source_snapshot, dict) else {}
+        return {
+            "clean_library_reference_count": int(source_snapshot.get("file_count") or 0),
+            "clean_library_reference_series_count": int(source_snapshot.get("series_count") or 0),
+            "clean_library_reference_bytes": int(source_snapshot.get("total_bytes") or 0),
+            "clean_library_target_roots": [],
+            "clean_library_active_job": active_payload,
+        }
+    source_root_paths = set(
+        (
+            await session.scalars(
+                select(LibraryRoot.path)
+                .select_from(ImportedFile)
+                .join(LibraryFile, LibraryFile.id == ImportedFile.library_file_id)
+                .join(Issue, Issue.id == LibraryFile.issue_id)
+                .join(LibraryRoot, LibraryRoot.id == LibraryFile.library_root_id)
+                .where(*eligibility)
+                .distinct()
+            )
+        ).all()
+    )
+    roots = list(
+        (
+            await session.scalars(
+                select(LibraryRoot)
+                .where(
+                    LibraryRoot.enabled.is_(True),
+                    LibraryRoot.allow_managed_writes.is_(True),
+                )
+                .order_by(LibraryRoot.name, LibraryRoot.id)
+            )
+        ).all()
+    )
+    targets: list[dict[str, object]] = []
+    for root in roots:
+        if any(_library_paths_overlap(root.path, source) for source in source_root_paths):
+            continue
+        policy = await load_effective_library_ingest_policy(session, root)
+        targets.append(
+            {
+                "id": root.id,
+                "name": root.name,
+                "path": root.path,
+                "rename_on_import": policy.rename_on_import,
+                "normalize_to_cbz": policy.normalize_imported_archives_to_cbz,
+                "update_comicinfo": policy.update_embedded_comicinfo_from_match,
+                "skip_existing": policy.skip_existing_files,
+            }
+        )
+    return {
+        "clean_library_reference_count": reference_count,
+        "clean_library_reference_series_count": int(count_row[1] or 0),
+        "clean_library_reference_bytes": int(count_row[2] or 0),
+        "clean_library_target_roots": targets,
+        "clean_library_active_job": active_payload,
+    }
 
 
 async def _count_series_status(
@@ -61,14 +268,234 @@ async def _load_files_for_status(
     session: AsyncSession,
     job_id: int,
     status: ImportedFileStatus,
+    *,
+    limit: int | None = None,
 ) -> list[ImportedFile]:
-    result = await session.execute(
-        select(ImportedFile).where(
+    query = (
+        select(ImportedFile)
+        .where(
             ImportedFile.import_job_id == job_id,
             ImportedFile.status == status,
         )
+        .order_by(ImportedFile.id)
     )
+    if limit is not None:
+        query = query.limit(limit)
+    result = await session.execute(query)
     return list(result.scalars().all())
+
+
+_SAFETY_ACTION_BY_CATEGORY = {
+    ImportSafetyCategory.SOURCE_MISSING: (
+        CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES,
+        "safe_action",
+    ),
+    ImportSafetyCategory.SINGLE_PAGE_COMIC: (
+        CompletedImportCleanupAction.SKIP_PROBABLE_COVERS,
+        "safe_action",
+    ),
+    ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT: (
+        CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES,
+        "safe_action",
+    ),
+    ImportSafetyCategory.PERMISSION_UNREADABLE: (
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+        "safe_action",
+    ),
+    ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED: (
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+        "safe_action",
+    ),
+    ImportSafetyCategory.SOURCE_CHANGED: (
+        CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION,
+        "safe_action",
+    ),
+    ImportSafetyCategory.ZERO_BYTE: (
+        CompletedImportCleanupAction.SKIP_UNUSABLE_FILES,
+        "safe_action",
+    ),
+    ImportSafetyCategory.ARCHIVE_NO_PAGES: (
+        CompletedImportCleanupAction.SKIP_UNUSABLE_FILES,
+        "safe_action",
+    ),
+    ImportSafetyCategory.UNSUPPORTED_FILE_TYPE: (
+        CompletedImportCleanupAction.SKIP_UNUSABLE_FILES,
+        "safe_action",
+    ),
+}
+
+_CLEANUP_ACTION_PRESENTATION = {
+    CompletedImportCleanupAction.RECHECK_DEFERRED_FILES: {
+        "label": "Recheck deferred files",
+        "description": (
+            "Group repeated file records, recognize completed imports, and recover exact issue "
+            "matches. Missing series catalogs are checked in the background. "
+            "Files that still need a decision remain here."
+        ),
+        "button_label": "Recheck files",
+        "tone": "warning",
+    },
+    CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES: {
+        "label": "Dismiss stale Mylar references",
+        "description": (
+            "Clear database references whose source files no longer exist. No files are deleted."
+        ),
+        "button_label": "Dismiss references",
+        "tone": "neutral",
+    },
+    CompletedImportCleanupAction.SKIP_PROBABLE_COVERS: {
+        "label": "Skip one-page archives",
+        "description": (
+            "Exclude one-page image archives from this import while preserving the source files. "
+            "They may be cover art, damaged archives, or intentional one-page comics."
+        ),
+        "button_label": "Skip from import",
+        "tone": "neutral",
+    },
+    CompletedImportCleanupAction.SKIP_UNUSABLE_FILES: {
+        "label": "Skip unusable files",
+        "description": (
+            "Clear empty, unsupported, or page-less files that cannot become library issues."
+        ),
+        "button_label": "Skip unusable files",
+        "tone": "neutral",
+    },
+    CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES: {
+        "label": "Allow oversized files once",
+        "description": (
+            "Retry legitimate large books once without weakening the global archive safety policy."
+        ),
+        "button_label": "Allow once and retry",
+        "tone": "warning",
+    },
+    CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION: {
+        "label": "Retry source inspection",
+        "description": (
+            "Recheck files that were unreadable, changed, or could not be "
+            "inspected during the original run."
+        ),
+        "button_label": "Recheck sources",
+        "tone": "warning",
+    },
+    CompletedImportCleanupAction.NORMALIZE_ALREADY_OWNED: {
+        "label": "Recognize already-owned issues",
+        "description": (
+            "Resolve conflicts that point to issues already registered in the Pullbox library."
+        ),
+        "button_label": "Mark already owned",
+        "tone": "neutral",
+    },
+    CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS: {
+        "label": "Accept recommended conflict choices",
+        "description": (
+            "Import the single high-confidence preferred file in each eligible "
+            "conflict group and skip its alternatives."
+        ),
+        "button_label": "Accept recommendations",
+        "tone": "warning",
+    },
+    CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES: {
+        "label": "Resolve mixed-folder files",
+        "description": (
+            "Use exact embedded ComicInfo identity to assign misplaced files to the correct "
+            "Pullbox series and issue. Mylar folders and source files remain unchanged."
+        ),
+        "button_label": "Resolve and retry",
+        "tone": "warning",
+    },
+    CompletedImportCleanupAction.RECOVER_KNOWN_SERIES: {
+        "label": "Recover known series",
+        "description": (
+            "Retry files with agreeing saved series and issue IDs from an older import. "
+            "Conflicting files, skips, and safety decisions stay in Follow-up. "
+            "Source files remain unchanged."
+        ),
+        "button_label": "Recover and retry",
+        "tone": "warning",
+    },
+}
+
+
+async def _load_cleanup_action_summaries(
+    session: AsyncSession,
+    job_id: int,
+) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for action, presentation in _CLEANUP_ACTION_PRESENTATION.items():
+        summary = await summarize_completed_import_cleanup_scope(
+            session,
+            job_id,
+            action,
+        )
+        if summary.affected_count == 0:
+            continue
+        summaries.append(
+            {
+                "action": action.value,
+                "affected_count": summary.affected_count,
+                "affected_file_count": summary.affected_file_count,
+                "item_unit": (
+                    "group"
+                    if action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS
+                    else "follow-up item"
+                    if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES
+                    else "file"
+                ),
+                "examples": summary.examples,
+                **presentation,
+            }
+        )
+    return summaries
+
+
+async def _load_safety_category_summaries(
+    session: AsyncSession,
+    job_id: int,
+) -> list[dict[str, object]]:
+    category_expression = ImportedFile.diagnostics["safety_block"]["category"].as_string()
+    rows = (
+        await session.execute(
+            select(category_expression, func.count(ImportedFile.id))
+            .where(
+                ImportedFile.import_job_id == job_id,
+                ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+            )
+            .group_by(category_expression)
+            .order_by(func.count(ImportedFile.id).desc(), category_expression.asc())
+        )
+    ).all()
+    summaries: list[dict[str, object]] = []
+    for raw_category, count in rows:
+        try:
+            category = ImportSafetyCategory(str(raw_category))
+        except ValueError:
+            category = ImportSafetyCategory.UNKNOWN
+        action, bucket = _SAFETY_ACTION_BY_CATEGORY.get(category, (None, "needs_review"))
+        examples = tuple(
+            (
+                await session.scalars(
+                    select(ImportedFile.file_name)
+                    .where(
+                        ImportedFile.import_job_id == job_id,
+                        ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                        category_expression == raw_category,
+                    )
+                    .order_by(ImportedFile.id)
+                    .limit(3)
+                )
+            ).all()
+        )
+        summaries.append(
+            {
+                "category": category.value,
+                "label": import_safety_category_label(category),
+                "count": int(count),
+                "examples": examples,
+                "action": action.value if action is not None else None,
+                "bucket": bucket,
+            }
+        )
+    return summaries
 
 
 async def _orphaned_file_no_match_count(session: AsyncSession, job_id: int) -> int:
@@ -128,11 +555,363 @@ async def _load_catalog_sync_series(session: AsyncSession, job_id: int) -> list[
     return list(result.unique().scalars().all())
 
 
+def _positive_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _managed_story_arc_action_is_completed(
+    *,
+    job_id: int,
+    action: ImportJobAction,
+    work: StoryArcSyncWork | None,
+    placements: list[StoryArcPlacement],
+    staged_arc: ImportedStoryArc | None,
+    staged_entry: ImportedStoryArcEntry | None,
+    membership: IssueStoryArc | None,
+    library_file: LibraryFile | None,
+) -> bool:
+    payload = dict(action.payload or {})
+    if (
+        action.phase != "story_arc_placements"
+        or set(payload) != _MANAGED_PAYLOAD_KEYS
+        or _positive_int(payload.get("schema_version")) != 1
+        or work is None
+        or work.state is not StoryArcSyncWorkState.COMPLETED
+        or work.origin_import_action_id != action.id
+        or work.origin_import_job_id != job_id
+        or _positive_int(payload.get("sync_work_id")) != work.id
+        or _positive_int(payload.get("membership_id")) != work.issue_story_arc_id
+        or payload.get("desired_generation") != work.desired_generation
+        or _positive_int(payload.get("imported_story_arc_id")) != work.origin_imported_story_arc_id
+        or _positive_int(payload.get("imported_story_arc_entry_id"))
+        != work.origin_imported_story_arc_entry_id
+        or _positive_int(payload.get("source_import_job_id")) != job_id
+        or staged_arc is None
+        or staged_arc.import_job_id != job_id
+        or staged_arc.status is not ImportedStoryArcStatus.IMPORTED
+        or staged_entry is None
+        or staged_entry.imported_story_arc_id != staged_arc.id
+        or staged_entry.materialized_membership_id != work.issue_story_arc_id
+        or staged_entry.resolution_state is not StoryArcResolutionState.RESOLVED
+        or membership is None
+        or staged_arc.materialized_story_arc_id != membership.story_arc_id
+        or library_file is None
+        or staged_entry.matched_issue_id != library_file.issue_id
+        or membership.issue_id != library_file.issue_id
+        or len(placements) != 1
+    ):
+        return False
+    placement = placements[0]
+    return bool(
+        placement.issue_story_arc_id == work.issue_story_arc_id
+        and placement.library_file_id == work.library_file_id
+        and placement.source_import_job_id == job_id
+        and placement.creating_action_id == action.id
+        and placement.ownership is StoryArcPlacementOwnership.MANAGED
+        and placement.mode in _MANAGED_PLACEMENT_MODES
+        and placement.state is StoryArcPlacementState.CURRENT
+        and placement.source_kind is StoryArcSourceKind.PULLBOX
+        and placement.policy_schema_version == work.policy_schema_version
+        and placement.rendered_reading_order == work.membership_sequence
+        and placement.operation_token is None
+        and dict(placement.last_result or {}).get("status") == "complete"
+    )
+
+
+def _referenced_story_arc_action_is_completed(
+    *,
+    job_id: int,
+    action: ImportJobAction,
+    placements: list[StoryArcPlacement],
+    staged_arc: ImportedStoryArc | None,
+    staged_entry: ImportedStoryArcEntry | None,
+) -> bool:
+    payload = dict(action.payload or {})
+    placement_id = _positive_int(payload.get("placement_id"))
+    membership_id = _positive_int(payload.get("issue_story_arc_id"))
+    if (
+        action.phase != "story_arcs"
+        or set(payload) != _REFERENCE_PAYLOAD_KEYS
+        or _positive_int(payload.get("schema_version")) != 1
+        or payload.get("journal_state") != "completed"
+        or placement_id is None
+        or membership_id is None
+        or _positive_int(payload.get("source_import_job_id")) != job_id
+        or not isinstance(payload.get("expected_after"), dict)
+        or staged_arc is None
+        or staged_arc.import_job_id != job_id
+        or staged_arc.status is not ImportedStoryArcStatus.IMPORTED
+        or staged_entry is None
+        or staged_entry.imported_story_arc_id != staged_arc.id
+        or staged_entry.materialized_membership_id != membership_id
+        or staged_entry.resolution_state is not StoryArcResolutionState.RESOLVED
+        or staged_entry.source_kind.value != payload.get("source_kind")
+        or len(placements) != 1
+    ):
+        return False
+    placement = placements[0]
+    return bool(
+        placement.id == placement_id
+        and placement.issue_story_arc_id == membership_id
+        and placement.placement_path == payload.get("placement_path")
+        and placement.mode is StoryArcPlacementMode.REFERENCE_ONLY
+        and placement.ownership is StoryArcPlacementOwnership.REFERENCED
+        and placement.source_kind.value == payload.get("source_kind")
+        and placement.source_import_job_id == job_id
+        and placement.creating_action_id == action.id
+    )
+
+
+async def _load_story_arc_ownership_counts(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[str, int]:
+    """Count only durable, completed, import-owned Story Arc placements."""
+    counts = {"managed": 0, "referenced": 0}
+    after_action_id = 0
+    while True:
+        actions = list(
+            (
+                await session.scalars(
+                    select(ImportJobAction)
+                    .where(
+                        ImportJobAction.import_job_id == job_id,
+                        ImportJobAction.status == ImportJobActionStatus.COMPLETED,
+                        ImportJobAction.action_type.in_(
+                            [_STORY_ARC_MANAGED_ACTION, _STORY_ARC_REFERENCE_ACTION]
+                        ),
+                        ImportJobAction.id > after_action_id,
+                    )
+                    .order_by(ImportJobAction.id.asc())
+                    .limit(_STORY_ARC_ACTION_PAGE_SIZE)
+                )
+            ).all()
+        )
+        if not actions:
+            break
+        action_ids = [int(action.id) for action in actions]
+        works = list(
+            (
+                await session.scalars(
+                    select(StoryArcSyncWork).where(
+                        StoryArcSyncWork.origin_import_action_id.in_(action_ids)
+                    )
+                )
+            ).all()
+        )
+        work_by_action_id = {
+            int(work.origin_import_action_id): work
+            for work in works
+            if work.origin_import_action_id is not None
+        }
+        placements_by_action_id: dict[int, list[StoryArcPlacement]] = {}
+        for placement in (
+            await session.scalars(
+                select(StoryArcPlacement).where(
+                    StoryArcPlacement.creating_action_id.in_(action_ids)
+                )
+            )
+        ).all():
+            if placement.creating_action_id is not None:
+                placements_by_action_id.setdefault(int(placement.creating_action_id), []).append(
+                    placement
+                )
+
+        imported_arc_ids = {
+            int(work.origin_imported_story_arc_id)
+            for work in works
+            if work.origin_imported_story_arc_id is not None
+        }
+        imported_entry_ids = {
+            int(work.origin_imported_story_arc_entry_id)
+            for work in works
+            if work.origin_imported_story_arc_entry_id is not None
+        }
+        for action in actions:
+            payload = dict(action.payload or {})
+            arc_id = _positive_int(payload.get("imported_story_arc_id"))
+            entry_id = _positive_int(payload.get("imported_story_arc_entry_id"))
+            if arc_id is not None:
+                imported_arc_ids.add(arc_id)
+            if entry_id is not None:
+                imported_entry_ids.add(entry_id)
+        entries_by_id = {
+            int(entry.id): entry
+            for entry in (
+                await session.scalars(
+                    select(ImportedStoryArcEntry).where(
+                        ImportedStoryArcEntry.id.in_(imported_entry_ids)
+                    )
+                )
+            ).all()
+        }
+        imported_arc_ids.update(
+            int(entry.imported_story_arc_id) for entry in entries_by_id.values()
+        )
+        arcs_by_id = {
+            int(arc.id): arc
+            for arc in (
+                await session.scalars(
+                    select(ImportedStoryArc).where(ImportedStoryArc.id.in_(imported_arc_ids))
+                )
+            ).all()
+        }
+        membership_ids = {int(work.issue_story_arc_id) for work in works}
+        library_file_ids = {int(work.library_file_id) for work in works}
+        memberships_by_id = {
+            int(membership.id): membership
+            for membership in (
+                await session.scalars(
+                    select(IssueStoryArc).where(IssueStoryArc.id.in_(membership_ids))
+                )
+            ).all()
+        }
+        library_files_by_id = {
+            int(library_file.id): library_file
+            for library_file in (
+                await session.scalars(
+                    select(LibraryFile).where(LibraryFile.id.in_(library_file_ids))
+                )
+            ).all()
+        }
+        for action in actions:
+            placements = placements_by_action_id.get(int(action.id), [])
+            if action.action_type == _STORY_ARC_REFERENCE_ACTION:
+                entry_id = _positive_int(
+                    dict(action.payload or {}).get("imported_story_arc_entry_id")
+                )
+                entry = entries_by_id.get(entry_id) if entry_id is not None else None
+                arc = (
+                    arcs_by_id.get(int(entry.imported_story_arc_id)) if entry is not None else None
+                )
+                if _referenced_story_arc_action_is_completed(
+                    job_id=job_id,
+                    action=action,
+                    placements=placements,
+                    staged_arc=arc,
+                    staged_entry=entry,
+                ):
+                    counts["referenced"] += 1
+                continue
+            work = work_by_action_id.get(int(action.id))
+            if work is None:
+                continue
+            if _managed_story_arc_action_is_completed(
+                job_id=job_id,
+                action=action,
+                work=work,
+                placements=placements,
+                staged_arc=arcs_by_id.get(int(work.origin_imported_story_arc_id or 0)),
+                staged_entry=entries_by_id.get(int(work.origin_imported_story_arc_entry_id or 0)),
+                membership=memberships_by_id.get(int(work.issue_story_arc_id)),
+                library_file=library_files_by_id.get(int(work.library_file_id)),
+            ):
+                counts["managed"] += 1
+        after_action_id = int(actions[-1].id)
+    return counts
+
+
+async def _load_rollback_journal_summary(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[str, int]:
+    """Summarize file ownership without materializing a large action journal."""
+    storage_mode = ImportJobAction.payload["storage_mode"].as_string()
+    transfer_method = ImportJobAction.payload["transfer_method"].as_string()
+    ownership = case(
+        (
+            (storage_mode == "referenced") | (transfer_method == "leave_in_place"),
+            "referenced",
+        ),
+        else_="managed",
+    ).label("ownership")
+    result = await session.execute(
+        select(
+            ownership,
+            ImportJobAction.status,
+            func.count(ImportJobAction.id),
+        )
+        .where(
+            ImportJobAction.import_job_id == job_id,
+            ImportJobAction.action_type == "library_file_registered",
+        )
+        .group_by(ownership, ImportJobAction.status)
+    )
+
+    completed = {"managed": 0, "referenced": 0}
+    for owner, status, count in result.all():
+        if status == ImportJobActionStatus.COMPLETED:
+            completed[str(owner)] = int(count or 0)
+    story_arc_completed = await _load_story_arc_ownership_counts(session, job_id)
+    completed["managed"] += story_arc_completed["managed"]
+    completed["referenced"] += story_arc_completed["referenced"]
+
+    action_status_result = await session.execute(
+        select(ImportJobAction.status, func.count(ImportJobAction.id))
+        .where(ImportJobAction.import_job_id == job_id)
+        .group_by(ImportJobAction.status)
+    )
+    action_status_counts = {status: int(count or 0) for status, count in action_status_result.all()}
+    completed_action_count = action_status_counts.get(ImportJobActionStatus.COMPLETED, 0)
+    rolled_back_action_count = action_status_counts.get(ImportJobActionStatus.ROLLED_BACK, 0)
+    manual_recovery_count = action_status_counts.get(
+        ImportJobActionStatus.ROLLBACK_FAILED,
+        0,
+    )
+    return {
+        "managed_artifacts_created": completed["managed"],
+        "referenced_files_registered": completed["referenced"],
+        # These are journal candidates, not an assertion that the on-disk artifact
+        # is still unchanged. Rollback revalidates ownership and fingerprints.
+        "rollback_managed_candidates": completed["managed"],
+        "rollback_reference_candidates": completed["referenced"],
+        "rollback_manual_recovery_count": manual_recovery_count,
+        "rollback_action_count": sum(action_status_counts.values()),
+        "rollback_actions_pending": completed_action_count,
+        "rollback_actions_rolled_back": rolled_back_action_count,
+    }
+
+
+async def _load_story_arc_results_summary(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[str, int]:
+    """Summarize created arcs separately from retained follow-up evidence."""
+    created_count, follow_up_count = (
+        await session.execute(
+            select(
+                func.sum(
+                    case(
+                        (ImportedStoryArc.materialized_story_arc_id.is_not(None), 1),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case(
+                        (
+                            ImportedStoryArc.materialized_story_arc_id.is_(None)
+                            & (ImportedStoryArc.status != ImportedStoryArcStatus.SKIPPED),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+            ).where(ImportedStoryArc.import_job_id == job_id)
+        )
+    ).one()
+    return {
+        "story_arcs_created_count": int(created_count or 0),
+        "story_arcs_follow_up_count": int(follow_up_count or 0),
+    }
+
+
 async def load_import_results_context(
     session: AsyncSession,
     job: ImportJob,
+    *,
+    include_clean_library: bool = True,
 ) -> dict[str, object]:
-    """Load aggregate counts and detail rows for the Step 5 results template."""
+    """Load import results, optionally including History-only organizer data."""
     job_id = int(job.id)
     imported_count = await _count_series_status(session, job_id, ImportSeriesStatus.IMPORTED)
     failed_count = await _count_series_status(session, job_id, ImportSeriesStatus.FAILED)
@@ -201,10 +980,102 @@ async def load_import_results_context(
         file_status_counts.get(ImportedFileStatus.FAILED.value, 0),
         job.total_files_failed or 0,
     )
+    files_skipped = file_status_counts.get(ImportedFileStatus.SKIPPED.value, 0)
+    failed_files = (
+        await _load_files_for_status(session, job_id, ImportedFileStatus.FAILED)
+        if files_failed > 0
+        else []
+    )
+    source_changed_files = sum(
+        1
+        for imported_file in failed_files
+        if dict(dict(imported_file.diagnostics or {}).get("source_revalidation") or {}).get("code")
+        == "source_changed"
+    )
     files_safety_blocked = file_status_counts.get(
         ImportedFileStatus.SAFETY_BLOCKED.value,
         0,
     )
+    safety_blocked_files = (
+        await _load_files_for_status(
+            session,
+            job_id,
+            ImportedFileStatus.SAFETY_BLOCKED,
+            limit=_FAILED_SAFETY_DETAIL_LIMIT,
+        )
+        if files_safety_blocked > 0 and job.status is ImportJobStatus.FAILED
+        else []
+    )
+    safety_category_summaries = (
+        await _load_safety_category_summaries(session, job_id) if files_safety_blocked > 0 else []
+    )
+    recovery_actions_available = allows_terminal_import_recovery(job)
+    cleanup_action_summaries = (
+        await _load_cleanup_action_summaries(session, job_id) if recovery_actions_available else []
+    )
+    misplaced_source_restore_count = 0
+    misplaced_source_duplicate_count = 0
+    if (
+        job.status is ImportJobStatus.COMPLETED
+        and job.archived_at is None
+        and job.source_type is ImportSourceType.MYLAR3
+    ):
+        misplaced_source_restore_count = await count_misplaced_source_cleanup_files(
+            session,
+            job_id,
+            MisplacedSourceCleanupAction.RESTORE_RECORDED_PATH,
+        )
+        misplaced_source_duplicate_count = await count_misplaced_source_cleanup_files(
+            session,
+            job_id,
+            MisplacedSourceCleanupAction.TRASH_IDENTICAL_DUPLICATE,
+        )
+    clean_library_summary = (
+        await load_clean_library_summary(session, job_id)
+        if include_clean_library
+        and job.status is ImportJobStatus.COMPLETED
+        and job.archived_at is None
+        else {
+            "clean_library_reference_count": 0,
+            "clean_library_reference_series_count": 0,
+            "clean_library_reference_bytes": 0,
+            "clean_library_target_roots": [],
+        }
+    )
+    cleanup_by_action = {str(item["action"]): item for item in cleanup_action_summaries}
+    mixed_folder_summary = cleanup_by_action.get(
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES.value,
+        {},
+    )
+    clean_library_summary["clean_library_mixed_folder_repair_count"] = (
+        _positive_int(mixed_folder_summary.get("affected_file_count")) or 0
+    )
+    recommended_summary = cleanup_by_action.get(
+        CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS.value,
+        {},
+    )
+    already_owned_summary = cleanup_by_action.get(
+        CompletedImportCleanupAction.NORMALIZE_ALREADY_OWNED.value,
+        {},
+    )
+    recommended_conflict_groups = _positive_int(recommended_summary.get("affected_count")) or 0
+    recommended_conflict_files = _positive_int(recommended_summary.get("affected_file_count")) or 0
+    already_owned_conflict_files = (
+        _positive_int(already_owned_summary.get("affected_file_count")) or 0
+    )
+    remaining_conflict_files = max(
+        files_conflict - recommended_conflict_files - already_owned_conflict_files,
+        0,
+    )
+    cleanup_safe_action_count = sum(
+        _positive_int(item["affected_file_count"]) or 0 for item in cleanup_action_summaries
+    )
+    manual_safety_count = sum(
+        _positive_int(item["count"]) or 0
+        for item in safety_category_summaries
+        if item.get("bucket") == "needs_review"
+    )
+    cleanup_needs_review_count = manual_safety_count + remaining_conflict_files
     files_total = sum(file_status_counts.values())
     orphaned_file_no_match_count = await _orphaned_file_no_match_count(session, job_id)
     identified_series_file_no_match_count = max(
@@ -218,14 +1089,38 @@ async def load_import_results_context(
         if series.issue_catalog_state == IssueCatalogState.FAILED
     )
     catalog_sync_pending_count = len(catalog_sync_series) - catalog_sync_failed_count
+    rollback_journal_summary = await _load_rollback_journal_summary(session, job_id)
+    story_arc_results_summary = await _load_story_arc_results_summary(session, job_id)
+    follow_up_group_count = (
+        int(unmatched_queue_count > 0)
+        + len(cleanup_action_summaries)
+        + int(cleanup_needs_review_count > 0)
+        + int(misplaced_source_restore_count > 0)
+        + int(misplaced_source_duplicate_count > 0)
+        + int(failed_count > 0)
+        + int(files_failed > 0)
+        + int(job.status is ImportJobStatus.FAILED and files_safety_blocked > 0)
+        + int(story_arc_results_summary["story_arcs_follow_up_count"] > 0)
+        + int(catalog_sync_failed_count > 0)
+    )
+    rollback_incomplete = bool(
+        rollback_journal_summary["rollback_manual_recovery_count"]
+        and job.status == ImportJobStatus.FAILED
+        and dict(job.progress_snapshot or {}).get("mode") == "rollback"
+    )
+    can_rollback = bool(import_control_state_for_job(job).get("can_rollback")) and not (
+        rollback_incomplete
+    )
 
     return {
-        "can_rollback": bool(import_control_state_for_job(job).get("can_rollback")),
+        "can_rollback": can_rollback,
+        "rollback_incomplete": rollback_incomplete,
         "imported_count": imported_count,
         "failed_count": failed_count,
         "duplicate_count": duplicate_count,
         "no_match_count": no_match_count,
         "unmatched_queue_count": unmatched_queue_count,
+        "follow_up_group_count": follow_up_group_count,
         "failed_series": failed_series,
         "files_total": files_total,
         "files_imported": files_imported,
@@ -241,19 +1136,30 @@ async def load_import_results_context(
         "catalog_sync_attention_count": len(catalog_sync_series),
         "catalog_sync_series": catalog_sync_series,
         "files_failed": files_failed,
-        "failed_files": (
-            await _load_files_for_status(session, job_id, ImportedFileStatus.FAILED)
-            if files_failed > 0
-            else []
-        ),
+        "files_skipped": files_skipped,
+        "source_changed_files": source_changed_files,
+        "failed_files": failed_files,
         "files_safety_blocked": files_safety_blocked,
-        "safety_blocked_files": (
-            await _load_files_for_status(
-                session,
-                job_id,
-                ImportedFileStatus.SAFETY_BLOCKED,
-            )
-            if files_safety_blocked > 0
-            else []
+        # Completed results use category summaries. Failed jobs retain a
+        # bounded detail list so interrupted safety decisions remain actionable.
+        "safety_blocked_files": safety_blocked_files,
+        "safety_blocked_files_truncated": max(
+            files_safety_blocked - len(safety_blocked_files),
+            0,
         ),
+        "safety_category_summaries": safety_category_summaries,
+        "cleanup_action_summaries": cleanup_action_summaries,
+        "recovery_actions_available": recovery_actions_available,
+        "recommended_conflict_groups": recommended_conflict_groups,
+        "recommended_conflict_files": recommended_conflict_files,
+        "already_owned_conflict_files": already_owned_conflict_files,
+        "remaining_conflict_files": remaining_conflict_files,
+        "cleanup_no_action_count": files_duplicate + files_already_owned + files_skipped,
+        "cleanup_safe_action_count": cleanup_safe_action_count,
+        "cleanup_needs_review_count": cleanup_needs_review_count,
+        "misplaced_source_restore_count": misplaced_source_restore_count,
+        "misplaced_source_duplicate_count": misplaced_source_duplicate_count,
+        **clean_library_summary,
+        **rollback_journal_summary,
+        **story_arc_results_summary,
     }

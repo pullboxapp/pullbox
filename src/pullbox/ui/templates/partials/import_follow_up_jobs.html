@@ -1,0 +1,93 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+
+<section class="downloads-table-wrap" data-testid="import-follow-up-job-list">
+  <form
+    id="import-follow-up-filter-form"
+    class="series-toolbar-frame downloads-history-toolbar"
+    action="/import"
+    method="get"
+    hx-get="/import"
+    hx-target="#import-orphaned-results"
+    hx-swap="outerHTML"
+    hx-push-url="true"
+  >
+    <input type="hidden" name="tab" value="follow-up">
+    <div class="series-toolbar-body">
+      <div class="series-toolbar-browse">
+        <div class="series-toolbar-primary">
+          <div class="series-toolbar-field">
+            <span class="series-toolbar-label">Show</span>
+            {{ dropdown_select(
+              name="view",
+              value=view,
+              size="sm",
+              options=[("all", "Needs attention"), ("dismissed", "Dismissed")],
+              root_testid="import-follow-up-view",
+              hx_get="/import",
+              hx_target="#import-orphaned-results",
+              hx_swap="outerHTML",
+              hx_push_url="true",
+              hx_include="#import-follow-up-filter-form",
+              class_name="series-registry-dropdown",
+              fit_width=true
+            ) }}
+          </div>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  {% if follow_up_jobs %}
+  <table class="downloads-table" data-testid="import-follow-up-jobs-table">
+    <thead>
+      <tr>
+        <th>Import source</th>
+        <th class="w-[100px]">Type</th>
+        <th class="hidden sm:table-cell w-[110px]">Status</th>
+        <th class="hidden lg:table-cell is-right w-[150px]">Completed</th>
+        <th class="is-right w-[96px]"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for follow_up_job in follow_up_jobs %}
+      <tr data-testid="import-follow-up-job-{{ follow_up_job.id }}">
+        <td>
+          <span class="downloads-release-name tooltip-wrap" data-tooltip-auto data-tip-size="wide">
+            <span class="block truncate" data-tooltip-measure>{{ follow_up_job.source_path }}</span>
+            <span class="downloads-mono-cell mt-1 block text-xs">Import #{{ follow_up_job.id }}</span>
+          </span>
+        </td>
+        <td><span class="pill {{ 'pill-info' if follow_up_job.source_type.value == 'mylar3' else 'pill-neutral' }}">{{ 'Mylar3' if follow_up_job.source_type.value == 'mylar3' else 'Folder' }}</span></td>
+        <td class="hidden sm:table-cell"><span class="pill {{ 'pill-error' if follow_up_job.status.value == 'failed' else 'pill-warning' }}">{{ follow_up_job.status.value|replace('_', ' ')|title }}</span></td>
+        <td class="downloads-mono-cell is-right hidden lg:table-cell">{{ (follow_up_job.import_completed_at or follow_up_job.created_at)|localtime|safe }}</td>
+        <td class="is-right">
+          <a
+            href="/import?tab=follow-up&amp;job_id={{ follow_up_job.id }}"
+            hx-get="/import?tab=follow-up&amp;job_id={{ follow_up_job.id }}"
+            hx-target="#import-orphaned-results"
+            hx-swap="outerHTML"
+            hx-push-url="true"
+            class="downloads-action-btn is-warn"
+            data-tip="Review follow-up"
+            data-tip-pos="left"
+            aria-label="Review follow-up for import {{ follow_up_job.id }}"
+          >
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
+            </svg>
+          </a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="downloads-empty-state is-history" data-testid="import-follow-up-empty">
+    <svg class="downloads-empty-icon" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    </svg>
+    <p class="downloads-empty-title">No import follow-up</p>
+    <p class="downloads-empty-copy">Every current import is resolved. New matching, recovery, or cleanup work will appear here.</p>
+  </div>
+  {% endif %}
+</section>

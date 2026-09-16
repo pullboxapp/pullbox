@@ -6,6 +6,7 @@ from pullbox.models.series import SeriesStatus
 from pullbox.ui.formatters import (
     format_eta,
     format_filesize,
+    format_issue_number,
     format_series_year_label,
     format_type_display,
     humanize_download_error,
@@ -23,6 +24,11 @@ def test_format_eta_uses_existing_short_duration_copy() -> None:
     assert format_eta(59) == "59s"
     assert format_eta(65) == "1m 5s"
     assert format_eta(3660) == "1h 1m"
+
+
+def test_format_issue_number_never_uses_scientific_notation() -> None:
+    assert format_issue_number(1_000_000.0) == "1000000"
+    assert format_issue_number(12.25) == "12.25"
 
 
 def test_format_series_year_label_preserves_status_semantics() -> None:

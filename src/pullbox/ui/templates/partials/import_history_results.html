@@ -1,6 +1,7 @@
 {% set active_statuses = ['pending', 'scanning', 'pausing', 'paused', 'analyzing', 'matching', 'file_matching', 'review', 'importing', 'stalled', 'cancelling', 'rolling_back'] %}
 {% set refresh_qs = "tab=history&sort=" ~ sort ~ "&page=" ~ page %}
 {% if search_query %}{% set refresh_qs = refresh_qs ~ "&search=" ~ (search_query|urlencode) %}{% endif %}
+{% if show_archived %}{% set refresh_qs = refresh_qs ~ "&show_archived=true" %}{% endif %}
 {%- macro sort_header(field, label, extra_classes="", width="") -%}
   {%- set current_field = sort.lstrip("-") -%}
   {%- set current_desc = sort.startswith("-") -%}
@@ -11,6 +12,7 @@
   {%- endif -%}
   {%- set sort_qs = "tab=history&sort=" ~ next_sort ~ "&page=1" -%}
   {%- if search_query %}{% set sort_qs = sort_qs ~ "&search=" ~ (search_query|urlencode) %}{% endif -%}
+  {%- if show_archived %}{% set sort_qs = sort_qs ~ "&show_archived=true" %}{% endif -%}
   <th class="{{ extra_classes }} {{ width }}">
     <button
       type="button"
@@ -59,6 +61,7 @@
       </thead>
       {% for job in jobs %}
         {% set is_active = job.status.value in active_statuses %}
+        {% set is_rollback_incomplete = job.status.value == 'failed' and (job.progress_snapshot or {}).get('mode') == 'rollback' and (job.progress_snapshot or {}).get('phase') == 'rollback_incomplete' %}
         {% set row_tone = "downloads-led-off" %}
         {% if is_active %}
           {% set row_tone = "downloads-led-blue" %}
@@ -99,6 +102,12 @@
             <td>
               <span class="downloads-release-name tooltip-wrap" data-tooltip-auto data-tip-size="wide">
                 <span class="block truncate" data-tooltip-measure>{{ job.source_path }}</span>
+                {% if job.removed_library_root_snapshot %}
+                <span class="block text-xs text-pb-warning" title="{{ job.removed_library_root_snapshot.path }}">
+                  Original root removed: {{ job.removed_library_root_snapshot.name }}.
+                  Start a new import to choose a destination.
+                </span>
+                {% endif %}
               </span>
             </td>
             <td>
@@ -108,7 +117,7 @@
             </td>
             <td>
               <span class="pill {{ status_tone.get(job.status.value, 'pill-neutral') }}">
-                {{ job.status.value|replace('_', ' ')|title }}
+                {{ 'Rollback Incomplete' if is_rollback_incomplete else job.status.value|replace('_', ' ')|title }}
               </span>
             </td>
             <td class="downloads-mono-cell is-right">{{ metrics.get("series_found", job.series_found or 0) }}</td>
@@ -167,6 +176,24 @@
                   </a>
                 {% endif %}
 
+                {% if job.id in clean_library_job_ids|default([]) and not job.archived_at %}
+                  <button
+                    type="button"
+                    data-testid="import-history-organize-{{ job.id }}"
+                    class="downloads-action-btn import-history-action-btn"
+                    hx-get="/import/{{ job.id }}/clean-library-panel"
+                    hx-target="#cv-search-modal"
+                    hx-swap="innerHTML"
+                    data-tip="Organize library"
+                    data-tip-pos="left"
+                    aria-label="Build a clean Pullbox library from import {{ job.id }}"
+                  >
+                    <svg class="import-history-action-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 5.25h16.5M6.75 9.75h10.5m-7.5 4.5h4.5m-2.25 4.5h.008v.008H12v-.008z"/>
+                    </svg>
+                  </button>
+                {% endif %}
+
                 {% if control_state.get('can_rollback') %}
                   <button
                     type="button"
@@ -201,6 +228,21 @@
                 {% endif %}
 
                 {% if control_state.get('can_delete') %}
+                  {% if not job.archived_at %}
+                  <button
+                    type="button"
+                    data-testid="import-history-archive-{{ job.id }}"
+                    @click="archiveJob({{ job.id }})"
+                    class="downloads-action-btn import-history-action-btn"
+                    data-tip="Archive"
+                    data-tip-pos="left"
+                    aria-label="Archive import results"
+                  >
+                    <svg class="import-history-action-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 7.5h15m-13.5 0v11.25h12V7.5M9.75 11.25h4.5M5.25 3.75h13.5v3.75H5.25z"/>
+                    </svg>
+                  </button>
+                  {% endif %}
                   <button
                     type="button"
                     data-testid="import-history-delete-{{ job.id }}"
@@ -212,6 +254,21 @@
                   >
                     <svg class="import-history-action-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"/>
+                    </svg>
+                  </button>
+                {% endif %}
+                {% if job.archived_at %}
+                  <button
+                    type="button"
+                    data-testid="import-history-restore-{{ job.id }}"
+                    @click="restoreJob({{ job.id }})"
+                    class="downloads-action-btn import-history-action-btn"
+                    data-tip="Restore to history"
+                    data-tip-pos="left"
+                    aria-label="Restore import to current history"
+                  >
+                    <svg class="import-history-action-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 101.64-5.16M3 4.5v4.75h4.75"/>
                     </svg>
                   </button>
                 {% endif %}

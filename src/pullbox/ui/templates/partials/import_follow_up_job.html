@@ -1,0 +1,48 @@
+<div data-testid="import-follow-up-job-panel" class="space-y-4">
+  <section class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy min-w-0">
+        <p class="section-eyebrow">Import #{{ selected_follow_up_job.id }}</p>
+        <h2 class="section-title-plain truncate">{{ selected_follow_up_job.source_path }}</h2>
+        <p class="section-copy">Resolve the remaining matching, recovery, and cleanup groups from this import. Completed work disappears from this page automatically.</p>
+      </div>
+      <div class="section-header-actions">
+        <a
+          href="/import?tab=follow-up"
+          hx-get="/import?tab=follow-up"
+          hx-target="#import-orphaned-results"
+          hx-swap="outerHTML"
+          hx-push-url="true"
+          class="btn-ghost btn-sm"
+        >All follow-up</a>
+      </div>
+    </div>
+  </section>
+
+  {% if orphaned_count|default(0) > 0 %}
+  <section class="section-card overflow-hidden" data-testid="import-follow-up-matching">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Matching</p>
+        <h3 class="section-title-plain">Resolve series and issue matches</h3>
+        <p class="section-copy">Only unresolved records from this import are shown.</p>
+      </div>
+      <span class="pill pill-warning">{{ orphaned_count }}</span>
+    </div>
+    <div class="section-body p-0">
+      {% include "partials/import_orphaned_table.html" %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% set job = selected_follow_up_job %}
+  {% set follow_up_workspace = true %}
+  {% include "partials/import_results.html" %}
+
+  {% if follow_up_group_count|default(0) == 0 %}
+  <div class="downloads-empty-state is-history" data-testid="import-follow-up-job-empty">
+    <p class="downloads-empty-title">This import is resolved</p>
+    <p class="downloads-empty-copy">There is no remaining follow-up for this import. Return to all follow-up to continue.</p>
+  </div>
+  {% endif %}
+</div>

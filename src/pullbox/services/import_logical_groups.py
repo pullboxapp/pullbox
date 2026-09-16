@@ -208,6 +208,7 @@ async def _mark_library_owned_ambiguous_candidate_conflict(
     imp_file.diagnostics = {
         **dict(imp_file.diagnostics or {}),
         "kind": "series_conflict_file",
+        "reason": "library_owned_ambiguous_candidate",
         "target_state": "series_match_conflict",
         "rejection_reason": (
             "A same-year single-issue library item has the same crossover title tokens."

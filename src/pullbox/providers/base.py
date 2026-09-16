@@ -79,6 +79,7 @@ class IssueSummary:
     release_date: str | None
     cover_url: str | None
     issue_type: str
+    issue_number_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ class IssueMetadata:
     comicvine_url: str | None
     creators: list[dict[str, str]] = field(default_factory=list)
     story_arcs: list[dict[str, str]] = field(default_factory=list)
+    issue_number_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -358,6 +360,7 @@ class ProviderRegistry:
         self._download_clients: dict[int, DownloadClient] = {}
         self._download_priorities: dict[int, int] = {}
         self._indexers: dict[int, Indexer] = {}
+        self._indexer_aliases: dict[int, int] = {}
 
     def register_metadata_provider(self, name: str, provider: MetadataProvider) -> None:
         self._metadata_providers[name] = provider
@@ -372,7 +375,12 @@ class ProviderRegistry:
         self._download_priorities[config_id] = priority
 
     def register_indexer(self, config_id: int, indexer: Indexer) -> None:
+        self._indexer_aliases.pop(config_id, None)
         self._indexers[config_id] = indexer
+
+    def register_indexer_alias(self, config_id: int, aggregate_id: int) -> None:
+        """Resolve a persisted source ID without adding another search request."""
+        self._indexer_aliases[config_id] = aggregate_id
 
     def get_metadata_provider(self, name: str = "comicvine") -> MetadataProvider:
         """Get a metadata provider by name."""
@@ -392,7 +400,7 @@ class ProviderRegistry:
 
     def get_indexer(self, config_id: int) -> Indexer | None:
         """Get one registered indexer by its persisted config ID."""
-        return self._indexers.get(config_id)
+        return self._indexers.get(self._indexer_aliases.get(config_id, config_id))
 
     def get_indexer_items(self) -> list[tuple[int, Indexer]]:
         """Get (config_id, indexer) pairs for all registered indexers."""

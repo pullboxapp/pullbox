@@ -105,6 +105,7 @@ async def materialize_import_cbz_with_comicinfo_interruptible(
     comicinfo_payload: dict[str, Any],
     *,
     transfer_method: str,
+    temp_path: Path | None = None,
     progress_callback: ProgressCallback | None = None,
     raise_if_cancelled_immediately: RaiseIfCancelledImmediately,
     materializer: MaterializeCbzWithComicInfoInterruptible | None = None,
@@ -116,6 +117,7 @@ async def materialize_import_cbz_with_comicinfo_interruptible(
         target_path,
         comicinfo_payload,
         transfer_method=transfer_method,
+        temp_path=temp_path,
         cancellation_check=lambda: raise_if_cancelled_immediately(session, int(job.id)),
         progress_callback=progress_callback,
     )

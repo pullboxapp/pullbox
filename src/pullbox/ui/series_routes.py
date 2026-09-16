@@ -21,9 +21,10 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
-from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 from pullbox.services.cover_url_service import build_series_cover_url
+from pullbox.services.library_root_management import list_library_roots
 from pullbox.services.reading_query_service import load_series_reading_aggregates
+from pullbox.ui.comicvine_provider import open_comicvine_ui_provider
 from pullbox.ui.comicvine_series_search import (
     ADD_SERIES_PER_PAGE,
     COMICVINE_SERIES_SEARCH_LIMIT,
@@ -525,10 +526,25 @@ async def add_series_page(
     search_mode: str | None = Query(None),
 ) -> Response:
     """Render the add series page with ComicVine search."""
-    roots_result = await session.execute(
-        select(LibraryRoot).where(LibraryRoot.enabled.is_(True)).order_by(LibraryRoot.name)
+    roots = [
+        root
+        for root in await list_library_roots(session)
+        if bool(root["enabled"])
+        and bool(root["allow_managed_writes"])
+        and bool(root["available"])
+        and bool(root["writable"])
+    ]
+    roots.sort(
+        key=lambda root: (
+            not bool(root["is_default_managed_destination"]),
+            str(root["name"]).casefold(),
+            int(root["id"]),
+        )
     )
-    roots = list(roots_result.scalars().all())
+    if not roots or not bool(roots[0]["is_default_managed_destination"]):
+        # The page intentionally has no arbitrary first-root fallback.  A
+        # managed default must be selected through root management first.
+        roots = []
 
     add_series_sort_options = COMICVINE_SERIES_SORT_OPTIONS
     add_series_search_ctx = await load_add_series_search_context(
@@ -585,17 +601,24 @@ async def load_add_series_search_context(
     search_mode: str | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> dict[str, object]:
+    from pullbox.services.catalog.reader import get_catalog_reader
+
+    local_catalog = get_catalog_reader().available
     per_page = ADD_SERIES_PER_PAGE
     normalized_query = (query or "").strip()
     normalized_sort = normalize_add_series_sort(sort)
     requested_page = max(1, page)
     roots_count = (
         await session.scalar(
-            select(func.count(LibraryRoot.id)).where(LibraryRoot.enabled.is_(True))
+            select(func.count(LibraryRoot.id)).where(
+                LibraryRoot.enabled.is_(True),
+                LibraryRoot.allow_managed_writes.is_(True),
+            )
         )
     ) or 0
 
     base_context: dict[str, object] = {
+        "local_catalog": local_catalog,
         "search_query": normalized_query,
         "add_series_sort": normalized_sort,
         "is_preview_search": False,
@@ -628,13 +651,6 @@ async def load_add_series_search_context(
     base_context["add_series_full_search_url"] = full_search_url
 
     try:
-        from pullbox.core.comicvine_key import get_comicvine_api_key
-        from pullbox.providers.metadata.comicvine import ComicVineProvider
-
-        api_key = await get_comicvine_api_key(session)
-        provider: Any = ComicVineProvider(api_key=api_key)
-        if session_factory is not None:
-            provider = PersistentComicVineCacheProvider(provider, session_factory)
         naming_config = await _system_config_values(
             session,
             (
@@ -646,17 +662,22 @@ async def load_add_series_search_context(
         folder_template = naming_config.get("series_folder_template", "{Series} ({Year})")
         replace_illegal = naming_config.get("replace_illegal_characters", "true") == "true"
         colon_replacement = naming_config.get("colon_replacement", "dash")
-        if preview_mode:
-            cv_results, _total_results = await provider.search_series_page(
-                parsed_query.title_query,
-                parsed_query.year_hint,
-                limit=per_page,
-            )
-        else:
-            cv_results, _total_results = await provider.search_series_globally(
-                parsed_query.title_query,
-                max_results=COMICVINE_SERIES_SEARCH_LIMIT,
-            )
+        async with open_comicvine_ui_provider(
+            session,
+            session_factory=session_factory,
+            prefer_catalog=True,
+        ) as provider:
+            if preview_mode:
+                cv_results, _total_results = await provider.search_series_page(
+                    parsed_query.title_query,
+                    parsed_query.year_hint,
+                    limit=per_page,
+                )
+            else:
+                cv_results, _total_results = await provider.search_series_globally(
+                    parsed_query.title_query,
+                    max_results=COMICVINE_SERIES_SEARCH_LIMIT,
+                )
         searchable_total = len(cv_results)
         total_pages = max(1, (searchable_total + per_page - 1) // per_page)
         resolved_page = min(requested_page, total_pages)
@@ -679,7 +700,11 @@ async def load_add_series_search_context(
         )
     except Exception:
         logger.exception("comicvine_search_failed", query=normalized_query)
-        base_context["search_error"] = "ComicVine search failed. Check your API key in settings."
+        base_context["search_error"] = (
+            "Local catalog search failed. Check its status in Metadata settings."
+            if local_catalog
+            else "ComicVine search failed. Check your API key in settings."
+        )
         return base_context
 
     in_library_count = sum(1 for item in search_results if bool(item.get("already_added")))

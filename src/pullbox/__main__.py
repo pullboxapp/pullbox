@@ -17,6 +17,10 @@ from pullbox.core.https_runtime import (
     validate_https_runtime_settings,
 )
 
+# Leave time for in-flight requests to finish while ensuring long-lived SSE
+# connections cannot consume Docker's default 10-second stop grace period.
+GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 5
+
 
 def _resolve_db_path(db_url: str) -> Path | None:
     """Extract the SQLite file path from a database URL.
@@ -61,6 +65,7 @@ def main() -> None:
         host=settings.bind_address,
         port=settings.port,
         factory=True,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
         **uvicorn_ssl_kwargs(https_settings),
     )
 

@@ -362,6 +362,38 @@ async def test_descriptor_rejects_url_outside_configured_indexer_origin() -> Non
     assert request_count == 0
 
 
+@pytest.mark.parametrize("content", [b"d4:info11:not-an-infoe", b"d4:infod4:name99:truncatedee"])
+async def test_descriptor_rejects_malformed_bencode_before_handoff(content: bytes) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content))
+    ) as client:
+        transport = TorznabTransport(
+            http_client=client, configured_base_url="https://indexer.example"
+        )
+        with pytest.raises(TorznabTransportError, match="valid torrent descriptor"):
+            await transport.fetch_descriptor("https://indexer.example/get")
+
+
+async def test_descriptor_redirect_policy_overrides_client_follow_redirects() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "indexer.example":
+            return httpx.Response(302, headers={"location": "http://unconfigured.example/private"})
+        return httpx.Response(200, content=b"d4:infod4:name4:testee")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=True
+    ) as client:
+        transport = TorznabTransport(
+            http_client=client, configured_base_url="https://indexer.example"
+        )
+        with pytest.raises(TorznabTransportError, match="outside its configured origin"):
+            await transport.fetch_descriptor("https://indexer.example/get")
+    assert len(requests) == 1
+
+
 @pytest.mark.asyncio
 async def test_descriptor_stream_stops_at_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     class CountingStream(httpx.AsyncByteStream):

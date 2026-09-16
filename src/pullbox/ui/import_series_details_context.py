@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import case, select
 
 from pullbox.core.exceptions import NotFoundError
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.release_parser import parse_release_title
 from pullbox.core.source_metadata import SourceMetadataExtractor
 from pullbox.models.import_job import (
@@ -37,9 +38,7 @@ def is_actionable_duplicate_merge(series_item: ImportedSeries | None) -> bool:
 def _format_issue_number(issue_number: float | None) -> str | None:
     if issue_number is None:
         return None
-    if float(issue_number).is_integer():
-        return str(int(issue_number))
-    return f"{issue_number:g}"
+    return format_issue_number(issue_number)
 
 
 def _duplicate_reason_label(reason: str | None) -> str:

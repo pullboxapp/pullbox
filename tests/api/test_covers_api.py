@@ -14,6 +14,7 @@ from pullbox.api.v1 import covers as covers_api
 from pullbox.core.exceptions import NotFoundError
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
+from pullbox.models.story_arc import StoryArc
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -175,6 +176,87 @@ class TestSeriesCoverRoutes:
 
         assert isinstance(response, Response)
         assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+class TestStoryArcCoverRoutes:
+    async def test_fetches_and_serves_remote_story_arc_cover(
+        self,
+        sec_db: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cached = _write_cover(tmp_path / "story-arc-cover.webp", b"RIFF")
+
+        async def _no_local_cover(_session: AsyncSession, _arc: StoryArc) -> None:
+            return None
+
+        async def _cached_cover(_session: AsyncSession, arc: StoryArc) -> Path:
+            arc.cover_path = f"/api/v1/story-arcs/{arc.id}/cover"
+            return cached
+
+        monkeypatch.setattr(covers_api, "resolve_story_arc_cover_file", _no_local_cover)
+        monkeypatch.setattr(covers_api, "cache_story_arc_cover", _cached_cover)
+
+        async with sec_db() as session:
+            arc = StoryArc(
+                name="Remote Arc",
+                normalized_name="remote arc",
+                cover_url="https://example.test/arc.webp",
+            )
+            session.add(arc)
+            await session.flush()
+
+            response = await covers_api.get_story_arc_cover(
+                arc.id,
+                object(),  # type: ignore[arg-type]
+                session,
+            )
+
+        assert isinstance(response, FileResponse)
+        assert response.media_type == "image/webp"
+        assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
+        assert arc.cover_path == f"/api/v1/story-arcs/{arc.id}/cover"
+
+    async def test_existing_provider_snapshot_supplies_legacy_story_arc_cover(
+        self,
+        sec_db: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cached = _write_cover(tmp_path / "legacy-arc-cover.jpg")
+
+        async def _no_local_cover(_session: AsyncSession, _arc: StoryArc) -> None:
+            return None
+
+        async def _cached_cover(_session: AsyncSession, arc: StoryArc) -> Path:
+            assert arc.cover_url == "https://example.test/legacy-arc.jpg"
+            return cached
+
+        monkeypatch.setattr(covers_api, "resolve_story_arc_cover_file", _no_local_cover)
+        monkeypatch.setattr(covers_api, "cache_story_arc_cover", _cached_cover)
+
+        async with sec_db() as session:
+            arc = StoryArc(
+                name="Legacy Provider Arc",
+                normalized_name="legacy provider arc",
+                diagnostics={
+                    "provider_catalog": {
+                        "snapshot": {"cover_url": "https://example.test/legacy-arc.jpg"}
+                    }
+                },
+            )
+            session.add(arc)
+            await session.flush()
+
+            response = await covers_api.get_story_arc_cover(
+                arc.id,
+                object(),  # type: ignore[arg-type]
+                session,
+            )
+
+        assert isinstance(response, FileResponse)
+        assert arc.cover_url == "https://example.test/legacy-arc.jpg"
 
 
 @pytest.mark.asyncio

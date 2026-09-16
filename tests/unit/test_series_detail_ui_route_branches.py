@@ -194,7 +194,13 @@ async def test_series_detail_route_redirects_or_renders_context(
     monkeypatch.setattr(
         series_detail_routes.SeriesService,
         "build_delete_context",
-        AsyncMock(return_value=SimpleNamespace(linked_file_count=1)),
+        AsyncMock(
+            return_value=SimpleNamespace(
+                linked_file_count=1,
+                managed_file_count=1,
+                referenced_file_count=0,
+            )
+        ),
     )
 
     missing = await series_detail_routes.series_detail(

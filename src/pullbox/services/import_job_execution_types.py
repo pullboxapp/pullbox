@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
     from datetime import datetime
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from pullbox.models.series import Series
     from pullbox.providers.base import IssueSummary
     from pullbox.schemas.import_job import ImportProgressEvent
+    from pullbox.services.import_job_actions import ImportJobActionSpec
 
 
 class SeriesServiceFunc(Protocol):
@@ -101,6 +102,15 @@ class RecordActionFunc(Protocol):
         action_type: str,
         payload: dict[str, Any],
     ) -> ImportJobAction: ...
+
+
+class RecordActionsFunc(Protocol):
+    async def __call__(
+        self,
+        session: AsyncSession,
+        job: ImportJob,
+        specs: Sequence[ImportJobActionSpec],
+    ) -> list[ImportJobAction]: ...
 
 
 class LogEventFunc(Protocol):

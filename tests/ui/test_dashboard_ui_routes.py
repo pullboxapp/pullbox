@@ -359,6 +359,30 @@ class TestDashboardRouteContracts:
         assert "Open reading queue" in response.text
         assert 'hx-trigger="every 3s"' not in response.text
 
+    async def test_dashboard_continue_shelf_shows_progress_for_large_compendium(
+        self,
+        authenticated_client,
+        sec_db,
+        sec_user,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from tests.ui.test_reading_ui_routes import _seed_reading_items
+
+        await _seed_reading_items(
+            sec_db,
+            sec_user,
+            count=1,
+            mode="continue",
+            last_page_index=0,
+            page_count=1_250,
+        )
+
+        response = await authenticated_client.get("/")
+
+        assert response.status_code == 200
+        assert "Page 1 of 1250 · 1%" in response.text
+        assert 'aria-valuenow="1"' in response.text
+        assert 'style="width: 1%"' in response.text
+
     async def test_reader_gate_hides_dashboard_continue_shelf(
         self,
         authenticated_client,
@@ -383,16 +407,36 @@ class TestDashboardRouteContracts:
         assert 'data-reading-action="want-to-read"' not in response.text
         assert 'data-reading-action="completion"' not in response.text
 
-    async def test_dashboard_storage_strip_measures_enabled_library_root(
+    async def test_dashboard_storage_strip_measures_default_managed_library_root(
         self,
         sec_db,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path,
     ) -> None:  # type: ignore[no-untyped-def]
-        library_root = tmp_path / "comics"
-        library_root.mkdir()
+        reference_root = tmp_path / "reference-comics"
+        managed_root = tmp_path / "managed-comics"
+        reference_root.mkdir()
+        managed_root.mkdir()
         async with sec_db() as session:
-            session.add(LibraryRoot(name="Primary", path=str(library_root), enabled=True))
+            session.add_all(
+                [
+                    LibraryRoot(
+                        name="Reference",
+                        path=str(reference_root),
+                        enabled=True,
+                        allow_referenced_registrations=True,
+                        allow_managed_writes=False,
+                    ),
+                    LibraryRoot(
+                        name="Managed",
+                        path=str(managed_root),
+                        enabled=True,
+                        allow_referenced_registrations=True,
+                        allow_managed_writes=True,
+                        is_default_managed_destination=True,
+                    ),
+                ]
+            )
             await session.commit()
 
             measured_paths: list[str] = []
@@ -411,7 +455,7 @@ class TestDashboardRouteContracts:
                 dashboard,
             )
 
-        assert measured_paths == [str(library_root)]
+        assert measured_paths == [str(managed_root)]
         assert free_bytes == 8_000
         assert delta == "8 TB runway"
 

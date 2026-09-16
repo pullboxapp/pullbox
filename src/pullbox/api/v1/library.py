@@ -22,7 +22,12 @@ from pullbox.config import get_settings
 from pullbox.core.exceptions import ValidationError
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
 from pullbox.models.config import SystemConfig
-from pullbox.models.library import LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.series import Series
 from pullbox.schemas.library import (
     LibraryBrowserActionFlags,
@@ -189,6 +194,7 @@ def _build_library_actions(
     kind: str,
     file_format: str | None,
     tracking_scope: str = "tracked_file",
+    referenced_file_count: int = 0,
 ) -> LibraryBrowserActionFlags:
     normalized_format = (file_format or "").strip().lower()
     if kind == "root":
@@ -203,6 +209,9 @@ def _build_library_actions(
         "tracked_file_parent_folder",
     }:
         return LibraryBrowserActionFlags(can_properties=False)
+
+    if referenced_file_count:
+        return LibraryBrowserActionFlags(can_properties=True, can_delete=True)
 
     return LibraryBrowserActionFlags(
         can_properties=True,
@@ -486,6 +495,15 @@ async def _validate_library_browser_convert(
         raise ValidationError("Only files can be converted from the browser.")
     if not await _tracked_library_file_exists(session, source):
         raise ValidationError("This path is not tracked by Pullbox's library catalog.")
+    storage_mode = (
+        await session.execute(
+            select(LibraryFile.storage_mode).where(LibraryFile.file_path == str(source))
+        )
+    ).scalar_one_or_none()
+    if storage_mode == LibraryFileStorageMode.REFERENCED:
+        raise ValidationError(
+            "Referenced library files cannot be converted. They must stay unchanged on disk."
+        )
 
     source_format = source.suffix.lower().lstrip(".")
     if source_format not in _CONVERTIBLE_FILE_FORMATS:
@@ -583,6 +601,7 @@ async def library_browser_entry(
             kind=kind,
             file_format=file_format,
             tracking_scope=tracking_scope,
+            referenced_file_count=delete_context.referenced_file_count,
         ),
         delete_context=LibraryBrowserDeleteContext.model_validate(asdict(delete_context)),
         rename_context=rename_context,
@@ -623,6 +642,10 @@ async def _validate_library_browser_rename(
     if kind == "root":
         raise ValidationError("Library roots cannot be renamed from the browser.")
     _require_mutable_library_catalog_entry(tracking_scope)
+    if delete_context.referenced_file_count:
+        raise ValidationError(
+            "Referenced library files cannot be renamed. They must stay unchanged on disk."
+        )
     if rename_context.stale_reference:
         raise ValidationError(
             rename_context.message
@@ -750,6 +773,8 @@ async def delete_library_browser_entry(
         "source_path": outcome.source_path,
         "deleted_via_trash": outcome.deleted_via_trash,
         "result_path": outcome.result_path,
+        "managed_files_deleted": outcome.managed_files_deleted,
+        "referenced_files_detached": outcome.referenced_files_detached,
     }
 
 

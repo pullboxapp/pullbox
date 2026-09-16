@@ -15,6 +15,7 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
 )
@@ -87,6 +88,8 @@ async def apply_manual_file_match(
     confidence: str = "high",
 ) -> tuple[str, str | None]:
     """Apply a manual issue assignment, respecting duplicate-series merge rules."""
+    if imp_file.status == ImportedFileStatus.SAFETY_BLOCKED:
+        raise ValidationError("Resolve this file's safety review before assigning an issue.")
     imp_series = await session.get(ImportedSeries, imp_file.import_series_id)
     duplicate_series = is_duplicate_series(imp_series)
     has_library_file = False
@@ -157,6 +160,9 @@ async def override_file_match(
     if imp_file is None or imp_file.import_job_id != job_id:
         raise NotFoundError("ImportedFile", file_id)
 
+    if imp_file.status == ImportedFileStatus.SAFETY_BLOCKED:
+        raise ValidationError("Resolve this file's safety review before assigning an issue.")
+
     issue = await session.get(Issue, issue_id)
     if issue is None:
         raise NotFoundError("Issue", issue_id)
@@ -212,10 +218,18 @@ async def repair_file_metadata(
         raise NotFoundError("ImportJob", job_id)
     if job.status != ImportJobStatus.REVIEW:
         raise ValidationError("Job must be in REVIEW state to repair file metadata")
+    if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE:
+        raise ValidationError(
+            "In-place import files cannot have embedded metadata rewritten. "
+            "Choose a managed copy if Pullbox should repair ComicInfo metadata."
+        )
 
     imp_file = await session.get(ImportedFile, file_id)
     if imp_file is None or imp_file.import_job_id != job_id:
         raise NotFoundError("ImportedFile", file_id)
+
+    if imp_file.status == ImportedFileStatus.SAFETY_BLOCKED:
+        raise ValidationError("Resolve this file's safety review before repairing metadata.")
 
     target_issue_id = issue_id or imp_file.matched_issue_id
     if target_issue_id is None:

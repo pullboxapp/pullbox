@@ -16,8 +16,18 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.library import LibraryRoot
 from pullbox.services.import_review_selection import load_import_review_selection_state
+from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
+from pullbox.services.import_split_series import load_selected_split_series_review
+from pullbox.services.import_story_arc_review import (
+    ImportedStoryArcReviewRow,
+    load_import_story_arc_review_page,
+)
+from pullbox.services.library_root_management import list_library_roots
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
-from pullbox.ui.import_review_summary import load_import_review_summary
+from pullbox.ui.import_review_summary import (
+    load_import_review_summary,
+    load_import_safety_failure_summary,
+)
 from pullbox.ui.import_review_tables import (
     _get_import_review_series_order_by,
     _load_import_review_file_detail_groups,
@@ -27,6 +37,11 @@ from pullbox.ui.import_review_tables import (
     _normalize_import_review_series_sort,
     _safety_blocked_files_filter,
     _series_conflict_kind_filter,
+)
+from pullbox.ui.import_story_arc_entry_review import (
+    ImportedStoryArcEntryReviewRow,
+    StoryArcEntryResolutionFilter,
+    load_import_story_arc_entry_review_page,
 )
 
 if TYPE_CHECKING:
@@ -47,7 +62,7 @@ def _resolve_review_view(status: str | None) -> tuple[str, ImportSeriesStatus | 
     current_view = "series"
     if status == "conflicts":
         current_view = "conflicts"
-    elif status in {"needs_series", "needs_issue", "safety_blocked"}:
+    elif status in {"needs_series", "needs_issue", "safety_blocked", "story_arcs"}:
         current_view = status
     elif status:
         with contextlib.suppress(ValueError):
@@ -165,8 +180,44 @@ async def _load_status_counts(
     return status_counts
 
 
+async def _load_safety_review_counts(
+    session: AsyncSession,
+    job_id: int,
+) -> tuple[int, int]:
+    row = (
+        await session.execute(
+            select(
+                func.count(func.distinct(ImportedFile.import_series_id)),
+                func.count(ImportedFile.id),
+            ).where(
+                ImportedFile.import_job_id == job_id,
+                ImportedFile.status.in_(
+                    (ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED)
+                ),
+            )
+        )
+    ).one()
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+async def has_pending_import_safety_rematch(session: AsyncSession, job_id: int) -> bool:
+    """Return whether a review job has an approved file actively awaiting rematch."""
+    pending_file_id = await session.scalar(
+        select(ImportedFile.id)
+        .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
+        .where(
+            ImportedFile.import_job_id == job_id,
+            ImportedFile.status == ImportedFileStatus.SAFETY_APPROVED,
+            ImportedSeries.diagnostics["rematch_pending"].as_boolean().is_(True),
+        )
+        .limit(1)
+    )
+    return pending_file_id is not None
+
+
 async def _load_safety_blocked_files_by_series_id(
     session: AsyncSession,
+    job_id: int,
     visible_series_ids: list[int],
 ) -> dict[int, list[ImportedFile]]:
     safety_blocked_files_by_series_id: dict[int, list[ImportedFile]] = {
@@ -178,6 +229,7 @@ async def _load_safety_blocked_files_by_series_id(
     safety_files_result = await session.execute(
         select(ImportedFile)
         .where(
+            ImportedFile.import_job_id == job_id,
             ImportedFile.import_series_id.in_(visible_series_ids),
             ImportedFile.status.in_(
                 [ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SAFETY_APPROVED]
@@ -193,6 +245,38 @@ async def _load_safety_blocked_files_by_series_id(
     return safety_blocked_files_by_series_id
 
 
+def _build_safety_block_context_by_file_id(
+    files_by_series_id: Mapping[int, list[ImportedFile]],
+) -> dict[int, dict[str, object]]:
+    """Normalize persisted/legacy blocks without mutating ORM diagnostics."""
+    result: dict[int, dict[str, object]] = {}
+    for files in files_by_series_id.values():
+        for imp_file in files:
+            diagnostics = imp_file.diagnostics or {}
+            if not isinstance(diagnostics, Mapping):
+                continue
+            safety_block = diagnostics.get("safety_block")
+            if isinstance(safety_block, Mapping):
+                result[imp_file.id] = normalize_import_safety_diagnostics(safety_block)
+    return result
+
+
+def _build_safety_file_display_name_by_file_id(
+    files_by_series_id: Mapping[int, list[ImportedFile]],
+) -> dict[int, str]:
+    """Return bounded basename-only labels for safety review rows."""
+    result: dict[int, str] = {}
+    for files in files_by_series_id.values():
+        for imp_file in files:
+            normalized = str(imp_file.file_name).replace("\\", "/").rstrip("/")
+            leaf = normalized.rsplit("/", maxsplit=1)[-1]
+            safe_leaf = "".join(
+                character for character in leaf if character >= " " and character != "\x7f"
+            )
+            result[imp_file.id] = (safe_leaf or "File")[:200]
+    return result
+
+
 async def load_import_review_context(
     session: AsyncSession,
     job: ImportJob,
@@ -200,6 +284,9 @@ async def load_import_review_context(
     status: str | None,
     page: int,
     sort: str | None,
+    story_arc_id: int | None = None,
+    arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
+    arc_entry_page: int = 1,
 ) -> dict[str, object]:
     """Load the template context for the Step 3 review table."""
     job_id = int(job.id)
@@ -212,6 +299,13 @@ async def load_import_review_context(
     conflict_review_ctx: dict[str, object] | None = None
     matched_file_targets_by_series_id: dict[int, list[dict[str, object]]] = {}
     review_file_groups_by_series_id: dict[int, list[dict[str, object]]] = {}
+    story_arc_items: tuple[ImportedStoryArcReviewRow, ...] = ()
+    story_arc_total = 0
+    story_arc_selected_item: ImportedStoryArcReviewRow | None = None
+    story_arc_entry_items: tuple[ImportedStoryArcEntryReviewRow, ...] = ()
+    story_arc_entry_total = 0
+    story_arc_entry_page_size = 25
+    safety_blocked_files_by_series_id: dict[int, list[ImportedFile]] = {}
     safety_rematch_pending = False
 
     if current_view == "safety_blocked":
@@ -228,7 +322,41 @@ async def load_import_review_context(
             current_view = "series"
             requested_series_status = None
 
-    if current_view == "conflicts":
+    if current_view == "story_arcs":
+        library_roots_result = await session.execute(
+            select(LibraryRoot).where(LibraryRoot.enabled.is_(True)).order_by(LibraryRoot.id)
+        )
+        library_roots = list(library_roots_result.scalars().all())
+        story_arc_page = await load_import_story_arc_review_page(
+            session,
+            job_id,
+            page=page,
+            page_size=page_size,
+        )
+        story_arc_items = story_arc_page.items
+        story_arc_total = story_arc_page.total
+        total = story_arc_page.total
+        page = story_arc_page.page
+        page_size = story_arc_page.page_size
+        normalized_sort = "source_order"
+        story_arc_selected_item = next(
+            (item for item in story_arc_items if item.id == story_arc_id),
+            story_arc_items[0] if story_arc_items else None,
+        )
+        if story_arc_selected_item is not None:
+            story_arc_entry_page_result = await load_import_story_arc_entry_review_page(
+                session,
+                job_id=job_id,
+                imported_story_arc_id=story_arc_selected_item.id,
+                resolution_state=arc_entry_state.resolution_state,
+                page=arc_entry_page,
+                page_size=story_arc_entry_page_size,
+            )
+            story_arc_entry_items = story_arc_entry_page_result.items
+            story_arc_entry_total = story_arc_entry_page_result.total
+            arc_entry_page = story_arc_entry_page_result.page
+            story_arc_entry_page_size = story_arc_entry_page_result.page_size
+    elif current_view == "conflicts":
         conflict_review_ctx = await _load_import_conflict_review_context(
             job_id,
             session,
@@ -239,7 +367,6 @@ async def load_import_review_context(
         page = _object_to_int(conflict_review_ctx["page"])
         page_size = _object_to_int(conflict_review_ctx["page_size"])
         normalized_sort = str(conflict_review_ctx["sort"])
-        safety_blocked_files_by_series_id: dict[int, list[ImportedFile]] = {}
     else:
         filters = _review_filters(
             job_id=job_id,
@@ -260,20 +387,18 @@ async def load_import_review_context(
         visible_series_ids = [item.id for item in series_items]
         safety_blocked_files_by_series_id = await _load_safety_blocked_files_by_series_id(
             session,
+            job_id,
             visible_series_ids,
-        )
-        safety_rematch_pending = any(
-            imp_file.status == ImportedFileStatus.SAFETY_APPROVED
-            for files in safety_blocked_files_by_series_id.values()
-            for imp_file in files
         )
         if visible_series_ids:
             matched_file_targets_by_series_id = await _load_import_review_matched_file_targets(
                 session,
+                job_id,
                 visible_series_ids,
             )
             review_file_groups_by_series_id = await _load_import_review_file_detail_groups(
                 session,
+                job_id,
                 series_items,
             )
         library_roots_result = await session.execute(
@@ -281,9 +406,38 @@ async def load_import_review_context(
         )
         library_roots = list(library_roots_result.scalars().all())
 
+    split_series_review = await load_selected_split_series_review(session, job)
+    safety_review_series_count, safety_review_file_count = await _load_safety_review_counts(
+        session, job_id
+    )
+    safety_rematch_pending = await has_pending_import_safety_rematch(session, job_id)
+    managed_library_root_options: list[dict[str, Any]] = []
+    if split_series_review.requires_preferred_destination:
+        managed_library_root_options = [
+            root
+            for root in await list_library_roots(session)
+            if bool(root["enabled"])
+            and bool(root["allow_managed_writes"])
+            and bool(root["available"])
+            and bool(root["readable"])
+            and bool(root["writable"])
+        ]
+
     template_ctx: dict[str, object] = {
         "job": job,
         "series_items": series_items,
+        "story_arc_items": story_arc_items,
+        "story_arc_total": story_arc_total,
+        "story_arc_selected_item": story_arc_selected_item,
+        "story_arc_selected_id": (
+            story_arc_selected_item.id if story_arc_selected_item is not None else None
+        ),
+        "story_arc_entry_items": story_arc_entry_items,
+        "story_arc_entry_total": story_arc_entry_total,
+        "story_arc_entry_page": arc_entry_page,
+        "story_arc_entry_page_size": story_arc_entry_page_size,
+        "story_arc_entry_state_filter": arc_entry_state,
+        "story_arc_entry_state_options": tuple(StoryArcEntryResolutionFilter),
         "library_roots": library_roots,
         "total": total,
         "page": page,
@@ -292,13 +446,24 @@ async def load_import_review_context(
         "current_view": current_view,
         "sort": normalized_sort,
         "status_counts": await _load_status_counts(session, job_id),
+        "safety_review_series_count": safety_review_series_count,
+        "safety_review_file_count": safety_review_file_count,
         "review_summary": await load_import_review_summary(session, job),
+        "split_series_review": split_series_review,
+        "managed_library_root_options": managed_library_root_options,
+        "safety_failure_summary": await load_import_safety_failure_summary(session, job),
         "selected_series_ids": await _load_selected_review_series_ids(session, job_id),
         "duplicate_selected_file_counts": await _load_duplicate_selected_file_counts(
             session,
             job_id,
         ),
         "safety_blocked_files_by_series_id": safety_blocked_files_by_series_id,
+        "safety_block_context_by_file_id": _build_safety_block_context_by_file_id(
+            safety_blocked_files_by_series_id
+        ),
+        "safety_file_display_name_by_file_id": _build_safety_file_display_name_by_file_id(
+            safety_blocked_files_by_series_id
+        ),
         "safety_rematch_pending": safety_rematch_pending,
         "matched_file_targets_by_series_id": matched_file_targets_by_series_id,
         "review_file_groups_by_series_id": review_file_groups_by_series_id,

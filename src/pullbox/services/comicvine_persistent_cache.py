@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.models.provider_cache import MetadataProviderCacheEntry
 from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesMetadata, SeriesSearchResult
+from pullbox.providers.story_arcs import StoryArcSearchResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -156,6 +157,37 @@ class PersistentComicVineCacheProvider:
             _global_series_search_results_from_payload,
         )
 
+    async def search_story_arcs_page(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[StoryArcSearchResult], int]:
+        request = {
+            "query": NameMatcher.normalize(query),
+            "limit": int(limit),
+            "offset": int(offset),
+        }
+
+        async def fetch() -> tuple[list[StoryArcSearchResult], int]:
+            return cast(
+                "tuple[list[StoryArcSearchResult], int]",
+                await self._provider.search_story_arcs_page(
+                    query,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
+        return await self._get_or_fetch(
+            "search_story_arcs_page",
+            request,
+            fetch,
+            _story_arc_search_results_to_payload,
+            _story_arc_search_results_from_payload,
+        )
+
     async def get_series(self, series_provider_id: str) -> SeriesMetadata:
         request = {"series_provider_id": str(series_provider_id)}
         return await self._get_or_fetch(
@@ -166,6 +198,52 @@ class PersistentComicVineCacheProvider:
             _series_metadata_from_payload,
         )
 
+    async def get_series_batch(
+        self,
+        series_provider_ids: list[str],
+    ) -> dict[str, SeriesMetadata]:
+        """Resolve series profiles from singular cache rows, batching misses upstream."""
+        provider_ids = _ordered_provider_ids(series_provider_ids)
+        found: dict[str, SeriesMetadata] = {}
+        missing: list[str] = []
+        for provider_id in provider_ids:
+            request = {"series_provider_id": provider_id}
+            payload = await self._load_cached_payload("get_series", _cache_key(request))
+            if payload is None:
+                self._stats.misses["get_series"] += 1
+                missing.append(provider_id)
+            else:
+                self._stats.hits["get_series"] += 1
+                found[provider_id] = _series_metadata_from_payload(payload)
+
+        if missing:
+            started_at = time.monotonic()
+            batch_fetch = _declared_provider_method(self._provider, "get_series_batch")
+            if callable(batch_fetch):
+                fetched = await batch_fetch(missing)
+            else:
+                fetched = {
+                    provider_id: await self._provider.get_series(provider_id)
+                    for provider_id in missing
+                }
+            self._stats.external_calls["get_series"] += 1
+            self._stats.external_duration_ms["get_series"] += (time.monotonic() - started_at) * 1000
+            for provider_id in missing:
+                metadata = fetched.get(provider_id)
+                if metadata is None:
+                    continue
+                found[provider_id] = metadata
+                request = {"series_provider_id": provider_id}
+                await self._store_payload(
+                    "get_series",
+                    _cache_key(request),
+                    request,
+                    _series_metadata_to_payload(metadata),
+                )
+        return {
+            provider_id: found[provider_id] for provider_id in provider_ids if provider_id in found
+        }
+
     async def get_series_cached(self, series_provider_id: str) -> SeriesMetadata | None:
         """Return cached series metadata without making a provider request."""
         request = {"series_provider_id": str(series_provider_id)}
@@ -174,6 +252,18 @@ class PersistentComicVineCacheProvider:
             return None
         self._stats.hits["get_series"] += 1
         return _series_metadata_from_payload(payload)
+
+    async def refresh_series(self, series_provider_id: str) -> SeriesMetadata:
+        """Bypass a fresh cache row, then replace it with current provider data."""
+        metadata = cast("SeriesMetadata", await self._provider.get_series(series_provider_id))
+        request = {"series_provider_id": str(series_provider_id)}
+        await self._store_payload(
+            "get_series",
+            _cache_key(request),
+            request,
+            _series_metadata_to_payload(metadata),
+        )
+        return metadata
 
     async def get_issue(self, issue_provider_id: str) -> IssueMetadata:
         request = {"issue_provider_id": str(issue_provider_id)}
@@ -185,6 +275,52 @@ class PersistentComicVineCacheProvider:
             _issue_metadata_from_payload,
         )
 
+    async def get_issue_batch(
+        self,
+        issue_provider_ids: list[str],
+    ) -> dict[str, IssueMetadata]:
+        """Resolve full issue metadata from singular cache rows and one batch miss path."""
+        provider_ids = _ordered_provider_ids(issue_provider_ids)
+        found: dict[str, IssueMetadata] = {}
+        missing: list[str] = []
+        for provider_id in provider_ids:
+            request = {"issue_provider_id": provider_id}
+            payload = await self._load_cached_payload("get_issue", _cache_key(request))
+            if payload is None:
+                self._stats.misses["get_issue"] += 1
+                missing.append(provider_id)
+            else:
+                self._stats.hits["get_issue"] += 1
+                found[provider_id] = _issue_metadata_from_payload(payload)
+
+        if missing:
+            started_at = time.monotonic()
+            batch_fetch = _declared_provider_method(self._provider, "get_issue_batch")
+            if callable(batch_fetch):
+                fetched = await batch_fetch(missing)
+            else:
+                fetched = {
+                    provider_id: await self._provider.get_issue(provider_id)
+                    for provider_id in missing
+                }
+            self._stats.external_calls["get_issue"] += 1
+            self._stats.external_duration_ms["get_issue"] += (time.monotonic() - started_at) * 1000
+            for provider_id in missing:
+                metadata = fetched.get(provider_id)
+                if metadata is None:
+                    continue
+                found[provider_id] = metadata
+                request = {"issue_provider_id": provider_id}
+                await self._store_payload(
+                    "get_issue",
+                    _cache_key(request),
+                    request,
+                    _issue_metadata_to_payload(metadata),
+                )
+        return {
+            provider_id: found[provider_id] for provider_id in provider_ids if provider_id in found
+        }
+
     async def get_issues_for_series(self, series_provider_id: str) -> list[IssueSummary]:
         request = {"series_provider_id": str(series_provider_id)}
         return await self._get_or_fetch(
@@ -194,6 +330,82 @@ class PersistentComicVineCacheProvider:
             _issue_summaries_to_payload,
             _issue_summaries_from_payload,
         )
+
+    async def get_issue_catalog_batch(
+        self,
+        series_provider_ids: list[str],
+    ) -> dict[str, list[IssueSummary]]:
+        """Resolve issue catalogs from singular cache rows, batching missing volumes."""
+        provider_ids = _ordered_provider_ids(series_provider_ids)
+        found: dict[str, list[IssueSummary]] = {}
+        missing: list[str] = []
+        for provider_id in provider_ids:
+            request = {"series_provider_id": provider_id}
+            payload = await self._load_cached_payload(
+                "get_issues_for_series",
+                _cache_key(request),
+            )
+            if payload is None:
+                self._stats.misses["get_issues_for_series"] += 1
+                missing.append(provider_id)
+            else:
+                self._stats.hits["get_issues_for_series"] += 1
+                found[provider_id] = _issue_summaries_from_payload(payload)
+
+        if missing:
+            started_at = time.monotonic()
+            batch_fetch = _declared_provider_method(self._provider, "get_issue_catalog_batch")
+            if callable(batch_fetch):
+                fetched = await batch_fetch(missing)
+            else:
+                fetched = {
+                    provider_id: await self._provider.get_issues_for_series(provider_id)
+                    for provider_id in missing
+                }
+            self._stats.external_calls["get_issues_for_series"] += 1
+            self._stats.external_duration_ms["get_issues_for_series"] += (
+                time.monotonic() - started_at
+            ) * 1000
+            for provider_id in missing:
+                summaries = fetched.get(provider_id)
+                if summaries is None:
+                    continue
+                found[provider_id] = summaries
+                request = {"series_provider_id": provider_id}
+                await self._store_payload(
+                    "get_issues_for_series",
+                    _cache_key(request),
+                    request,
+                    _issue_summaries_to_payload(summaries),
+                )
+        return {
+            provider_id: found[provider_id] for provider_id in provider_ids if provider_id in found
+        }
+
+    async def refresh_issue_catalog(self, series_provider_id: str) -> list[IssueSummary]:
+        """Bypass a fresh catalog cache row, then replace it atomically."""
+        batch_fetch = _declared_provider_method(self._provider, "get_issue_catalog_batch")
+        if callable(batch_fetch):
+            summaries = cast(
+                "list[IssueSummary]",
+                (await batch_fetch([str(series_provider_id)])).get(
+                    str(series_provider_id),
+                    [],
+                ),
+            )
+        else:
+            summaries = cast(
+                "list[IssueSummary]",
+                await self._provider.get_issues_for_series(series_provider_id),
+            )
+        request = {"series_provider_id": str(series_provider_id)}
+        await self._store_payload(
+            "get_issues_for_series",
+            _cache_key(request),
+            request,
+            _issue_summaries_to_payload(summaries),
+        )
+        return summaries
 
     async def get_issues_for_series_by_numbers(
         self,
@@ -509,6 +721,10 @@ def _cache_key(request: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _ordered_provider_ids(provider_ids: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(provider_id) for provider_id in provider_ids))
+
+
 def _clear_inflight(
     inflight_key: tuple[str, str],
     completed: asyncio.Task[dict[str, Any]],
@@ -546,6 +762,23 @@ def _global_series_search_results_from_payload(
     payload: dict[str, Any],
 ) -> tuple[list[SeriesSearchResult], int]:
     items = [SeriesSearchResult(**item) for item in payload.get("items", [])]
+    return items, int(payload.get("total_results") or len(items))
+
+
+def _story_arc_search_results_to_payload(
+    results: tuple[list[StoryArcSearchResult], int],
+) -> dict[str, Any]:
+    items, total_results = results
+    return {
+        "items": [asdict(result) for result in items],
+        "total_results": int(total_results),
+    }
+
+
+def _story_arc_search_results_from_payload(
+    payload: dict[str, Any],
+) -> tuple[list[StoryArcSearchResult], int]:
+    items = [StoryArcSearchResult(**item) for item in payload.get("items", [])]
     return items, int(payload.get("total_results") or len(items))
 
 

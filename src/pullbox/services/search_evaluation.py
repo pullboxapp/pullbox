@@ -172,6 +172,9 @@ def _result_diagnostic(
         ),
         "rejection_reason": validation.rejection_reason,
     }
+    if validation.year_match_basis is not None:
+        diagnostic["year_match"] = validation.year_match
+        diagnostic["year_match_basis"] = validation.year_match_basis
     if query_provenance is not None:
         query = query_provenance.get(release_provenance_key(validation.release))
         if query:

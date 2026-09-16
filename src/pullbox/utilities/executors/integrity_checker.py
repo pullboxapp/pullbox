@@ -117,6 +117,7 @@ class IntegrityCheckerExecutor(JobExecutor):
             payload = {
                 "library_file_id": library_file.id,
                 "library_root_path": root_path,
+                "storage_mode": library_file.storage_mode.value,
             }
             tracked_files[library_file.file_path] = payload
             library_items.append(
@@ -124,6 +125,7 @@ class IntegrityCheckerExecutor(JobExecutor):
                     "file_path": library_file.file_path,
                     "library_file_id": library_file.id,
                     "library_root_path": root_path,
+                    "storage_mode": library_file.storage_mode.value,
                 }
             )
 
@@ -184,6 +186,9 @@ class IntegrityCheckerExecutor(JobExecutor):
                         path,
                         Path(library_root_path),
                     )
+                storage_mode = tracked.get("storage_mode")
+                if isinstance(storage_mode, str):
+                    item["storage_mode"] = storage_mode
             items.append(item)
         return items
 
@@ -255,6 +260,9 @@ class IntegrityCheckerExecutor(JobExecutor):
                     "operation": "check",
                     "library_file_id": library_file_id,
                 }
+                storage_mode = raw_item.get("storage_mode")
+                if isinstance(storage_mode, str):
+                    item["storage_mode"] = storage_mode
                 library_root_path = raw_item.get("library_root_path")
                 if isinstance(library_root_path, str) and library_root_path:
                     item["trash_relative_path"] = _relative_trash_path(
@@ -296,6 +304,7 @@ class IntegrityCheckerExecutor(JobExecutor):
         file_path = str(item_data.get("file_path", "") or "")
         deep = str(job_config.get("scan_depth", "quick") or "quick") == "deep"
         corrupt_action = str(job_config.get("corrupt_action", "report") or "report").lower()
+        is_referenced = item_data.get("storage_mode") == "referenced"
 
         try:
             path = Path(file_path)
@@ -337,7 +346,7 @@ class IntegrityCheckerExecutor(JobExecutor):
                     log_entries.append(("WARNING", f"  {warning}", {}))
             else:
                 error_detail = "; ".join(result.errors) if result.errors else "Unknown error"
-                if corrupt_action == "quarantine":
+                if corrupt_action == "quarantine" and not is_referenced:
                     trash_dir = _resolve_effective_trash_directory(
                         str(job_config.get("trash_folder", "") or "")
                     )
@@ -361,6 +370,18 @@ class IntegrityCheckerExecutor(JobExecutor):
                         )
                     )
                 else:
+                    if corrupt_action == "quarantine" and is_referenced:
+                        warning_message = (
+                            "Referenced file was reported as corrupt but left unchanged on disk."
+                        )
+                        after_state["quarantine_blocked_reason"] = "referenced_file"
+                        log_entries.append(
+                            (
+                                "WARNING",
+                                "  Quarantine skipped because this is a referenced library file.",
+                                {"reason": "referenced_file"},
+                            )
+                        )
                     log_entries.append(("ERROR", f"{path.name}: CORRUPT — {error_detail}", {}))
                     log_entries.append(("ERROR", f"  Path: {file_path}", {}))
                     log_entries.append(
@@ -483,6 +504,8 @@ class IntegrityCheckerExecutor(JobExecutor):
             "has_comicinfo": bool(library_file.has_comicinfo),
             "issue_id": library_file.issue_id,
             "library_root_id": library_file.library_root_id,
+            "storage_mode": str(library_file.storage_mode),
+            "source_signature": dict(library_file.source_signature or {}),
         }
 
     @staticmethod
@@ -599,7 +622,12 @@ class IntegrityCheckerExecutor(JobExecutor):
         processed: ProcessedItem,
     ) -> ApplyResult:
         from pullbox.models.issue import Issue, IssueStatus
-        from pullbox.models.library import FileFormat, LibraryFile, MatchConfidence
+        from pullbox.models.library import (
+            FileFormat,
+            LibraryFile,
+            LibraryFileStorageMode,
+            MatchConfidence,
+        )
 
         if processed.result != ItemResult.COMPLETED:
             return ApplyResult()
@@ -643,6 +671,10 @@ class IntegrityCheckerExecutor(JobExecutor):
             "has_comicinfo": bool(library_file_snapshot.get("has_comicinfo")),
             "issue_id": library_file_snapshot.get("issue_id"),
             "library_root_id": library_file_snapshot.get("library_root_id"),
+            "storage_mode": LibraryFileStorageMode(
+                str(library_file_snapshot.get("storage_mode") or "managed")
+            ),
+            "source_signature": dict(library_file_snapshot.get("source_signature") or {}),
         }
         if library_file is None:
             session.add(

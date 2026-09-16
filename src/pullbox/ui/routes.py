@@ -49,6 +49,7 @@ from pullbox.ui import (
     series_detail_routes,
     series_routes,
     settings_routes,
+    story_arc_routes,
     system_routes,
     utilities_routes,
     whats_new_routes,
@@ -560,6 +561,12 @@ import_progress_state = import_routes.import_progress_state
 import_review_partial = import_routes.import_review_partial
 import_series_reconcile = import_routes.import_series_reconcile
 import_results_partial = import_routes.import_results_partial
+import_clean_library_panel = import_routes.import_clean_library_panel
+import_misplaced_source_cleanup_files_partial = (
+    import_routes.import_misplaced_source_cleanup_files_partial
+)
+import_misplaced_source_cleanup_preview = import_routes.import_misplaced_source_cleanup_preview
+import_misplaced_source_cleanup_apply = import_routes.import_misplaced_source_cleanup_apply
 import_series_details_partial = import_routes.import_series_details_partial
 import_conflicts_partial = import_routes.import_conflicts_partial
 import_log_panel = import_routes.import_log_panel
@@ -762,6 +769,16 @@ reading_routes.configure_reading_routes(
 router.include_router(reading_routes.router)
 
 reading_workspace = reading_routes.reading_workspace
+
+
+story_arc_routes.configure_story_arc_routes(
+    get_templates=lambda: templates,
+    build_context=_ctx,
+)
+router.include_router(story_arc_routes.router)
+
+story_arc_list = story_arc_routes.story_arc_list
+story_arc_detail = story_arc_routes.story_arc_detail
 
 
 router.include_router(series_routes.htmx_router)

@@ -9,8 +9,15 @@ from typing import TYPE_CHECKING
 import pytest
 from sqlalchemy import select
 
+from pullbox.core.exceptions import ValidationError
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series, SeriesStatus
 from pullbox.services import db_check_service
@@ -318,6 +325,51 @@ async def test_build_referential_findings_reports_repairable_path_and_root_issue
 
 
 @pytest.mark.asyncio
+async def test_root_id_repairs_reject_targets_that_do_not_contain_the_record_path(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    first_path = tmp_path / "first"
+    second_path = tmp_path / "second"
+    series_path = first_path / "Series"
+    file_path = series_path / "Series 001.cbz"
+    series_path.mkdir(parents=True)
+    second_path.mkdir()
+    file_path.write_bytes(b"comic")
+    first = LibraryRoot(name="First", path=str(first_path), enabled=True)
+    second = LibraryRoot(name="Second", path=str(second_path), enabled=True)
+    series = _series(title="Series", path=str(series_path))
+    db_session.add_all([first, second, series])
+    await db_session.flush()
+    issue = _issue(series_id=series.id)
+    db_session.add(issue)
+    await db_session.flush()
+    library_file = _library_file(
+        file_path=file_path,
+        issue_id=issue.id,
+        library_root_id=first.id,
+    )
+    db_session.add(library_file)
+    await db_session.flush()
+
+    with pytest.raises(ValidationError, match="does not contain"):
+        await repair_series_root_id(
+            db_session,
+            series_id=series.id,
+            target_root_id=second.id,
+        )
+    with pytest.raises(ValidationError, match="does not contain"):
+        await repair_library_file_root_id(
+            db_session,
+            library_file_id=library_file.id,
+            target_root_id=second.id,
+        )
+
+    assert series.library_root_id is None
+    assert library_file.library_root_id == first.id
+
+
+@pytest.mark.asyncio
 async def test_register_stale_library_file_resolves_formats_roots_series_and_issues(
     db_session: AsyncSession,
     tmp_path: Path,
@@ -414,8 +466,102 @@ async def test_register_stale_library_file_resolves_formats_roots_series_and_iss
     by_name = {row.file_name: row for row in rows}
     assert by_name[exact_file.name].issue_id == exact_issue_id
     assert by_name[exact_file.name].match_confidence == MatchConfidence.HIGH
+    assert by_name[exact_file.name].storage_mode is LibraryFileStorageMode.REFERENCED
+    assert by_name[exact_file.name].source_signature["resolved_path"] == str(exact_file.resolve())
     assert by_name[fallback_file.name].issue_id is None
     assert by_name[fallback_file.name].match_confidence == MatchConfidence.LOW
+    assert by_name[fallback_file.name].storage_mode is LibraryFileStorageMode.REFERENCED
+
+
+@pytest.mark.asyncio
+async def test_register_stale_library_file_refuses_managed_only_root(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "managed-only"
+    series_path = root_path / "Batman"
+    series_path.mkdir(parents=True)
+    comic = series_path / "Batman 001.cbz"
+    comic.write_bytes(b"user-created file")
+    root = LibraryRoot(
+        name="Managed only",
+        path=str(root_path),
+        enabled=True,
+        allow_referenced_registrations=False,
+        allow_managed_writes=True,
+    )
+    db_session.add(root)
+    await db_session.flush()
+    db_session.add(_series(title="Batman", library_root_id=root.id, path=str(series_path)))
+    await db_session.flush()
+
+    finding = await register_stale_library_file(db_session, file_path_str=str(comic))
+
+    assert finding is not None
+    assert "referenced registrations" in finding["reason"]
+    assert await db_session.scalar(select(LibraryFile.id)) is None
+
+
+@pytest.mark.asyncio
+async def test_repair_series_path_preserves_split_file_root_associations(
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    old_root_path = tmp_path / "old-root"
+    target_root_path = tmp_path / "target-root"
+    archive_root_path = tmp_path / "archive-root"
+    old_series_path = old_root_path / "Batman"
+    target_series_path = target_root_path / "Batman"
+    archive_series_path = archive_root_path / "Batman"
+    for path in (old_series_path, target_series_path, archive_series_path):
+        path.mkdir(parents=True)
+    moved_file = target_series_path / "Batman 001.cbz"
+    archived_file = archive_series_path / "Batman 002.cbz"
+    moved_file.write_bytes(b"moved")
+    archived_file.write_bytes(b"archive")
+
+    roots = [
+        LibraryRoot(name="Old", path=str(old_root_path), enabled=True),
+        LibraryRoot(name="Target", path=str(target_root_path), enabled=True),
+        LibraryRoot(name="Archive", path=str(archive_root_path), enabled=True),
+    ]
+    db_session.add_all(roots)
+    await db_session.flush()
+    series = _series(
+        title="Batman",
+        library_root_id=roots[0].id,
+        path=str(old_series_path),
+    )
+    db_session.add(series)
+    await db_session.flush()
+    issues = [_issue(series_id=series.id, number=1), _issue(series_id=series.id, number=2)]
+    db_session.add_all(issues)
+    await db_session.flush()
+    moved = _library_file(
+        file_path=old_series_path / moved_file.name,
+        issue_id=issues[0].id,
+        library_root_id=roots[0].id,
+    )
+    archived = _library_file(
+        file_path=archived_file,
+        issue_id=issues[1].id,
+        library_root_id=roots[2].id,
+    )
+    db_session.add_all([moved, archived])
+    await db_session.flush()
+
+    await repair_series_path(
+        db_session,
+        series_id=series.id,
+        target_path=str(target_series_path),
+    )
+
+    assert series.path == str(target_series_path)
+    assert series.library_root_id == roots[1].id
+    assert moved.file_path == str(moved_file)
+    assert moved.library_root_id == roots[1].id
+    assert archived.file_path == str(archived_file)
+    assert archived.library_root_id == roots[2].id
 
 
 @pytest.mark.asyncio

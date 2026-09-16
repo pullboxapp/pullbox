@@ -252,6 +252,42 @@ async def test_manual_run_defers_while_import_is_protected(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("trigger_type", ["scheduled", "manual"])
+async def test_story_arc_sync_runs_through_import_protection(
+    monkeypatch,
+    trigger_type: str,
+) -> None:
+    """The import-owned placement drain must be the narrow scheduler exception."""
+    monkeypatch.setattr(
+        "pullbox.core.scheduler.get_settings",
+        lambda: type("Settings", (), {"db_url": "sqlite+aiosqlite:///:memory:"})(),
+    )
+    protection_check = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "pullbox.core.scheduler.has_active_import_scheduler_protection",
+        protection_check,
+    )
+    scheduler = PullboxScheduler()
+    scheduler._persist_task_stat = AsyncMock()  # type: ignore[method-assign]
+    called = False
+
+    async def _story_arc_sync() -> None:
+        nonlocal called
+        called = True
+
+    wrapped = scheduler._wrap_task(
+        _story_arc_sync,
+        "sync_story_arc_placements",
+        trigger_type=trigger_type,
+    )
+    await wrapped()
+
+    assert called is True
+    protection_check.assert_not_awaited()
+    assert scheduler._task_stats["sync_story_arc_placements"].last_status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_running_task_is_exposed_in_scheduler_rows() -> None:
     """A currently executing task should surface as running in scheduled task rows."""
     _task_registry.clear()

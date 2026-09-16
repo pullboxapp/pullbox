@@ -26,6 +26,15 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services.import_counters import job_stats
+from pullbox.services.import_deferred_recovery_execution import (
+    cancel_deferred_preparation,
+    prepare_deferred_recovery,
+)
+from pullbox.services.import_job_execution_progress import (
+    reconcile_durable_import_execution_counters,
+)
+from pullbox.services.import_library_adoption import prepare_clean_library_import
 from pullbox.services.import_workflow_state import (
     emit_progress,
     import_control_state_for_job,
@@ -45,6 +54,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _COMPAT_QUEUE_MAXSIZE = 200
+_BULK_SAFETY_REMATCH_PAGE_SIZE = 25
 
 _import_progress_queues: dict[int, asyncio.Queue[ImportProgressEvent]] = {}
 _latest_import_progress_events: dict[int, ImportProgressEvent] = {}
@@ -84,6 +94,7 @@ _TERMINAL_STATES = frozenset(
     }
 )
 _STARTUP_RECOVERY_PAUSE_REASON = "startup_recovery"
+_STARTUP_RECOVERY_DISPATCH_PENDING = "startup_recovery_dispatch_pending"
 _RECOVERED_SCAN_PHASE_BY_STATUS = {
     ImportJobStatus.SCANNING: "scanning",
     ImportJobStatus.ANALYZING: "analyzing",
@@ -196,6 +207,8 @@ async def _emit_terminal_event_for_job(
     job = await session.get(ImportJob, job_id)
     if job is None:
         return None
+    if job.status not in _TERMINAL_STATES:
+        return await _publish_current_snapshot_event_for_job(session, job_id)
 
     terminal_mode = snapshot_mode_for_job(job)
     terminal_phase = "done"
@@ -245,25 +258,16 @@ async def _emit_terminal_event_for_job(
         "error_message": job.error_message,
         "control_state": import_control_state_for_job(job),
     }
+    payload.update(job_stats(job))
     snapshot = dict(job.progress_snapshot or {})
     for field_name in (
-        "scan_total_files",
-        "scan_total_dirs",
-        "series_found",
-        "series_duplicate",
-        "series_matched",
-        "series_no_match",
-        "series_new",
-        "series_imported",
-        "series_failed",
-        "total_files_found",
-        "total_files_matched",
-        "total_files_duplicate",
-        "total_files_already_owned",
-        "total_files_conflict",
-        "total_files_no_match",
-        "total_files_imported",
-        "total_files_failed",
+        "story_arc_placements_total",
+        "story_arc_placements_queued",
+        "story_arc_placements_running",
+        "story_arc_placements_retry_wait",
+        "story_arc_placements_failed",
+        "story_arc_placements_completed",
+        "story_arc_placements_cancelled",
         "review_summary",
         "scan_started_at",
         "import_started_at",
@@ -329,6 +333,13 @@ async def _publish_current_snapshot_event_for_job(
             "current_file_progress_unit": snapshot.get("current_file_progress_unit"),
             "current_series": snapshot.get("current_series") or snapshot.get("current_series_name"),
             "estimated_seconds_remaining": snapshot.get("estimated_seconds_remaining"),
+            "story_arc_placements_total": snapshot.get("story_arc_placements_total"),
+            "story_arc_placements_queued": snapshot.get("story_arc_placements_queued"),
+            "story_arc_placements_running": snapshot.get("story_arc_placements_running"),
+            "story_arc_placements_retry_wait": snapshot.get("story_arc_placements_retry_wait"),
+            "story_arc_placements_failed": snapshot.get("story_arc_placements_failed"),
+            "story_arc_placements_completed": snapshot.get("story_arc_placements_completed"),
+            "story_arc_placements_cancelled": snapshot.get("story_arc_placements_cancelled"),
             "error_message": job.error_message,
             "control_state": import_control_state_for_job(job),
         }
@@ -354,6 +365,60 @@ def _should_schedule_comicinfo_enrichment(result: Any) -> bool:
     return getattr(result, "schedule_comicinfo_enrichment", False) is True
 
 
+def _should_schedule_story_arc_sync(result: Any) -> bool:
+    """Return True only for a committed import-owned placement batch."""
+    return getattr(result, "schedule_story_arc_sync", False) is True
+
+
+def _rollback_waits_for_story_arc(result: Any) -> bool:
+    """Return True only for the explicit cooperative rollback deferral signal."""
+    return result is False
+
+
+async def publish_story_arc_import_updates(
+    job_ids: tuple[int, ...],
+    *,
+    completed_job_ids: tuple[int, ...] = (),
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    """Publish reconciled import state and start post-commit completion work."""
+    factory = session_factory or get_session_factory()
+    completed = frozenset(completed_job_ids)
+    completed_for_dispatch = False
+    for job_id in dict.fromkeys(job_ids):
+        async with factory() as session:
+            job = await session.get(ImportJob, job_id)
+            if job is None:
+                continue
+            service: Any | None = None
+            followup_pending = bool(
+                job_id in completed
+                and job.status is ImportJobStatus.COMPLETED
+                and job.story_arc_placement_followup_pending
+            )
+            if followup_pending:
+                service = await _build_import_service(session)
+                await session.commit()
+                service.schedule_comicinfo_enrichment(factory, job_id=job_id)
+
+            terminal_status = await _emit_terminal_event_for_job(session, job_id)
+            if followup_pending and terminal_status is ImportJobStatus.COMPLETED:
+                refreshed = await session.get(ImportJob, job_id)
+                if refreshed is not None:
+                    snapshot = dict(refreshed.progress_snapshot or {})
+                    snapshot["story_arc_placement_followup_pending"] = False
+                    refreshed.progress_snapshot = snapshot
+                    refreshed.story_arc_placement_followup_pending = False
+            await session.commit()
+            completed_for_dispatch = completed_for_dispatch or (
+                terminal_status is ImportJobStatus.COMPLETED
+            )
+            if terminal_status in _TERMINAL_STATES:
+                purge_import_runtime_state(job_id)
+    if completed_for_dispatch and _import_runner is not None:
+        await _import_runner.request_recovered_dispatch()
+
+
 class ImportRunner:
     """Single-import durable runner with startup recovery and broadcast progress."""
 
@@ -362,6 +427,7 @@ class ImportRunner:
         self._lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
         self._active_job_id: int | None = None
+        self._dispatch_recovered_requested = False
 
     async def recover_and_dispatch(self) -> int:
         """Recover interrupted imports and resume any runnable job."""
@@ -385,40 +451,66 @@ class ImportRunner:
         """Run a rollback for the given import job."""
         await self._start_if_idle(job_id)
 
+    async def request_recovered_dispatch(self) -> None:
+        """Resume the next startup-recovered job once the runner is idle."""
+        await self._dispatch_recovered_job()
+
     async def _dispatch_recovered_job(self) -> None:
+        async with self._lock:
+            if self._worker_task is not None and not self._worker_task.done():
+                self._dispatch_recovered_requested = True
+                return
+            self._dispatch_recovered_requested = False
+            job_id = await self._resume_next_recovered_job()
+            if job_id is not None:
+                self._start_worker_locked(job_id)
+
+    async def _resume_next_recovered_job(self) -> int | None:
+        """Restore and return the oldest runnable startup-recovered job."""
         async with self._session_factory() as session:
+            stalled_job_id = await session.scalar(
+                sa_select(ImportJob.id)
+                .where(ImportJob.status == ImportJobStatus.STALLED)
+                .order_by(ImportJob.created_at.asc(), ImportJob.id.asc())
+                .limit(1)
+            )
+            if stalled_job_id is not None:
+                logger.info(
+                    "import_recovered_dispatch_blocked_by_stalled_job",
+                    job_id=int(stalled_job_id),
+                )
+                return None
             result = await session.execute(
                 sa_select(ImportJob)
                 .where(
                     ImportJob.status.in_(
                         {
-                            ImportJobStatus.SCANNING,
-                            ImportJobStatus.ANALYZING,
-                            ImportJobStatus.MATCHING,
-                            ImportJobStatus.FILE_MATCHING,
-                            ImportJobStatus.IMPORTING,
                             ImportJobStatus.ROLLING_BACK,
                             ImportJobStatus.PAUSED,
                         }
                     )
                 )
-                .order_by(ImportJob.created_at.asc())
+                .order_by(ImportJob.created_at.asc(), ImportJob.id.asc())
             )
-            job_id: int | None = None
             for job in result.scalars().all():
                 if job.status == ImportJobStatus.PAUSED:
                     if not _is_startup_recovered_pause(job):
                         continue
                     _resume_startup_recovered_job(job)
-                    job_id = job.id
                     await session.commit()
-                    logger.info("import_recovered_job_auto_resumed", job_id=job_id)
-                    break
-
-                job_id = job.id
-                break
-        if job_id is not None:
-            await self._start_if_idle(job_id)
+                    logger.info("import_recovered_job_auto_resumed", job_id=job.id)
+                    return int(job.id)
+                if not _is_startup_recovered_rollback(job):
+                    continue
+                snapshot = dict(job.progress_snapshot or {})
+                snapshot.pop(_STARTUP_RECOVERY_DISPATCH_PENDING, None)
+                snapshot.pop("recovered_status", None)
+                snapshot.pop("recovered_at", None)
+                job.progress_snapshot = snapshot
+                await session.commit()
+                logger.info("import_recovered_rollback_auto_resumed", job_id=job.id)
+                return int(job.id)
+        return None
 
     async def _start_if_idle(self, job_id: int) -> None:
         async with self._lock:
@@ -431,9 +523,28 @@ class ImportRunner:
                     )
                 return
 
-            self._active_job_id = job_id
-            self._worker_task = asyncio.create_task(self._run_job(job_id))
-            self._worker_task.add_done_callback(self._on_worker_done)
+            self._start_worker_locked(job_id)
+
+    def _start_worker_locked(self, job_id: int) -> None:
+        """Start one serial worker while the runner lock is held."""
+        self._active_job_id = job_id
+        self._worker_task = asyncio.create_task(self._run_job_sequence(job_id))
+        self._worker_task.add_done_callback(self._on_worker_done)
+
+    async def _run_job_sequence(self, job_id: int) -> None:
+        """Drain recovered jobs serially while each predecessor reaches an idle state."""
+        current_job_id: int | None = job_id
+        while current_job_id is not None:
+            self._active_job_id = current_job_id
+            await self._run_job(current_job_id)
+            if not await self._job_is_terminal_or_deleted(current_job_id):
+                return
+            current_job_id = await self._resume_next_recovered_job()
+
+    async def _job_is_terminal_or_deleted(self, job_id: int) -> bool:
+        async with self._session_factory() as session:
+            job = await session.get(ImportJob, job_id)
+            return job is None or job.status in _TERMINAL_STATES
 
     def _on_worker_done(self, task: asyncio.Task[None]) -> None:
         try:
@@ -441,8 +552,12 @@ class ImportRunner:
         except Exception:
             logger.exception("import_runner_worker_failed")
         finally:
-            self._worker_task = None
-            self._active_job_id = None
+            if self._worker_task is task:
+                self._worker_task = None
+                self._active_job_id = None
+                if self._dispatch_recovered_requested:
+                    self._dispatch_recovered_requested = False
+                    _fire_and_forget(self._dispatch_recovered_job())
 
     async def _mark_paused(self, session: AsyncSession, job_id: int) -> None:
         job = await session.get(ImportJob, job_id)
@@ -461,6 +576,9 @@ class ImportRunner:
     async def _finalize_cancel(self, session: AsyncSession, job_id: int) -> None:
         job = await session.get(ImportJob, job_id)
         if job is None:
+            return
+        if await cancel_deferred_preparation(session, job):
+            purge_import_runtime_state(job_id)
             return
         if job.import_started_at is None:
             await session.delete(job)
@@ -585,24 +703,42 @@ class ImportRunner:
                     )
                     await session.commit()
                 elif job.status == ImportJobStatus.IMPORTING:
+                    if dict(job.progress_snapshot or {}).get("deferred_recovery"):
+                        await prepare_deferred_recovery(
+                            session,
+                            job_id,
+                            metadata_service=service._metadata_service,
+                            progress_callback=progress_callback,
+                        )
+                    if job.status != ImportJobStatus.IMPORTING:
+                        return
+                    await prepare_clean_library_import(
+                        session,
+                        job_id,
+                        progress_callback=progress_callback,
+                    )
                     result = await service.run_import(
                         session,
                         job_id,
                         progress_callback=progress_callback,
                     )
                     await session.commit()
+                    if _should_schedule_story_arc_sync(result):
+                        service.schedule_story_arc_sync()
                     if _should_schedule_comicinfo_enrichment(result):
                         service.schedule_comicinfo_enrichment(
                             self._session_factory,
                             job_id=job_id,
                         )
                 elif job.status == ImportJobStatus.ROLLING_BACK:
-                    await service.rollback_import(
+                    rollback_result = await service.rollback_import(
                         session,
                         job_id,
                         progress_callback=progress_callback,
                     )
                     await session.commit()
+                    if _rollback_waits_for_story_arc(rollback_result):
+                        service.schedule_story_arc_sync()
                 else:
                     logger.info("import_runner_noop", job_id=job_id, status=job.status.value)
                     return
@@ -614,12 +750,14 @@ class ImportRunner:
                 await self._finalize_cancel(session, job_id)
                 job = await session.get(ImportJob, job_id)
                 if job is not None and job.status == ImportJobStatus.ROLLING_BACK:
-                    await service.rollback_import(
+                    rollback_result = await service.rollback_import(
                         session,
                         job_id,
                         progress_callback=progress_callback,
                     )
                     await session.commit()
+                    if _rollback_waits_for_story_arc(rollback_result):
+                        service.schedule_story_arc_sync()
             except Exception as exc:
                 logger.exception("import_runner_job_failed", job_id=job_id)
                 await session.rollback()
@@ -663,6 +801,7 @@ async def _run_single_job_once(
         service = await _build_import_service(session)
         terminal_event_override: ImportProgressEvent | None = None
         run_import_result: Any = None
+        rollback_result: Any = None
 
         async def progress_callback(event: ImportProgressEvent) -> None:
             await _publish_progress_event(event)
@@ -686,12 +825,27 @@ async def _run_single_job_once(
                 await service.start_scan(session, job_id, progress_callback=progress_callback)
             elif job.status in {ImportJobStatus.IMPORTING, ImportJobStatus.ROLLING_BACK}:
                 if job.status == ImportJobStatus.ROLLING_BACK:
-                    await service.rollback_import(
+                    rollback_result = await service.rollback_import(
                         session,
                         job_id,
                         progress_callback=progress_callback,
                     )
                 else:
+                    if dict(job.progress_snapshot or {}).get("deferred_recovery"):
+                        await prepare_deferred_recovery(
+                            session,
+                            job_id,
+                            metadata_service=service._metadata_service,
+                            progress_callback=progress_callback,
+                        )
+                    if job.status != ImportJobStatus.IMPORTING:
+                        await session.commit()
+                        return
+                    await prepare_clean_library_import(
+                        session,
+                        job_id,
+                        progress_callback=progress_callback,
+                    )
                     run_import_result = await service.run_import(
                         session,
                         job_id,
@@ -702,6 +856,10 @@ async def _run_single_job_once(
                 return
 
             await session.commit()
+            if _should_schedule_story_arc_sync(run_import_result):
+                service.schedule_story_arc_sync()
+            if _rollback_waits_for_story_arc(rollback_result):
+                service.schedule_story_arc_sync()
             if _should_schedule_comicinfo_enrichment(run_import_result):
                 service.schedule_comicinfo_enrichment(session_factory, job_id=job_id)
         except JobPausedError:
@@ -714,7 +872,9 @@ async def _run_single_job_once(
             await session.rollback()
             job = await session.get(ImportJob, job_id)
             if job is not None:
-                if job.import_started_at is None:
+                if await cancel_deferred_preparation(session, job):
+                    purge_import_runtime_state(job_id)
+                elif job.import_started_at is None:
                     terminal_event_override = ImportProgressEvent(
                         job_id=job_id,
                         status=ImportJobStatus.CANCELLED,
@@ -737,12 +897,14 @@ async def _run_single_job_once(
                         status=ImportJobStatus.ROLLING_BACK,
                     )
                     await session.commit()
-                    await service.rollback_import(
+                    rollback_result = await service.rollback_import(
                         session,
                         job_id,
                         progress_callback=progress_callback,
                     )
                     await session.commit()
+                    if _rollback_waits_for_story_arc(rollback_result):
+                        service.schedule_story_arc_sync()
         except Exception:
             logger.exception("import_task_failed", job_id=job_id)
             await session.rollback()
@@ -794,6 +956,53 @@ async def run_import_series_rematch_task(job_id: int, imported_series_id: int) -
     lock = _review_rematch_locks.setdefault(job_id, asyncio.Lock())
     async with lock:
         await _run_import_series_rematch_task(job_id, imported_series_id)
+
+
+async def run_import_safety_bulk_rematch_task(job_id: int) -> None:
+    """Rematch safety-approved series from one job in bounded keyset pages."""
+    lock = _review_rematch_locks.setdefault(job_id, asyncio.Lock())
+    async with lock:
+        session_factory = get_session_factory()
+        cursor = 0
+        while True:
+            async with session_factory() as session:
+                job = await session.get(ImportJob, job_id)
+                if (
+                    job is None
+                    or job.status != ImportJobStatus.REVIEW
+                    or job.control_request != ImportControlRequest.NONE
+                ):
+                    return
+                series_ids = list(
+                    (
+                        await session.execute(
+                            sa_select(ImportedSeries.id)
+                            .join(
+                                ImportedFile,
+                                ImportedFile.import_series_id == ImportedSeries.id,
+                            )
+                            .where(
+                                ImportedSeries.import_job_id == job_id,
+                                ImportedSeries.id > cursor,
+                                ImportedSeries.diagnostics["rematch_pending"]
+                                .as_boolean()
+                                .is_(True),
+                                ImportedFile.import_job_id == job_id,
+                                ImportedFile.status == ImportedFileStatus.SAFETY_APPROVED,
+                            )
+                            .distinct()
+                            .order_by(ImportedSeries.id)
+                            .limit(_BULK_SAFETY_REMATCH_PAGE_SIZE)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            if not series_ids:
+                return
+            for imported_series_id in series_ids:
+                await _run_import_series_rematch_task(job_id, imported_series_id)
+                cursor = imported_series_id
 
 
 async def _run_import_series_rematch_task(job_id: int, imported_series_id: int) -> None:
@@ -881,6 +1090,12 @@ def trigger_import_series_rematch(job_id: int, imported_series_id: int) -> None:
     )
 
 
+def trigger_import_safety_bulk_rematch(job_id: int) -> None:
+    """Schedule one bounded worker for all pending safety rematches in a job."""
+    _fire_and_forget(run_import_safety_bulk_rematch_task(job_id))
+    logger.info("import_safety_bulk_rematch_triggered", job_id=job_id)
+
+
 async def recover_stuck_import_jobs(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
@@ -908,12 +1123,53 @@ async def recover_stuck_import_jobs(
                 )
                 for item in series_result.scalars().all():
                     item.status = ImportSeriesStatus.CONFIRMED
+                await reconcile_durable_import_execution_counters(session, job)
+
+            if (
+                job.control_request is ImportControlRequest.CANCEL
+                or previous_status is ImportJobStatus.CANCELLING
+            ):
+                job.status = ImportJobStatus.ROLLING_BACK
+                job.control_request = ImportControlRequest.CANCEL
+                job.error_message = job.error_message or "Import cancelled by user."
+                job.story_arc_placement_followup_pending = False
+                job.progress_snapshot = initialize_progress_snapshot(
+                    job,
+                    mode="rollback",
+                    phase="queued",
+                    progress=0,
+                    message="Cancelling import and rolling back changes...",
+                    status=ImportJobStatus.ROLLING_BACK,
+                )
+                recovered_snapshot = dict(job.progress_snapshot or {})
+                recovered_snapshot[_STARTUP_RECOVERY_DISPATCH_PENDING] = True
+                recovered_snapshot["recovered_status"] = previous_status.value
+                recovered_snapshot["recovered_at"] = datetime.now(UTC).isoformat()
+                job.progress_snapshot = recovered_snapshot
+                logger.warning(
+                    "import_cancel_recovered_on_startup",
+                    job_id=job.id,
+                    previous_status=previous_status.value,
+                )
+                continue
+
+            if (
+                job.control_request is ImportControlRequest.PAUSE
+                or previous_status is ImportJobStatus.PAUSING
+            ):
+                sync_paused_job_state(job)
+                logger.warning(
+                    "import_pause_recovered_on_startup",
+                    job_id=job.id,
+                    previous_status=previous_status.value,
+                )
+                continue
 
             snapshot = dict(job.progress_snapshot or {})
             if previous_status == ImportJobStatus.ROLLING_BACK:
                 snapshot["phase"] = "rollback"
             elif previous_status == ImportJobStatus.IMPORTING:
-                snapshot["phase"] = "importing"
+                snapshot.setdefault("phase", "importing")
                 snapshot["mode"] = "import"
             else:
                 snapshot["mode"] = "scan"
@@ -946,6 +1202,12 @@ def _is_startup_recovered_pause(job: ImportJob) -> bool:
     """Return True when a paused job was paused by startup recovery, not the user."""
     snapshot = dict(job.progress_snapshot or {})
     return snapshot.get("pause_reason") == _STARTUP_RECOVERY_PAUSE_REASON
+
+
+def _is_startup_recovered_rollback(job: ImportJob) -> bool:
+    """Return True only for rollback work durably queued during startup recovery."""
+    snapshot = dict(job.progress_snapshot or {})
+    return snapshot.get(_STARTUP_RECOVERY_DISPATCH_PENDING) is True
 
 
 def _resume_startup_recovered_job(job: ImportJob) -> None:

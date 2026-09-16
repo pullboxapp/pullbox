@@ -29,8 +29,8 @@ async def import_orphaned_redirect(
     tab: str = Query("all"),
     page: int = Query(1, ge=1),
 ) -> Response:
-    """Redirect legacy unmatched-series URLs to the unified Import workspace."""
-    params = {"tab": "unmatched", "view": "dismissed" if tab == "dismissed" else "all"}
+    """Redirect legacy unmatched-series URLs to the Follow-up workspace."""
+    params = {"tab": "follow-up", "view": "dismissed" if tab == "dismissed" else "all"}
     if page != 1:
         params["page"] = str(page)
     return RedirectResponse(url=f"/import?{urlencode(params)}", status_code=307)

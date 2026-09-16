@@ -29,6 +29,11 @@ async def search_with_retry(
     year: int | None,
 ) -> list[SeriesSearchResult]:
     """Search ComicVine with retry on transient provider failures."""
+    if getattr(provider, "is_local_catalog", False) is True:
+        results, _ = await provider.search_series_globally(
+            query, max_results=_IMPORT_GLOBAL_SEARCH_LIMIT
+        )
+        return list(results)
     last_provider_error: str | None = None
     saw_successful_response = False
     for attempt in range(_MAX_RETRIES):

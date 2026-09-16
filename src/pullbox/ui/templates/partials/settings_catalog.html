@@ -1,0 +1,75 @@
+{% call section_card(title="Local Comic Vine catalog", eyebrow="Offline search and imports", title_style="plain", body_class="p-5") %}
+  <div x-data="catalogSettings()" class="space-y-4">
+    <p class="text-sm text-pb-text-sec">Download a verified catalog to your Pullbox server for local series searches and import matching. Daily updates download only changes when possible. Full metadata refreshes still use your Comic Vine API key.</p>
+    <p class="text-sm text-pb-text-sec">Catalog files stay separate from your library database. A download never moves or imports comics.</p>
+    <div role="status" aria-live="polite" aria-atomic="true" class="text-sm text-pb-text">
+      <span x-text="label"></span>
+      <span x-show="state.source_cutoff_at" x-cloak> · Data through <span x-text="date(state.source_cutoff_at)"></span></span>
+    </div>
+    <div x-show="busy" x-cloak class="space-y-2">
+      <label for="catalog-download-progress" class="text-sm text-pb-text-sec" x-text="progressLabel"></label>
+      <progress id="catalog-download-progress" class="w-full" :max="state.bytes_total || 1" :value="state.phase === 'downloading' && state.bytes_total ? state.bytes_downloaded : null"></progress>
+      <p class="text-xs text-pb-text-dim">You can leave this page while Pullbox works.</p>
+    </div>
+    <p x-show="error || state.error" x-cloak role="alert" class="text-sm text-pb-danger" x-text="error || state.error"></p>
+    <dl x-show="state.installed_version" x-cloak class="text-xs text-pb-text-sec space-y-1">
+      <div><dt class="inline">Installed version: </dt><dd class="inline font-mono" x-text="state.installed_version"></dd></div>
+      <div><dt class="inline">Catalog size: </dt><dd class="inline" x-text="size(state.catalog_size_bytes)"></dd></div>
+      <div><dt class="inline">Last checked: </dt><dd class="inline" x-text="date(state.last_checked_at)"></dd></div>
+    </dl>
+    <label class="flex items-center gap-2 text-sm text-pb-text-sec">
+      <input type="checkbox" :checked="state.automatic_updates" @change="preferences($event.target.checked)" :disabled="!loaded || saving" class="rounded">
+      Check for catalog updates daily after the first download
+    </label>
+    <button type="button" class="btn-primary" @click="download()" :disabled="!loaded || busy" x-text="busy ? 'Catalog update in progress' : state.installed_version ? 'Check for catalog updates' : state.requested ? 'Retry catalog download' : 'Download catalog'"></button>
+    <p x-show="state.installed_version" x-cloak class="text-xs text-pb-text-dim">Local searches do not automatically fall back to online searches when no match is found.</p>
+  </div>
+{% endcall %}
+<script>
+function catalogSettings() {
+  return {
+    state: {phase: 'not_downloaded', automatic_updates: true}, loaded: false,
+    saving: false, queued: false, error: '', timer: null, polling: false,
+    get busy() { return this.queued || ['checking','downloading','verifying','decompressing','installing'].includes(this.state.phase); },
+    get label() {
+      if (this.queued) return 'Waiting for the catalog task';
+      return ({not_downloaded:'Catalog not downloaded',current:'Local catalog ready',checking:'Checking for updates',downloading:'Downloading catalog',verifying:'Verifying catalog',decompressing:'Unpacking catalog',installing:'Installing verified catalog',interrupted:'Download interrupted — ready to resume',failed:this.state.installed_version ? 'Update failed; the installed catalog is still available' : 'Catalog download failed'})[this.state.phase] || 'Loading catalog status';
+    },
+    get progressLabel() { return this.state.phase === 'downloading' ? this.size(this.state.bytes_downloaded) + ' of ' + this.size(this.state.bytes_total) : this.label; },
+    size(n) { return ((n || 0) / 1048576).toFixed(1) + ' MiB'; },
+    date(value) { return value ? new Date(value).toLocaleString() : 'Not yet'; },
+    async init() {
+      await this.refresh();
+      this.timer = setInterval(() => { if (window.pullboxLiveUpdatesEnabled()) this.refresh(); }, 4000);
+    },
+    destroy() { clearInterval(this.timer); },
+    async refresh() {
+      if (this.polling) return;
+      this.polling = true;
+      try {
+        const response = await fetch('/api/v1/catalog');
+        if (!response.ok) throw new Error('Catalog status could not be loaded.');
+        const state = await response.json();
+        if (state.phase !== this.state.phase || state.last_checked_at !== this.state.last_checked_at || state.attempt_started_at !== this.state.attempt_started_at) this.queued = false;
+        this.state = state; this.loaded = true;
+      } catch (e) { this.error = e.message; } finally { this.polling = false; }
+    },
+    async download() {
+      this.queued = true; this.error = '';
+      try {
+        const response = await fetch('/api/v1/catalog/sync', {method:'POST',headers:{'X-CSRF-Token':{{ csrf_token | tojson }}}});
+        if (!response.ok) throw new Error('Catalog update could not be queued. Please retry.');
+        await this.refresh();
+      } catch (e) { this.error = e.message; this.queued = false; }
+    },
+    async preferences(enabled) {
+      this.saving = true; this.error = '';
+      try {
+        const response = await fetch('/api/v1/catalog/preferences', {method:'PATCH',headers:{'Content-Type':'application/json','X-CSRF-Token':{{ csrf_token | tojson }}},body:JSON.stringify({automatic_updates:enabled})});
+        if (!response.ok) throw new Error('Catalog preference could not be saved.');
+        this.state = await response.json();
+      } catch (e) { this.error = e.message; } finally { this.saving = false; }
+    }
+  };
+}
+</script>
