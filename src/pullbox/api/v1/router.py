@@ -27,6 +27,7 @@ from pullbox.api.v1.library import router as library_router
 from pullbox.api.v1.reader import router as reader_router
 from pullbox.api.v1.search import router as search_router
 from pullbox.api.v1.series import router as series_router
+from pullbox.api.v1.series_rescan import router as series_rescan_router
 from pullbox.api.v1.story_arc_placements import router as story_arc_placements_router
 from pullbox.api.v1.story_arcs import router as story_arcs_router
 from pullbox.api.v1.suggestions import router as suggestions_router
@@ -42,6 +43,7 @@ v1_router.include_router(audit_router)
 v1_router.include_router(blocklist_router)
 v1_router.include_router(auth_router)
 v1_router.include_router(series_router)
+v1_router.include_router(series_rescan_router)
 v1_router.include_router(story_arcs_router)
 v1_router.include_router(story_arc_placements_router)
 v1_router.include_router(issues_router)

@@ -10,6 +10,7 @@
   class="series-domain-page space-y-4"
   data-testid="series-detail-page"
   hx-history="false"
+  @series-files-rescanned.window="refreshIssuesPanel()"
   x-data="seriesDetailPage({
     seriesId: {{ series.id }},
     csrfToken: '{{ csrf_token }}',

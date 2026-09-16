@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from pullbox.models.operation_progress import (
@@ -79,6 +80,14 @@ def build_utility_operation_update(
         visibility = OperationProgressVisibility.QUIET
 
     message = job.error_message or job_state.value.replace("_", " ").title()
+    detail_url = "/utilities?tab=queue"
+    if job.job_type == JobType.SERIES_RESCAN:
+        config = json.loads(job.config)
+        detail_url = f"/series/{int(config['series_id'])}?rescan={job.id}"
+        if job_state == JobState.RUNNING and total is None:
+            message = "Inspecting local files and checking for duplicates"
+        elif job_state == JobState.COMPLETED:
+            message = f"Rescan complete. {job.warning_count or 0} files need review."
     return OperationProgressUpdate(
         operation_type=OperationProgressType.UTILITY,
         operation_key=job.id,
@@ -89,7 +98,7 @@ def build_utility_operation_update(
         title=job.display_name,
         message=message,
         source_label="Utilities",
-        detail_url="/utilities?tab=queue",
+        detail_url=detail_url,
         visibility=visibility,
         tone=tone,
         attention_required=attention,

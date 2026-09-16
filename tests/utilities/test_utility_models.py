@@ -426,7 +426,8 @@ class TestEnums:
         assert JobType.INTEGRITY_CHECK == "integrity_check"
         assert JobType.LIBRARY_PERMISSIONS == "library_permissions"
         assert JobType.ROLLBACK == "rollback"
-        assert len(JobType) == 8
+        assert len(JobType) == 9
+        assert JobType.SERIES_RESCAN == "series_rescan"
 
     def test_job_state_values(self) -> None:
         assert JobState.QUEUED == "QUEUED"

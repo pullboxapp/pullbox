@@ -97,3 +97,11 @@ def test_release_site_suffix_is_not_a_different_comic() -> None:
         _file("X-Men 026 (2015).cbz", 2013, "X-Men", 2),
     ]
     assert classify_conflict_group(files) == "duplicate_copy"
+
+
+def test_scan_label_is_not_a_different_comic_but_a_subtitle_still_is() -> None:
+    first = _file("Batman 001 (2016).cbz", 2016, "Batman", 1)
+    scan = _file("Batman 001 (2016) (scan).cbz", 2016, "Batman", 2)
+    assert classify_conflict_group([first, scan]) == "duplicate_copy"
+    subtitle = _file("Batman Finale 001 (2016).cbz", 2016, "Batman", 3)
+    assert classify_conflict_group([first, subtitle]) == "series_mismatch"

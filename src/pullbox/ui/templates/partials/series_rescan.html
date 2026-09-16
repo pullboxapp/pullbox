@@ -1,0 +1,45 @@
+<div x-data="seriesRescan({{ series.id }})" class="flex items-center gap-2">
+  <button type="button" class="btn-ghost" data-testid="series-action-rescan"
+          @click="start()" :disabled="{{ 'false' if series.path else 'true' }} || busy || (report.job && report.job.active)"
+          {% if not series.path %}disabled title="This series has no configured folder"{% endif %}>Rescan folder</button>
+  <button type="button" class="btn-ghost" x-show="report.job" x-cloak @click="showReport()">Rescan results</button>
+  <template x-teleport="body">
+    <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window="if (open) closeReport()" @keydown.tab.window="trapFocus($event)">
+      <div class="modal-backdrop" @click="closeReport()"></div>
+      <section class="modal-panel max-w-2xl max-h-[90vh]" role="dialog" aria-modal="true" aria-labelledby="series-rescan-title" tabindex="-1" x-ref="dialog">
+        <div class="modal-header"><h2 id="series-rescan-title" class="modal-title">Rescan folder</h2></div>
+        <div class="modal-body space-y-4 p-5">
+          <p class="text-sm text-pb-text-sec">Checks this series folder and already-linked files. Proven matches are registered in place. Files are never moved, renamed, converted, or deleted.</p>
+          <p class="text-sm text-pb-error" x-show="error || (report.job && report.job.error)" x-text="error || (report.job && report.job.error)" role="alert"></p>
+          <div x-show="report.job" class="space-y-3">
+            <p class="text-sm text-pb-text" aria-live="polite" x-text="report.job && (report.job.state === 'COMPLETED' ? 'Rescan complete' : report.job.state === 'RUNNING' && report.job.percent === null ? 'Inspecting local files and checking for duplicates...' : report.job.state)"></p>
+            <div class="app-progress">
+              <div class="app-progress-track">
+                <div class="app-progress-fill app-progress-fill--interactive" :class="{ 'is-indeterminate': report.job && report.job.percent === null }"
+                     :style="report.job && report.job.percent !== null ? 'width: ' + report.job.percent + '%' : ''"
+                     role="progressbar" aria-label="Series rescan progress" aria-valuemin="0" aria-valuemax="100"
+                     :aria-valuenow="report.job ? report.job.percent : null"></div>
+              </div>
+              <span class="app-progress-value" x-text="report.job && report.job.percent !== null ? Math.round(report.job.percent) + '%' : ''"></span>
+            </div>
+            <p class="text-sm text-pb-text-sec" x-text="(report.counts.added || 0) + ' added · ' + (report.counts.repaired || 0) + ' repaired · ' + (report.counts.unchanged || 0) + ' unchanged · ' + (report.counts.review || 0) + ' need review'"></p>
+            <p class="text-xs text-pb-text-dim" x-show="report.job && report.job.active">You can close this window. The rescan continues in Background activity.</p>
+          </div>
+          <template x-for="item in report.items" :key="item.id">
+            <article class="rounded-lg border border-pb-border p-3 space-y-2">
+              <p class="break-all text-sm font-medium text-pb-text" x-text="item.path"></p>
+              <p class="text-sm text-pb-text-sec" x-text="item.reason"></p>
+              <button type="button" class="btn-ghost" @click="reviewFile(item.path)" :disabled="reviewing || (report.job && report.job.active)">Review in Import</button>
+            </article>
+          </template>
+          <div class="flex items-center justify-between gap-2" x-show="report.pages > 1">
+            <button type="button" class="btn-ghost" @click="loadReport(report.page - 1)" :disabled="loading || report.page <= 1">Previous</button>
+            <span class="text-sm text-pb-text-sec" x-text="report.page + ' / ' + report.pages"></span>
+            <button type="button" class="btn-ghost" @click="loadReport(report.page + 1)" :disabled="loading || report.page >= report.pages">Next</button>
+          </div>
+        </div>
+        <div class="modal-footer flex justify-end"><button type="button" class="btn-primary" @click="closeReport()">Close</button></div>
+      </section>
+    </div>
+  </template>
+</div>

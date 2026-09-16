@@ -14,6 +14,7 @@ _RELEASE_SITE_SUFFIX = re.compile(
     r"\s+(?:www\.)?[\w-]+\.(?:com|org|net|info)(?=\.(?:cbz|cbr|cb7|pdf|epub)$)",
     re.IGNORECASE,
 )
+_SCAN_LABEL_SUFFIX = re.compile(r"\s+\(scan\)(?=\.(?:cbz|cbr|cb7|cbt|pdf|epub)$)", re.IGNORECASE)
 
 
 def review_filename_identity(
@@ -24,7 +25,8 @@ def review_filename_identity(
     Undated filenames can contain copy counters or issue ordinals that the release
     parser folds into the title. Retain their saved identity rather than guessing.
     """
-    parsed = parse_release_title(_RELEASE_SITE_SUFFIX.sub("", file_name or ""))
+    name = _SCAN_LABEL_SUFFIX.sub("", _RELEASE_SITE_SUFFIX.sub("", file_name or ""))
+    parsed = parse_release_title(name)
     if parsed is None or parsed.year is None:
         return NameMatcher.normalize(parsed_series or ""), parsed_year
     return (

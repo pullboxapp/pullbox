@@ -27,6 +27,7 @@ class JobType(enum.StrEnum):
     MASS_CONVERT_PIPELINE = "mass_convert_pipeline"
     MASS_RENAME = "mass_rename"
     DB_CHECK_CLEANUP = "db_check_cleanup"
+    SERIES_RESCAN = "series_rescan"
     EXPORT_LIBRARY = "export_library"
     INTEGRITY_CHECK = "integrity_check"
     LIBRARY_PERMISSIONS = "library_permissions"
