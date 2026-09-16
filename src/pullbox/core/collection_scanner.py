@@ -1308,12 +1308,11 @@ class CollectionScanner:
             if conflicts:
                 metadata_diagnostics["source_layout_conflicts"] = conflicts
 
-            parsed = metadata.parsed_release
             issue_number_raw: str | None = None
             if layout_issue_number_raw is not None:
                 issue_number_raw = layout_issue_number_raw
-            elif parsed is not None and parsed.issue_number is not None:
-                issue_number_raw = format_issue_number(parsed.issue_number)
+            elif metadata.issue_number_text is not None:
+                issue_number_raw = metadata.issue_number_text
             elif parsed_issue_number is not None:
                 issue_number_raw = format_issue_number(parsed_issue_number)
 

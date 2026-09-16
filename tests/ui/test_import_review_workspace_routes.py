@@ -87,6 +87,8 @@ async def test_existing_conflict_link_uses_immediate_choices(authenticated_clien
     assert 'data-testid="import-review-keep-selected-copy"' in response.text
     assert "Save conflict choices" not in response.text
     assert "pendingResolutions" not in response.text
+    assert "It's a different comic" in response.text
+    assert "Across this import: 2 issue groups involving 4 files in 2 series." in response.text
 
 
 async def test_duplicate_files_remain_individually_selectable(authenticated_client, sec_db):
@@ -138,3 +140,36 @@ async def test_legacy_conflicts_do_not_suggest_keeping_different_comics(
     assert 'data-import-review-series-row="7"' in response.text
     assert "Do these files belong to the same comic?" in response.text
     assert "Suggested copy" not in response.text
+
+
+async def test_legacy_mylar_parent_title_does_not_hide_conflicting_filename(
+    authenticated_client, sec_db
+):
+    from sqlalchemy import select
+
+    from pullbox.models.import_job import ImportedFile, ImportedFileStatus
+
+    job_id = await _seed_import_review_job(sec_db)
+    async with sec_db() as session:
+        files = list(
+            await session.scalars(
+                select(ImportedFile)
+                .where(
+                    ImportedFile.import_series_id == 7,
+                    ImportedFile.status == ImportedFileStatus.CONFLICT,
+                )
+                .order_by(ImportedFile.id)
+            )
+        )
+        for file in files:
+            file.parsed_series = "New Avengers"
+            file.parsed_year = 2004
+        files[0].file_name = "New Avengers 001 (2005).cbr"
+        files[1].file_name = "New Avengers Finale 01 (2010).cbr"
+        await session.commit()
+    response = await authenticated_client.get(
+        f"/import/{job_id}/review-partial?status=decide&reason=same_comic_review"
+    )
+    assert 'data-import-review-series-row="7"' in response.text
+    assert "Suggested copy" not in response.text
+    assert "It's a different comic" in response.text

@@ -35,7 +35,7 @@
         <p class="font-medium text-pb-text">{{ item.cv_title or item.raw_series_name }}</p>
         <div class="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-pb-text-sec">
           <span>{{ item.cv_year or item.raw_year or 'Year unknown' }}{% if item.cv_publisher or item.raw_publisher %} &middot; {{ item.cv_publisher or item.raw_publisher }}{% endif %}</span>
-          {% if item.source_folder %}<span class="font-mono text-pb-text-dim [overflow-wrap:anywhere]">{{ item.source_folder.replace('\\', '/').rstrip('/').split('/')[-1] }}</span>{% endif %}
+          {% if item.source_folder %}<span class="font-mono text-pb-text-sec [overflow-wrap:anywhere]">{{ item.source_folder.replace('\\', '/').rstrip('/').split('/')[-1] }}</span>{% endif %}
         </div>
       </td>
       <td>{% if ready_table %}<span class="text-pb-success">{{ row.ready_files }} ready</span>{% if row.attention_files %}<p class="mt-1 text-xs text-pb-text-dim">{{ row.attention_files }} need review</p>{% endif %}

@@ -18,6 +18,41 @@ from pullbox.models.import_job import (
 )
 
 
+async def test_conflict_summary_distinguishes_groups_files_and_series(db_session):
+    from pullbox.ui.import_review_summary import load_import_review_summary
+
+    job = ImportJob(
+        source_path="/fixture", source_type=ImportSourceType.MYLAR3, status=ImportJobStatus.REVIEW
+    )
+    db_session.add(job)
+    await db_session.flush()
+    series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Annuals",
+        status=ImportSeriesStatus.MATCHED,
+        files_conflict=4,
+    )
+    db_session.add(series)
+    await db_session.flush()
+    for i in range(4):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                file_name=f"Annual {i}.cbz",
+                file_path=f"/fixture/Annual {i}.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.CONFLICT,
+                conflict_group_id=i // 2 + 1,
+            )
+        )
+    await db_session.flush()
+    summary = await load_import_review_summary(db_session, job)
+    assert summary["series_file_conflicts"] == 1
+    assert summary["files_conflict"] == 4
+    assert summary.get("file_conflict_groups") == 2
+
+
 @pytest.mark.asyncio
 async def test_load_import_review_summary_uses_persisted_review_rows(
     db_session,

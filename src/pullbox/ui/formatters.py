@@ -10,6 +10,7 @@ from markupsafe import Markup
 from pullbox.core.duration_format import format_duration_ms_label
 from pullbox.core.html_sanitizer import sanitize_rich_html
 from pullbox.core.issue_numbers import format_issue_number as _format_issue_number
+from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.models.series import SeriesStatus
 
 
@@ -18,8 +19,10 @@ def sanitize_rich_html_filter(value: str | None) -> Markup:
     return Markup(sanitize_rich_html(value))  # nosec
 
 
-def format_issue_number(value: float) -> str:
-    """Format issue number, stripping unnecessary trailing zeros."""
+def format_issue_number(value: float, exact_text: str | None = None) -> str:
+    """Prefer the exact catalog designation over its numeric compatibility value."""
+    if exact_text:
+        return normalize_issue_number_text(exact_text)
     return _format_issue_number(value)
 
 

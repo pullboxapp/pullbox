@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
+import pytest
 from sqlalchemy import event, select
 
 from pullbox.core.collection_scanner import DiscoveredFile, DiscoveredSeries
@@ -32,6 +34,61 @@ async def _create_job(session: AsyncSession) -> ImportJob:
     session.add(job)
     await session.flush()
     return job
+
+
+@pytest.mark.parametrize(
+    "source_type,diagnostics,reason",
+    [
+        (
+            ImportSourceType.MYLAR3,
+            {
+                "mylar3_folder_scope_conflict": {
+                    "expected_series": "Alpha Flight",
+                    "parsed_series": "AlphaFlight SpecialEdition",
+                }
+            },
+            "mylar3_folder_scope_conflict",
+        ),
+        (
+            ImportSourceType.FILESYSTEM,
+            {
+                "source_layout": {
+                    "review_required": True,
+                    "review_reason": "selected_layout_no_match",
+                }
+            },
+            "selected_layout_no_match",
+        ),
+    ],
+)
+async def test_scan_time_unmatched_files_emit_detail_events(
+    db_session, source_type, diagnostics, reason
+):
+    from pullbox.services import import_scan_materialization as materialization
+
+    job = await _create_job(db_session)
+    job.source_type = source_type
+    file = _discovered_file(name="AlphaFlight-SpecialEdition.cbz")
+    file.metadata_diagnostics = diagnostics
+    discovered = DiscoveredSeries(
+        raw_series_name="Alpha Flight",
+        raw_year=1983,
+        raw_publisher=None,
+        file_count=1,
+        sample_paths=[],
+        source_folder="/fixture",
+        source_folder_relative=".",
+        files=[file],
+    )
+    log = AsyncMock()
+    await materialization.materialize_discovered_scan_results(
+        db_session, job, [discovered], log_event=log
+    )
+    assert log.await_count == 1
+    call = log.call_args
+    assert call.args[3] == "import_file_no_match_detail"
+    assert call.kwargs["file_name"] == file.file_name
+    assert call.kwargs["reason"] == reason
 
 
 async def test_materialization_batches_file_inserts_without_losing_review_rows(db_session):

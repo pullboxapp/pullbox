@@ -15,7 +15,7 @@
     <button type="button" onclick="Alpine.$data(document.getElementById('matching-queue-app')).matchToIssue({{ issue.id }})"
             class="selection-card flex w-full items-start justify-between gap-4 text-left">
       <div class="min-w-0">
-        <p class="text-sm font-semibold text-pb-text">#{{ issue.issue_number|issue_num }}</p>
+        <p class="text-sm font-semibold text-pb-text">#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</p>
         <p class="mt-1 text-xs leading-5 text-pb-text-sec">
           {% if issue.title %}{{ issue.title }}{% else %}No issue title saved{% endif %}
         </p>

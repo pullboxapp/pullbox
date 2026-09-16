@@ -9,7 +9,7 @@
   <div class="overflow-x-auto rounded-lg border border-pb-border">
     <table class="downloads-table text-xs"><thead><tr><th>Issue</th><th>Title</th><th><span class="sr-only">Action</span></th></tr></thead><tbody>
       {% for issue in issues %}<tr>
-        <td class="font-semibold">#{{ issue.issue_number|issue_num }}</td><td>{{ issue.title or 'Untitled issue' }}</td>
+        <td class="font-semibold">#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</td><td>{{ issue.title or 'Untitled issue' }}</td>
         <td><form hx-boost="false" @submit.prevent="submit($el)">
           <input type="hidden" name="token" value="{{ token }}"><input type="hidden" name="cv_id" value="{{ series.provider_id }}"><input type="hidden" name="issue_cv_id" value="{{ issue.provider_id }}">
           <button type="submit" class="btn-primary btn-sm whitespace-nowrap" :disabled="selecting" data-testid="import-review-use-issue">Use this</button>

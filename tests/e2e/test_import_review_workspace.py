@@ -2,12 +2,70 @@
 
 from pathlib import Path
 
+import pytest
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from playwright.sync_api import expect
 
 from pullbox.ui.formatters import format_issue_number
 from tests.e2e.pages.import_page import ImportPage
 from tests.e2e.test_import_collection_page import TestImportCollectionTab as _ImportBaseline
+
+
+@pytest.fixture(scope="module")
+def copy_review_job(seeded_server):
+    from pullbox.database import get_session_factory
+    from tests.e2e.conftest import _run_async_blocking
+    from tests.ui.test_import_collection_shell_ui_routes import _seed_import_review_job
+
+    return _run_async_blocking(_seed_import_review_job(get_session_factory()))
+
+
+def test_copy_choice_can_open_file_reassignment_without_losing_review(
+    authed_page, seeded_server, copy_review_job, browser_name
+):
+    job_id = copy_review_job
+    page = authed_page
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
+    page.get_by_test_id("import-review-lane-confirm").click()
+    expect(page.get_by_test_id("import-review-conflict-counts")).to_have_text(
+        "Across this import: 2 issue groups involving 4 files in 2 series."
+    )
+    row = page.locator("[data-import-review-series-row]").filter(has_text="Review Series 7")
+    expander = row.locator("td:last-child > [data-import-review-expand-action]")
+    expander.click()
+    expect(row.get_by_test_id("import-review-reassign-file")).to_have_count(2)
+    page.evaluate("""() => {
+        window.copyReviewShell = document.getElementById('import-step-review-shell');
+        window.copyReviewUrl = location.href;
+    }""")
+    trigger = row.get_by_test_id("import-review-reassign-file").first
+    trigger.click()
+    modal = page.get_by_test_id("import-collection-cv-search-modal")
+    expect(modal).to_be_visible()
+    expect(modal).to_contain_text("Choose the correct series for this file")
+    expect(modal).to_contain_text("Other files and source folders will not change.")
+    modal.get_by_role("button", name="Close search dialog").click()
+    expect(modal).not_to_be_visible()
+    expect(expander).to_have_attribute("aria-expanded", "true")
+    assert page.evaluate("""() =>
+        window.copyReviewShell === document.getElementById('import-step-review-shell') &&
+        window.copyReviewUrl === location.href
+    """)
+    output = Path(__file__).resolve().parents[2] / "test-results/review-workspace"
+    output.mkdir(parents=True, exist_ok=True)
+    page.add_script_tag(path="node_modules/axe-core/axe.min.js")
+    for theme in ("dark", "light"):
+        page.evaluate("theme => applyTheme(theme)", theme)
+        row.screenshot(path=str(output / f"{browser_name}-copy-choices-{theme}.png"))
+        assert (
+            page.evaluate("""async () => (await axe.run('#import-step-review-shell', {
+            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa'] }
+        })).violations.map(v => ({ id: v.id, nodes: v.nodes.map(n => ({ target: n.target, summary: n.failureSummary })) }))""")
+            == []
+        )
+    assert errors == []
 
 
 def test_series_file_inventory_preserves_review_and_focus(authed_page, seeded_server, browser_name):

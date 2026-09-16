@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
-from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
+from pullbox.core.issue_numbers import (
+    normalize_issue_number_queries,
+    normalize_issue_number_text,
+    parse_issue_number_text,
+)
 from pullbox.core.naming import detect_issue_type
 from pullbox.providers.base import (
     IssueMetadata,
@@ -203,9 +207,9 @@ def _parse_issue_number_fields(value: str | None) -> tuple[float, str | None]:
         return 0.0, None
 
 
-def _format_issue_number_filter(value: float) -> str:
+def _format_issue_number_filter(value: float | str) -> str:
     """Format an issue number for ComicVine's exact issue_number filter."""
-    return format_issue_number(value)
+    return normalize_issue_number_text(value)
 
 
 def _safe_int(value: Any) -> int | None:
@@ -950,7 +954,7 @@ class ComicVineProvider:
     async def get_issues_for_series_by_numbers(
         self,
         series_provider_id: str,
-        issue_numbers: list[float],
+        issue_numbers: Sequence[float | str],
     ) -> list[IssueSummary]:
         """Get selected issues for a series by issue number."""
         log = logger.bind(
@@ -960,7 +964,7 @@ class ComicVineProvider:
         log.debug("comicvine_get_issues_for_series_by_numbers")
 
         summaries: list[IssueSummary] = []
-        seen_numbers = sorted({float(number) for number in issue_numbers})
+        seen_numbers = normalize_issue_number_queries(issue_numbers)
         for issue_number in seen_numbers:
             params: dict[str, Any] = {
                 "filter": (

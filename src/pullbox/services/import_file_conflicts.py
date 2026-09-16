@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pullbox.core.name_matcher import NameMatcher
+from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus
 from pullbox.services.import_duplicates import confidence_rank
+
+_RELEASE_SITE_SUFFIX = re.compile(
+    r"\s+(?:www\.)?[\w-]+\.(?:com|org|net|info)(?=\.(?:cbz|cbr|cb7|pdf|epub)$)",
+    re.IGNORECASE,
+)
+
+
+def review_filename_identity(
+    file_name: str, parsed_series: str | None, parsed_year: int | None
+) -> tuple[str, int | None]:
+    """Use dated filename evidence, not inherited Mylar series-start metadata.
+
+    Undated filenames can contain copy counters or issue ordinals that the release
+    parser folds into the title. Retain their saved identity rather than guessing.
+    """
+    parsed = parse_release_title(_RELEASE_SITE_SUFFIX.sub("", file_name or ""))
+    if parsed is None or parsed.year is None:
+        return NameMatcher.normalize(parsed_series or ""), parsed_year
+    return (
+        NameMatcher.normalize(parsed.series_name or parsed_series or ""),
+        parsed.year if parsed.year is not None else parsed_year,
+    )
 
 
 def classify_conflict_group(files: list[ImportedFile]) -> str:
@@ -14,10 +38,17 @@ def classify_conflict_group(files: list[ImportedFile]) -> str:
     hashes = {file.content_hash for file in files}
     if len(files) > 1 and len(hashes) == 1 and None not in hashes and "" not in hashes:
         return "identical_copy"
-    names = {NameMatcher.normalize(file.parsed_series) for file in files if file.parsed_series}
-    if len(names) > 1:
+    identities = [
+        review_filename_identity(file.file_name, file.parsed_series, file.parsed_year)
+        for file in files
+    ]
+    names = {title for title, _ in identities if title}
+    saved_names = {
+        NameMatcher.normalize(file.parsed_series) for file in files if file.parsed_series
+    }
+    if len(names) > 1 or len(saved_names) > 1:
         return "series_mismatch"
-    years = {file.parsed_year for file in files if file.parsed_year}
+    years = {year for _, year in identities if year}
     if len(years) > 1:
         return "year_disagreement"
     return "duplicate_copy"

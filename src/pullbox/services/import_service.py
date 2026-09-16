@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -380,7 +381,9 @@ class ImportService(
                 reset_scan_artifacts=self._reset_scan_artifacts,
                 resolve_import_file_extensions=self._resolve_import_file_extensions,
                 validate_discovered_files_safety=self._validate_discovered_files_safety,
-                materialize_discovered_scan_results=materialize_discovered_scan_results,
+                materialize_discovered_scan_results=partial(
+                    materialize_discovered_scan_results, log_event=self._log_event
+                ),
                 deduplicate_series=self._deduplicate_series,
                 run_matching=self._run_matching,
                 consolidate_logical_series_groups=self._consolidate_logical_series_groups,

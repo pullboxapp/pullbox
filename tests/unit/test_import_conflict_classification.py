@@ -52,3 +52,48 @@ def test_normal_copies_keep_the_existing_recommendation() -> None:
     assert classify_conflict_group(files) == "duplicate_copy"
     detect_conflicts(files, 0)
     assert sum(bool(file.is_preferred) for file in files) == 1
+
+
+def test_mylar_parent_identity_does_not_hide_different_file_titles() -> None:
+    files = [
+        _file("New Avengers 001 (2005).cbr", 2004, "New Avengers", 1),
+        _file("New Avengers Finale 01 (2010).cbr", 2004, "New Avengers", 2),
+    ]
+    files[1].file_size = 900
+    assert classify_conflict_group(files) == "series_mismatch"
+    detect_conflicts(files, 0)
+    assert not any(file.is_preferred for file in files)
+
+
+def test_mylar_start_year_does_not_hide_file_year_disagreement() -> None:
+    files = [
+        _file("Excalibur 002 (1988).cbz", 1988, "Excalibur", 1),
+        _file("Excalibur 002 (1994).cbz", 1988, "Excalibur", 2),
+    ]
+    assert classify_conflict_group(files) == "year_disagreement"
+
+
+def test_series_start_year_is_not_compared_to_annual_publication_year() -> None:
+    files = [
+        _file("Justice League Dark Annual 002 (2014).cbz", 2012, "Justice League Dark Annual", 1),
+        _file("Justice League Dark Annual 002 (2014).cbr", 2014, "Justice League Dark Annual", 2),
+    ]
+    assert classify_conflict_group(files) == "duplicate_copy"
+
+
+def test_identical_bytes_still_prove_a_duplicate_despite_filename_drift() -> None:
+    files = [
+        _file("Excalibur 002 (1988).cbz", 1988, "Excalibur", 1),
+        _file("Excalibur 002 (1994).cbz", 1988, "Excalibur", 2),
+    ]
+    for file in files:
+        file.content_hash = "same-content-digest"
+    assert classify_conflict_group(files) == "identical_copy"
+
+
+def test_release_site_suffix_is_not_a_different_comic() -> None:
+    files = [
+        _file("X-Men 026 (2015) GetComics.INFO.cbz", 2013, "X-Men", 1),
+        _file("X-Men 026 (2015).cbz", 2013, "X-Men", 2),
+    ]
+    assert classify_conflict_group(files) == "duplicate_copy"

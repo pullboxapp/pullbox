@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+from pullbox.services.import_file_conflicts import review_filename_identity
 from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
 
 if TYPE_CHECKING:
@@ -203,7 +204,7 @@ async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, Revi
 
 async def _identity_conflict_series_ids(session: AsyncSession, job_id: int) -> set[int]:
     """Older jobs have no conflict class; interpret saved fields without rewriting them."""
-    groups: dict[int, tuple[set[int], set[str], set[int], set[str | None]]] = {}
+    groups: dict[int, tuple[set[int], set[str], set[str], set[int], set[str | None]]] = {}
     records = await session.execute(
         select(
             ImportedFile.conflict_group_id,
@@ -211,6 +212,7 @@ async def _identity_conflict_series_ids(session: AsyncSession, job_id: int) -> s
             ImportedFile.parsed_series,
             ImportedFile.parsed_year,
             ImportedFile.content_hash,
+            ImportedFile.file_name,
         )
         .where(
             ImportedFile.import_job_id == job_id,
@@ -219,17 +221,22 @@ async def _identity_conflict_series_ids(session: AsyncSession, job_id: int) -> s
         )
         .distinct()
     )
-    for group_id, series_id, title, year, content_hash in records:
-        series, titles, years, hashes = groups.setdefault(group_id, (set(), set(), set(), set()))
+    for group_id, series_id, title, year, content_hash, file_name in records:
+        series, titles, saved_titles, years, hashes = groups.setdefault(
+            group_id, (set(), set(), set(), set(), set())
+        )
         series.add(series_id)
         if title:
-            titles.add(NameMatcher.normalize(title))
-        if year:
-            years.add(year)
+            saved_titles.add(NameMatcher.normalize(title))
+        file_title, file_year = review_filename_identity(file_name, title, year)
+        if file_title:
+            titles.add(file_title)
+        if file_year:
+            years.add(file_year)
         hashes.add(content_hash)
     result: set[int] = set()
-    for series, titles, years, hashes in groups.values():
+    for series, titles, saved_titles, years, hashes in groups.values():
         identical = len(hashes) == 1 and None not in hashes and "" not in hashes
-        if not identical and (len(titles) > 1 or len(years) > 1):
+        if not identical and (len(titles) > 1 or len(saved_titles) > 1 or len(years) > 1):
             result.update(series)
     return result

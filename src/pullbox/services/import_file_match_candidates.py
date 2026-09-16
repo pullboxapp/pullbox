@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.release_parser import parse_release_title
 from pullbox.core.source_metadata import volume_subtitle_hint_from_filename
 from pullbox.core.type_semantics import (
@@ -181,8 +182,14 @@ def select_file_match_candidate(
     exact_issue_number = candidate_issue_number_text(imp_file)
     if exact_issue_number is not None and target_index.exact_number_map:
         exact_target = target_index.exact_number_map.get(exact_issue_number)
-        if exact_target is None:
+        if exact_target is None and (
+            target_index.existing_series is not None
+            or exact_issue_number != format_issue_number(candidate_issue_number(imp_file) or 0.0)
+        ):
             return None
+    else:
+        exact_target = None
+    if exact_target is not None:
         matched_issue_id, matched_issue_cv_id, has_library_file, matched_issue, issue_title = (
             exact_target
         )
@@ -191,6 +198,9 @@ def select_file_match_candidate(
             if matched_issue is not None
             else candidate_issue_number(imp_file)
         )
+        if target_issue_number is None:
+            return None
+        provisional_type = target_index.provisional_exact_types.get(exact_issue_number or "")
         return FileMatchCandidate(
             matched_issue_id=matched_issue_id,
             matched_issue_cv_id=matched_issue_cv_id,
@@ -199,7 +209,10 @@ def select_file_match_candidate(
             matched_issue=matched_issue,
             target_issue_title=issue_title,
             confidence="high" if series_high_confidence else "medium",
-            method="issue_number",
+            method=PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD
+            if provisional_type
+            else "issue_number",
+            synthetic_issue_type=provisional_type,
         )
 
     issue_number = candidate_issue_number(imp_file)

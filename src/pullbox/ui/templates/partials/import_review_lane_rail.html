@@ -22,9 +22,12 @@
       <span class="text-pb-text-dim">Show:</span>
       <button type="button" data-testid="import-review-reason-all" aria-pressed="{{ 'true' if not active_reason else 'false' }}" class="{{ 'text-pb-interactive underline underline-offset-4' if not active_reason else 'text-pb-text-sec hover:underline' }}" hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}&sort={{ sort }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">All &middot; {{ lane_counts[active_lane] }}</button>
       {% for key, count in reason_counts.items() if count and key != 'ready' %}
-      <button type="button" data-testid="import-review-reason-{{ key }}" aria-pressed="{{ 'true' if active_reason == key else 'false' }}" class="{{ 'text-pb-interactive underline underline-offset-4' if active_reason == key else 'text-pb-text-sec hover:underline' }}" hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}&reason={{ key }}&sort={{ sort }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">{{ filter_labels.get(key, review_reasons[key][0]) }} &middot; {{ count }}</button>
+      <button type="button" data-testid="import-review-reason-{{ key }}" aria-pressed="{{ 'true' if active_reason == key else 'false' }}" class="{{ 'text-pb-interactive underline underline-offset-4' if active_reason == key else 'text-pb-text-sec hover:underline' }}" hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}&reason={{ key }}&sort={{ sort }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">{{ filter_labels.get(key, review_reasons[key][0]) }} &middot; {{ count }} series</button>
       {% endfor %}
     </div>
+    {% endif %}
+    {% if active_review_view in ('confirm', 'decide', 'conflict_rows') and review_summary.file_conflict_groups %}
+    <p class="text-xs text-pb-text-dim" data-testid="import-review-conflict-counts">Across this import: {{ review_summary.file_conflict_groups }} issue {{ 'group' if review_summary.file_conflict_groups == 1 else 'groups' }} involving {{ review_summary.files_conflict }} files in {{ review_summary.series_file_conflicts }} series.</p>
     {% endif %}
   </div>
   {% if active_review_view == 'ready' %}

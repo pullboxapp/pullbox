@@ -19,6 +19,39 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-series-detail-u
 _EN_DASH = "\u2013"
 
 
+async def test_lettered_issues_remain_distinct_in_library_and_search_controls(
+    authenticated_client, sec_db
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.models.issue import Issue, IssueStatus
+    from pullbox.models.series import Series
+
+    async with sec_db() as session:
+        series = Series(title="Gen13", sort_title="Gen13", year_start=1996)
+        session.add(series)
+        await session.flush()
+        issues = [
+            Issue(
+                series_id=series.id,
+                issue_number=13,
+                issue_number_text=number,
+                status=IssueStatus.WANTED,
+            )
+            for number in ["13A", "13B", "13C"]
+        ]
+        session.add_all(issues)
+        await session.commit()
+        series_id, issue_id = series.id, issues[0].id
+
+    response = await authenticated_client.get(f"/series/{series_id}")
+    assert response.status_code == 200
+    for number in ["13A", "13B", "13C"]:
+        assert f"#{number}" in response.text
+        assert f'issueNum: "{number}"' in response.text.replace("&#34;", '"')
+    detail = await authenticated_client.get(f"/issues/{issue_id}")
+    assert detail.status_code == 200
+    assert "#13A" in detail.text
+
+
 def _series_monitor_control_html(html: str) -> str:
     """Return the isolated monitor toggle markup from the rendered series page."""
     start = html.index('data-testid="series-action-monitor-control"')

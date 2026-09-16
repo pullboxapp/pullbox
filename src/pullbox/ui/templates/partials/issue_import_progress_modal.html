@@ -21,7 +21,7 @@
       <div class="space-y-1">
         <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-brand">Import file</p>
         <h3 class="text-base font-semibold text-pb-text" data-testid="issue-import-modal-title">
-          Import {{ issue.series.title }} #{{ issue.issue_number|issue_num }}
+          Import {{ issue.series.title }} #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}
         </h3>
         <p class="text-xs leading-5 text-pb-text-dim">
           Keep this dialog open while Pullbox prepares, transfers, and finalizes the selected file.
@@ -38,7 +38,7 @@
           </div>
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
             <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Issue</p>
-            <p class="mt-1 text-sm font-semibold text-pb-text">#{{ issue.issue_number|issue_num }}</p>
+            <p class="mt-1 text-sm font-semibold text-pb-text">#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</p>
           </div>
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
             <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Status</p>

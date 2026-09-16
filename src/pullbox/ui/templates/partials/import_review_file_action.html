@@ -13,7 +13,7 @@
       <p class="text-sm text-pb-text-sec">{{ series.title }}{% if series.year_start %} ({{ series.year_start }}){% endif %}. Only this file's import match changes. Its source folder stays unchanged.</p>
       <input type="hidden" name="cv_id" value="{{ series.provider_id }}">
       {% set choices = namespace(options=[["", "Choose an issue"]]) %}
-      {% for issue in issues %}{% set choices.options = choices.options + [[issue.provider_id, '#' ~ (issue.issue_number|issue_num) ~ (' - ' ~ issue.title if issue.title else '')]] %}{% endfor %}
+      {% for issue in issues %}{% set choices.options = choices.options + [[issue.provider_id, '#' ~ (issue.issue_number|issue_num(issue.issue_number_text|default(none))) ~ (' - ' ~ issue.title if issue.title else '')]] %}{% endfor %}
       <label for="review-file-issue-dropdown-trigger" class="block text-sm text-pb-text">Issue</label>
       {{ dropdown_select(name="issue_cv_id", trigger_id="review-file-issue-dropdown-trigger", options=choices.options, local_model="issueId", class_name="w-full") }}
       {% else %}

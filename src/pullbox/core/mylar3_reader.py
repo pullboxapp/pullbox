@@ -1397,7 +1397,9 @@ class Mylar3Reader:
                     issue_type = IssueType(parsed.issue_type)
                 except ValueError:
                     issue_type = IssueType.ISSUE
-                issue_number_raw = format_issue_number(parsed.issue_number)
+                issue_number_raw = parsed.issue_number_text or format_issue_number(
+                    parsed.issue_number
+                )
                 if parsed_issue_number is not None:
                     metadata_signals["issue_number"] = MetadataSignal.RELEASE_TITLE.value
                 if parsed.issue_type != IssueType.ISSUE.value:

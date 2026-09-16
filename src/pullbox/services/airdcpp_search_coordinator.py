@@ -193,6 +193,7 @@ class AirDcppSearchCoordinator:
             releases,
             wanted_series=target.series_title,
             wanted_issue=target.issue_number,
+            wanted_issue_number_text=target.effective_issue_number_text,
             wanted_year=target.search_year,
             year_context=target.year_context,
             wanted_issue_type=target.issue_type,

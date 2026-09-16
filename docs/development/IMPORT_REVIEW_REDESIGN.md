@@ -99,6 +99,53 @@ passed, plus 10 Chromium/Firefox workspace checks. Real-file preview was verifie
 on the isolated 8785 lab without applying an import decision. Corrupt archive/image,
 source-change, unsafe-path, authentication and read-only Mylar-root cases are covered.
 
+### Post-Release Identity And Reporting Follow-Up
+
+September 16 changes preserve the existing import execution and completed-job
+recovery paths:
+
+- Dated filenames now inform copy-group identity instead of relying only on
+  inherited Mylar series titles and start years. Different titles or publication
+  years require a decision, not a suggested keeper. Annual copies with the same
+  publication year, identical content hashes, and trailing release-site labels
+  retain the existing duplicate behavior. Undated ambiguous filenames retain
+  their saved identity rather than treating copy counters as series names.
+- The shared file matcher protects a narrower case: an extended file title such
+  as `New Avengers Finale` cannot silently match the shorter parent title when
+  ComicInfo or strong archive-page-name evidence corroborates the extension.
+  The parent series stays identified. This is not a replacement for alternate
+  title, annual/special, or collected-volume matching, and adds no provider calls.
+- Every competing copy offers individual reassignment, even when Pullbox suggests
+  a keeper. Existing issue ownership checks and source-preservation rules remain
+  authoritative. Existing jobs are interpreted without rewriting them on display.
+- Reason filters explicitly count series. Conflict descriptions distinguish
+  issue groups, files, and affected series. Files marked unmatched while scan
+  rows are created now emit the same detail event as files rejected later during
+  matching, for both Mylar and folder-layout decisions.
+- The folder label uses the standard secondary text token so it remains readable
+  on a hovered light-theme row.
+
+Local verification (overlapping suites are not additive):
+
+- Import unit and UI regression suite: 2,147 passed.
+- Chromium/Firefox workspace suite: 14 passed, including stable review DOM,
+  file-scoped reassignment, and light/dark accessibility checks. Copy-choice
+  screenshots were also inspected.
+- Read-only replay of all 7,671 matched/conflicting records in the supplied first
+  scan flagged only the two corroborated New Avengers mismatches with the new
+  title guard. Its nine saved conflict groups classify as five copy choices,
+  two title disagreements, and two year disagreements. No database writes,
+  archive reads, provider requests, or recovery actions were performed.
+- Synthetic review projection: 20,000 series / 120,000 saved files in 0.551 seconds.
+  This measures review loading, not scan/import throughput.
+- Focused lint, formatting, strict source types, stylesheet generation and
+  whitespace checks passed. Full CI has not been rerun for this follow-up.
+
+The supplied diagnostic contains only the first scan (630 series / 7,721 files).
+The reported second scan (632 / 7,952) requires its own diagnostic before a
+cause or scan-mode parity fix can be confirmed. No count reconciliation or source
+mode changes were inferred from the first package alone.
+
 ## Boundary
 
 Step 3 becomes a decision-oriented review without replacing the import engine.
@@ -194,6 +241,29 @@ PULLBOX_REVIEW_BENCHMARK_SERIES=20000 .venv/bin/pytest \
 Initial local measurement: 20,000 series / 120,000 files, 0.499 seconds for review
 context loading. This is a synthetic saved-state benchmark, not a claim about
 scan/import throughput or full browser rendering on a production database.
+
+## Lettered Issue Identity Follow-Up
+
+Issue-number suffixes are identities, not disposable formatting. `13`, `13A`,
+`13B`, and `13C` remain distinct; case and zero padding normalize (`013a` becomes
+`13A`). The existing numeric issue column remains the compatibility/sort value.
+
+- Folder and Mylar discovery preserve the selected exact issue designation.
+- New-series issue indexes, provisional targets, targeted metadata requests,
+  per-job caches, and persistent caches retain suffixes without adding per-file
+  metadata requests. Plain numeric cache keys remain compatible.
+- Manual and automatic search use the same exact-number validation for Usenet,
+  torrents, Direct providers, and AirDC++. Artifact coverage cannot substitute
+  another suffix or the unsuffixed issue. Trusted issue-ID precedence and existing
+  collection/title matching remain unchanged.
+- Library, issue detail, search, download, intervention, and import-choice labels
+  show the exact issue number where catalog identity is available.
+
+Regression coverage includes Gen13 `13A`/`13B`/`13C`, `50X`/`50O`, `0.5`, and
+`-1`, including exact download handoff and source-preserving Mylar discovery.
+These changes do not migrate the schema, rewrite existing library files, or
+silently reassign previously imported issues. A reporter's original failed
+download still needs verification with its actual release title and logs.
 
 ## Checkpoint Evidence
 

@@ -695,6 +695,26 @@ async def test_get_issues_for_series_by_numbers_deduplicates_and_formats_filters
     ]
 
 
+async def test_targeted_issue_filters_preserve_alphabetic_suffixes() -> None:
+    provider = ComicVineProvider(api_key="targeted-issues-test-key", rate_limit=999_999)
+    request_mock = AsyncMock(
+        side_effect=[
+            {"results": [_issue_item(1301, "13A")]},
+            {"results": [_issue_item(1302, "13B")]},
+        ]
+    )
+    provider._request = request_mock  # type: ignore[method-assign]
+    try:
+        summaries = await provider.get_issues_for_series_by_numbers("97508", ["013a", "13A", "13B"])
+    finally:
+        await provider._client.aclose()
+    assert [summary.issue_number_text for summary in summaries] == ["13A", "13B"]
+    assert [call.args[1]["filter"] for call in request_mock.await_args_list] == [
+        "volume:97508,issue_number:13A",
+        "volume:97508,issue_number:13B",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_get_cover_image_returns_cdn_bytes_without_api_params() -> None:
     provider = ComicVineProvider(api_key="cover-test-key", rate_limit=999_999)

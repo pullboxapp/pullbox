@@ -308,6 +308,15 @@ async def load_import_review_summary(
     row_summary["series_conflicts_total"] = (
         row_summary["series_file_conflicts"] + series_candidate_conflicts
     )
+    row_summary["file_conflict_groups"] = int(
+        await session.scalar(
+            select(func.count(func.distinct(ImportedFile.conflict_group_id))).where(
+                ImportedFile.import_job_id == job.id,
+                ImportedFile.status == ImportedFileStatus.CONFLICT,
+            )
+        )
+        or 0
+    )
 
     active_scan_statuses = {
         ImportJobStatus.PENDING,
