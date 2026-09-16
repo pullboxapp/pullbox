@@ -26,6 +26,19 @@ ignore:
       version: 2.41-12+deb13u4+dhi0
       type: deb
 
+  # Approved by Adam Hernandez on 2026-09-15 for this exact runtime revision.
+  # Accepted risk, NOT a fix: strfmon/strfmon_l right-padding buffer overflow.
+  # Debian 13 lists this as vulnerable/no-DSA with no fixed stable package.
+  # No direct Pullbox callers were found; dependency reachability remains unproven.
+  # Re-review by 2026-09-30 or the next base refresh, whichever comes first;
+  # remove when a fixed stable package ships. All other High findings block.
+  # https://security-tracker.debian.org/tracker/CVE-2026-19499
+  - vulnerability: CVE-2026-19499
+    package:
+      name: libc6
+      version: 2.41-12+deb13u4+dhi0
+      type: deb
+
   # Renewed by Adam Hernandez on 2026-09-13 for eight exact findings in the
   # refreshed DHI runtime. These are accepted-risk exceptions, NOT fixes.
   # Keep all other High findings blocking, including other package versions.
