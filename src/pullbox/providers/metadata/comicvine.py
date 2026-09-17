@@ -765,6 +765,9 @@ class ComicVineProvider:
 
     async def get_series(self, provider_id: str) -> SeriesMetadata:
         """Get full series (volume) metadata by ComicVine volume ID."""
+        if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
+            raise ValueError("ComicVine provider IDs must be positive integers")
+        resource_id = int(provider_id)
         log = logger.bind(provider_id=provider_id)
         log.debug("comicvine_get_series")
 
@@ -775,7 +778,7 @@ class ComicVineProvider:
             ),
         }
 
-        data = await self._request(f"/volume/{_VOLUME_PREFIX}-{provider_id}/", params)
+        data = await self._request(f"/volume/{_VOLUME_PREFIX}-{resource_id}/", params)
         item: dict[str, Any] = data.get("results", {})
 
         return _series_metadata_from_item(item, fallback_provider_id=provider_id)
@@ -809,6 +812,9 @@ class ComicVineProvider:
 
     async def get_issue(self, provider_id: str) -> IssueMetadata:
         """Get full issue metadata by ComicVine issue ID."""
+        if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
+            raise ValueError("ComicVine provider IDs must be positive integers")
+        resource_id = int(provider_id)
         log = logger.bind(provider_id=provider_id)
         log.debug("comicvine_get_issue")
 
@@ -820,7 +826,7 @@ class ComicVineProvider:
             ),
         }
 
-        data = await self._request(f"/issue/{_ISSUE_PREFIX}-{provider_id}/", params)
+        data = await self._request(f"/issue/{_ISSUE_PREFIX}-{resource_id}/", params)
         item: dict[str, Any] = data.get("results", {})
 
         return _issue_metadata_from_item(item, fallback_provider_id=provider_id)

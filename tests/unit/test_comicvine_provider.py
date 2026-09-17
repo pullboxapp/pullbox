@@ -58,6 +58,39 @@ def test_rate_limit_resource_key_keeps_api_resources_independent() -> None:
     assert comicvine_module._resource_rate_key("/search/") == "search"
 
 
+@pytest.mark.parametrize("resource", ["series", "issue"])
+@pytest.mark.parametrize(
+    "provider_id",
+    [
+        "",
+        "0",
+        "-1",
+        "123/../../search",
+        "123?filter=volume:1",
+        "123#fragment",
+        "https://example.test",
+    ],
+)
+async def test_single_resource_rejects_noncanonical_id_before_request(
+    resource: str, provider_id: str
+) -> None:
+    provider = ComicVineProvider(api_key="invalid-resource-id-test", rate_limit=999_999)
+    request = AsyncMock(
+        return_value={
+            "results": _volume_item(123, "Example", 2026)
+            if resource == "series"
+            else _issue_item(123, "1")
+        }
+    )
+    provider._request = request  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ValueError, match="positive integers"):
+            await getattr(provider, f"get_{resource}")(provider_id)
+        request.assert_not_awaited()
+    finally:
+        await provider._client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_rate_coordinator_is_shared_by_api_key_and_policy() -> None:
     first = comicvine_module._rate_coordinator_for(
