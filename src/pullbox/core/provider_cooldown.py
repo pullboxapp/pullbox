@@ -13,6 +13,8 @@ from email.utils import parsedate_to_datetime
 
 def retry_after_seconds(header: str | None, *, default: float) -> float:
     """Accept seconds or an HTTP date; reject malformed and unbounded values."""
+    if not isinstance(header, str):
+        return default
     try:
         delay = float(header or "")
     except ValueError:
