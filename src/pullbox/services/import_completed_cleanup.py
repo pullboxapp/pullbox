@@ -34,7 +34,10 @@ from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.models.series import Series
 from pullbox.services.audit_service import AuditService
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
-from pullbox.services.import_deferred_recovery import load_empty_stale_series
+from pullbox.services.import_deferred_recovery import (
+    load_empty_stale_series,
+    refresh_recovered_groups,
+)
 from pullbox.services.import_known_series_recovery import load_known_series_recovery
 from pullbox.services.import_review_actions import apply_safety_allow_once_to_file
 from pullbox.services.import_review_recheck import retryable_failed_source_filters
@@ -289,12 +292,23 @@ def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[An
             )
         )
     elif action is CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES:
-        filters.extend(
-            [
-                ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
-                _safety_filter(ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT),
-                _overrideable_expression().is_(True),
-            ]
+        filters.append(
+            or_(
+                and_(
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                    _safety_filter(ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT),
+                    _overrideable_expression().is_(True),
+                ),
+                and_(
+                    ImportedFile.status == ImportedFileStatus.FAILED,
+                    ImportedFile.diagnostics["safety_block"].as_string().is_(None),
+                    _source_revalidation_category_expression()
+                    == ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT.value,
+                    ImportedFile.diagnostics["source_revalidation"]["overrideable"]
+                    .as_boolean()
+                    .is_(True),
+                ),
+            )
         )
     elif action is CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION:
         retryable_categories = [
@@ -1520,7 +1534,8 @@ async def _prepare_series_for_retry(
 
 async def _apply_known_series_recovery(session: AsyncSession, job: ImportJob) -> set[int]:
     plans = await load_known_series_recovery(session, job.id)
-    affected: set[int] = set()
+    sources: set[int] = set()
+    targets: dict[int, ImportedSeries] = {}
     for batch in batched(plans, 400):
         items = {
             item.id: item
@@ -1547,38 +1562,53 @@ async def _apply_known_series_recovery(session: AsyncSession, job: ImportJob) ->
             file = files.get(plan.file_id)
             if item is None or file is None:
                 raise ValidationError("Recovery evidence disappeared. Preview the action again.")
-            _apply_known_series_file(item, file, plan, affected)
+            sources.add(item.id)
+            target = targets.get(item.id)
+            if target is None:
+                candidate = dict(item.diagnostics or {}).get("selected_candidate")
+                candidate = candidate if isinstance(candidate, dict) else {}
+                target = ImportedSeries(
+                    import_job_id=job.id,
+                    raw_series_name=item.raw_series_name,
+                    raw_year=item.raw_year,
+                    raw_publisher=item.raw_publisher,
+                    source_folder=item.source_folder,
+                    cv_id=plan.cv_id,
+                    cv_title=item.raw_series_name,
+                    cv_year=item.raw_year,
+                    cv_issue_count=candidate.get("issue_count"),
+                    cv_match_method=plan.match_method,
+                    cv_match_score=1.0,
+                    status=ImportSeriesStatus.CONFIRMED,
+                    selected_for_import=True,
+                    has_files=True,
+                    diagnostics={
+                        "kind": "known_series_recovery",
+                        "source_import_series_id": item.id,
+                        "source_preserved": True,
+                        "file_identity_review_required": True,
+                    },
+                )
+                session.add(target)
+                await session.flush()
+                targets[item.id] = target
+            file.import_series_id = target.id
+            _apply_known_series_file(file, plan)
         await refresh_story_arc_entries_for_import_files(
             session,
             import_job_id=job.id,
             import_file_ids=list(files),
         )
         await session.flush()
-    return affected
+    target_ids = {item.id for item in targets.values()}
+    await refresh_recovered_groups(session, job, sources | target_ids)
+    return target_ids
 
 
 def _apply_known_series_file(
-    item: ImportedSeries,
     file: ImportedFile,
     plan: KnownSeriesRecovery,
-    affected: set[int],
 ) -> None:
-    if item.id not in affected:
-        candidate = dict(item.diagnostics or {}).get("selected_candidate")
-        candidate = candidate if isinstance(candidate, dict) else {}
-        item.cv_id = plan.cv_id
-        item.cv_match_method = plan.match_method
-        item.cv_match_score = 1.0
-        item.cv_title = item.raw_series_name
-        item.cv_year = item.raw_year
-        item.cv_issue_count = candidate.get("issue_count")
-        item.diagnostics = {
-            **dict(item.diagnostics or {}),
-            "previous_reason": "trusted_source_identity_conflict",
-            "reason": "known_series_recovered",
-            "file_identity_review_required": True,
-        }
-        affected.add(item.id)
     file.status = ImportedFileStatus.CONFIRMED
     file.include_in_import = True
     file.matched_issue_cv_id = int(plan.summary["provider_id"])
@@ -1590,6 +1620,7 @@ def _apply_known_series_file(
         "target_issue_summary": plan.summary,
         "completed_import_cleanup": {
             "action": CompletedImportCleanupAction.RECOVER_KNOWN_SERIES.value,
+            "source_import_series_id": plan.series_id,
             "evidence_digest": plan.evidence_digest,
             "source_preserved": True,
             "resolved_at": datetime.now(UTC).isoformat(),
@@ -1644,9 +1675,26 @@ async def apply_completed_import_cleanup(
         affected_file_ids: tuple[int, ...] = ()
         requires_import_retry = True
     elif action is CompletedImportCleanupAction.RECOVER_KNOWN_SERIES:
+        from pullbox.services.import_retry_helpers import require_retained_import_destination
+
+        require_retained_import_destination(job)
         affected_series_ids = await _apply_known_series_recovery(session, job)
         affected_file_ids = ()
         requires_import_retry = await _prepare_series_for_retry(session, job, affected_series_ids)
+        job.progress_snapshot = {
+            **dict(job.progress_snapshot or {}),
+            "deferred_recovery": {
+                "state": "prepared",
+                "run_id": uuid4().hex,
+                "series_ids": sorted(affected_series_ids),
+                "actor_id": actor_id,
+                "action": action.value,
+            },
+            "mode": "import",
+            "phase": "deferred_recovery",
+            "progress": 0,
+            "message": "Queued recovery of verified files...",
+        }
     elif action is CompletedImportCleanupAction.ACCEPT_RECOMMENDED_CONFLICTS:
         affected_series_ids = await _apply_recommended_conflicts(session, job)
         affected_file_ids = ()

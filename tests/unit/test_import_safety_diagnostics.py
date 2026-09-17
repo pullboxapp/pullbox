@@ -10,11 +10,38 @@ from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
     build_import_safety_diagnostics,
     classify_import_safety_failure,
+    normalize_import_safety_diagnostics,
     summarize_import_safety_failures,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+def test_identity_disagreement_is_not_reported_as_physical_source_change() -> None:
+    result = build_import_safety_diagnostics(
+        "The current source identity conflicts with /private/library/file.cbz",
+        kind="source_revalidation",
+        code="source_identity_changed",
+        overrideable_hint=True,
+    )
+
+    assert "identity" in result["reason"]
+    assert "Follow-up" in result["reason"]
+    assert "source changed" not in result["reason"].lower()
+    assert "/private" not in result["reason"]
+    assert result["retryable"] is False
+    assert result["overrideable"] is False
+    legacy = normalize_import_safety_diagnostics(
+        {
+            "category": "source_changed",
+            "code": "source_identity_changed",
+            "reason": "The source changed or became unavailable after scanning.",
+            "retryable": True,
+        }
+    )
+    assert legacy["reason"] == result["reason"]
+    assert legacy["retryable"] is False
 
 
 @pytest.mark.parametrize(

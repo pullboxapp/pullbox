@@ -97,8 +97,10 @@ ineligible.
 - **Skip unusable files** excludes empty, unsupported, and page-less files,
   including those confirmed unusable by a later source recheck.
 - **Allow oversized files once** retries only decompression-size blocks marked
-  overrideable. It does not change the global archive safety policy or approve
-  dangerous archive content.
+  overrideable, including failed files whose latest source recheck recorded an
+  overrideable size limit rather than a scan-time safety block. The original
+  recheck evidence is retained alongside the one-job exception. It does not
+  change the global archive safety policy or approve dangerous archive content.
 - **Retry source inspection** rechecks files that were unreadable, changed, or
   temporarily could not be inspected, then resumes only work that now passes.
 - **Recognize already-owned issues** clears conflicts whose issue already has a
@@ -118,9 +120,14 @@ ineligible.
   only files whose saved series and issue identities agree. Existing catalog
   ownership, issue numbers, per-file conflicts, manual decisions, skips, and
   safety blocks are checked before an actor-bound preview is issued. Ambiguous
-  duplicate candidates and a series containing an unpreviewed ready file are
-  excluded. The confirmed scope runs through normal background Step 4 source
-  validation and import rules. Successful files and source paths are untouched;
+  duplicate candidates remain excluded, including another ready file claiming
+  the same issue or a manually chosen keeper. Explicit file exclusions and
+  safety-review decisions remain protected. Eligible files are isolated into
+  new recovery groups with links to their original groups; an unresolved
+  sibling no longer blocks otherwise proven files. The actor-bound preview
+  authorizes only those groups, not other ready files or Story Arcs in the job.
+  The confirmed scope runs through normal background Step 4 source validation
+  and the original copy or keep-in-place rules. Successful files and source paths are untouched;
   unresolved files remain in Follow-up. This is not a blanket repair of stale
   IDs or a replacement for manual review when trusted evidence disagrees.
 - **Recheck deferred files** checks the remaining unmatched files in a resumable
@@ -174,7 +181,10 @@ status-only correction does not launch another import.
 A completed source recheck reports a file ready only after both archive safety
 and saved target identity checks pass. Missing, empty, or otherwise blocked
 sources are counted as blocked even when the archive-level inspection itself
-completed successfully.
+completed successfully. A `source_identity_changed` result means the current
+series or issue identity disagrees with the reviewed match, not that the file
+was necessarily modified on disk. Its message directs the user to Follow-up;
+it is neither automatically retryable nor overrideable.
 Completed-import source rechecks inspect one bounded page before writing its
 refreshed evidence, then commit that page before reading more archives. This
 keeps slow archive I/O outside SQLite's single-writer window, bounds memory, and

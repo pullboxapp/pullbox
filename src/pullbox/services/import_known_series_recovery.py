@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from itertools import batched
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, or_, select
 
 from pullbox.core.issue_numbers import parse_issue_number_text
 from pullbox.core.name_matcher import NameMatcher
@@ -26,6 +26,7 @@ from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 from pullbox.providers.base import IssueSummary
 from pullbox.services.import_file_match_targets import trusted_source_issue_identity_matches_target
+from pullbox.services.import_file_selection import not_excluded_from_review
 from pullbox.services.import_source_metadata import (
     build_import_metadata_conflict,
     source_metadata_for_import_file,
@@ -118,6 +119,8 @@ def _file_plan(
     }:
         return None
     diagnostics = dict(file.diagnostics or {})
+    if diagnostics.get("review_selection") is False:
+        return None
     if diagnostics.get("kind") in {
         "metadata_conflict",
         "source_scope_review",
@@ -129,7 +132,8 @@ def _file_plan(
     if (file.match_method or "").startswith(("manual", "orphan_recovery")):
         return None
     if any(
-        diagnostics.get(key) for key in ("safety_block", "source_revalidation", "safety_exception")
+        diagnostics.get(key)
+        for key in ("safety_block", "source_revalidation", "safety_exception", "safety_review")
     ):
         return None
     if (
@@ -218,7 +222,6 @@ async def load_known_series_recovery(
         return ()
     plans: list[KnownSeriesRecovery] = []
     matched_local_ids: dict[int, int | None] = {}
-    ready_files_by_series: dict[int, set[int]] = {}
     cursor = 0
     while True:
         items = list(
@@ -257,11 +260,6 @@ async def load_known_series_recovery(
             identity = _known_identity(item, files, job.source_type)
             if identity is None:
                 continue
-            ready_files_by_series[item.id] = {
-                file.id
-                for file in files
-                if file.status in {ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED}
-            }
             for file in files:
                 plan = _file_plan(item, file, *identity)
                 if plan is not None:
@@ -269,7 +267,34 @@ async def load_known_series_recovery(
                     matched_local_ids[file.id] = file.matched_issue_id
     issue_ids = sorted({int(plan.summary["provider_id"]) for plan in plans})
     local_targets = {}
-    for ids in batched(issue_ids, 400):
+    ready_claims: dict[int, set[int]] = defaultdict(set)
+    for ids in batched(issue_ids, 300):
+        for file_id, source_cv_id, target_cv_id, local_cv_id in (
+            await session.execute(
+                select(
+                    ImportedFile.id,
+                    ImportedFile.comicvine_issue_id,
+                    ImportedFile.matched_issue_cv_id,
+                    Issue.comicvine_id,
+                )
+                .outerjoin(Issue, Issue.id == ImportedFile.matched_issue_id)
+                .where(
+                    ImportedFile.import_job_id == job_id,
+                    ImportedFile.status.in_(
+                        (ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED)
+                    ),
+                    not_excluded_from_review(),
+                    or_(
+                        ImportedFile.comicvine_issue_id.in_(ids),
+                        ImportedFile.matched_issue_cv_id.in_(ids),
+                        Issue.comicvine_id.in_(ids),
+                    ),
+                )
+            )
+        ).all():
+            for claimed_id in (source_cv_id, target_cv_id, local_cv_id):
+                if claimed_id is not None:
+                    ready_claims[claimed_id].add(file_id)
         for issue, series_cv_id, owned in (
             await session.execute(
                 select(Issue, Series.comicvine_id, exists().where(LibraryFile.issue_id == Issue.id))
@@ -282,7 +307,8 @@ async def load_known_series_recovery(
     counts = Counter(int(plan.summary["provider_id"]) for plan in plans)
     result = []
     for plan in plans:
-        if counts[int(plan.summary["provider_id"])] != 1:
+        issue_cv_id = int(plan.summary["provider_id"])
+        if counts[issue_cv_id] != 1 or ready_claims[issue_cv_id] - {plan.file_id}:
             continue
         local = local_targets.get(int(plan.summary["provider_id"]))
         if local is not None:
@@ -297,12 +323,6 @@ async def load_known_series_recovery(
         elif matched_local_ids[plan.file_id] is not None:
             continue
         result.append(plan)
-    eligible_ids = {plan.file_id for plan in result}
-    # Step 4 consumes all ready files in a series. Never revive a parent if that
-    # would implicitly authorize an unpreviewed ready file or manual decision.
-    return tuple(
-        sorted(
-            (plan for plan in result if ready_files_by_series[plan.series_id] <= eligible_ids),
-            key=lambda plan: plan.file_id,
-        )
-    )
+    # Apply isolates these files into new scoped groups. Unpreviewed siblings
+    # stay in their original parent and are never authorized by this recovery.
+    return tuple(sorted(result, key=lambda plan: plan.file_id))
