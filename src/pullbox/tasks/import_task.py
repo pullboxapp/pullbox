@@ -427,6 +427,7 @@ class ImportRunner:
         self._lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
         self._active_job_id: int | None = None
+        self._pending_wakeup_job_id: int | None = None
         self._dispatch_recovered_requested = False
 
     async def recover_and_dispatch(self) -> int:
@@ -516,7 +517,9 @@ class ImportRunner:
     async def _start_if_idle(self, job_id: int) -> None:
         async with self._lock:
             if self._worker_task is not None and not self._worker_task.done():
-                if self._active_job_id != job_id:
+                if self._active_job_id == job_id:
+                    self._pending_wakeup_job_id = job_id
+                else:
                     logger.info(
                         "import_runner_already_active",
                         active_job_id=self._active_job_id,
@@ -525,6 +528,29 @@ class ImportRunner:
                 return
 
             self._start_worker_locked(job_id)
+
+    async def _dispatch_pending_wakeup(self, job_id: int, *, recover_requested: bool) -> None:
+        """Recheck a control request accepted while the prior worker was exiting."""
+        async with self._lock:
+            if self._worker_task is not None and not self._worker_task.done():
+                self._dispatch_recovered_requested |= recover_requested
+                return
+            async with self._session_factory() as session:
+                job = await session.get(ImportJob, job_id)
+                runnable = job is not None and (
+                    job.status in _SCAN_STATES
+                    or job.status == ImportJobStatus.ROLLING_BACK
+                    or (
+                        job.status == ImportJobStatus.IMPORTING
+                        and dict(job.progress_snapshot or {}).get("phase") != "story_arc_placements"
+                    )
+                )
+            if runnable:
+                self._dispatch_recovered_requested |= recover_requested
+                self._start_worker_locked(job_id)
+                return
+        if recover_requested:
+            await self._dispatch_recovered_job()
 
     def _start_worker_locked(self, job_id: int) -> None:
         """Start one serial worker while the runner lock is held."""
@@ -554,10 +580,19 @@ class ImportRunner:
             logger.exception("import_runner_worker_failed")
         finally:
             if self._worker_task is task:
+                pending_job_id = self._pending_wakeup_job_id
+                self._pending_wakeup_job_id = None
                 self._worker_task = None
                 self._active_job_id = None
-                if self._dispatch_recovered_requested:
-                    self._dispatch_recovered_requested = False
+                recover_requested = self._dispatch_recovered_requested
+                self._dispatch_recovered_requested = False
+                if pending_job_id is not None:
+                    _fire_and_forget(
+                        self._dispatch_pending_wakeup(
+                            pending_job_id, recover_requested=recover_requested
+                        )
+                    )
+                elif recover_requested:
                     _fire_and_forget(self._dispatch_recovered_job())
 
     async def _mark_paused(self, session: AsyncSession, job_id: int) -> None:
