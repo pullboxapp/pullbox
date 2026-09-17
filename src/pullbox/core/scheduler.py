@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import wraps
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from apscheduler.events import (  # type: ignore[import-untyped]
@@ -102,6 +102,8 @@ logger = structlog.get_logger(__name__)
 _MANUAL_QUEUE_DEFERRED_TASK_IDS = {"run_health_checks"}
 _HOT_TASK_INTERVAL_SECONDS = 300
 _HOT_TASK_PERSIST_WINDOW_SECONDS = 300.0
+_EXCLUSIVE_WAIT_SECONDS = 5.0
+_EXCLUSIVE_RETRY_SECONDS = 60
 
 
 # ── Scheduler ─────────────────────────────────────────────────
@@ -382,7 +384,11 @@ class PullboxScheduler:
 
     def _visible_jobs(self) -> list[Any]:
         """Return user-facing jobs without internal continuation plumbing."""
-        return [job for job in self._scheduler.get_jobs() if not job.id.endswith("__continuation")]
+        return [
+            job
+            for job in self._scheduler.get_jobs()
+            if not job.id.endswith(("__continuation", "__exclusive_retry"))
+        ]
 
     @staticmethod
     def _continuation_job_id(task_id: str) -> str:
@@ -405,7 +411,6 @@ class PullboxScheduler:
         @wraps(func)
         async def wrapper() -> None:
             log = logger.bind(task_id=task_id)
-            reserved_exclusive = False
             if trigger_type in {"scheduled", "manual"} and await scheduler._defer_task_for_import(
                 task_id,
                 log,
@@ -413,52 +418,20 @@ class PullboxScheduler:
             ):
                 return
 
-            async with scheduler._execution_admission_lock:
-                active_exclusive = scheduler._exclusive_active_task_id
-                if active_exclusive is not None and active_exclusive != task_id:
-                    stats = scheduler._task_stats.setdefault(task_id, TaskStats())
-                    stats.last_exclusive_block_at = datetime.now(UTC).isoformat()
-                    stats.exclusive_block_count += 1
-                    await scheduler._persist_task_stat(
-                        task_id,
-                        stats,
-                        trigger_type=trigger_type,
-                        reason="exclusive_block",
-                    )
-                    log.debug(
-                        "task_skipped_exclusive",
-                        trigger_type=trigger_type,
-                        exclusive_task_id=active_exclusive,
-                    )
-                    return
-
-                if scheduler._running_counts.get(task_id, 0) > 0:
-                    stats = scheduler._task_stats.setdefault(task_id, TaskStats())
-                    stats.last_overlap_at = datetime.now(UTC).isoformat()
-                    stats.overlap_count += 1
-                    await scheduler._persist_task_stat(
-                        task_id,
-                        stats,
-                        trigger_type=trigger_type,
-                        reason="overlap",
-                    )
-                    scheduler._log_task_overlap(task_id, trigger_type=trigger_type)
-                    return
-
-                if exclusive:
-                    scheduler._exclusive_active_task_id = task_id
-                    reserved_exclusive = True
-
-            if exclusive:
-                while any(
-                    running_task_id != task_id and count > 0
-                    for running_task_id, count in scheduler._running_counts.items()
-                ):
-                    await asyncio.sleep(0.05)
+            reservation = await scheduler._reserve_execution(
+                task_id, log, trigger_type=trigger_type, exclusive=exclusive
+            )
+            if reservation != "reserved":
+                if exclusive and reservation == "exclusive_block":
+                    scheduler._schedule_exclusive_retry(task_id, wrapper)
+                return
+            if exclusive and not await scheduler._wait_for_exclusive_execution(
+                task_id, wrapper, log, trigger_type=trigger_type
+            ):
+                return
 
             log.debug("task_started", trigger_type=trigger_type)
             start = time.monotonic()
-            scheduler._running_counts[task_id] = scheduler._running_counts.get(task_id, 0) + 1
             run_context = bind_scheduler_run_context(
                 task_id=task_id,
                 trigger_type=trigger_type,
@@ -540,17 +513,94 @@ class PullboxScheduler:
                 )
             finally:
                 reset_scheduler_run_context(run_context)
-                current = scheduler._running_counts.get(task_id, 0)
-                if current <= 1:
-                    scheduler._running_counts.pop(task_id, None)
-                else:
-                    scheduler._running_counts[task_id] = current - 1
-                if reserved_exclusive:
-                    async with scheduler._execution_admission_lock:
-                        if scheduler._exclusive_active_task_id == task_id:
-                            scheduler._exclusive_active_task_id = None
+                scheduler._release_execution(task_id)
 
         return wrapper
+
+    async def _reserve_execution(
+        self, task_id: str, log: Any, *, trigger_type: str, exclusive: bool
+    ) -> Literal["reserved", "exclusive_block", "overlap"]:
+        """Reserve atomically, without holding admission behind database writes."""
+        reason: Literal["exclusive_block", "overlap"]
+        async with self._execution_admission_lock:
+            active_exclusive = self._exclusive_active_task_id
+            stats = self._task_stats.setdefault(task_id, TaskStats())
+            if active_exclusive is not None and active_exclusive != task_id:
+                stats.last_exclusive_block_at = datetime.now(UTC).isoformat()
+                stats.exclusive_block_count += 1
+                reason = "exclusive_block"
+            elif self._running_counts.get(task_id, 0) > 0:
+                stats.last_overlap_at = datetime.now(UTC).isoformat()
+                stats.overlap_count += 1
+                reason = "overlap"
+            else:
+                self._running_counts[task_id] = 1
+                if exclusive:
+                    self._exclusive_active_task_id = task_id
+                return "reserved"
+
+        await self._persist_task_stat(task_id, stats, trigger_type=trigger_type, reason=reason)
+        if reason == "overlap":
+            self._log_task_overlap(task_id, trigger_type=trigger_type)
+        else:
+            log.debug(
+                "task_skipped_exclusive",
+                trigger_type=trigger_type,
+                exclusive_task_id=active_exclusive,
+            )
+        return reason
+
+    def _release_execution(self, task_id: str) -> None:
+        """Release in-memory admission synchronously, including during cancellation."""
+        self._running_counts.pop(task_id, None)
+        if self._exclusive_active_task_id == task_id:
+            self._exclusive_active_task_id = None
+
+    async def _wait_for_exclusive_execution(
+        self, task_id: str, wrapped: Callable[[], Any], log: Any, *, trigger_type: str
+    ) -> bool:
+        """Bound the drain window; a busy application gets a later maintenance retry."""
+        retry_id = f"{task_id}__exclusive_retry"
+        try:
+            async with asyncio.timeout(_EXCLUSIVE_WAIT_SECONDS):
+                while any(
+                    other_id != task_id and count > 0
+                    for other_id, count in self._running_counts.items()
+                ):
+                    await asyncio.sleep(0.05)
+            if self._scheduler.get_job(retry_id) is not None:
+                self._scheduler.remove_job(retry_id)
+            return True
+        except TimeoutError:
+            self._release_execution(task_id)
+        except BaseException:
+            self._release_execution(task_id)
+            raise
+
+        retry_at = self._schedule_exclusive_retry(task_id, wrapped)
+        stats = self._task_stats.setdefault(task_id, TaskStats())
+        stats.last_status = "deferred"
+        stats.last_execution = datetime.now(UTC).isoformat()
+        stats.last_duration_seconds = 0.0
+        stats.running_since = None
+        log.info(
+            "task_deferred_exclusive_busy",
+            trigger_type=trigger_type,
+            retry_at=retry_at.isoformat(),
+        )
+        await self._persist_task_stat(task_id, stats, trigger_type=trigger_type, reason="deferred")
+        return False
+
+    def _schedule_exclusive_retry(self, task_id: str, wrapped: Callable[[], Any]) -> datetime:
+        retry_at = datetime.now(UTC) + timedelta(seconds=_EXCLUSIVE_RETRY_SECONDS)
+        self._scheduler.add_job(
+            wrapped,
+            "date",
+            id=f"{task_id}__exclusive_retry",
+            run_date=retry_at,
+            replace_existing=True,
+        )
+        return retry_at
 
     async def _defer_task_for_import(self, task_id: str, log: Any, *, trigger_type: str) -> bool:
         """Skip scheduler-managed background work while an import owns the runtime."""
