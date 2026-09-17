@@ -553,6 +553,24 @@ task registry. The scheduler runs recurring jobs for search, downloads,
 metadata refresh, health checks, imports, backups, dashboard refresh, blocklist
 cleanup, and related operational work.
 
+Exclusive scheduled maintenance reserves admission in memory, outside database
+stats writes. It waits at most five seconds for other tasks, then releases its
+reservation and schedules a retry after 60 seconds if work is still active.
+Cancellation also releases the reservation.
+
+Nightly issue and metadata sweeps checkpoint their last completed series and
+initial upper bound in `SystemConfig`. Each batch handles at most 25 series and
+checks a two-minute budget between series; an individual series has a separate
+15-minute timeout. Pending batches resume through hidden continuations, including
+after restart. Provider throttling pauses the sweep at its saved position instead
+of repeatedly failing every remaining series. Series metadata writes are committed
+before subsequent cover or issue-provider waits.
+
+ComicVine and Newznab clients share process-local account cooldowns, so creating a
+new client does not bypass a throttle response. Newznab also serializes request
+pacing per provider/account; unrelated accounts remain independent. Sweep retry
+deadlines are durable, while the shared client cooldown registry itself is not.
+
 The event bus is intentionally small and in-process. It supports domain side
 effects such as:
 

@@ -544,13 +544,23 @@ not suppress failures in those checks.
 
 - Database maintenance windows coordinate app traffic through the shared
   maintenance gate.
-- Gate-aware sessions pause before database-touching operations.
+- Gate-aware sessions pause new transactions while existing transactions have
+  up to five seconds to finish. If they cannot drain, maintenance yields with
+  a retryable busy result rather than holding the gate indefinitely.
+- Manual backup, restore, and optimization requests release their own request
+  transaction before entering maintenance. Cancellation does not reopen the
+  gate until an already-running filesystem or SQLite worker has stopped.
 - An exclusive nightly task runs SQLite `REINDEX` and
   `PRAGMA optimize=0x10002` at 04:30, then verifies the database with
   `PRAGMA quick_check`. The all-tables mask is intentional because the
   maintenance connection has no prior query history.
 - Full SQLite `VACUUM` compaction remains an explicit operator action because
   it rewrites the database and can require substantial temporary disk space.
+- Routine integrity health probes use a separate read-only SQLite connection
+  with a five-second execution budget. An interrupted or busy probe reports
+  incomplete verification, not confirmed database corruption.
+- Search-log retention deletes at most 500 rows per transaction and releases
+  the writer between batches.
 
 **Required standard**
 
