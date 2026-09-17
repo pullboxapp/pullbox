@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 import pullbox
 from pullbox.api.deps import DbSession, InteractiveOperatorUser  # noqa: TC001
 from pullbox.core.exceptions import ValidationError
+from pullbox.database import DatabaseMaintenanceBusyError
 from pullbox.models.health import HealthCurrentStatus as HealthCurrentStatusModel
 from pullbox.models.health import HealthStatus
 from pullbox.models.import_job import ImportJob, ImportJobStatus
@@ -430,7 +431,7 @@ async def optimize_database(
 
     try:
         result = await DatabaseOptimizationRuntimeService(db_path).optimize()
-    except DatabaseOptimizationError as exc:
+    except (DatabaseOptimizationError, DatabaseMaintenanceBusyError) as exc:
         raise ValidationError(str(exc)) from exc
 
     await run_health_refresh(component="database")

@@ -49,6 +49,7 @@ from pullbox.core.build_metadata import get_build_metadata
 from pullbox.core.config_resolver import load_system_config_values
 from pullbox.core.shutdown import shutdown_manager
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
+from pullbox.database import DatabaseMaintenanceBusyError
 from pullbox.models.config import DEFAULT_SYSTEM_CONFIG, SystemConfig
 from pullbox.services.backup_runtime_service import BackupRuntimeService
 from pullbox.services.backup_service import BackupService
@@ -279,7 +280,14 @@ async def create_backup(
 ) -> BackupCreatedResponse:
     """Create a manual backup of the Pullbox database."""
     svc = await _get_backup_runtime_service(session)
-    info = await svc.create_backup(backup_type="manual")
+    await session.commit()
+    await session.close()
+    try:
+        info = await svc.create_backup(backup_type="manual")
+    except DatabaseMaintenanceBusyError as exc:
+        raise HTTPException(
+            status_code=503, detail=str(exc), headers={"Retry-After": "60"}
+        ) from exc
     return BackupCreatedResponse(
         message=f"Backup created: {info.filename}",
         backup=BackupResponse(
@@ -383,7 +391,15 @@ async def restore_backup(
 
         raise ValidationError(f"Invalid backup filename: {filename}")
     svc = await _get_backup_runtime_service(session)
-    if not await svc.restore_backup(filename):
+    await session.commit()
+    await session.close()
+    try:
+        restored = await svc.restore_backup(filename)
+    except DatabaseMaintenanceBusyError as exc:
+        raise HTTPException(
+            status_code=503, detail=str(exc), headers={"Retry-After": "60"}
+        ) from exc
+    if not restored:
         from pullbox.core.exceptions import NotFoundError
 
         raise NotFoundError("Backup", filename)
