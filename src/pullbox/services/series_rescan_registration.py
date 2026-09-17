@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import select, update
 
+from pullbox.core.archive_format import archive_format
 from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.file_ops import register_library_file
 from pullbox.core.library_file_ownership import build_file_identity_signature
@@ -28,6 +29,7 @@ async def apply_rescan_match(session: Any, series_id: int, item: dict[str, Any])
         return "review", item["reason"]
     path = Path(item["file_path"])
     try:
+        file_format = FileFormat(await asyncio.to_thread(archive_format, path))
         signature = await asyncio.to_thread(build_file_identity_signature, path)
     except (OSError, ConfigurationError):
         return (
@@ -126,10 +128,13 @@ async def apply_rescan_match(session: Any, series_id: int, item: dict[str, Any])
                 return "review", "This issue already has a registration. Review both file records."
             outcome = (
                 "unchanged"
-                if issue.status == IssueStatus.OWNED and path_record.issue_id == issue.id
+                if issue.status == IssueStatus.OWNED
+                and path_record.issue_id == issue.id
+                and path_record.file_format == file_format
                 else "repaired"
             )
             path_record.issue_id = issue.id
+            path_record.file_format = file_format
             path_record.match_confidence = MatchConfidence.HIGH
             issue.status = IssueStatus.OWNED
             return outcome, "Existing file verified."
@@ -139,7 +144,7 @@ async def apply_rescan_match(session: Any, series_id: int, item: dict[str, Any])
             record.file_name = path.name
             record.file_size = signature["size"]
             record.file_modified_at = datetime.fromtimestamp(int(signature["mtime_ns"]) / 1e9, UTC)
-            record.file_format = FileFormat(path.suffix.lower().lstrip("."))
+            record.file_format = file_format
             record.file_hash = None
             record.source_signature = signature
             record.storage_mode = LibraryFileStorageMode.REFERENCED

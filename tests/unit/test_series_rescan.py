@@ -129,14 +129,16 @@ async def seed_catalog(db_session, context):
     return issue
 
 
-async def test_registration_is_referenced_owned_and_idempotent(db_session, context):
+@pytest.mark.parametrize("suffix", ["cbz", "cbr"])
+async def test_registration_is_referenced_owned_and_idempotent(db_session, context, suffix):
     from sqlalchemy import select
 
+    from pullbox.core.page_sources import open_page_source
     from pullbox.models.issue import IssueStatus
-    from pullbox.models.library import LibraryFile, LibraryFileStorageMode
+    from pullbox.models.library import FileFormat, LibraryFile, LibraryFileStorageMode
 
     issue = await seed_catalog(db_session, context)
-    path = comic(Path(context["folder"]), "Swamp Thing 001 (1986).cbz")
+    path = comic(Path(context["folder"]), f"Swamp Thing 001 (1986).{suffix}")
     before = path.read_bytes(), path.stat().st_mtime_ns
     item = plan_series_rescan(context)[0]
     assert (await apply_rescan_match(db_session, 1, item))[0] == "added"
@@ -145,6 +147,8 @@ async def test_registration_is_referenced_owned_and_idempotent(db_session, conte
     files = list((await db_session.scalars(select(LibraryFile))).all())
     assert len(files) == 1
     assert files[0].storage_mode == LibraryFileStorageMode.REFERENCED
+    assert files[0].file_format == FileFormat.CBZ
+    assert len(open_page_source(path, declared_format=files[0].file_format).pages) == 2
     assert (await apply_rescan_match(db_session, 1, item))[0] == "unchanged"
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
@@ -162,10 +166,11 @@ async def test_changed_file_is_not_registered(db_session, context):
     assert issue.status == IssueStatus.WANTED
 
 
-async def test_missing_link_is_repaired_without_deleting_the_record(db_session, context):
+@pytest.mark.parametrize("suffix", ["cbz", "cbr"])
+async def test_missing_link_is_repaired_without_deleting_the_record(db_session, context, suffix):
     from sqlalchemy import select
 
-    from pullbox.models.library import LibraryFile, LibraryFileStorageMode
+    from pullbox.models.library import FileFormat, LibraryFile, LibraryFileStorageMode
 
     await seed_catalog(db_session, context)
     old = comic(Path(context["folder"]), "Swamp Thing 001 (1986).cbz")
@@ -173,7 +178,7 @@ async def test_missing_link_is_repaired_without_deleting_the_record(db_session, 
     await db_session.commit()
     record = await db_session.scalar(select(LibraryFile))
     original_id = record.id
-    old.rename(old.with_name("Swamp Thing 001 (1986) (digital).cbz"))
+    old.rename(old.with_name(f"Swamp Thing 001 (1986) (digital).{suffix}"))
     context["files"] = [{"path": str(old), "issue_id": 10}]
     plan = plan_series_rescan(context)
     assert len(plan) == 1
@@ -182,6 +187,25 @@ async def test_missing_link_is_repaired_without_deleting_the_record(db_session, 
     assert record.id == original_id
     assert record.file_path == new_item["file_path"]
     assert record.storage_mode == LibraryFileStorageMode.REFERENCED
+    assert record.file_format == FileFormat.CBZ
+
+
+async def test_rescan_repairs_stale_declared_format_without_replacing_source(db_session, context):
+    from sqlalchemy import select
+
+    from pullbox.models.library import FileFormat, LibraryFile
+
+    await seed_catalog(db_session, context)
+    path = comic(Path(context["folder"]), "Swamp Thing 001 (1986).cbr")
+    item = plan_series_rescan(context)[0]
+    await apply_rescan_match(db_session, 1, item)
+    record = await db_session.scalar(select(LibraryFile))
+    record.file_format = FileFormat.CBR
+    await db_session.commit()
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    assert (await apply_rescan_match(db_session, 1, item))[0] == "repaired"
+    assert record.file_format == FileFormat.CBZ
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
 async def test_existing_owned_copy_is_never_replaced(db_session, context):
@@ -311,6 +335,8 @@ def test_unsafe_archive_and_symlink_are_not_registered(context, tmp_path):
 
 
 async def test_background_queue_registers_and_saves_report(db_session, async_engine, context):
+    from sqlalchemy import event
+    from sqlalchemy.dialects import postgresql
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from pullbox.api.v1.series_rescan import series_rescan_report
@@ -330,7 +356,21 @@ async def test_background_queue_registers_and_saves_report(db_session, async_eng
     await manager.dispatch_next()
     await db_session.refresh(job)
     assert job.state == JobState.COMPLETED
-    report = await series_rescan_report(1, db_session, None, page=1)
+    statements = []
+
+    def capture_statement(_conn, clauseelement, _multiparams, _params, _options):
+        statements.append(clauseelement)
+
+    event.listen(async_engine.sync_engine, "before_execute", capture_statement)
+    try:
+        report = await series_rescan_report(1, db_session, None, page=1)
+    finally:
+        event.remove(async_engine.sync_engine, "before_execute", capture_statement)
+    assert len(statements) == 4
+    for statement in statements:
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        assert "json_extract" not in sql, sql
+        assert " AS JSON)" in sql, sql
     assert job.warning_count == 1, report
     assert report["counts"] == {"added": 1, "review": 1}
     assert report["job"]["percent"] == 100
@@ -341,6 +381,17 @@ async def test_background_queue_registers_and_saves_report(db_session, async_eng
     assert history["history_jobs"][0]["can_rollback"] is False
     with pytest.raises(ValueError, match="do not support rollback"):
         await manager.queue_rollback_job(db_session, job.id)
+
+
+def test_rescan_job_filter_compiles_for_postgresql():
+    from sqlalchemy.dialects import postgresql
+
+    from pullbox.api.v1.series_rescan import _jobs
+
+    sql = str(_jobs(7).compile(dialect=postgresql.dialect()))
+    assert "json_extract" not in sql, sql
+    assert " AS JSON)" in sql
+    assert " AS INTEGER)" in sql
 
 
 def test_rescan_activity_links_to_series_and_finishes():

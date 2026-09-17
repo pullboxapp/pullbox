@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Query
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import JSON, Text, cast, func, or_, select, type_coerce, update
 
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser  # noqa: TC001
 from pullbox.core.exceptions import NotFoundError, ValidationError
@@ -23,12 +23,16 @@ _ACTIVE = [
     JobState.PAUSED,
     JobState.CANCELLING,
 ]
+# These columns store JSON in Text. PostgreSQL needs a JSON cast, while SQLite's
+# CAST AS JSON would turn the document into a number rather than preserve it.
+_JSON_DOCUMENT = JSON().with_variant(Text(), "sqlite")
 
 
 def _jobs(series_id: int) -> Any:
     return select(UtilityJob).where(
         UtilityJob.job_type == JobType.SERIES_RESCAN,
-        func.json_extract(UtilityJob.config, "$.series_id") == series_id,
+        type_coerce(cast(UtilityJob.config, _JSON_DOCUMENT), JSON)["series_id"].as_integer()
+        == series_id,
     )
 
 
@@ -79,7 +83,9 @@ async def series_rescan_report(
     )
     if job is None:
         return {"job": None, "items": [], "counts": {}, "page": page, "pages": 0}
-    outcome = func.json_extract(UtilityJobItem.after_state, "$.outcome")
+    outcome = type_coerce(cast(UtilityJobItem.after_state, _JSON_DOCUMENT), JSON)[
+        "outcome"
+    ].as_string()
     counts: dict[str, int] = {
         str(label): count
         for label, count in (
