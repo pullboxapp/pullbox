@@ -24,13 +24,35 @@ from pullbox.providers.airdcpp.contracts import (
     AirDcppQueueFile,
 )
 from pullbox.providers.airdcpp.errors import AirDcppUnavailableError
-from pullbox.services.airdcpp_reconciliation import AirDcppReconciler, apply_airdcpp_bundle
+from pullbox.services.airdcpp_reconciliation import (
+    AirDcppReconciler,
+    _shared_progress_snapshot,
+    apply_airdcpp_bundle,
+)
 from pullbox.services.airdcpp_search_cooldown import AirDcppCooldownReservation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 _TTH = "CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y"
+
+
+def test_overshoot_keeps_download_active_and_clamps_display_only() -> None:
+    history = DownloadHistory(state=DownloadState.SENT)
+    acquisition = AirDcppAcquisition(download_history=history)
+    # Construct the telemetry independently so this regression tests projection,
+    # not the separately covered wire validation.
+    bundle = _bundle().model_copy(update={"downloaded_bytes": 100_000_001, "seconds_left": None})
+
+    assert apply_airdcpp_bundle(acquisition, bundle, at=datetime.now(UTC))
+    assert history.state == DownloadState.DOWNLOADING
+    assert history.completed_at is None
+    assert history.downloaded_path is None
+    assert acquisition.route_snapshot["queue"]["downloaded_bytes"] == 100_000_001
+    progress = _shared_progress_snapshot(acquisition)
+    assert progress["bytes_transferred"] == progress["size_bytes"] == 100_000_000
+    assert progress["progress"] == 1.0
+    assert progress["eta_seconds"] is None
 
 
 @pytest.fixture

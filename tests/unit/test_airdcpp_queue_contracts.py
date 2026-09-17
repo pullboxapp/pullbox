@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from pullbox.providers.airdcpp.api_client import AirDcppApiClient
 from pullbox.providers.airdcpp.contracts import (
+    AirDcppQueueBundle,
     AirDcppQueueBundleAddInfo,
     AirDcppQueueFile,
     AirDcppSearchDownloadResponse,
@@ -54,6 +58,41 @@ def test_queue_mutation_contracts_require_typed_bundle_and_file_identity() -> No
     assert queue_file.downloaded_bytes == 25_000_000
     assert queue_file.speed == 1_000_000
     assert queue_file.target.get_secret_value().startswith("/Downloads/")
+
+
+@pytest.mark.parametrize("model", [AirDcppQueueBundle, AirDcppQueueFile])
+@pytest.mark.parametrize("eta", [-2, -4.0])
+def test_queue_telemetry_accepts_overshoot_without_claiming_completion(model, eta) -> None:
+    payload = _queue_file_payload()
+    payload.update(downloaded_bytes=100_000_001.0, seconds_left=eta)
+    parsed = None
+    with suppress(ValidationError):
+        parsed = model.model_validate(payload)
+
+    assert parsed is not None, "Transient AirDC++ counters must not discard the queue"
+    assert parsed.downloaded_bytes == 100_000_001
+    assert parsed.seconds_left is None
+    assert not parsed.status.completed
+
+
+@pytest.mark.parametrize("model", [AirDcppQueueBundle, AirDcppQueueFile])
+@pytest.mark.parametrize("eta", [True, "-2", -1.5, float("inf"), float("nan"), -(2**64)])
+def test_queue_telemetry_still_rejects_malformed_eta(model, eta) -> None:
+    payload = _queue_file_payload()
+    payload["seconds_left"] = eta
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field,value", [("id", 0), ("bundle", 0), ("tth", "invalid"), ("type", {"id": "directory"})]
+)
+def test_queue_overshoot_does_not_weaken_file_identity(field, value) -> None:
+    payload = _queue_file_payload()
+    payload.update(downloaded_bytes=100_000_001.0, seconds_left=-2.0)
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        AirDcppQueueFile.model_validate(payload)
 
 
 @pytest.mark.asyncio

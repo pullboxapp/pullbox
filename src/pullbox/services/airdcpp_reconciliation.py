@@ -713,6 +713,8 @@ def _shared_progress_snapshot(acquisition: AirDcppAcquisition) -> dict[str, obje
     transferred_bytes = (
         int(transferred) if isinstance(transferred, int | float) and transferred >= 0 else None
     )
+    if transferred_bytes is not None and size_bytes is not None:
+        transferred_bytes = min(transferred_bytes, size_bytes)
     progress = (
         min(transferred_bytes / size_bytes, 1.0)
         if transferred_bytes is not None and size_bytes is not None
