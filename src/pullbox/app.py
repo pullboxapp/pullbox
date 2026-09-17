@@ -669,6 +669,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning("search_wanted_sweep_recovery_failed", exc_info=True)
 
+    try:
+        from pullbox.tasks.metadata_sweep_state import recover_metadata_sweep_schedules
+
+        await recover_metadata_sweep_schedules()
+    except Exception:
+        logger.warning("metadata_sweep_recovery_failed", exc_info=True)
+
     search_on_add_recovery_task = asyncio.create_task(recover_recent_search_on_add_misses())
     _startup_background_tasks.add(search_on_add_recovery_task)
 

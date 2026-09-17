@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pullbox.core.scheduler import scheduled_task
+from pullbox.core.scheduler import TaskExecutionResult, scheduled_task
 from pullbox.tasks.metadata_task import refresh_metadata, sync_new_issues
 
 
@@ -13,9 +13,9 @@ from pullbox.tasks.metadata_task import refresh_metadata, sync_new_issues
     hour=1,
     minute=0,
 )
-async def scheduled_sync_new_issues() -> None:
+async def scheduled_sync_new_issues() -> TaskExecutionResult:
     """Run the monitored-series issue sync on its configured cadence."""
-    await sync_new_issues()
+    return await sync_new_issues()
 
 
 @scheduled_task(
@@ -25,6 +25,6 @@ async def scheduled_sync_new_issues() -> None:
     hour=3,
     minute=15,
 )
-async def scheduled_refresh_metadata() -> None:
+async def scheduled_refresh_metadata() -> TaskExecutionResult:
     """Run the stale-series metadata refresh on its nightly cadence."""
-    await refresh_metadata()
+    return await refresh_metadata()

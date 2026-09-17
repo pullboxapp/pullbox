@@ -27,6 +27,7 @@ from pullbox.core.issue_numbers import (
     parse_issue_number_text,
 )
 from pullbox.core.naming import detect_issue_type
+from pullbox.core.provider_cooldown import provider_cooldown, retry_after_seconds
 from pullbox.providers.base import (
     IssueMetadata,
     IssueSummary,
@@ -388,9 +389,17 @@ def _extract_story_arcs(arc_credits: list[dict[str, Any]] | None) -> list[dict[s
 class ComicVineError(Exception):
     """Raised when the ComicVine API returns a non-OK status."""
 
-    def __init__(self, status_code: int, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        *,
+        retryable: bool = False,
+        retry_after_seconds: int | None = None,
+    ) -> None:
         self.status_code = status_code
         self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(message)
 
 
@@ -438,6 +447,14 @@ class ComicVineProvider:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Make a rate-limited GET request to the ComicVine API."""
+        cooldown = provider_cooldown("comicvine", self._api_key)
+        if cooldown.remaining_seconds:
+            raise ComicVineError(
+                429,
+                "ComicVine cooldown active",
+                retryable=True,
+                retry_after_seconds=cooldown.remaining_seconds,
+            )
         if self._rate_coordinator is None:
             self._rate_coordinator = _rate_coordinator_for(
                 api_key=self._api_key,
@@ -448,6 +465,13 @@ class ComicVineProvider:
             _resource_rate_key(endpoint),
             requests_per_second=self._requests_per_second,
         )
+        if cooldown.remaining_seconds:
+            raise ComicVineError(
+                429,
+                "ComicVine cooldown active",
+                retryable=True,
+                retry_after_seconds=cooldown.remaining_seconds,
+            )
 
         request_params: dict[str, Any] = {
             "api_key": self._api_key,
@@ -478,10 +502,15 @@ class ComicVineProvider:
                 log.warning("comicvine_not_found")
                 raise ComicVineError(_STATUS_NOT_FOUND, f"Resource not found: {endpoint}") from None
             log.error("comicvine_http_error", status=http_status)
+            if http_status in {420, 429}:
+                cooldown.defer(
+                    retry_after_seconds(exc.response.headers.get("Retry-After"), default=3600)
+                )
             raise ComicVineError(
                 http_status,
                 f"HTTP {http_status}: {endpoint}",
                 retryable=http_status in {408, 420, 429} or http_status >= 500,
+                retry_after_seconds=cooldown.remaining_seconds or None,
             ) from None
         except httpx.HTTPError as exc:
             log.error("comicvine_request_failed", error=str(exc))
@@ -498,7 +527,13 @@ class ComicVineProvider:
             raise ComicVineError(status_code, f"Resource not found: {endpoint}")
         if status_code == _STATUS_RATE_LIMITED:
             log.warning("comicvine_rate_limited")
-            raise ComicVineError(status_code, "Rate limit exceeded", retryable=True)
+            cooldown.defer(retry_after_seconds(response.headers.get("Retry-After"), default=3600))
+            raise ComicVineError(
+                status_code,
+                "Rate limit exceeded",
+                retryable=True,
+                retry_after_seconds=cooldown.remaining_seconds,
+            )
         if status_code != _STATUS_OK:
             error_msg = data.get("error", "Unknown error")
             log.error("comicvine_api_error", status_code=status_code, error=error_msg)

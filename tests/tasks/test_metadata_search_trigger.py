@@ -12,6 +12,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import sys
@@ -34,6 +35,104 @@ if TYPE_CHECKING:
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-metadata-search")
 
 _MOD = "pullbox.tasks.metadata_task"
+
+
+async def test_interrupted_sync_restarts_at_first_uncommitted_series(db_factory):
+    from pullbox.tasks import metadata_task
+
+    ids = [await _create_series(db_factory, comicvine_id=i) for i in (91001, 91002, 91003)]
+    blocked = asyncio.Event()
+    svc = _make_metadata_svc([])
+
+    async def fetch(session, series_id):
+        if series_id == ids[1]:
+            blocked.set()
+            await asyncio.Event().wait()
+        return []
+
+    svc.fetch_issues_for_series.side_effect = fetch
+    with _sync_patches(db_factory, svc, _make_scheduler()):
+        task = asyncio.create_task(metadata_task.sync_new_issues())
+        await asyncio.wait_for(blocked.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        svc.fetch_issues_for_series.side_effect = None
+        svc.fetch_issues_for_series.return_value = []
+        await metadata_task.sync_new_issues()
+    assert [call.args[1] for call in svc.fetch_series.await_args_list] == [
+        91001,
+        91002,
+        91002,
+        91003,
+    ]
+
+
+async def test_sync_resumes_bounded_batches_from_durable_cursor(db_factory, monkeypatch):
+    from pullbox.tasks import metadata_task
+
+    for identifier in (91001, 91002, 91003):
+        await _create_series(db_factory, comicvine_id=identifier)
+    svc = _make_metadata_svc([])
+    scheduler = _make_scheduler()
+    monkeypatch.setattr(metadata_task, "_METADATA_BATCH_SIZE", 2, raising=False)
+    with _sync_patches(db_factory, svc, scheduler):
+        result = await metadata_task.sync_new_issues()
+        assert svc.fetch_series.await_count == 2, "A run must yield after a bounded batch"
+        assert result.status == "waiting"
+        await metadata_task.sync_new_issues()
+    assert [call.args[1] for call in svc.fetch_series.await_args_list] == [91001, 91002, 91003]
+    scheduler.schedule_task_continuation.assert_called()
+
+
+async def test_sync_pauses_whole_sweep_after_provider_throttle(db_factory):
+    from pullbox.core.exceptions import ProviderError
+    from pullbox.tasks import metadata_task
+
+    for identifier in (91001, 91002, 91003):
+        await _create_series(db_factory, comicvine_id=identifier)
+    svc = _make_metadata_svc([])
+    svc.fetch_series.side_effect = ProviderError(
+        "comicvine", "HTTP 420", details={"status_code": 420, "retryable": True}
+    )
+    with _sync_patches(db_factory, svc, _make_scheduler()):
+        result = await metadata_task.sync_new_issues()
+        assert svc.fetch_series.await_count == 1, (
+            "One throttle must pause the provider, not fail every series"
+        )
+        assert result.status == "waiting"
+        await metadata_task.sync_new_issues()
+        assert svc.fetch_series.await_count == 1, "Persisted cooldown must survive a fresh batch"
+
+
+async def test_sync_commits_metadata_before_waiting_for_issue_provider(db_factory):
+    from pullbox.tasks import metadata_task
+
+    sid = await _create_series(db_factory, comicvine_id=91001)
+    svc = _make_metadata_svc([])
+    tracking = _TrackingFactory(db_factory)
+    commits_after_metadata = []
+
+    async def write_series(session, identifier, **kwargs):
+        series = await session.get(Series, sid)
+        series.description = "Refreshed metadata"
+        await session.flush()
+        commits_after_metadata.append(tracking.commit_calls)
+
+    async def check_issue_fetch(session, series_id):
+        assert tracking.commit_calls > commits_after_metadata[-1], (
+            "Provider wait still holds metadata's write transaction"
+        )
+        return []
+
+    svc.fetch_series.side_effect = write_series
+    svc.fetch_issues_for_series.side_effect = check_issue_fetch
+    with _sync_patches(tracking, svc, _make_scheduler()):
+        await metadata_task.sync_new_issues()
+    assert svc.fetch_series.await_args.kwargs.get("download_cover") is False
+    async with db_factory() as session:
+        series = await session.get(Series, sid)
+        assert series.issue_catalog_last_checked_at is not None
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────
@@ -102,6 +201,7 @@ def _sync_patches(
             return_value=metadata_svc,
         ),
         patch(f"{_MOD}.get_scheduler", return_value=scheduler),
+        patch("pullbox.tasks.metadata_sweep_state.get_scheduler", return_value=scheduler),
     ):
         mock_settings.return_value = MagicMock()
         yield mock_settings
