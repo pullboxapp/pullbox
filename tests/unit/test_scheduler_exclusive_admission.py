@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from pullbox.core.scheduler import PullboxScheduler, get_current_task_trigger_type
+from pullbox.database import DatabaseMaintenanceBusyError
 
 
 @pytest.fixture
@@ -47,6 +48,14 @@ async def test_busy_exclusive_task_defers_without_blocking_other_jobs(
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_maintenance_blocked_by_request_transaction_is_retried(scheduler) -> None:
+    maintenance = AsyncMock(side_effect=DatabaseMaintenanceBusyError("Database is busy"))
+    await scheduler._wrap_task(maintenance, "maintain_database", exclusive=True)()
+    assert scheduler._task_stats["maintain_database"].last_status == "deferred"
+    assert scheduler._scheduler.get_job("maintain_database__exclusive_retry") is not None
+    assert scheduler._exclusive_active_task_id is None
 
 
 async def test_cancelling_waiting_exclusive_task_releases_reservation(

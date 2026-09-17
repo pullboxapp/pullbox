@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import time
 from collections.abc import Awaitable, Callable
+from contextlib import closing
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +24,9 @@ from pullbox.services.health_helpers import (
 )
 from pullbox.services.health_types import CheckOutcome, SubCheckOutcome
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 _DB_CONNECTION_DEGRADED_MS = 250.0
 _DB_CONNECTION_UNHEALTHY_MS = 1000.0
 _DB_QUERY_DEGRADED_MS = 500.0
@@ -28,6 +35,7 @@ _DB_BLOAT_DEGRADED_RATIO = 0.15
 _DB_BLOAT_UNHEALTHY_RATIO = 0.3
 _DB_BLOAT_DEGRADED_MB = 50.0
 _DB_BLOAT_UNHEALTHY_MB = 250.0
+_INTEGRITY_BUDGET_SECONDS = 5.0
 
 PerfCounter = Callable[[], float]
 RequiredDatabaseCheck = Callable[[AsyncSession], Awaitable[SubCheckOutcome]]
@@ -90,10 +98,15 @@ async def check_database(
                 "SQLite free-list bloat is high. Vacuuming the database should reclaim "
                 "unused pages."
             )
-        elif check.check_name == "integrity_check" and check.status != HealthStatus.HEALTHY:
+        elif check.check_name == "integrity_check" and check.status == HealthStatus.UNHEALTHY:
             guidance_parts.append(
                 "SQLite quick_check reported an integrity issue. Stop background work "
                 "and inspect the database."
+            )
+        elif check.check_name == "integrity_check" and check.status == HealthStatus.DEGRADED:
+            guidance_parts.append(
+                "Integrity verification did not finish within the health-check budget. "
+                "Use Database Maintenance for a full check when background activity is quiet."
             )
 
     if any(
@@ -243,13 +256,39 @@ async def check_db_size(session: AsyncSession) -> SubCheckOutcome | None:
     )
 
 
+def _bounded_integrity_check(path: Path) -> str:
+    """Interrupt expensive SQLite work inside SQLite, not only its awaiter."""
+    deadline = time.monotonic() + _INTEGRITY_BUDGET_SECONDS
+    with closing(
+        sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1)
+    ) as connection:
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Integrity check budget exhausted")
+        rows = connection.execute("PRAGMA quick_check").fetchall()
+        return "; ".join(str(row[0]) for row in rows)
+
+
 async def check_db_integrity(session: AsyncSession) -> SubCheckOutcome | None:
-    """Run SQLite quick_check when supported."""
-    if _sqlite_database_path(session) is None:
+    """Run a bounded read-only integrity probe without occupying the shared session."""
+    path = _sqlite_database_path(session)
+    if path is None:
         return None
 
-    result = await session.execute(text("PRAGMA quick_check"))
-    status_text = str(result.scalar_one_or_none() or "").strip()
+    try:
+        status_text = await asyncio.to_thread(_bounded_integrity_check, path)
+    except (TimeoutError, sqlite3.OperationalError) as exc:
+        if isinstance(exc, sqlite3.OperationalError) and getattr(
+            exc, "sqlite_errorcode", None
+        ) not in {sqlite3.SQLITE_INTERRUPT, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            raise
+        return SubCheckOutcome(
+            check_name="integrity_check",
+            name="Integrity check",
+            status=HealthStatus.DEGRADED,
+            message="Integrity check deferred: database busy or health-check time budget exhausted",
+            details={"verification": "incomplete"},
+        )
     if not status_text:
         return None
     if status_text.lower() == "ok":

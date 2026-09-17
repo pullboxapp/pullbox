@@ -74,6 +74,7 @@ from pullbox.core.scheduler_task_views import (
     build_scheduled_task_views,
 )
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
+from pullbox.database import DatabaseMaintenanceBusyError
 from pullbox.services.import_activity import (
     has_active_import_scheduler_protection,
     is_missing_import_jobs_table_error,
@@ -466,6 +467,17 @@ class PullboxScheduler:
                     "task_completed",
                     duration_seconds=round(elapsed, 2),
                     logical_status=completed_status,
+                )
+            except DatabaseMaintenanceBusyError:
+                scheduler._release_execution(task_id)
+                retry_at = scheduler._schedule_exclusive_retry(task_id, wrapper)
+                stats.last_execution = datetime.now(UTC).isoformat()
+                stats.last_duration_seconds = round(time.monotonic() - start, 2)
+                stats.last_status = "deferred"
+                stats.running_since = None
+                log.info("task_deferred_database_busy", retry_at=retry_at.isoformat())
+                await scheduler._persist_task_stat(
+                    task_id, stats, trigger_type=trigger_type, reason="deferred"
                 )
             except asyncio.CancelledError:
                 elapsed = time.monotonic() - start

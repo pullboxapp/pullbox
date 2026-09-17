@@ -404,7 +404,11 @@ class TestDatabaseExtendedChecks:
         )
         service = _make_service(settings)
 
-        result = await service._check_db_integrity(session)
+        with patch(
+            "pullbox.services.health_database_checks._bounded_integrity_check",
+            return_value="row 17 missing from index ix_series_title_year",
+        ):
+            result = await service._check_db_integrity(session)
 
         assert result is not None
         assert result.status == HealthStatus.UNHEALTHY

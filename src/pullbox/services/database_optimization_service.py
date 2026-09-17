@@ -8,13 +8,22 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from pullbox.database import database_maintenance_window
+from pullbox.core.sqlite_lock import is_sqlite_locked_error
+from pullbox.database import (
+    DatabaseMaintenanceBusyError,
+    await_maintenance_worker,
+    database_maintenance_window,
+)
 
 _BUSY_TIMEOUT_MS = 30_000
 
 
 class DatabaseOptimizationError(RuntimeError):
     """Raised when SQLite database optimization cannot run safely."""
+
+
+class DatabaseOptimizationBusyError(DatabaseOptimizationError, DatabaseMaintenanceBusyError):
+    """Database contention is safe to retry without calling it corruption."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +85,7 @@ class DatabaseOptimizationService:
         with self._connect(read_only=False) as connection:
             checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if checkpoint is not None and int(checkpoint[0]) != 0:
-                raise DatabaseOptimizationError(
+                raise DatabaseOptimizationBusyError(
                     "SQLite could not checkpoint the write-ahead log because the database is busy."
                 )
             connection.execute("VACUUM")
@@ -94,7 +103,7 @@ class DatabaseOptimizationService:
         with self._connect(read_only=False) as connection:
             checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if checkpoint is not None and int(checkpoint[0]) != 0:
-                raise DatabaseOptimizationError(
+                raise DatabaseOptimizationBusyError(
                     "SQLite could not checkpoint the write-ahead log because the database is busy."
                 )
             connection.execute("REINDEX")
@@ -106,7 +115,7 @@ class DatabaseOptimizationService:
             connection.execute("PRAGMA optimize=0x10002")
             checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if checkpoint is not None and int(checkpoint[0]) != 0:
-                raise DatabaseOptimizationError(
+                raise DatabaseOptimizationBusyError(
                     "SQLite could not checkpoint the write-ahead log after maintenance."
                 )
             integrity_row = connection.execute("PRAGMA quick_check").fetchone()
@@ -174,9 +183,16 @@ class DatabaseOptimizationRuntimeService:
     async def optimize(self) -> DatabaseOptimizationResult:
         """Compact the database outside the event loop under the maintenance gate."""
         async with database_maintenance_window(reason="database_optimize"):
-            return await asyncio.to_thread(self._service.optimize)
+            return await await_maintenance_worker(asyncio.to_thread(self._service.optimize))
 
     async def maintain(self) -> DatabaseMaintenanceResult:
         """Run recurring maintenance outside the event loop under the shared gate."""
-        async with database_maintenance_window(reason="nightly_database_maintenance"):
-            return await asyncio.to_thread(self._service.maintain)
+        try:
+            async with database_maintenance_window(reason="nightly_database_maintenance"):
+                return await await_maintenance_worker(asyncio.to_thread(self._service.maintain))
+        except sqlite3.OperationalError as exc:
+            if not is_sqlite_locked_error(exc):
+                raise
+            raise DatabaseOptimizationBusyError(
+                "Database is busy; maintenance will retry."
+            ) from exc
