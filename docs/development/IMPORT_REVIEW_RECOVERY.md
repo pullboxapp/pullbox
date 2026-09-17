@@ -72,6 +72,14 @@ decisions, skips, and safety blocks are not overridden. Reads are paged, source
 signatures and files are unchanged, and no provider requests are added. The
 shared finalization applies to Mylar and folder imports in either handling mode.
 
+Exact issue designations retain letter suffixes and their hyphens, including
+`13A`, `50-X`, and `50-O`. ComicVine metadata, local catalog reads, Mylar and
+folder discovery, and release validation share this identity policy. A dashed
+letter suffix is not a numeric range or a plain issue number; sibling letters
+must not collapse into the same target. Refreshing live metadata can correct
+an older zero-number fallback using its existing ComicVine issue ID without
+discarding ownership. No schema migration or source-file rename is required.
+
 ## Import Follow-up
 
 The Follow-up tab groups actionable work by import job rather than rendering

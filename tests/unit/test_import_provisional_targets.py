@@ -335,7 +335,10 @@ async def test_matching_pipeline_groups_late_identity_without_provider_or_file_i
     provider = Mock()
     provider.cache_metrics.return_value = {}
     for name in [
-        "get_series", "get_issue", "get_issues_for_series", "get_issues_for_series_by_numbers"
+        "get_series",
+        "get_issue",
+        "get_issues_for_series",
+        "get_issues_for_series_by_numbers",
     ]:
         setattr(provider, name, AsyncMock(side_effect=AssertionError("unexpected provider call")))
     service = ImportService(

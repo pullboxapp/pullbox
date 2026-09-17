@@ -137,7 +137,7 @@ _YEAR_BRACKET_RE = re.compile(r"\[(?:[A-Za-z]{3}\s+)?(\d{4})\]")
 _YEAR_PAREN_RE = re.compile(r"\((\d{4})\)")
 
 # Issue number with hash prefix: #045, #5, #5.1
-_ISSUE_HASH_RE = re.compile(r"#([+-]?\d+(?:\.\d+)?[A-Za-z]*)")
+_ISSUE_HASH_RE = re.compile(r"#([+-]?\d+(?:\.\d+)?(?:-?[A-Za-z]+)?)")
 
 # DC's One Million event used the literal issue number 1,000,000 across
 # multiple ongoing titles. Keep this exact exception narrow so arbitrary long
@@ -148,14 +148,14 @@ _DC_ONE_MILLION_ISSUE_RE = re.compile(r"(?<=\s)(1000000)(?=\s|$)")
 _PROG_ISSUE_RE = re.compile(r"\bProg(?:ramme)?\.?\s*#?\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE)
 
 # Bare four-digit issues are unambiguous only at the end of the stripped title.
-_LONG_POSITIONAL_ISSUE_RE = re.compile(r"(?<=\s)(\d{4}(?:\.\d+)?[A-Za-z]*)\s*$")
+_LONG_POSITIONAL_ISSUE_RE = re.compile(r"(?<=\s)(\d{4}(?:\.\d+)?(?:-?[A-Za-z]+)?)\s*$")
 _RANGE_OR_COUNT_PREFIX_RE = re.compile(r"(?:\d\s*[-\u2013\u2014]|\bof)\s*$", re.IGNORECASE)
 _VOLUME_YEAR_RE = re.compile(r"\b(?:v|vol(?:ume)?\.?)\s*((?:19|20)\d{2})\b", re.IGNORECASE)
 
 # Limited series marker: (of 05)
 _LIMITED_SERIES_RE = re.compile(r"\(of\s+\d+\)", re.IGNORECASE)
 _INLINE_LIMITED_SERIES_RE = re.compile(
-    r"(?<![\w.])(\d{1,3}(?:\.\d+)?)\s+of\s+\d{1,3}\b",
+    r"(?<![\w.])(\d{1,3}(?:\.\d+)?(?:-?[A-Za-z]+)?)\s+of\s+\d{1,3}\b",
     re.IGNORECASE,
 )
 
@@ -218,7 +218,7 @@ _PAREN_KNOWN_PUBLISHER_YEAR_RE = re.compile(
 )
 
 # "No." or "No" issue number in dot-separated: No.01, No.02
-_DOT_NO_ISSUE_RE = re.compile(r"\bNo\.?\s*(\d+)\b", re.IGNORECASE)
+_DOT_NO_ISSUE_RE = re.compile(r"\bNo\.?\s*(\d+(?:\.\d+)?(?:-?[A-Za-z]+)?)\b", re.IGNORECASE)
 _SCENE_PREFIX_NUMBERED_RE = re.compile(
     r"^(?P<group>[a-z][a-z0-9]{1,15})-"
     r"(?P<title>[A-Z].*?[._\s]+(?i:No)\.?[._\s]*\d{1,5})\s*$"
@@ -226,7 +226,9 @@ _SCENE_PREFIX_NUMBERED_RE = re.compile(
 
 # Minimal separator-only filenames such as ``dc_connect_72.pdf`` are common
 # enough to support, but this path stays narrower than full dot release parsing.
-_MINIMAL_SEPARATOR_ISSUE_RE = re.compile(r"^(?P<series>.+?)[._](?P<issue>0*\d{1,3}(?:\.\d+)?)$")
+_MINIMAL_SEPARATOR_ISSUE_RE = re.compile(
+    r"^(?P<series>.+?)[._](?P<issue>0*\d{1,3}(?:\.\d+)?(?:-?[A-Za-z]+)?)$"
+)
 _GENERIC_MINIMAL_SERIES_TOKENS = frozenset(
     {"scan", "scans", "page", "pages", "img", "image", "images", "cover", "covers", "comic"}
 )
@@ -295,7 +297,7 @@ def normalize_issue_number(raw: str | float | None) -> float | None:
         text = text[1:]
 
     limited_series_match = re.fullmatch(
-        r"(\d+(?:\.\d+)?)\s*(?:[\[(]\s*of\s+\d+\s*[\])]|\s+of\s+\d+)",
+        r"(\d+(?:\.\d+)?(?:-?[A-Za-z]+)?)\s*(?:[\[(]\s*of\s+\d+\s*[\])]|\s+of\s+\d+)",
         text,
         re.IGNORECASE,
     )
@@ -314,13 +316,8 @@ def normalize_issue_number(raw: str | float | None) -> float | None:
         if denom != 0:
             return num / denom
 
-    # Strip alpha suffixes: "5a" → "5", "12AU" → "12"
-    cleaned = re.sub(r"[a-zA-Z]+$", "", text).strip()
-    if not cleaned:
-        return None
-
     try:
-        return float(cleaned)
+        return parse_issue_number_text(text)[0]
     except ValueError:
         return None
 
@@ -820,7 +817,7 @@ def _extract_issue_number(
     # but NOT part of an alphanumeric word like "D4VE2" or "Spider-Man 2099"
     positional_matches = list(
         re.finditer(
-            r"(?<=\s)(\d{2,3}(?:\.\d+)?[A-Za-z]*)(?=\s|$)",
+            r"(?<=\s)(\d{2,3}(?:\.\d+)?(?:-?[A-Za-z]+)?)(?=\s|$)",
             clean,
         )
     )
@@ -842,7 +839,7 @@ def _extract_issue_number(
 
     # Priority 8: Single digit number at word boundary after text
     # Must NOT be followed by a word (e.g. "4 Covers" is a count, not issue #4)
-    m = re.search(r"(?<=\s)(\d[A-Za-z]*)(?=\s|$)", clean)
+    m = re.search(r"(?<=\s)(\d(?:-?[A-Za-z]+)?)(?=\s|$)", clean)
     if m:
         # Check the word after the digit — if it's alphabetic, this is likely
         # a count or descriptor (e.g. "4 Covers", "3 Stories"), not an issue number

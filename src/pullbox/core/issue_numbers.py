@@ -11,7 +11,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 _MAX_ISSUE_NUMBER_TEXT_LENGTH = 320
-_NUMERIC_SUFFIX_PATTERN = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([A-Za-z]+)$")
+# A suffix separator belongs to the exact designation, not the numeric value.
+_NUMERIC_SUFFIX_PATTERN = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(-?[A-Za-z]+)$")
 
 
 def _format_decimal(value: Decimal) -> str:

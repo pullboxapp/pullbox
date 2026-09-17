@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from pullbox.models.import_job import ImportedSeries
 from pullbox.services import import_file_matching as matching
 
 
@@ -56,7 +57,7 @@ async def test_singleton_issue_cohorts_do_not_load_files_or_commit(monkeypatch):
     result = await matching._finalize_import_series_file_groups(
         session,
         SimpleNamespace(id=1),
-        SimpleNamespace(id=2, raw_series_name="Test"),
+        ImportedSeries(id=2, raw_series_name="Test"),
         duplicate_group_counter=3,
         conflict_group_counter=4,
         detect_duplicate_copies=detect,

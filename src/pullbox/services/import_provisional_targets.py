@@ -55,8 +55,11 @@ def _source_key(file: ImportedFile, series_cv_id: int) -> _IssueKey | None:
     text = candidate_issue_number_text(file)
     if file.issue_number_raw and text is None:
         return None
+    source_issue_type = diagnostics.get("source_issue_type")
+    if not isinstance(source_issue_type, str):
+        return None
     try:
-        issue_type = IssueType(diagnostics.get("source_issue_type"))
+        issue_type = IssueType(source_issue_type)
         return text or format_issue_number(number), issue_type
     except (TypeError, ValueError):
         return None
@@ -183,9 +186,9 @@ async def reconcile_provisional_targets(
                         targets[key] = None
         await raise_if_cancelled(session, job.id)
         for file in page:
-            key = keys[file.id]
-            exact = targets.get(key) if key is not None else None
-            if exact is None:
+            provisional_key = keys[file.id]
+            resolved = targets.get(provisional_key) if provisional_key is not None else None
+            if resolved is None:
                 continue
             diagnostics = dict(file.diagnostics or {})
             for field in (
@@ -200,14 +203,14 @@ async def reconcile_provisional_targets(
                 "rejection_reason",
             ):
                 diagnostics.pop(field, None)
-            diagnostics["target_issue_summary"] = dict(exact.summary)
+            diagnostics["target_issue_summary"] = dict(resolved.summary)
             diagnostics["provisional_target_reconciliation"] = {
-                "evidence_file_id": exact.file_id,
-                "matched_issue_cv_id": exact.issue_cv_id,
+                "evidence_file_id": resolved.file_id,
+                "matched_issue_cv_id": resolved.issue_cv_id,
                 "previous_match_method": file.match_method,
             }
-            file.matched_issue_id = exact.issue_id
-            file.matched_issue_cv_id = exact.issue_cv_id
+            file.matched_issue_id = resolved.issue_id
+            file.matched_issue_cv_id = resolved.issue_cv_id
             file.match_method = "issue_number"
             file.diagnostics = diagnostics
             reconciled += 1
