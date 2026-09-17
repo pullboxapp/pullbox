@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from pullbox.core.archive import comicinfo_member_sort_key
+from pullbox.core.archive_format import ARCHIVE_SUFFIXES, archive_format
 from pullbox.core.comicinfo import ComicInfoData, parse_comicinfo
 from pullbox.core.filesystem_scan import iter_supported_files_with_handler
 from pullbox.core.page_sources.base import canonical_page_names
@@ -321,7 +322,7 @@ def _has_path_traversal(entry_name: str) -> bool:
 
 def ensure_zip_archive_inspectable(archive_path: Path) -> None:
     """Fail closed when a ZIP-based archive cannot be inspected."""
-    if archive_path.suffix.lower() not in (".cbz", ".zip"):
+    if archive_format(archive_path) != "cbz":
         return
 
     try:
@@ -347,7 +348,7 @@ def check_archive_path_traversal(archive_path: Path) -> list[str]:
     and we have stdlib support. RAR/7z support can be added later.
     """
     offending: list[str] = []
-    ext = archive_path.suffix.lower()
+    ext = "." + archive_format(archive_path)
 
     if ext in (".cbz", ".zip"):
         try:
@@ -371,7 +372,7 @@ def check_archive_size(archive_path: Path, max_bytes: int) -> int | None:
     Returns the total uncompressed size in bytes, or None if the archive
     cannot be read. Raises FileSafetyError if the size exceeds the limit.
     """
-    ext = archive_path.suffix.lower()
+    ext = "." + archive_format(archive_path)
 
     if ext not in (".cbz", ".zip"):
         return None
@@ -403,7 +404,7 @@ def check_archive_contents_for_dangerous_files(archive_path: Path) -> list[str]:
     Returns a list of dangerous entry names (empty = safe).
     """
     dangerous: list[str] = []
-    ext = archive_path.suffix.lower()
+    ext = "." + archive_format(archive_path)
 
     if ext in (".cbz", ".zip"):
         try:
@@ -428,7 +429,7 @@ def inspect_zip_archive_safety(
     block_dangerous: bool,
 ) -> ZipArchiveSafetyReport | None:
     """Inspect a ZIP-based archive once and return all safety facts needed."""
-    if archive_path.suffix.lower() not in (".cbz", ".zip"):
+    if archive_format(archive_path) != "cbz":
         return None
 
     try:
@@ -558,7 +559,7 @@ def run_safety_checks(
     # Find archive files to inspect
     archive_files: list[Path] = []
     if download_path.is_file():
-        if download_path.suffix.lower() in (".cbz", ".zip"):
+        if download_path.suffix.lower() in ARCHIVE_SUFFIXES:
             archive_files.append(download_path)
     elif download_path.is_dir():
 
@@ -572,7 +573,7 @@ def run_safety_checks(
         archive_files.extend(
             iter_supported_files_with_handler(
                 download_path,
-                frozenset({".cbz", ".zip"}),
+                ARCHIVE_SUFFIXES,
                 _on_archive_scan_error,
             )
         )
@@ -585,6 +586,27 @@ def run_safety_checks(
             block_dangerous=block_dangerous,
         )
         if safety_report is None:
+            from pullbox.core.archive import ArchiveError, ArchiveReader
+
+            try:
+                members = ArchiveReader(archive).list_members()
+            except ArchiveError as exc:
+                raise FileSafetyError("Archive inspection failed", details=[str(archive)]) from exc
+            if any(
+                member.is_link or has_archive_member_path_traversal(member.name)
+                for member in members
+            ):
+                raise FileSafetyError(
+                    "Archive contains dangerous path or link", details=[str(archive)]
+                )
+            if sum(member.size for member in members) > max_archive_size:
+                raise FileSafetyError(
+                    "Archive decompressed size exceeds limit", details=[str(archive)]
+                )
+            if block_dangerous and any(
+                Path(member.name).suffix.lower() in DANGEROUS_EXTENSIONS for member in members
+            ):
+                raise FileSafetyError("Archive contains dangerous payload", details=[str(archive)])
             continue
 
         # 2. Path traversal

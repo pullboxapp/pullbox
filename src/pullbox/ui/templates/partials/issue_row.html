@@ -17,7 +17,7 @@
       data-testid="series-issue-link"
       class="transition-colors hover:text-pb-interactive"
     >
-      #{{ issue.issue_number|issue_num }}
+      #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}
     </a>
   </td>
   <td class="series-domain-issue-title-cell">
@@ -74,7 +74,7 @@
         hx-boost="false"
         data-testid="series-issue-read"
         data-reading-interaction
-        aria-label="{{ reading.primary_label }} {{ series.title }} #{{ issue.issue_number|issue_num }}"
+        aria-label="{{ reading.primary_label }} {{ series.title }} #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}"
         class="series-domain-issue-action-btn"
         data-tip="{{ reading.primary_label }}"
         data-tip-pos="left"
@@ -90,7 +90,7 @@
               aria-label="Search"
               @click="runIssueAutoSearch({
                 id: {{ issue.id }},
-                label: {{ ('#' ~ issue.issue_number|issue_num)|tojson|forceescape }},
+                label: {{ ('#' ~ issue.issue_number|issue_num(issue.issue_number_text|default(none)))|tojson|forceescape }},
                 downloadUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/download')|tojson|forceescape }}
               })"
               :class="isIssueAutoSearching({{ issue.id }}) ? 'text-pb-interactive' : ''"
@@ -106,7 +106,7 @@
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
         </svg>
       </button>
-      <button data-testid="series-issue-manual-search" aria-label="Manual search" @click="window.dispatchEvent(new CustomEvent('open-search', { detail: { issueId: {{ issue.id }}, issueNum: {{ issue.issue_number|issue_num|tojson|forceescape }}, seriesTitle: {{ series.title|tojson|forceescape }}, seriesYear: {{ (series.year_start or '')|string|tojson|forceescape }} } }))"
+      <button data-testid="series-issue-manual-search" aria-label="Manual search" @click="window.dispatchEvent(new CustomEvent('open-search', { detail: { issueId: {{ issue.id }}, issueNum: {{ issue.issue_number|issue_num(issue.issue_number_text|default(none))|tojson|forceescape }}, seriesTitle: {{ series.title|tojson|forceescape }}, seriesYear: {{ (series.year_start or '')|string|tojson|forceescape }} } }))"
               class="series-domain-issue-action-btn"
               data-tip="Manual search"
               data-tip-pos="left"
@@ -126,7 +126,7 @@
         <button
           type="button"
           class="series-domain-issue-action-btn"
-          aria-label="Reading options for {{ series.title }} #{{ issue.issue_number|issue_num }}"
+          aria-label="Reading options for {{ series.title }} #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}"
           :aria-expanded="readingMenuOpen ? 'true' : 'false'"
           @click="readingMenuOpen = !readingMenuOpen"
           data-tip="Reading options"

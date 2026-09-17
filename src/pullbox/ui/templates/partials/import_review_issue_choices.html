@@ -1,0 +1,27 @@
+<div id="import-review-issue-choices-{{ file.id }}" data-testid="import-review-issue-choices"
+  x-data='importReviewFileActionData({jobId: {{ job.id }}, fileId: {{ file.id }}, action: "assign", inline: true})'
+  class="mt-3 space-y-2">
+  <form hx-get="/import/{{ job.id }}/files/{{ file.id }}/assign" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML" hx-boost="false" class="flex items-center gap-2">
+    <input type="hidden" name="cv_id" value="{{ series.provider_id }}"><input type="hidden" name="inline" value="true">
+    <input type="search" name="q" value="{{ query }}" class="input-pb min-w-0 flex-1" aria-label="Find an issue for {{ file.file_name }}" placeholder="Issue number or title">
+    <button type="submit" class="btn-ghost btn-sm">Find issue</button>
+  </form>
+  <div class="overflow-x-auto rounded-lg border border-pb-border">
+    <table class="downloads-table text-xs"><thead><tr><th>Issue</th><th>Title</th><th><span class="sr-only">Action</span></th></tr></thead><tbody>
+      {% for issue in issues %}<tr>
+        <td class="font-semibold">#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</td><td>{{ issue.title or 'Untitled issue' }}</td>
+        <td><form hx-boost="false" @submit.prevent="submit($el)">
+          <input type="hidden" name="token" value="{{ token }}"><input type="hidden" name="cv_id" value="{{ series.provider_id }}"><input type="hidden" name="issue_cv_id" value="{{ issue.provider_id }}">
+          <button type="submit" class="btn-primary btn-sm whitespace-nowrap" :disabled="selecting" data-testid="import-review-use-issue">Use this</button>
+        </form></td>
+      </tr>{% else %}<tr><td colspan="3" class="text-pb-text-dim">No matching issues. Try another number or title.</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+  {% if issue_page_count > 1 %}<nav class="flex items-center justify-end gap-3 text-xs" aria-label="Issue choices pages">
+    {% if issue_page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/files/{{ file.id }}/assign?cv_id={{ series.provider_id }}&inline=true&issue_page={{ issue_page - 1 }}&q={{ query|urlencode }}" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML">Previous</button>{% endif %}
+    <span>{{ issue_page }} of {{ issue_page_count }}</span>
+    {% if issue_page < issue_page_count %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/files/{{ file.id }}/assign?cv_id={{ series.provider_id }}&inline=true&issue_page={{ issue_page + 1 }}&q={{ query|urlencode }}" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML">Next</button>{% endif %}
+  </nav>{% endif %}
+  <p class="text-xs text-pb-text-dim">Verified issue list for {{ series.title }}. Only this file's match changes.</p>
+  <p x-cloak x-show="error" x-text="error" role="alert" class="text-xs text-pb-error"></p>
+</div>

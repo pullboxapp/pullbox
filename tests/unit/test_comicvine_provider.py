@@ -58,6 +58,39 @@ def test_rate_limit_resource_key_keeps_api_resources_independent() -> None:
     assert comicvine_module._resource_rate_key("/search/") == "search"
 
 
+@pytest.mark.parametrize("resource", ["series", "issue"])
+@pytest.mark.parametrize(
+    "provider_id",
+    [
+        "",
+        "0",
+        "-1",
+        "123/../../search",
+        "123?filter=volume:1",
+        "123#fragment",
+        "https://example.test",
+    ],
+)
+async def test_single_resource_rejects_noncanonical_id_before_request(
+    resource: str, provider_id: str
+) -> None:
+    provider = ComicVineProvider(api_key="invalid-resource-id-test", rate_limit=999_999)
+    request = AsyncMock(
+        return_value={
+            "results": _volume_item(123, "Example", 2026)
+            if resource == "series"
+            else _issue_item(123, "1")
+        }
+    )
+    provider._request = request  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ValueError, match="positive integers"):
+            await getattr(provider, f"get_{resource}")(provider_id)
+        request.assert_not_awaited()
+    finally:
+        await provider._client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_rate_coordinator_is_shared_by_api_key_and_policy() -> None:
     first = comicvine_module._rate_coordinator_for(
@@ -692,6 +725,26 @@ async def test_get_issues_for_series_by_numbers_deduplicates_and_formats_filters
     assert filters == [
         "volume:97508,issue_number:1",
         "volume:97508,issue_number:1.5",
+    ]
+
+
+async def test_targeted_issue_filters_preserve_alphabetic_suffixes() -> None:
+    provider = ComicVineProvider(api_key="targeted-issues-test-key", rate_limit=999_999)
+    request_mock = AsyncMock(
+        side_effect=[
+            {"results": [_issue_item(1301, "13A")]},
+            {"results": [_issue_item(1302, "13B")]},
+        ]
+    )
+    provider._request = request_mock  # type: ignore[method-assign]
+    try:
+        summaries = await provider.get_issues_for_series_by_numbers("97508", ["013a", "13A", "13B"])
+    finally:
+        await provider._client.aclose()
+    assert [summary.issue_number_text for summary in summaries] == ["13A", "13B"]
+    assert [call.args[1]["filter"] for call in request_mock.await_args_list] == [
+        "volume:97508,issue_number:13A",
+        "volume:97508,issue_number:13B",
     ]
 
 

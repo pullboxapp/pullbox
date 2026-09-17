@@ -174,7 +174,7 @@
                     {% endif %}
                   </span>
                 {% else %}
-                  <span class="pill pill-muted">Issue {{ issue.issue_number|issue_num }}</span>
+                  <span class="pill pill-muted">Issue {{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</span>
                 {% endif %}
               </td>
               <td>

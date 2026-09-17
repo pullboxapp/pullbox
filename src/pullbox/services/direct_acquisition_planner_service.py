@@ -13,9 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from pullbox.core.exceptions import ValidationError
+from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.log_sanitizer import sanitize_log_string
 from pullbox.core.name_matcher import NameMatcher
-from pullbox.core.release_parser import issues_match, normalize_issue_number
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
@@ -1039,9 +1039,10 @@ def _requested_volume(
 def _coverage_numbers_match(requested: str, offered: str) -> bool:
     if requested.casefold() == offered.casefold():
         return True
-    requested_number = normalize_issue_number(requested)
-    offered_number = normalize_issue_number(offered)
-    return requested_number is not None and issues_match(requested_number, offered_number)
+    try:
+        return normalize_issue_number_text(requested) == normalize_issue_number_text(offered)
+    except ValueError:
+        return False
 
 
 def _candidate_confidence(snapshot: Mapping[str, object]) -> float:

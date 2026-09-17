@@ -18,6 +18,10 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.issue import Issue
+from pullbox.services.import_file_selection import (
+    defer_excluded_review_files,
+    not_excluded_from_review,
+)
 from pullbox.services.import_job_execution_items import (
     ensure_target_issue_summary_for_import_file,
 )
@@ -75,6 +79,17 @@ async def confirm_import_job(
 
     if job.status != ImportJobStatus.REVIEW:
         raise ValidationError(f"Job must be in REVIEW state to confirm (current: {job.status})")
+    if await session.scalar(
+        sa_select(ImportedFile.id)
+        .where(
+            ImportedFile.import_job_id == job_id,
+            ImportedFile.diagnostics["review_source_action"]["state"]
+            .as_string()
+            .in_(["pending", "matching"]),
+        )
+        .limit(1)
+    ):
+        raise ValidationError("Wait for source verification to finish before starting the import.")
 
     affected_series_ids: set[int] = set()
 
@@ -152,6 +167,9 @@ async def confirm_import_job(
         await reopen_review_after_managed_copy_preflight_failure(session, job, exc)
         raise
 
+    deferred_series_ids = await defer_excluded_review_files(session, job_id)
+    if deferred_series_ids:
+        await recompute_file_counters(session, job, series_ids=sorted(deferred_series_ids))
     job.status = ImportJobStatus.IMPORTING
     job.control_request = ImportControlRequest.NONE
     progress_snapshot = initialize_progress_snapshot(
@@ -235,6 +253,7 @@ async def _load_confirmed_series(
                         ImportedFile.status.in_(
                             [ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]
                         ),
+                        not_excluded_from_review(),
                     )
                     .distinct()
                 )
@@ -268,7 +287,7 @@ async def _load_confirmed_series(
         if item.status == ImportSeriesStatus.MATCHED and (
             item.id in importable_series_ids
             or no_persisted_files
-            or item.id not in conflict_series_ids
+            or (item.id not in conflict_series_ids and not item.files_matched)
         ):
             valid_items.append(item)
             continue
@@ -363,6 +382,7 @@ async def _confirm_matched_files(
         sa_select(ImportedFile).where(
             ImportedFile.import_series_id.in_(confirmed_series_ids),
             ImportedFile.status == ImportedFileStatus.MATCHED,
+            not_excluded_from_review(),
         )
     )
     for matched_file in matched_result.scalars().all():

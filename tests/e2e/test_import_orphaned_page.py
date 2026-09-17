@@ -74,7 +74,7 @@ class TestImportUnmatchedTab:
         assert authed_page.locator("[data-testid='import-orphaned-cv-search-modal']").is_visible()
         assert authed_page.locator("[data-testid='import-orphaned-cv-search-input']").is_visible()
 
-    def test_import_orphaned_actions_use_icon_buttons_with_tooltips(
+    def test_import_orphaned_actions_use_labeled_match_buttons_with_tooltips(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
@@ -106,7 +106,7 @@ class TestImportUnmatchedTab:
         assert action_state is not None
         assert action_state["searchTip"] == "Search ComicVine"
         assert action_state["dismissTip"] == "Dismiss"
-        assert action_state["searchText"] == ""
+        assert action_state["searchText"] == "Find series"
         assert action_state["dismissText"] == ""
         assert action_state["searchHasSvg"] is True
         assert action_state["dismissHasSvg"] is True

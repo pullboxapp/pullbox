@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pullbox.core.archive import inspect_archive_page_count as inspect_archive_page_count
+from pullbox.core.archive_format import archive_format
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.file_safety import is_resource_safety_exception_allowed
 from pullbox.core.issue_numbers import format_issue_number
@@ -65,7 +66,10 @@ async def prepare_import_file(
             converted=False,
         )
 
-    if source_path.suffix.lower().lstrip(".") == "cbz":
+    if (
+        source_path.suffix.lower() == ".cbz"
+        and await asyncio.to_thread(archive_format, source_path) == "cbz"
+    ):
         return PreparedImportFile(
             registration_source=source_path,
             original_source=source_path,
@@ -211,7 +215,10 @@ async def rewrite_import_file_comicinfo(
 ) -> tuple[Path, str, str]:
     """Repair an imported archive's ComicInfo.xml, normalizing to CBZ when needed."""
     source_path = Path(imp_file.file_path)
-    if source_path.suffix.lower() == ".cbz":
+    if (
+        source_path.suffix.lower() == ".cbz"
+        and await asyncio.to_thread(archive_format, source_path) == "cbz"
+    ):
         await asyncio.to_thread(
             embedder,
             source_path,

@@ -5,6 +5,10 @@ from __future__ import annotations
 import math
 import re
 from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _MAX_ISSUE_NUMBER_TEXT_LENGTH = 320
 _NUMERIC_SUFFIX_PATTERN = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([A-Za-z]+)$")
@@ -93,3 +97,16 @@ def parse_issue_number_text(value: str | float | int) -> tuple[float, str]:
     if not math.isfinite(float_value):
         raise ValueError("issue number exceeds the numeric compatibility range")
     return float_value, exact_text
+
+
+def issue_number_lookup_value(value: str | float | int) -> float | str:
+    """Keep legacy numeric cache keys, but never discard an identity suffix."""
+    numeric, exact = parse_issue_number_text(value)
+    return numeric if exact == format_issue_number(numeric) else exact
+
+
+def normalize_issue_number_queries(values: Iterable[str | float | int]) -> list[float | str]:
+    """Deduplicate targeted lookups by exact identity in stable numeric order."""
+    return sorted(
+        {issue_number_lookup_value(value) for value in values}, key=parse_issue_number_text
+    )

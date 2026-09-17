@@ -107,26 +107,9 @@ def _detect_archive_type(source: Path) -> str:
     Many .cbr files are actually ZIP archives (mislabeled). This ensures
     the correct converter is used regardless of file extension.
     """
-    try:
-        with open(source, "rb") as f:
-            header = f.read(8)
-    except OSError:
-        return source.suffix.lower()
+    from pullbox.core.archive_format import archive_format
 
-    # ZIP: PK\x03\x04
-    if header[:4] == b"PK\x03\x04":
-        return ".cbz"
-    # RAR: Rar!\x1a\x07
-    if header[:6] == b"Rar!\x1a\x07":
-        return ".cbr"
-    # 7z: 7z\xbc\xaf\x27\x1c
-    if header[:6] == b"7z\xbc\xaf\x27\x1c":
-        return ".cb7"
-    # PDF: %PDF
-    if header[:4] == b"%PDF":
-        return ".pdf"
-
-    return source.suffix.lower()
+    return "." + archive_format(source)
 
 
 def _convert_sync(

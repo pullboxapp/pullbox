@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.services.catalog.contract import CatalogError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pullbox.providers.base import (
         IssueMetadata,
         IssueSummary,
@@ -74,13 +77,13 @@ class CatalogLookupService:
         return await self.reader.issues(int(series_provider_id))
 
     async def get_issues_for_series_by_numbers(
-        self, series_provider_id: str, issue_numbers: list[float]
+        self, series_provider_id: str, issue_numbers: Sequence[float | str]
     ) -> list[IssueSummary]:
-        numbers = set(issue_numbers)
+        numbers = {normalize_issue_number_text(number) for number in issue_numbers}
         return [
             issue
             for issue in await self.get_issues_for_series(series_provider_id)
-            if issue.issue_number in numbers
+            if normalize_issue_number_text(issue.issue_number_text or issue.issue_number) in numbers
         ]
 
     async def get_issue(self, issue_provider_id: str) -> IssueMetadata:

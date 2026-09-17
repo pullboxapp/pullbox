@@ -448,6 +448,17 @@ class TestImportReviewPartial:
             )
             assert selected_series is not None
             selected_series.selected_for_import = True
+            selected_series.files_matched = 1
+            session.add(
+                ImportedFile(
+                    import_job_id=job_id,
+                    import_series_id=selected_series.id,
+                    file_path="/tmp/comics/selected-001.cbz",
+                    file_name="selected-001.cbz",
+                    file_format="cbz",
+                    status=ImportedFileStatus.MATCHED,
+                )
+            )
             await session.commit()
 
         request = MagicMock()
@@ -472,8 +483,13 @@ class TestImportReviewPartial:
                 ctx = call_args[0][2]
                 assert ctx["job"].id == job_id
                 assert ctx["sort"] == "confidence"
-                assert len(ctx["series_items"]) == 5
-                assert ctx["total"] == 5
+                assert ctx["current_view"] == "decide"
+                assert len(ctx["series_items"]) == 2
+                assert ctx["total"] == 2
+                assert sum(ctx["lane_counts"].values()) == 5
+                assert all(
+                    item.status == ImportSeriesStatus.NO_MATCH for item in ctx["series_items"]
+                )
                 assert len(ctx["library_roots"]) == 1
                 assert "status_counts" in ctx
                 assert ctx["selected_series_ids"] == [selected_series.id]
@@ -2693,11 +2709,11 @@ class TestImportUnmatchedTab:
             total_pages=1,
         )
 
-        assert "Series identified" in html
+        assert "Review suggestions" in html
         assert 'data-tip="Continue recovery"' in html
         assert 'data-testid="import-orphaned-recover-7"' in html
         assert 'data-tip="Change ComicVine match"' in html
-        assert 'class="downloads-action-btn"' in html
+        assert 'class="btn-ghost btn-sm"' in html
 
     def test_orphaned_table_routes_imported_issue_recovery_rows_directly_to_file_resolution(
         self,
@@ -2728,7 +2744,7 @@ class TestImportUnmatchedTab:
             total_pages=1,
         )
 
-        assert "Issue unresolved" in html
+        assert "Needs an issue match" in html
         assert 'data-testid="import-orphaned-recover-11"' in html
         assert 'data-tip="Resolve files"' in html
         assert 'aria-label="Resolve unresolved files for Absolute Martian Manhunter"' in html
@@ -2763,7 +2779,7 @@ class TestImportUnmatchedTab:
             total_pages=1,
         )
 
-        assert "Issue unresolved" in html
+        assert "Needs an issue match" in html
         assert 'data-testid="import-orphaned-recover-12"' in html
         assert 'data-tip="Resolve files"' in html
         assert 'data-testid="import-orphaned-search-12"' not in html

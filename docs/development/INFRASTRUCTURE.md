@@ -266,6 +266,10 @@ tracked in the active CI/CD path.
   AMD64/ARM64 platform builds can run concurrently. Production releases use
   architecture-specific GitHub Actions cache scopes and merge the platform
   digests only after validation succeeds.
+- The Docker runners are organization-level runners in `pullbox-docker-builders`,
+  not repository-level registrations. Check the organization's runner inventory
+  and the group's selected-repository access before attempting restoration; an
+  empty repository-only listing does not establish that these runners are missing.
 - Untrusted Docker PRs run a reduced public sanity check (`Dockerfile.dev`
   build) instead of the full DHI-backed production build.
 - `Docker Validate Required` is the stable aggregate check for Docker

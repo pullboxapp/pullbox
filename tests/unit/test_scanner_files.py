@@ -328,12 +328,8 @@ class TestFileEdgeCases:
         assert results[0].files[0].file_size == 12345
 
     @pytest.mark.asyncio
-    async def test_issue_number_raw_from_filename_not_comicinfo(self, tmp_path: Path) -> None:
-        """issue_number_raw comes from filename parsing, NOT ComicInfo.xml.
-
-        Even when ComicInfo has <Number>5</Number>, issue_number_raw reflects
-        what was parsed from the filename.
-        """
+    async def test_issue_number_raw_preserves_embedded_identity(self, tmp_path: Path) -> None:
+        """Keep the embedded issue identity instead of replacing it with the filename."""
         series_dir = tmp_path / "Batman (2016)"
         series_dir.mkdir()
         _make_cbz(
@@ -345,8 +341,7 @@ class TestFileEdgeCases:
         results = await _scan_all(scanner, tmp_path)
 
         f = results[0].files[0]
-        # issue_number_raw should reflect the filename parse ("1"), not ComicInfo ("5")
-        assert f.issue_number_raw == "1"
+        assert f.issue_number_raw == "5"
 
     @pytest.mark.asyncio
     async def test_fractional_issue_number_raw(self, tmp_path: Path) -> None:

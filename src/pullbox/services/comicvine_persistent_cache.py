@@ -15,13 +15,14 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from pullbox.core.issue_numbers import issue_number_lookup_value, normalize_issue_number_queries
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.models.provider_cache import MetadataProviderCacheEntry
 from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesMetadata, SeriesSearchResult
 from pullbox.providers.story_arcs import StoryArcSearchResult
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -410,12 +411,12 @@ class PersistentComicVineCacheProvider:
     async def get_issues_for_series_by_numbers(
         self,
         series_provider_id: str,
-        issue_numbers: list[float],
+        issue_numbers: Sequence[float | str],
     ) -> list[IssueSummary]:
         kind = "get_issues_for_series_by_number"
-        normalized_numbers = sorted({float(number) for number in issue_numbers})
+        normalized_numbers = normalize_issue_number_queries(issue_numbers)
         summaries: list[IssueSummary] = []
-        missing_numbers: list[float] = []
+        missing_numbers: list[float | str] = []
 
         for issue_number in normalized_numbers:
             request = _issue_number_request(series_provider_id, issue_number)
@@ -425,7 +426,12 @@ class PersistentComicVineCacheProvider:
                 missing_numbers.append(issue_number)
                 continue
             self._stats.hits[kind] += 1
-            summaries.extend(_issue_summaries_from_payload(payload))
+            summaries.extend(
+                summary
+                for summary in _issue_summaries_from_payload(payload)
+                if issue_number_lookup_value(summary.issue_number_text or summary.issue_number)
+                == issue_number
+            )
 
         if not missing_numbers:
             return summaries
@@ -441,17 +447,25 @@ class PersistentComicVineCacheProvider:
                 missing_numbers,
             )
         else:
-            missing_set = {float(number) for number in missing_numbers}
+            missing_set = set(missing_numbers)
             all_summaries = await self.get_issues_for_series(series_provider_id)
             fetched = [
-                summary for summary in all_summaries if float(summary.issue_number) in missing_set
+                summary
+                for summary in all_summaries
+                if issue_number_lookup_value(summary.issue_number_text or summary.issue_number)
+                in missing_set
             ]
         self._stats.external_calls[kind] += len(missing_numbers)
         self._stats.external_duration_ms[kind] += (time.monotonic() - started_at) * 1000
 
-        by_number: dict[float, list[IssueSummary]] = {number: [] for number in missing_numbers}
+        by_number: dict[float | str, list[IssueSummary]] = {
+            number: [] for number in missing_numbers
+        }
         for summary in fetched:
-            by_number.setdefault(float(summary.issue_number), []).append(summary)
+            number_key = issue_number_lookup_value(
+                summary.issue_number_text or summary.issue_number
+            )
+            by_number.setdefault(number_key, []).append(summary)
 
         for issue_number in missing_numbers:
             number_summaries = by_number.get(issue_number, [])
@@ -733,10 +747,10 @@ def _clear_inflight(
         _CACHE_MISS_INFLIGHT.pop(inflight_key, None)
 
 
-def _issue_number_request(series_provider_id: str, issue_number: float) -> dict[str, Any]:
+def _issue_number_request(series_provider_id: str, issue_number: float | str) -> dict[str, Any]:
     return {
         "series_provider_id": str(series_provider_id),
-        "issue_number": float(issue_number),
+        "issue_number": issue_number_lookup_value(issue_number),
     }
 
 

@@ -373,6 +373,36 @@ async def test_persistent_cache_ignores_dynamic_mock_targeted_issue_lookup(
     provider.get_issues_for_series_by_numbers.assert_not_awaited()
 
 
+async def test_persistent_targeted_cache_does_not_alias_suffix_siblings(
+    async_engine: AsyncEngine,
+) -> None:
+    session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    provider = AsyncMock()
+    provider.get_issues_for_series.return_value = [
+        IssueSummary(
+            provider_id=str(100 + index),
+            issue_number=13,
+            issue_number_text=number,
+            title=None,
+            release_date=None,
+            cover_url=None,
+            issue_type="issue",
+        )
+        for index, number in enumerate(["13", "13A", "13B"])
+    ]
+    cache = PersistentComicVineCacheProvider(provider, session_factory)
+    summaries = await cache.get_issues_for_series_by_numbers("123", [13.0])
+    assert [issue.issue_number_text for issue in summaries] == ["13"]
+    summaries = await cache.get_issues_for_series_by_numbers("123", ["013a", "13A"])
+    assert [issue.issue_number_text for issue in summaries] == ["13A"]
+    reloaded = PersistentComicVineCacheProvider(provider, session_factory)
+    summaries = await reloaded.get_issues_for_series_by_numbers("123", ["13B"])
+    assert [issue.issue_number_text for issue in summaries] == ["13B"]
+    summaries = await reloaded.get_issues_for_series_by_numbers("123", ["13A"])
+    assert [issue.issue_number_text for issue in summaries] == ["13A"]
+    provider.get_issues_for_series.assert_awaited_once()
+
+
 async def test_persistent_cache_reuses_series_detail_payload(
     async_engine: AsyncEngine,
 ) -> None:

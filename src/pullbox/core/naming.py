@@ -163,6 +163,7 @@ class ParsedFilename:
     issue_type: str = "issue"  # IssueType.value string
     tags: list[str] = field(default_factory=list)
     extension: str | None = None
+    issue_number_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -864,6 +865,7 @@ def parse_filename(filename: str) -> ParsedFilename | None:
     return ParsedFilename(
         series=parsed.series_name,
         issue_number=parsed.issue_number,
+        issue_number_text=parsed.issue_number_text,
         year=parsed.year,
         volume=parsed.volume,
         issue_type=parsed.issue_type.value,

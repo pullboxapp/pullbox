@@ -174,6 +174,47 @@ def source_file(tmp_path: Path) -> Path:
 class TestMoveToLibrary:
     """File is moved to comics directory under correct series folder."""
 
+    async def test_managed_copy_and_reregistration_keep_detected_format(
+        self, session: AsyncSession, issue: Issue, source_file: Path, comics_dir_config: Path
+    ) -> None:
+        from pullbox.core.file_ops import register_library_file
+
+        source = source_file.with_suffix(".cbr")
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("1.jpg", b"page")
+        before = source.read_bytes()
+        registered = await register_library_file(
+            session,
+            source,
+            issue,
+            MatchConfidence.HIGH,
+            move_to_library=True,
+            transfer_method="copy",
+            rename=False,
+            normalize_to_cbz=False,
+            update_embedded_comicinfo_from_match=False,
+        )
+        assert registered.file_format == FileFormat.CBZ
+        assert Path(registered.file_path).suffix == ".cbr"
+        assert source.read_bytes() == before
+        registered.file_format = FileFormat.CBR
+        await session.flush()
+        again = await register_library_file(
+            session,
+            Path(registered.file_path),
+            issue,
+            MatchConfidence.HIGH,
+            move_to_library=False,
+            storage_mode=LibraryFileStorageMode.MANAGED,
+            recover_existing_managed_artifact=True,
+            rename=False,
+            normalize_to_cbz=False,
+            update_embedded_comicinfo_from_match=False,
+        )
+        assert again.id == registered.id
+        assert again.file_format == FileFormat.CBZ
+        assert Path(again.file_path).read_bytes() == before
+
     @pytest.mark.asyncio
     async def test_move_to_library(
         self, session: AsyncSession, issue: Issue, source_file: Path, comics_dir_config: Path
@@ -2042,12 +2083,14 @@ class TestErrorHandling:
             await resolve_library_destination(session, source_file, issue)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("suffix", ["cbz", "cbr"])
     async def test_source_missing_recovers_existing_materialized_target(
         self,
         session: AsyncSession,
         issue: Issue,
         comics_dir_config: Path,
         tmp_path: Path,
+        suffix: str,
     ) -> None:
         """If a prior move succeeded, register the existing library file on retry."""
         from pullbox.core.file_ops import register_library_file, resolve_library_destination
@@ -2055,7 +2098,7 @@ class TestErrorHandling:
         session.add(SystemConfig(key="rename_on_import", value="true", value_type="bool"))
         await session.flush()
 
-        missing_source = tmp_path / "downloads" / "Batman 017 (2024).cbz"
+        missing_source = tmp_path / "downloads" / f"Batman 017 (2024).{suffix}"
         target_path, _root = await resolve_library_destination(
             session,
             missing_source,
@@ -2063,7 +2106,8 @@ class TestErrorHandling:
             rename=True,
         )
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(b"PK" + b"\x00" * 100)
+        with zipfile.ZipFile(target_path, "w") as archive:
+            archive.writestr("1.jpg", b"page")
 
         lf = await register_library_file(
             session,
@@ -2072,10 +2116,27 @@ class TestErrorHandling:
             MatchConfidence.HIGH,
             move_to_library=True,
             rename=True,
+            normalize_to_cbz=False,
+            update_embedded_comicinfo_from_match=False,
         )
 
         assert lf.file_path == str(target_path)
         assert Path(lf.file_path).exists()
+        assert lf.file_format == FileFormat.CBZ
+        lf.file_format = FileFormat.CBR
+        await session.flush()
+        again = await register_library_file(
+            session,
+            missing_source,
+            issue,
+            MatchConfidence.HIGH,
+            move_to_library=True,
+            rename=True,
+            normalize_to_cbz=False,
+            update_embedded_comicinfo_from_match=False,
+        )
+        assert again.id == lf.id
+        assert again.file_format == FileFormat.CBZ
         await session.refresh(issue)
         assert issue.status == IssueStatus.OWNED
 

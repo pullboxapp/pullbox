@@ -137,7 +137,7 @@ _YEAR_BRACKET_RE = re.compile(r"\[(?:[A-Za-z]{3}\s+)?(\d{4})\]")
 _YEAR_PAREN_RE = re.compile(r"\((\d{4})\)")
 
 # Issue number with hash prefix: #045, #5, #5.1
-_ISSUE_HASH_RE = re.compile(r"#(\d+(?:\.\d+)?[A-Za-z]*)")
+_ISSUE_HASH_RE = re.compile(r"#([+-]?\d+(?:\.\d+)?[A-Za-z]*)")
 
 # DC's One Million event used the literal issue number 1,000,000 across
 # multiple ongoing titles. Keep this exact exception narrow so arbitrary long

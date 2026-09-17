@@ -17,11 +17,12 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from pullbox.core.issue_numbers import issue_number_lookup_value, normalize_issue_number_queries
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,7 +79,9 @@ class CachedImportMetadataProvider:
         self._series_cache: dict[str, asyncio.Task[Any]] = {}
         self._issue_cache: dict[str, asyncio.Task[Any]] = {}
         self._issues_cache: dict[str, asyncio.Task[Any]] = {}
-        self._issues_by_number_cache: dict[tuple[str, tuple[float, ...]], asyncio.Task[Any]] = {}
+        self._issues_by_number_cache: dict[
+            tuple[str, tuple[float | str, ...]], asyncio.Task[Any]
+        ] = {}
         self._stats = _MemoryCacheStats()
 
     def __getattr__(self, name: str) -> Any:
@@ -245,9 +248,9 @@ class CachedImportMetadataProvider:
     async def get_issues_for_series_by_numbers(
         self,
         series_provider_id: str,
-        issue_numbers: list[float],
+        issue_numbers: Sequence[float | str],
     ) -> Any:
-        normalized_numbers = tuple(sorted({float(number) for number in issue_numbers}))
+        normalized_numbers = tuple(normalize_issue_number_queries(issue_numbers))
         key = (str(series_provider_id), normalized_numbers)
 
         async def fetch() -> Any:
@@ -265,7 +268,10 @@ class CachedImportMetadataProvider:
             return [
                 summary
                 for summary in summaries
-                if float(getattr(summary, "issue_number", 0.0)) in number_set
+                if issue_number_lookup_value(
+                    getattr(summary, "issue_number_text", None) or summary.issue_number
+                )
+                in number_set
             ]
 
         return await self._memoize(

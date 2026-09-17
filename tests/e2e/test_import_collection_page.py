@@ -635,6 +635,10 @@ class TestImportCollectionTab:
         )
         import_page.workspace_root.wait_for(state="visible", timeout=5000)
         import_page.review_panel.wait_for(state="visible", timeout=5000)
+        import_page.review_matched_tab.click()
+        page.wait_for_function(
+            "document.querySelector('[name=review_status_filter]').value === 'ready'"
+        )
         return review_job_id
 
     def test_import_collection_renders_stable_shell_without_implicit_resume(
@@ -698,14 +702,16 @@ class TestImportCollectionTab:
         if import_page.review_matched_tab.count() == 0:
             pytest.skip("Matched tab is unavailable in the seeded review state.")
 
-        assert authed_page.locator("input[name='review_status_filter']").first.input_value() == ""
+        assert (
+            authed_page.locator("input[name='review_status_filter']").first.input_value() == "ready"
+        )
 
         import_page.review_matched_tab.click()
         import_page.wait_for_htmx(timeout=10000)
         authed_page.wait_for_function(
             """() => {
                 const input = document.querySelector("#import-step-review-shell input[name='review_status_filter']");
-                return !!input && input.value === "matched";
+                return !!input && input.value === "ready";
             }""",
             timeout=5000,
         )
@@ -715,7 +721,7 @@ class TestImportCollectionTab:
         authed_page.wait_for_function(
             """() => {
                 const input = document.querySelector("#import-step-review-shell input[name='review_status_filter']");
-                return !!input && input.value === "";
+                return !!input && input.value === "decide";
             }""",
             timeout=5000,
         )
@@ -728,13 +734,11 @@ class TestImportCollectionTab:
         import_page = ImportPage(authed_page, seeded_server)
         self._goto_review_step(import_page, authed_page, seeded_server)
 
-        toggle = authed_page.locator("[data-testid='import-review-matched-why-action']").first
-        if toggle.count() == 0:
-            pytest.skip("Matched detail rows are unavailable in the seeded review state.")
+        toggle = import_page.review_matched_details_button
 
         toggle.click()
         assert toggle.get_attribute("aria-expanded") == "true"
-        authed_page.locator("[data-testid='import-review-matched-diagnostics']").first.wait_for(
+        authed_page.locator("[data-import-review-detail-row]").first.wait_for(
             state="visible",
             timeout=5000,
         )
@@ -749,11 +753,9 @@ class TestImportCollectionTab:
             }"""
         )
 
-        refreshed_toggle = authed_page.locator(
-            "[data-testid='import-review-matched-why-action']"
-        ).first
+        refreshed_toggle = import_page.review_matched_details_button
         assert refreshed_toggle.get_attribute("aria-expanded") == "true"
-        authed_page.locator("[data-testid='import-review-matched-diagnostics']").first.wait_for(
+        authed_page.locator("[data-import-review-detail-row]").first.wait_for(
             state="visible",
             timeout=5000,
         )
@@ -763,6 +765,8 @@ class TestImportCollectionTab:
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
+        from playwright.sync_api import expect
+
         page_errors: list[str] = []
         authed_page.on("pageerror", lambda exc: page_errors.append(str(exc)))
 
@@ -773,11 +777,13 @@ class TestImportCollectionTab:
         import_page.review_matched_diagnostics.wait_for(state="visible", timeout=5000)
 
         diagnostics_text = import_page.review_matched_diagnostics.text_content() or ""
-        assert "Matched files" in diagnostics_text
-        assert "CV Issue ID" in diagnostics_text
+        assert "Importable files" in diagnostics_text
+        target = import_page.review_matched_diagnostics.get_by_test_id("import-review-file-target")
+        expect(target).to_have_text("Issue 1 · CV 50001")
+        expect(target).to_have_attribute("href", "https://comicvine.gamespot.com/issue/4000-50001/")
         assert page_errors == []
 
-    def test_import_collection_conflict_save_reset_round_trip_keeps_table_visible(
+    def test_import_collection_conflict_review_uses_shared_table_without_staged_save(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
@@ -799,25 +805,8 @@ class TestImportCollectionTab:
         import_page.conflicts_panel.wait_for(state="visible", timeout=5000)
         assert_conflicts_panel_populated()
 
-        if (
-            import_page.save_conflict_choices_button.count() > 0
-            and import_page.save_conflict_choices_button.is_enabled()
-        ):
-            import_page.save_conflict_choices_button.click()
-            import_page.wait_for_htmx(timeout=10000)
-            import_page.conflicts_panel.wait_for(state="visible", timeout=5000)
-            assert_conflicts_panel_populated()
-
-            if import_page.reset_conflict_choices_button.is_enabled():
-                import_page.reset_conflict_choices_button.click()
-                import_page.wait_for_htmx(timeout=10000)
-                import_page.conflicts_panel.wait_for(state="visible", timeout=5000)
-                assert_conflicts_panel_populated()
-                if (
-                    import_page.conflicts_table.count() > 0
-                    and import_page.conflicts_table.is_visible()
-                ):
-                    assert import_page.save_conflict_choices_button.is_enabled()
+        assert import_page.save_conflict_choices_button.count() == 0
+        assert import_page.reset_conflict_choices_button.count() == 0
 
         import_page.review_series_tab.click()
         import_page.wait_for_htmx(timeout=10000)
@@ -841,6 +830,7 @@ class TestImportCollectionTab:
         import_page.navigate(f"/import?tab=collection&resume_job_id={review_job_id}&resume_step=3")
         import_page.review_panel.wait_for(state="visible", timeout=5000)
 
+        saved_summary = (import_page.review_selection_summary.text_content() or "").strip()
         authed_page.evaluate(
             """([jobId]) => {
                 sessionStorage.setItem(
@@ -854,10 +844,7 @@ class TestImportCollectionTab:
         authed_page.reload()
         import_page.review_panel.wait_for(state="visible", timeout=5000)
 
-        assert import_page.review_import_button.is_disabled()
-        assert (import_page.review_selection_summary.text_content() or "").strip() == (
-            "0 items selected for import"
-        )
+        assert (import_page.review_selection_summary.text_content() or "").strip() == saved_summary
 
     def test_import_collection_cv_search_modal_opens_without_page_errors(
         self,
@@ -875,6 +862,7 @@ class TestImportCollectionTab:
         import_page.navigate(f"/import?tab=collection&resume_job_id={review_job_id}&resume_step=3")
         import_page.review_panel.wait_for(state="visible", timeout=5000)
 
+        import_page.review_matched_details_button.click()
         import_page.search_cv_button.click()
         import_page.wait_for_htmx()
         import_page.cv_search_modal.wait_for(state="visible", timeout=5000)
@@ -901,6 +889,7 @@ class TestImportCollectionTab:
         import_page.navigate(f"/import?tab=collection&resume_job_id={review_job_id}&resume_step=3")
         import_page.review_panel.wait_for(state="visible", timeout=5000)
 
+        import_page.review_matched_details_button.click()
         import_page.search_cv_button.click()
         import_page.wait_for_htmx()
         import_page.cv_search_modal.wait_for(state="visible", timeout=5000)
@@ -2257,6 +2246,26 @@ class TestImportCollectionTab:
             "conflicts": 3,
         }
 
+    def test_scan_summary_does_not_count_missing_references_as_files(
+        self, authed_page, seeded_server: str
+    ) -> None:
+        ImportPage(authed_page, seeded_server).goto(tab="collection")
+        state = authed_page.evaluate("""() => {
+            const controller = window.importProgressData(42, 2, 'mylar3', {}, 'scan');
+            controller.applyJobState({
+                status: 'scanning', mode: 'scan', scan_total_files: 7952,
+                review_summary: {files_total: 7952, files_present: 7719,
+                    files_missing_references: 233},
+            });
+            const scanning = {...controller.reviewSummary};
+            controller.applyJobState({status: 'review', mode: 'scan', scan_total_files: 7952,
+                review_summary: {files_total: 7952, files_present: 7719,
+                    files_missing_references: 233}});
+            return [scanning.filesPresent, scanning.missingReferences,
+                controller.reviewSummary.filesPresent, controller.reviewSummary.missingReferences];
+        }""")
+        assert state == [7719, 233, 7719, 233]
+
     def test_import_collection_paused_import_resumes_even_if_control_state_is_stale(
         self,
         authed_page,
@@ -3091,13 +3100,13 @@ class TestImportCollectionTab:
         import_page = ImportPage(authed_page, seeded_server)
         self._goto_review_step(import_page, authed_page, seeded_server)
 
-        import_page.review_sort_button("year").click()
+        authed_page.get_by_role("button", name="Series", exact=True).click()
         import_page.wait_for_htmx()
-        import_page.review_sort_button("year").click()
+        authed_page.get_by_role("button", name="Series", exact=True).click()
         import_page.wait_for_htmx()
 
-        first_series_row = import_page.review_panel.locator("table tbody tr").first
-        assert "Saga" in (first_series_row.text_content() or "")
+        assert authed_page.locator("input[name=review_sort]").input_value() == "-found_series"
+        assert import_page.review_panel.locator("[data-import-review-series-row]").count() > 0
 
     def test_import_collection_source_step_keeps_selection_state_and_opens_browser(
         self,

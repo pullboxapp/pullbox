@@ -1,0 +1,14 @@
+<div class="modal-shell" x-data='importReviewSeriesChoiceData({jobId: {{ job.id }}, seriesId: {{ series.id }}, action: {{ action|tojson }}})' x-show="open" x-init="$nextTick(() => $refs.choiceDialog.focus())" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.choiceDialog)" data-testid="import-review-series-choice">
+  <div class="modal-backdrop" @click="close()"></div>
+  <form class="modal-panel max-w-lg" x-ref="choiceDialog" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="review-series-choice-title" hx-boost="false" @submit.prevent="submit($el)">
+    <div class="modal-header"><h2 class="modal-title" id="review-series-choice-title">{{ 'Skip this series?' if action == 'skip' else 'Put this series back in review?' }}</h2></div>
+    <div class="modal-body space-y-3 p-5">
+      <p class="text-sm font-semibold text-pb-text">{{ series.cv_title or series.raw_series_name }}</p>
+      <p class="text-sm leading-6 text-pb-text-sec">{% if action == 'skip' %}All files in this series stay out of this import, including ready files. Saved matches are preserved. You can put the series back in review from Info.{% else %}Restore the saved matches and unresolved decisions. The series will not be selected automatically.{% endif %}</p>
+      <p class="text-sm text-pb-text-sec">No source files are moved, changed or deleted.</p>
+      <input type="hidden" name="token" value="{{ token }}">
+      <p role="alert" x-show="error" x-cloak x-text="error" class="text-sm text-pb-error"></p>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn-ghost btn-sm" @click="close()" :disabled="selecting">Cancel</button><button type="submit" class="btn-primary btn-sm" :disabled="selecting">{{ 'Skip series' if action == 'skip' else 'Put back in review' }}</button></div>
+  </form>
+</div>

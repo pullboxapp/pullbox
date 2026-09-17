@@ -2,10 +2,58 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
+from pullbox.core.name_matcher import NameMatcher
+from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus
 from pullbox.services.import_duplicates import confidence_rank
+
+_RELEASE_SITE_SUFFIX = re.compile(
+    r"\s+(?:www\.)?[\w-]+\.(?:com|org|net|info)(?=\.(?:cbz|cbr|cb7|pdf|epub)$)",
+    re.IGNORECASE,
+)
+_SCAN_LABEL_SUFFIX = re.compile(r"\s+\(scan\)(?=\.(?:cbz|cbr|cb7|cbt|pdf|epub)$)", re.IGNORECASE)
+
+
+def review_filename_identity(
+    file_name: str, parsed_series: str | None, parsed_year: int | None
+) -> tuple[str, int | None]:
+    """Use dated filename evidence, not inherited Mylar series-start metadata.
+
+    Undated filenames can contain copy counters or issue ordinals that the release
+    parser folds into the title. Retain their saved identity rather than guessing.
+    """
+    name = _SCAN_LABEL_SUFFIX.sub("", _RELEASE_SITE_SUFFIX.sub("", file_name or ""))
+    parsed = parse_release_title(name)
+    if parsed is None or parsed.year is None:
+        return NameMatcher.normalize(parsed_series or ""), parsed_year
+    return (
+        NameMatcher.normalize(parsed.series_name or parsed_series or ""),
+        parsed.year if parsed.year is not None else parsed_year,
+    )
+
+
+def classify_conflict_group(files: list[ImportedFile]) -> str:
+    """Describe whether competing copies agree about their comic identity."""
+    hashes = {file.content_hash for file in files}
+    if len(files) > 1 and len(hashes) == 1 and None not in hashes and "" not in hashes:
+        return "identical_copy"
+    identities = [
+        review_filename_identity(file.file_name, file.parsed_series, file.parsed_year)
+        for file in files
+    ]
+    names = {title for title, _ in identities if title}
+    saved_names = {
+        NameMatcher.normalize(file.parsed_series) for file in files if file.parsed_series
+    }
+    if len(names) > 1 or len(saved_names) > 1:
+        return "series_mismatch"
+    years = {year for _, year in identities if year}
+    if len(years) > 1:
+        return "year_disagreement"
+    return "duplicate_copy"
 
 
 def preferred_conflict_reasons(
@@ -70,20 +118,23 @@ def _mark_conflict_group(
 
     group.sort(key=sort_key, reverse=True)
     preferred = group[0]
-    preferred_reasons = preferred_conflict_reasons(preferred, group[1:])
+    conflict_class = classify_conflict_group(group)
+    suggest_keeper = conflict_class in {"duplicate_copy", "identical_copy"}
+    preferred_reasons = preferred_conflict_reasons(preferred, group[1:]) if suggest_keeper else []
 
     for idx, imp_file in enumerate(group):
         imp_file.status = ImportedFileStatus.CONFLICT
         imp_file.conflict_group_id = group_counter
-        imp_file.is_preferred = idx == 0
+        imp_file.is_preferred = idx == 0 and suggest_keeper
         imp_file.include_in_import = False
         imp_file.diagnostics = {
             "kind": "file_conflict",
+            "conflict_class": conflict_class,
             "scope": scope,
             "conflict_group_id": group_counter,
             "group_size": len(group),
-            "preferred_file_id": preferred.id,
-            "preferred_file_name": preferred.file_name,
+            "preferred_file_id": preferred.id if suggest_keeper else None,
+            "preferred_file_name": preferred.file_name if suggest_keeper else None,
             "preferred_reasons": preferred_reasons,
             "selection_basis": {
                 "has_comicinfo": imp_file.has_comicinfo,
@@ -91,18 +142,21 @@ def _mark_conflict_group(
                 "file_size": imp_file.file_size,
             },
             "why_not_selected": (
-                [] if idx == 0 else rejected_conflict_reasons(imp_file, preferred)
+                []
+                if idx == 0 or not suggest_keeper
+                else rejected_conflict_reasons(imp_file, preferred)
             ),
             "previous_diagnostics": dict(imp_file.diagnostics or {}),
         }
 
     return {
         "kind": "file_conflict",
+        "conflict_class": conflict_class,
         "scope": scope,
         "conflict_group_id": group_counter,
         "group_size": len(group),
-        "preferred_file_id": preferred.id,
-        "preferred_file_name": preferred.file_name,
+        "preferred_file_id": preferred.id if suggest_keeper else None,
+        "preferred_file_name": preferred.file_name if suggest_keeper else None,
         "preferred_reasons": preferred_reasons,
         "files": [
             {

@@ -47,6 +47,8 @@
     </span>
   </button>
 
+  {% include "partials/series_rescan.html" %}
+
   <button
     data-testid="series-action-refresh"
     @click="refreshMetadata()"

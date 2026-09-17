@@ -241,6 +241,7 @@ class ReleaseValidator:
         wanted_issue_title: str | None = None,
         wanted_series_issue_count: int | None = None,
         year_context: ReleaseYearContext | None = None,
+        wanted_issue_number_text: str | None = None,
     ) -> list[ValidationResult]:
         """Validate a list of search results against a wanted issue.
 
@@ -263,6 +264,7 @@ class ReleaseValidator:
                 result,
                 wanted_series=wanted_series,
                 wanted_issue=wanted_issue,
+                wanted_issue_number_text=wanted_issue_number_text,
                 wanted_year=wanted_year,
                 wanted_issue_type=wanted_issue_type,
                 alternate_names=alternate_names,
@@ -324,6 +326,7 @@ class ReleaseValidator:
         wanted_issue_title: str | None = None,
         wanted_series_issue_count: int | None = None,
         year_context: ReleaseYearContext | None = None,
+        wanted_issue_number_text: str | None = None,
     ) -> tuple[list[ValidationResult], list[ValidationResult]]:
         """Validate results, returning (matched, rejected) tuples.
 
@@ -351,6 +354,7 @@ class ReleaseValidator:
                 result,
                 wanted_series=wanted_series,
                 wanted_issue=wanted_issue,
+                wanted_issue_number_text=wanted_issue_number_text,
                 wanted_year=wanted_year,
                 wanted_issue_type=wanted_issue_type,
                 alternate_names=alternate_names,
@@ -386,6 +390,7 @@ class ReleaseValidator:
         wanted_issue_title: str | None = None,
         wanted_series_issue_count: int | None = None,
         year_context: ReleaseYearContext | None = None,
+        wanted_issue_number_text: str | None = None,
     ) -> ValidationResult:
         """Run the validation pipeline on a single result."""
         metadata = self._extractor.from_release_title(
@@ -475,6 +480,7 @@ class ReleaseValidator:
             metadata=metadata,
             wanted_series=wanted_series,
             wanted_issue=wanted_issue,
+            wanted_issue_number_text=wanted_issue_number_text,
             wanted_year=wanted_year,
             wanted_issue_type=wanted_issue_type,
             alternate_names=alternate_names,

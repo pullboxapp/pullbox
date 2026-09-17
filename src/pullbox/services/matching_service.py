@@ -393,6 +393,7 @@ class MatchingService:
                 metadata=metadata,
                 wanted_series=str(series.title),
                 wanted_issue=issue.issue_number,
+                wanted_issue_number_text=issue.effective_issue_number_text,
                 wanted_year=series.year_start,
                 wanted_issue_type=issue.issue_type,
                 alternate_names=alternates,

@@ -1397,7 +1397,9 @@ class Mylar3Reader:
                     issue_type = IssueType(parsed.issue_type)
                 except ValueError:
                     issue_type = IssueType.ISSUE
-                issue_number_raw = format_issue_number(parsed.issue_number)
+                issue_number_raw = parsed.issue_number_text or format_issue_number(
+                    parsed.issue_number
+                )
                 if parsed_issue_number is not None:
                     metadata_signals["issue_number"] = MetadataSignal.RELEASE_TITLE.value
                 if parsed.issue_type != IssueType.ISSUE.value:
@@ -1646,7 +1648,7 @@ class Mylar3Reader:
         series_resolution: _ResolvedMylarPath,
         issue_records: list[_MylarIssueRecord],
     ) -> list[Path]:
-        """Merge safely resolved records, retaining missing paths only in-place."""
+        """Merge safely resolved records, retaining missing paths when requested."""
         paths = set(comic_paths)
         for record in issue_records:
             if not record.location:

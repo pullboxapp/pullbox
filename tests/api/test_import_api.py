@@ -487,8 +487,8 @@ async def _seed_mixed_review_selection_job(
                 raw_series_name=f"Matched {idx}",
                 raw_year=2020 + idx,
                 status=ImportSeriesStatus.MATCHED,
-                file_count=1,
-                files_total=1,
+                file_count=1 if idx < 2 else 2,
+                files_total=1 if idx < 2 else 2,
                 files_matched=1,
                 files_conflict=0 if idx < 2 else 1,
                 selected_for_import=idx == 0,
@@ -496,6 +496,27 @@ async def _seed_mixed_review_selection_job(
             session.add(imported_series)
             await session.flush()
             matched_ids.append(imported_series.id)
+            session.add(
+                ImportedFile(
+                    import_job_id=job.id,
+                    import_series_id=imported_series.id,
+                    file_path=f"/tmp/mixed-review/Matched {idx} 001.cbz",
+                    file_name=f"Matched {idx} 001.cbz",
+                    file_format="cbz",
+                    status=ImportedFileStatus.MATCHED,
+                )
+            )
+            if idx == 2:
+                session.add(
+                    ImportedFile(
+                        import_job_id=job.id,
+                        import_series_id=imported_series.id,
+                        file_path="/tmp/mixed-review/Conflicting 002.cbz",
+                        file_name="Conflicting 002.cbz",
+                        file_format="cbz",
+                        status=ImportedFileStatus.CONFLICT,
+                    )
+                )
 
         existing_series = Series(
             title="In Library",
@@ -1828,11 +1849,12 @@ class TestSeriesSelection:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["matched_series_importable"] == 2
+        # The third series has a ready file even though a different file conflicts.
+        assert data["matched_series_importable"] == 3
         assert data["matched_series_selected"] == 1
         assert data["duplicate_series_importable"] == 1
         assert data["duplicate_series_selected"] == 1
-        assert data["importable_item_count"] == 3
+        assert data["importable_item_count"] == 4
         assert data["selected_item_count"] == 2
         assert data["selected_series_ids"] == [matched_ids[0]]
         assert data["selected_duplicate_series_ids"] == [duplicate_series_id]

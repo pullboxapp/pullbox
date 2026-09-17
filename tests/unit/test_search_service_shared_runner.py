@@ -1159,6 +1159,54 @@ async def test_four_digit_issues_match_in_manual_and_automated_search(
         download_service.send_to_client.assert_not_awaited()
 
 
+@pytest.mark.parametrize("mode", ["fast", "deep"])
+@pytest.mark.parametrize("is_torrent", [False, True])
+@pytest.mark.parametrize("wanted", ["13A", "13B", "13C"])
+async def test_lettered_issues_match_exactly_in_manual_and_automatic_search(
+    monkeypatch: pytest.MonkeyPatch, mode: str, is_torrent: bool, wanted: str
+) -> None:
+    from pullbox.services.blocklist_service import BlocklistService
+
+    service = SearchService(ProviderRegistry())
+    target = replace(
+        _make_target(series_title="Gen13", issue_number=13, series_year=1996),
+        issue_number_text=wanted,
+    )
+    results = [
+        _make_release(f"Gen13 #{number} (1996)", is_torrent=is_torrent)
+        for number in ["13", "13A", "13B", "13C"]
+    ]
+    monkeypatch.setattr(BlocklistService, "filter_results", AsyncMock(return_value=results))
+    monkeypatch.setattr(
+        service, "_run_query_batch_with_provenance", AsyncMock(return_value=(results, {}, []))
+    )
+    outcome = await service.search_issue_target(MagicMock(), target, mode=mode)
+    assert len(outcome.matched) == 1
+    assert outcome.matched[0].parsed.issue_number_text == wanted
+    assert outcome.best_release is outcome.matched[0].release
+    assert outcome.best_validation.confidence == MatchConfidence.HIGH
+    assert len(outcome.rejected) == 3
+
+    download_service = AsyncMock()
+    intervention_service = AsyncMock()
+    intervention_service.has_pending_for_issue.return_value = False
+    routed = await route_search_acquisition(
+        MagicMock(),
+        outcome=outcome,
+        search_log_id=1,
+        eval_kwargs={},
+        type_thresholds={"issue": "high"},
+        download_service=download_service,
+        intervention_service=intervention_service,
+        runner=None,
+    )
+    assert routed.action_status == "downloading"
+    assert routed.grabbed == 1
+    download_service.send_to_client.assert_awaited_once()
+    assert download_service.send_to_client.await_args.args[1] is outcome.best_release
+    intervention_service.create_pending_match.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_search_issue_target_uses_fallback_priority_and_best_validation(
     monkeypatch: pytest.MonkeyPatch,

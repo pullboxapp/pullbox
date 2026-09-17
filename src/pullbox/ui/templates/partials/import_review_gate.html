@@ -1,0 +1,32 @@
+<template x-teleport="body">
+  <div x-show="importGateOpen" x-cloak class="modal-shell" data-testid="import-review-gate"
+    @keydown.escape.window="closeImportGate()" @keydown.tab="trapImportGateFocus($event)">
+    <div class="modal-backdrop" @click="closeImportGate()"></div>
+    <section class="modal-panel max-w-lg" role="dialog" aria-modal="true" aria-labelledby="import-review-gate-title" tabindex="-1" x-ref="importGateDialog">
+      <div class="modal-header"><h2 id="import-review-gate-title" class="modal-title">Ready to import</h2></div>
+      <div class="modal-body space-y-4 p-5">
+        <p class="text-sm text-pb-text"><strong x-text="selectedFilesCount"></strong> <span x-text="selectedFilesCount === 1 ? 'ready file' : 'ready files'"></span> from <strong x-text="totalSelectionCount()"></strong> selected series will import.</p>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <section class="rounded-lg border border-pb-success/30 bg-pb-success/5 p-3">
+            <h3 class="text-xs font-semibold uppercase tracking-wide text-pb-success">Imports now</h3>
+            <p class="mt-2 text-sm text-pb-text"><strong x-text="totalSelectionCount()"></strong> series</p>
+            <p class="mt-1 text-xs text-pb-text-sec"><strong x-text="selectedFilesCount"></strong> ready files</p>
+          </section>
+          <section class="rounded-lg border border-pb-border bg-pb-card p-3">
+            <h3 class="text-xs font-semibold uppercase tracking-wide text-pb-text-sec">Stays behind</h3>
+            <p class="mt-2 text-sm text-pb-text"><strong x-text="attentionFilesCount"></strong> <span x-text="attentionFilesCount === 1 ? 'file still needs attention.' : 'files still need attention.'"></span></p>
+            <p class="mt-1 text-xs text-pb-text-sec">Unselected files stay out of this import.</p>
+          </section>
+        </div>
+        <p class="text-sm leading-6 text-pb-text-sec">Unresolved matches, unavailable files, and files awaiting approval stay in Follow-up for this import. You can work through them later.</p>
+        <p class="text-sm text-pb-text-sec">{{ 'Existing files stay where they are.' if job.file_handling_mode.value == 'in_place' else 'Pullbox copies files using your import settings and preserves the originals.' }}</p>
+        <p role="alert" x-show="confirmError" x-text="confirmError" class="text-sm text-pb-error"></p>
+      </div>
+      <div class="modal-footer flex justify-end gap-2">
+        <button type="button" class="btn-ghost btn-sm" @click="closeImportGate()" :disabled="confirming">Back to review</button>
+        <button type="button" class="btn-primary btn-sm" @click="confirmImport()" :disabled="confirming || totalSelectionCount() === 0"
+          x-text="confirming ? 'Starting import...' : 'Import ready files'">Import ready files</button>
+      </div>
+    </section>
+  </div>
+</template>

@@ -120,7 +120,7 @@ def test_apply_orphan_recovery_decisions_assigns_issue() -> None:
         file_path="/imports/recovered.cbz",
         file_name="recovered.cbz",
         status=ImportedFileStatus.NO_MATCH,
-        diagnostics={"existing": "kept"},
+        diagnostics={"existing": "kept", "review_selection": False},
     )
     issue = Issue(id=42, series_id=5, issue_number=4.0, comicvine_id=1116296)
 
@@ -145,6 +145,8 @@ def test_apply_orphan_recovery_decisions_assigns_issue() -> None:
     assert imp_file.error_message is None
     assert imp_file.diagnostics["existing"] == "kept"
     assert imp_file.diagnostics["resolution"] == "assigned"
+    assert imp_file.diagnostics["review_selection"] is True
+    assert imp_file.include_in_import is True
 
 
 def test_apply_orphan_recovery_decisions_skips_file() -> None:

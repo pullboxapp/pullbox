@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
+from pullbox.services.utility_operation_progress import project_utility_operation_progress
 from pullbox.utilities.job_queue_items import build_generated_job_items
 from pullbox.utilities.job_queue_state import transition_job_state
 from pullbox.utilities.models import ItemState, JobState, UtilityJob, UtilityJobItem
@@ -36,6 +37,7 @@ async def mark_item_generation_failed(
 
     transition_job_state(job, JobState.FAILED)
     job.error_message = f"Item generation failed: {exc}"
+    await project_utility_operation_progress(session, job)
     await session.commit()
     return True
 

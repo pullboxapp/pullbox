@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
-from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
+from pullbox.core.issue_numbers import (
+    normalize_issue_number_queries,
+    normalize_issue_number_text,
+    parse_issue_number_text,
+)
 from pullbox.core.naming import detect_issue_type
 from pullbox.providers.base import (
     IssueMetadata,
@@ -203,9 +207,9 @@ def _parse_issue_number_fields(value: str | None) -> tuple[float, str | None]:
         return 0.0, None
 
 
-def _format_issue_number_filter(value: float) -> str:
+def _format_issue_number_filter(value: float | str) -> str:
     """Format an issue number for ComicVine's exact issue_number filter."""
-    return format_issue_number(value)
+    return normalize_issue_number_text(value)
 
 
 def _safe_int(value: Any) -> int | None:
@@ -761,6 +765,9 @@ class ComicVineProvider:
 
     async def get_series(self, provider_id: str) -> SeriesMetadata:
         """Get full series (volume) metadata by ComicVine volume ID."""
+        if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
+            raise ValueError("ComicVine provider IDs must be positive integers")
+        resource_id = int(provider_id)
         log = logger.bind(provider_id=provider_id)
         log.debug("comicvine_get_series")
 
@@ -771,7 +778,7 @@ class ComicVineProvider:
             ),
         }
 
-        data = await self._request(f"/volume/{_VOLUME_PREFIX}-{provider_id}/", params)
+        data = await self._request(f"/volume/{_VOLUME_PREFIX}-{resource_id}/", params)
         item: dict[str, Any] = data.get("results", {})
 
         return _series_metadata_from_item(item, fallback_provider_id=provider_id)
@@ -805,6 +812,9 @@ class ComicVineProvider:
 
     async def get_issue(self, provider_id: str) -> IssueMetadata:
         """Get full issue metadata by ComicVine issue ID."""
+        if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
+            raise ValueError("ComicVine provider IDs must be positive integers")
+        resource_id = int(provider_id)
         log = logger.bind(provider_id=provider_id)
         log.debug("comicvine_get_issue")
 
@@ -816,7 +826,7 @@ class ComicVineProvider:
             ),
         }
 
-        data = await self._request(f"/issue/{_ISSUE_PREFIX}-{provider_id}/", params)
+        data = await self._request(f"/issue/{_ISSUE_PREFIX}-{resource_id}/", params)
         item: dict[str, Any] = data.get("results", {})
 
         return _issue_metadata_from_item(item, fallback_provider_id=provider_id)
@@ -950,7 +960,7 @@ class ComicVineProvider:
     async def get_issues_for_series_by_numbers(
         self,
         series_provider_id: str,
-        issue_numbers: list[float],
+        issue_numbers: Sequence[float | str],
     ) -> list[IssueSummary]:
         """Get selected issues for a series by issue number."""
         log = logger.bind(
@@ -960,7 +970,7 @@ class ComicVineProvider:
         log.debug("comicvine_get_issues_for_series_by_numbers")
 
         summaries: list[IssueSummary] = []
-        seen_numbers = sorted({float(number) for number in issue_numbers})
+        seen_numbers = normalize_issue_number_queries(issue_numbers)
         for issue_number in seen_numbers:
             params: dict[str, Any] = {
                 "filter": (

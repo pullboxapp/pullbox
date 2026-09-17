@@ -15,6 +15,8 @@ from pullbox.models.import_job import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.core.collection_scanner import DiscoveredSeries
@@ -49,6 +51,8 @@ async def materialize_discovered_scan_results(
     session: AsyncSession,
     job: ImportJob,
     discovered_list: list[DiscoveredSeries],
+    *,
+    log_event: Callable[..., Awaitable[None]] | None = None,
 ) -> list[tuple[DiscoveredSeries, ImportedSeries]]:
     """Persist discovered scanner output as import review series/file rows."""
     series_pairs: list[tuple[DiscoveredSeries, ImportedSeries]] = []
@@ -178,6 +182,19 @@ async def materialize_discovered_scan_results(
                 diagnostics=diagnostics,
             )
             file_rows.append(file_item)
+            if file_status == ImportedFileStatus.NO_MATCH and log_event is not None:
+                await log_event(
+                    session,
+                    job.id,
+                    "DEBUG",
+                    "import_file_no_match_detail",
+                    message=f"File needs review: {df.file_name}",
+                    file_name=df.file_name,
+                    parsed_issue_number=df.parsed_issue_number,
+                    series=series_item.raw_series_name,
+                    reason=diagnostics.get("reason"),
+                    diagnostics=diagnostics,
+                )
             if len(file_rows) >= 500:
                 await session.execute(insert(ImportedFile), file_rows)
                 file_rows.clear()

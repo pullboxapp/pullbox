@@ -1024,7 +1024,8 @@ function readImportReviewStatusCounts(shell) {
   if (!shell || typeof shell.getAttribute !== "function") {
     return {};
   }
-  var raw = shell.getAttribute("data-import-review-status-counts") || "{}";
+  var countSource = shell.querySelector("#import-review-state") || shell;
+  var raw = countSource.getAttribute("data-import-review-status-counts") || "{}";
   try {
     var parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? parsed : {};
@@ -1124,7 +1125,7 @@ function captureImportReviewViewport(shell, preferredElement) {
   }
 
   var capturedRowKeys = Object.create(null);
-  var captureRow = function (row) {
+  var captureRow = function (row, keepAnchor) {
     if (!row || !shell.contains(row)) {
       return;
     }
@@ -1133,10 +1134,12 @@ function captureImportReviewViewport(shell, preferredElement) {
       return;
     }
     capturedRowKeys[rowKey] = true;
-    state.anchors.push({
-      key: rowKey,
-      top: row.getBoundingClientRect().top,
-    });
+    if (keepAnchor !== false) {
+      state.anchors.push({
+        key: rowKey,
+        top: row.getBoundingClientRect().top,
+      });
+    }
     if (row.querySelector("[data-import-review-expand-action][aria-expanded='true']")) {
       state.expandedRows.push({
         key: rowKey,
@@ -1156,10 +1159,8 @@ function captureImportReviewViewport(shell, preferredElement) {
   var rows = shell.querySelectorAll("[data-import-review-series-row]");
   for (var i = 0; i < rows.length; i += 1) {
     var rect = rows[i].getBoundingClientRect();
-    if (rect.bottom < 0 || rect.top > viewportHeight) {
-      continue;
-    }
-    captureRow(rows[i]);
+    // A dialog can cover or scroll past an expanded row; keep its disclosure state.
+    captureRow(rows[i], !(rect.bottom < 0 || rect.top > viewportHeight));
   }
   return state;
 }
@@ -1224,6 +1225,11 @@ var pendingImportReviewViewportState = null;
 document.body.addEventListener("htmx:beforeSwap", function (event) {
   var target = event && event.detail ? event.detail.target : null;
   if (target && target.id === "import-step-review-shell") {
+    if (target.hasAttribute("data-import-review-workspace") && !event.detail.isError) {
+      event.detail.shouldSwap = false;
+      applyImportReviewWorkspace(event.detail.xhr.responseText, target);
+      return;
+    }
     var requestElement =
       event.detail.requestConfig && event.detail.requestConfig.elt
         ? event.detail.requestConfig.elt
@@ -1231,6 +1237,49 @@ document.body.addEventListener("htmx:beforeSwap", function (event) {
     pendingImportReviewViewportState = captureImportReviewViewport(target, requestElement);
   }
 });
+
+function applyImportReviewWorkspace(html, shell) {
+  var wrapper = document.createElement("div");
+  wrapper.innerHTML = html.trim();
+  var nextShell = wrapper.querySelector("#import-step-review-shell");
+  if (!nextShell || !nextShell.hasAttribute("data-import-review-workspace")) {
+    throw new Error("Import review refresh returned an unexpected response.");
+  }
+  var state = captureImportReviewViewport(shell, document.activeElement);
+  restoreImportReviewExpansionState(state, nextShell);
+  var regions = nextShell.querySelectorAll("[data-import-review-region]");
+  var update = function () {
+    for (var i = 0; i < regions.length; i += 1) {
+      var current = document.getElementById(regions[i].id);
+      if (!current || !shell.contains(current)) { continue; }
+      Idiomorph.morph(current, regions[i], {
+        morphStyle: "outerHTML",
+        callbacks: {
+          beforeNodeMorphed: function (before, after) {
+            return !before.isEqualNode(after);
+          },
+          beforeNodeRemoved: function (node) {
+            if (window.Alpine && node.nodeType === 1) { Alpine.destroyTree(node); }
+            return true;
+          },
+        },
+      });
+    }
+    if (window.Alpine) { Alpine.initTree(shell); }
+  };
+  if (window.Alpine) { Alpine.mutateDom(update); } else { update(); }
+  htmx.process(shell);
+  var data = window.Alpine ? Alpine.$data(shell) : null;
+  var nextState = shell.querySelector("#import-review-state");
+  if (data && nextState) {
+    data.splitSeriesRequiresPreferredRoot = nextState.getAttribute("data-requires-preferred-root") === "true";
+    data.applyReviewSummary(JSON.parse(nextState.getAttribute("data-review-summary") || "{}"));
+    data.rehydrateAfterShellSwap();
+  }
+  _syncFooterDockFromResponse(html);
+  restoreImportReviewViewport(state, shell);
+  return shell;
+}
 
 function loadImportReviewShell(url) {
   var shell = document.getElementById("import-step-review-shell");
@@ -1274,6 +1323,9 @@ function loadImportReviewShell(url) {
 
       if (typeof Idiomorph === "undefined" || typeof Idiomorph.morph !== "function") {
         throw new Error("Import review refresh is unavailable.");
+      }
+      if (currentShell.hasAttribute("data-import-review-workspace")) {
+        return applyImportReviewWorkspace(html, currentShell);
       }
       var viewportState = captureImportReviewViewport(currentShell);
       destroyAlpineTree(currentShell);
@@ -2116,6 +2168,49 @@ function toggleImportReviewRow(button) {
 
 window.toggleImportReviewRow = toggleImportReviewRow;
 
+function handleImportReviewTabKey(event) {
+  var tabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]'));
+  var index = tabs.indexOf(event.target);
+  if (index < 0) { return; }
+  if (event.key === 'ArrowRight') { index = (index + 1) % tabs.length; }
+  else if (event.key === 'ArrowLeft') { index = (index + tabs.length - 1) % tabs.length; }
+  else if (event.key === 'Home') { index = 0; }
+  else if (event.key === 'End') { index = tabs.length - 1; }
+  else { return; }
+  event.preventDefault();
+  tabs[index].focus({ preventScroll: true });
+  tabs[index].click();
+}
+
+function positionImportReviewMenu(menu, event) {
+  if (event.newState !== 'open') { return; }
+  var trigger = document.querySelector('[popovertarget="' + menu.id + '"]');
+  if (!trigger) { return; }
+  var rect = trigger.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - 232, rect.right - 224)) + 'px';
+  menu.style.top = Math.max(8, Math.min(window.innerHeight - 190, rect.bottom + 4)) + 'px';
+}
+
+window.handleImportReviewTabKey = handleImportReviewTabKey;
+window.positionImportReviewMenu = positionImportReviewMenu;
+
+function trapImportReviewDialog(event, dialog) {
+  var controls = Array.from(dialog.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), [tabindex="0"]')).filter(function (el) { return el.getClientRects().length; });
+  if (!controls.length) { event.preventDefault(); dialog.focus(); return; }
+  var first = controls[0], last = controls[controls.length - 1];
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
+
+function closeImportReviewPreview() {
+  var shell = document.getElementById('import-step-review-shell');
+  var data = shell && window.Alpine ? Alpine.$data(shell) : null;
+  if (data) { data.refreshSeriesReview(); }
+}
+
+window.trapImportReviewDialog = trapImportReviewDialog;
+window.closeImportReviewPreview = closeImportReviewPreview;
+
 function readImportConflictCommitState(jobId) {
   function normalizeCommittedPages(pages) {
     if (!pages || typeof pages !== "object" || Array.isArray(pages)) {
@@ -2202,6 +2297,7 @@ function importCvSearchModalData(config) {
     query: cfg.query || "",
     jobId: cfg.jobId,
     seriesId: cfg.seriesId,
+    fileId: cfg.fileId || null,
     selecting: false,
 
     close: function (force) {
@@ -2232,7 +2328,7 @@ function importCvSearchModalData(config) {
               "/series/" +
               this.seriesId +
               "/cv-search?q=" +
-              encodeURIComponent(this.query || ""),
+              encodeURIComponent(this.query || "") + (this.fileId ? "&file_id=" + this.fileId : ""),
             {
               target: "#cv-search-modal",
               swap: "innerHTML",
@@ -2339,6 +2435,15 @@ function importCvSearchModalData(config) {
       var rematchPending = diagnostics.rematch_pending === true;
       var hasKnownSeriesTarget =
         !!result && !!(result.cv_id || result.user_selected_cv_id || result.series_id);
+
+      if (document.querySelector("[data-import-review-workspace]")) {
+        return {
+          message: rematchPending
+            ? "ComicVine match applied. Pullbox is updating the file matches in the background."
+            : "ComicVine match updated. Ready files and remaining decisions are shown in the review lanes.",
+          level: rematchPending ? "info" : "success",
+        };
+      }
 
       if (rematchPending) {
         return {
@@ -2519,6 +2624,12 @@ function importCvSearchModalData(config) {
         return;
       }
 
+      if (self.fileId) {
+        self.selecting = true;
+        return htmx.ajax("GET", "/import/" + self.jobId + "/files/" + self.fileId + "/assign?cv_id=" + cvId,
+          { target: "#cv-search-modal", swap: "innerHTML" }).finally(function () { self.selecting = false; });
+      }
+
       self.selecting = true;
       var activeReviewView = null;
       var reviewData = self.reviewPanelData();
@@ -2596,6 +2707,50 @@ function importCvSearchModalData(config) {
         .finally(function () {
           self.selecting = false;
         });
+    },
+  };
+}
+
+function importReviewFileActionData(config) {
+  var state = importCvSearchModalData(config);
+  state.issueId = "";
+  state.error = "";
+  state.submit = async function (form) {
+    if (this.selecting) return;
+    this.selecting = true;
+    this.error = "";
+    try {
+      var url = config.seriesChoice
+        ? "/import/" + config.jobId + "/series/" + config.seriesId + "/review-" + config.action
+        : "/import/" + config.jobId + "/files/" + config.fileId + "/" + config.action;
+      var response = await fetch(url, {
+        method: "POST", headers: { "X-CSRF-Token": readCsrfTokenFromBody() }, body: new FormData(form),
+      });
+      var result = await response.json();
+      if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : (result.error && result.error.message) || "The file changed. Reopen this action and try again.");
+      if (!config.inline) this.close(true);
+      await this.refreshReview();
+      var review = this.reviewPanelData();
+      if (review && review.refreshReviewSummary) await review.refreshReviewSummary();
+      showToast({ message: result.message, level: "success" });
+    } catch (error) {
+      this.error = error.message || "The action could not be completed.";
+    } finally { this.selecting = false; }
+  };
+  return state;
+}
+
+function importReviewSeriesChoiceData(config) {
+  return importReviewFileActionData(Object.assign({}, config, { seriesChoice: true }));
+}
+
+function importReviewFilesData(config) {
+  return {
+    close: function () {
+      var opener = document.getElementById("import-review-menu-trigger-" + config.seriesId);
+      var host = document.getElementById("cv-search-modal");
+      if (host) host.innerHTML = "";
+      if (opener) opener.focus({ preventScroll: true });
     },
   };
 }
@@ -5229,6 +5384,8 @@ function importProgressData(jobId, nextStep, sourceType) {
       duplicateCopies: 0,
       noMatch: 0,
       filesTotal: 0,
+      filesPresent: 0,
+      missingReferences: 0,
       conflicts: 0,
     },
 
@@ -6179,6 +6336,8 @@ function importProgressData(jobId, nextStep, sourceType) {
               files_duplicate: this.reviewSummary.duplicateCopies || 0,
               series_no_match: this.reviewSummary.noMatch || 0,
               files_total: this.reviewSummary.filesTotal || 0,
+              files_present: this.reviewSummary.filesPresent || 0,
+              files_missing_references: this.reviewSummary.missingReferences || 0,
               files_conflict: this.reviewSummary.conflicts || 0,
             },
             stats: {
@@ -6288,6 +6447,12 @@ function importProgressData(jobId, nextStep, sourceType) {
             data && data.scan_total_files,
           );
         }
+        if (summary.files_missing_references != null) {
+          this.reviewSummary.missingReferences = this.numberOrZero(summary.files_missing_references);
+        }
+        this.reviewSummary.filesPresent = summary.files_present != null
+          ? this.numberOrZero(summary.files_present)
+          : Math.max(0, this.reviewSummary.filesTotal - this.reviewSummary.missingReferences);
         if (summary.files_conflict != null) {
           this.reviewSummary.conflicts = this.mergeScanSummaryMetric(
             summary.files_conflict,
@@ -6311,6 +6476,9 @@ function importProgressData(jobId, nextStep, sourceType) {
         0;
       this.reviewSummary.conflicts =
         Number(data && data.total_files_conflict) || Number(this.fileStats.conflicts) || 0;
+      this.reviewSummary.filesPresent = Math.max(
+        0, this.reviewSummary.filesTotal - this.reviewSummary.missingReferences,
+      );
     },
 
     latestLogEntry: function (entries) {
@@ -7344,10 +7512,17 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       Number(cfg.selectedItemCount) ||
       (Number(cfg.matchedSelectedCount) || 0) + (Number(cfg.duplicateSelectedCount) || 0),
     importableItemCount: Number(cfg.importableItemCount) || 0,
+    selectedFilesCount: Number(cfg.selectedFilesCount) || 0,
+    attentionFilesCount: Number(cfg.attentionFilesCount) || 0,
     resolvedConflictGroupCount: Number(cfg.resolvedConflictGroupCount) || 0,
     conflictSeriesCount: Number(cfg.conflictSeriesCount) || 0,
     visibleFileConflictGroupCount: 0,
     confirming: false,
+    importGateOpen: false,
+    importGateTrigger: null,
+    reviewActionPending: false,
+    reviewSameComicGroups: [],
+    reviewCopyChoices: {},
     confirmError: "",
     jobId: cfg.jobId,
     currentView: cfg.currentView || "series",
@@ -7429,12 +7604,12 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     importSelectionLabel: function () {
       var total = this.totalSelectionCount();
-      return total + " items selected for import";
+      return total + " series selected to import";
     },
 
     importActionLabel: function () {
-      var total = this.totalSelectionCount();
-      return "Import " + total + " items";
+      var count = this.totalSelectionCount();
+      return count ? "Import " + count + " ready series" : "Nothing ready to import";
     },
 
     toolbarSelectionLabel: function (overallTotal) {
@@ -8086,6 +8261,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       );
       var sortInput = document.querySelector("#import-step-review-shell input[name='review_sort']");
       var pageInput = document.querySelector("#import-step-review-shell input[name='review_page']");
+      var reasonInput = document.querySelector("#import-step-review-shell input[name='review_reason']");
 
       if (statusInput && statusInput.value) {
         params.set("status", statusInput.value);
@@ -8096,6 +8272,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       if (pageInput && pageInput.value) {
         params.set("page", pageInput.value);
       }
+      if (reasonInput && reasonInput.value) { params.set("reason", reasonInput.value); }
 
       var query = params.toString();
       return query ? url + "?" + query : url;
@@ -8103,6 +8280,112 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     refreshSeriesReview: function () {
       return loadImportReviewShell(this.buildReviewUrl());
+    },
+
+    applyReviewSummary: function (summary) {
+      this.selectedFilesCount = Number(summary.selected_files_total) || 0;
+      this.attentionFilesCount = Number(summary.review_files_open == null ? summary.needs_attention_files_total : summary.review_files_open) || 0;
+      this.matchedSelectedCount = Number(summary.matched_series_selected) || 0;
+      this.duplicateSelectedCount = Number(summary.duplicate_series_selected) || 0;
+      this.selectedItemCount = Number(summary.selected_items_total) || 0;
+      this.importableItemCount = Number(summary.importable_items_total) || 0;
+      this.duplicateImportableCount = Number(summary.duplicate_series_importable) || 0;
+      this.resolvedConflictGroupCount = Number(summary.resolved_file_conflict_groups) || 0;
+      this.conflictSeriesCount = Number(summary.series_conflicts_total) || 0;
+      this.syncSelectionSummaryUi();
+    },
+
+    applyReviewAction: async function (url, method, payload, button) {
+      if (button.disabled || this.reviewActionPending) { return; }
+      this.reviewActionPending = true;
+      button.disabled = true;
+      try {
+        var response = await fetch(url, {
+          method: method,
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": readCsrfTokenFromBody() },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          var error = await response.json().catch(function () { return {}; });
+          throw new Error(typeof error.detail === "string" ? error.detail : "Unable to apply this decision.");
+        }
+        await this.refreshSeriesReview();
+        return true;
+      } catch (error) {
+        showToast({ message: error.message || "Unable to apply this decision.", level: "error" });
+        return false;
+      } finally {
+        this.reviewActionPending = false;
+        if (button.isConnected) { button.disabled = false; }
+      }
+    },
+
+    applyReviewCandidate: function (seriesId, cvId, button) {
+      return this.applyReviewAction("/api/v1/import/" + this.jobId + "/series/" + seriesId + "/override", "POST", { cv_id: cvId }, button);
+    },
+
+    selectReviewPage: async function (checked, checkbox) {
+      checkbox.disabled = true;
+      try {
+        var root = document.getElementById('import-step-review-shell');
+        var controls = Array.from(root.querySelectorAll('[data-import-review-selectable], [data-import-review-duplicate-selectable]'));
+        var choices = controls.map(function (control) {
+          return { id: Number(control.getAttribute('data-import-review-selectable') || control.getAttribute('data-import-review-duplicate-selectable')), duplicate: control.hasAttribute('data-import-review-duplicate-selectable'), checked: control.checked };
+        });
+        for (var choice of choices) {
+          if (choice.checked === checked) { continue; }
+          if (choice.duplicate) { await this.toggleDuplicateSeriesFiles(choice.id, checked); }
+          else { await this.toggleSelection(choice.id, checked); }
+        }
+        await this.refreshSeriesReview();
+      } finally {
+        if (checkbox.isConnected) { checkbox.disabled = false; }
+      }
+    },
+
+    resolveReviewConflict: function (groupId, fileId, button) {
+      return this.applyReviewAction("/api/v1/import/" + this.jobId + "/conflicts/" + groupId + "/resolve", "PUT", { chosen_file_id: fileId }, button);
+    },
+
+    skipReviewFile: function (seriesId, fileId, button) {
+      return this.applyReviewAction("/api/v1/import/" + this.jobId + "/series/" + seriesId + "/reconcile", "POST", { decisions: [{ imported_file_id: fileId, action: "skip" }] }, button);
+    },
+
+    keepSuggestedCopies: function (resolutions, button) {
+      return this.applyReviewAction("/api/v1/import/" + this.jobId + "/conflicts/resolve-bulk", "POST", { resolutions: resolutions }, button);
+    },
+
+    toggleReviewFileSelection: async function (fileId, checked, checkbox) {
+      var applied = await this.applyReviewAction("/api/v1/import/" + this.jobId + "/files/" + fileId + "/selection", "PUT", { include_in_import: checked }, checkbox);
+      if (!applied) { await this.refreshSeriesReviewQuietly(); }
+    },
+
+    openImportGate: async function (trigger) {
+      await this.refreshReviewSummary();
+      if (!this.totalSelectionCount() || !this.hasRequiredPreferredRoot()) { return; }
+      this.importGateTrigger = trigger;
+      this.importGateOpen = true;
+      this.$nextTick(function () { this.$refs.importGateDialog.focus(); }.bind(this));
+    },
+
+    closeImportGate: function () {
+      if (!this.importGateOpen || this.confirming) { return; }
+      this.importGateOpen = false;
+      if (this.importGateTrigger && this.importGateTrigger.isConnected) {
+        this.importGateTrigger.focus({ preventScroll: true });
+      }
+    },
+
+    trapImportGateFocus: function (event) {
+      var controls = this.$refs.importGateDialog.querySelectorAll("button:not([disabled]), [href], input:not([disabled])");
+      if (!controls.length) { event.preventDefault(); return; }
+      var first = controls[0];
+      var last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === this.$refs.importGateDialog)) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
     },
 
     refreshSeriesReviewQuietly: function () {
@@ -8146,6 +8429,8 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
           return;
         }
 
+        this.selectedFilesCount = Number(summary.selected_files_total) || 0;
+        this.attentionFilesCount = Number(summary.needs_attention_files_total) || 0;
         this.duplicateSelectedCount =
           Number(summary.duplicate_series_selected) ||
           Number(summary.duplicate_files_selected) ||
@@ -8223,6 +8508,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         }
 
         clearImportConflictCommitState(this.jobId);
+        this.importGateOpen = false;
         dispatchImportWizardAdvance({ step: 4, jobStatus: "importing" });
       } catch (err) {
         this.confirmError = err && err.message ? err.message : "Failed to confirm import.";
@@ -17768,6 +18054,18 @@ function orphanedRecoveryModal(config) {
   };
 }
 
+function importFileReaderData() {
+  var config = { previewOnly: true };
+  return Object.assign(readerMixin(config), {
+    previewImportFile: function (detail) {
+      if (!detail || this.readerOpen) return;
+      config.readerManifestUrl = "/api/v1/reader/imports/" + Number(detail.jobId) +
+        "/files/" + Number(detail.fileId) + "/manifest";
+      this.openReader({ currentTarget: detail.opener });
+    },
+  });
+}
+
 function readerMixin(config) {
   var cfg = config || {};
   var zoomSteps = [50, 67, 80, 100, 125, 150, 200, 300];
@@ -18192,7 +18490,9 @@ function readerMixin(config) {
           self.readerFailedPageIndex = nextIndex;
           self.readerErrorTitle = "Page " + (nextIndex + 1) + " could not be displayed.";
           self.readerErrorMessage =
-            "Try this page again, navigate to another page, or download the original comic.";
+            cfg.previewOnly
+              ? "This file could not be displayed. It may be damaged or no longer available. Close the reader to retry View File or choose Skip."
+              : "Try this page again, navigate to another page, or download the original comic.";
           self.showReaderControls();
           resolve(false);
         };
@@ -21216,6 +21516,10 @@ document.addEventListener("htmx:afterSwap", function (e) {
   }
 
   if (e.detail.target && e.detail.target.id === "settings-content") {
+    // Reset before the new controls can be used, not after a delayed settle.
+    if (_shouldScrollSettingsContent(e)) {
+      _scrollSettingsContentToTop();
+    }
     syncSettingsWorkspaceNav(document);
   }
 
@@ -22156,7 +22460,6 @@ document.addEventListener("htmx:afterSettle", function (e) {
   }
 
   if (_shouldScrollSettingsContent(e)) {
-    _scrollSettingsContentToTop();
     syncSettingsWorkspaceNav(document);
   }
 

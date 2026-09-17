@@ -417,10 +417,12 @@ async def _retry_source_roots(
     else:
         candidates.extend(Path(value) for value in dict(job.mylar3_path_map or {}).values())
         signature_query = select(ImportedFile.source_signature).where(
-            *retryable_failed_source_filters(job.id)
+            ImportedFile.import_job_id == job.id
         )
         if file_ids is not None:
             signature_query = signature_query.where(ImportedFile.id.in_(file_ids))
+        else:
+            signature_query = signature_query.where(*retryable_failed_source_filters(job.id))
         signature_rows = await session.scalars(signature_query)
         root_ids = {
             root_id
@@ -442,6 +444,11 @@ async def _retry_source_roots(
                 root_query = root_query.where(LibraryRoot.allow_referenced_registrations.is_(True))
             candidates.extend(Path(root.path) for root in (await session.scalars(root_query)).all())
 
+    return await asyncio.to_thread(_validated_source_roots, candidates)
+
+
+def _validated_source_roots(candidates: list[Path]) -> list[Path]:
+    """Resolve possibly remote filesystem roots without blocking the event loop."""
     roots: list[Path] = []
     seen: set[tuple[str, str]] = set()
     for candidate in candidates:

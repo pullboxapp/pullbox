@@ -355,19 +355,36 @@ def _build_import_review_file_detail_row(
 ) -> dict[str, object]:
     """Build the inline Step 3 file-detail payload used by review dropdowns."""
     diagnostics = dict(imp_file.diagnostics or {})
+    source = diagnostics.get("source_metadata") or {}
+    issue = issue_map.get(imp_file.matched_issue_id) if imp_file.matched_issue_id else None
+    issue_cv_id = imp_file.matched_issue_cv_id or (issue.comicvine_id if issue else None)
+    issue_number = issue.issue_number if issue else diagnostics.get("target_issue_number")
+    if issue_number is None:
+        issue_number = imp_file.parsed_issue_number
     return {
         "id": imp_file.id,
         "file_name": imp_file.file_name,
         "file_size": imp_file.file_size,
         "has_comicinfo": imp_file.has_comicinfo,
         "status": imp_file.status.value,
+        "include_in_import": imp_file.include_in_import,
+        "review_selected": dict(imp_file.diagnostics or {}).get("review_selection", True),
+        "archive_format": diagnostics.get("archive_format", source.get("archive_format", {})),
+        "page_count": diagnostics.get(
+            "content_inspection", source.get("content_inspection", {})
+        ).get("page_count"),
         "match_confidence": imp_file.match_confidence,
         "matched_issue_label": _import_review_matched_issue_label(imp_file, issue_map),
+        "matched_issue_cv_id": issue_cv_id,
+        "matched_issue_url": _comicvine_issue_url(issue_cv_id) if issue_cv_id else None,
+        "matched_issue_number": _format_import_review_issue_number(issue_number),
         "duplicate_reason_label": _import_review_duplicate_reason_label(
             diagnostics.get("duplicate_reason")
             if isinstance(diagnostics.get("duplicate_reason"), str)
             else None
-        ),
+        )
+        if imp_file.status is ImportedFileStatus.DUPLICATE_FILE
+        else None,
         "duplicate_keep_label": diagnostics.get("representative_file_name"),
     }
 
@@ -380,6 +397,10 @@ def _import_review_file_group_key(
         return "matched"
     if imp_file.status == ImportedFileStatus.CONFLICT:
         return "conflict"
+    if imp_file.status == ImportedFileStatus.SKIPPED and (
+        imp_file.match_method == "import_reconcile_skip" or imp_file.conflict_group_id is not None
+    ):
+        return "skipped"
     if imp_file.status == ImportedFileStatus.ALREADY_OWNED:
         return "already_owned"
     if imp_file.status == ImportedFileStatus.DUPLICATE_FILE:
@@ -443,6 +464,7 @@ async def _load_import_review_file_detail_groups(
             "already_owned": [],
             "duplicate_file": [],
             "no_match": [],
+            "skipped": [],
         }
         for series_id in series_ids
     }
@@ -458,6 +480,7 @@ async def _load_import_review_file_detail_groups(
         )
 
     group_definitions = [
+        ("skipped", "Skipped", "Your saved file decisions. Source files are unchanged."),
         (
             "matched",
             "Importable files",

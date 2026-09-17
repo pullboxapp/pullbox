@@ -32,6 +32,40 @@ def _create_mylar_db(
     )
 
 
+@pytest.mark.parametrize("recorded", [False, True])
+async def test_mylar_discovery_keeps_lettered_issue_numbers(tmp_path: Path, recorded: bool) -> None:
+    db = tmp_path / "mylar.db"
+    folder = tmp_path / "comics" / "Gen13"
+    numbers = ["13A", "13B", "13C"]
+    for number in numbers:
+        create_minimal_cbz(folder / f"Gen13 #{number} (1996).cbz")
+    _create_mylar_db(
+        db,
+        [
+            {
+                "ComicID": "123",
+                "ComicName": "Gen13",
+                "ComicYear": "1996",
+                "ComicLocation": str(folder),
+                "Total": 3,
+            }
+        ],
+        issues=[
+            {
+                "IssueID": str(100 + index),
+                "ComicID": "123",
+                "Issue_Number": number,
+                "Location": f"Gen13 #{number} (1996).cbz",
+            }
+            for index, number in enumerate(numbers)
+        ]
+        if recorded
+        else None,
+    )
+    results = await Mylar3Reader(db).read_series()
+    assert sorted(file.issue_number_raw for series in results for file in series.files) == numbers
+
+
 @pytest.mark.parametrize("file_name", ["mylar#export.db", "mylar%23export.db"])
 async def test_mylar_reader_preserves_literal_uri_characters(
     tmp_path: Path, file_name: str

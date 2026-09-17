@@ -20,6 +20,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from pullbox.core.archive_format import archive_format
 from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.library_comicinfo import (
     apply_comicinfo_to_imported_artifact as _apply_comicinfo_to_imported_artifact,
@@ -892,8 +893,8 @@ async def register_library_file_with_metadata(
         stat = await asyncio.to_thread(final_path.stat)
 
         # 9. Create LibraryFile record
-        extension = final_path.suffix.lstrip(".").lower()
-        file_format = _FORMAT_MAP.get(extension, FileFormat.CBZ)
+        detected_format = await asyncio.to_thread(archive_format, final_path)
+        file_format = _FORMAT_MAP.get(detected_format, FileFormat.CBZ)
 
         registered_signature = (
             referenced_signature
@@ -1147,12 +1148,12 @@ async def _update_existing_library_file_from_path(
 ) -> None:
     """Refresh an existing LibraryFile row from the current artifact on disk."""
     stat = await asyncio.to_thread(final_path.stat)
-    extension = final_path.suffix.lstrip(".").lower()
+    detected_format = await asyncio.to_thread(archive_format, final_path)
 
     library_file.file_path = str(final_path)
     library_file.file_name = final_path.name
     library_file.file_size = stat.st_size
-    library_file.file_format = _FORMAT_MAP.get(extension, FileFormat.CBZ)
+    library_file.file_format = _FORMAT_MAP.get(detected_format, FileFormat.CBZ)
     library_file.file_modified_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
     library_file.match_confidence = confidence
     library_file.parsed_series = series.title if isinstance(series, Series) else None
@@ -1246,8 +1247,11 @@ async def _recover_materialized_target_without_source(
         select(LibraryFile).where(LibraryFile.file_path == str(target_path))
     )
     existing = existing_result.scalars().first()
+    detected_format = await asyncio.to_thread(archive_format, target_path)
+    file_format = _FORMAT_MAP.get(detected_format, FileFormat.CBZ)
     if existing is not None:
         existing.issue_id = issue.id
+        existing.file_format = file_format
         existing.match_confidence = confidence
         existing.naming_snapshot = naming_snapshot
         issue.status = IssueStatus.OWNED
@@ -1266,8 +1270,6 @@ async def _recover_materialized_target_without_source(
         )
 
     stat = await asyncio.to_thread(target_path.stat)
-    extension = target_path.suffix.lstrip(".").lower()
-    file_format = _FORMAT_MAP.get(extension, FileFormat.CBZ)
 
     lf = LibraryFile(
         file_path=str(target_path),

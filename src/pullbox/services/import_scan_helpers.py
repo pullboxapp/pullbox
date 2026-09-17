@@ -138,6 +138,31 @@ async def _inspection_results(
         yield results
 
 
+def _mark_missing_mylar_references(discovered: list[DiscoveredSeries]) -> None:
+    for series in discovered:
+        for file in series.files:
+            diagnostics = file.metadata_diagnostics
+            if (
+                file.source_signature
+                or "mylar3_issue" not in diagnostics
+                or "file_safety" in diagnostics
+            ):
+                continue
+            try:
+                Path(file.file_path).lstat()
+            except FileNotFoundError:
+                diagnostics["file_safety"] = build_import_safety_diagnostics(
+                    "The Mylar comic file is missing or unavailable.",
+                    kind="source_revalidation",
+                    code="source_missing",
+                    source="source_revalidation",
+                    overrideable_hint=False,
+                )
+            except OSError:
+                # An unreadable path is not proof that the file is absent.
+                continue
+
+
 async def validate_discovered_files_safety(
     session: AsyncSession,
     discovered_list: list[DiscoveredSeries],
@@ -147,6 +172,7 @@ async def validate_discovered_files_safety(
     worker_count: int = 0,
 ) -> None:
     """Run safety checks once per unique discovered source file."""
+    await asyncio.to_thread(_mark_missing_mylar_references, discovered_list)
     files_by_path: dict[str, list[DiscoveredFile]] = {}
     for discovered in discovered_list:
         for discovered_file in discovered.files:

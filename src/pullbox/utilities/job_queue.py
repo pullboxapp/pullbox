@@ -137,6 +137,8 @@ class JobQueueManager:
         created_by: str | None = None,
     ) -> UtilityJob:
         """Create a queued rollback child job for ``job``."""
+        if job.job_type == JobType.SERIES_RESCAN:
+            raise ValueError("Rescans do not support rollback; source files were not changed.")
         existing_result = await session.execute(
             select(UtilityJob)
             .where(

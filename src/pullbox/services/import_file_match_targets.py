@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select as sa_select
 
 from pullbox.core.exceptions import ImportProviderDegradedError
+from pullbox.core.issue_numbers import (
+    format_issue_number,
+    normalize_issue_number_queries,
+    normalize_issue_number_text,
+)
 from pullbox.core.naming import detect_issue_type
 from pullbox.core.release_parser import parse_release_title
 from pullbox.core.source_metadata import volume_subtitle_hint_from_filename
@@ -17,7 +22,10 @@ from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 from pullbox.providers.base import IssueSummary
 from pullbox.services.import_embedded_title_match import embedded_issue_number_title_match
-from pullbox.services.import_file_issue_signals import candidate_issue_number
+from pullbox.services.import_file_issue_signals import (
+    candidate_issue_number,
+    candidate_issue_number_text,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +55,7 @@ class FileMatchTargetIndex:
     synthetic_issue_types: dict[float, IssueType] = field(default_factory=dict)
     synthetic_issue_titles: dict[float, str | None] = field(default_factory=dict)
     provisional_issue_numbers: set[float] = field(default_factory=set)
+    provisional_exact_types: dict[str, IssueType] = field(default_factory=dict)
     existing_series: Series | None = None
     issue_entries: list[tuple[Issue, bool]] = field(default_factory=list)
 
@@ -145,7 +154,12 @@ async def load_file_match_target_index(
             entry = (None, provider_id, False, None, summary.title)
             if provider_id is not None:
                 target_index.cv_id_map[provider_id] = entry
-            target_index.number_map[summary.issue_number] = entry
+            exact_text = normalize_issue_number_text(
+                summary.issue_number_text or summary.issue_number
+            )
+            target_index.exact_number_map[exact_text] = entry
+            if exact_text == format_issue_number(summary.issue_number):
+                target_index.number_map[summary.issue_number] = entry
 
     return target_index
 
@@ -197,10 +211,14 @@ def _trusted_source_issue_target_index(
         entry = (None, issue_cv_id, False, None, issue_title)
         target_index.cv_id_map[issue_cv_id] = entry
         if issue_number is not None:
-            target_index.number_map[issue_number] = entry
-            target_index.synthetic_issue_types.pop(issue_number, None)
-            target_index.synthetic_issue_titles.pop(issue_number, None)
-            target_index.provisional_issue_numbers.discard(issue_number)
+            exact_text = candidate_issue_number_text(imp_file) or format_issue_number(issue_number)
+            target_index.exact_number_map[exact_text] = entry
+            if exact_text == format_issue_number(issue_number):
+                target_index.number_map[issue_number] = entry
+                target_index.synthetic_issue_types.pop(issue_number, None)
+                target_index.synthetic_issue_titles.pop(issue_number, None)
+                target_index.provisional_issue_numbers.discard(issue_number)
+            target_index.provisional_exact_types.pop(exact_text, None)
 
     return target_index
 
@@ -213,13 +231,20 @@ def _add_trusted_provisional_target(
     if imp_file.comicvine_issue_id is not None:
         return
     issue_number = candidate_issue_number(imp_file)
-    if issue_number is None or issue_number in target_index.number_map:
+    if issue_number is None:
+        return
+    exact_text = candidate_issue_number_text(imp_file) or format_issue_number(issue_number)
+    if exact_text in target_index.exact_number_map:
         return
     issue_type = _file_placeholder_issue_type(imp_file) or IssueType.ISSUE
-    target_index.number_map.setdefault(issue_number, (None, None, False, None, None))
-    target_index.synthetic_issue_types[issue_number] = issue_type
-    target_index.synthetic_issue_titles[issue_number] = None
-    target_index.provisional_issue_numbers.add(issue_number)
+    entry: FileMatchTargetEntry = (None, None, False, None, None)
+    target_index.exact_number_map[exact_text] = entry
+    target_index.provisional_exact_types[exact_text] = issue_type
+    if exact_text == format_issue_number(issue_number):
+        target_index.number_map.setdefault(issue_number, entry)
+        target_index.synthetic_issue_types[issue_number] = issue_type
+        target_index.synthetic_issue_titles[issue_number] = None
+        target_index.provisional_issue_numbers.add(issue_number)
 
 
 def _has_trusted_issue_identity(imp_file: ImportedFile) -> bool:
@@ -464,13 +489,12 @@ def _requested_issue_ids(files: list[ImportedFile]) -> list[int]:
     return sorted(issue_ids)
 
 
-def _requested_issue_numbers(files: list[ImportedFile]) -> list[float]:
-    issue_numbers = {
-        float(issue_number)
+def _requested_issue_numbers(files: list[ImportedFile]) -> list[float | str]:
+    return normalize_issue_number_queries(
+        candidate_issue_number_text(imp_file) or issue_number
         for imp_file in files
         if (issue_number := candidate_issue_number(imp_file)) is not None
-    }
-    return sorted(issue_numbers)
+    )
 
 
 async def _load_issue_summaries_by_issue_ids(
@@ -487,6 +511,7 @@ async def _load_issue_summaries_by_issue_ids(
             IssueSummary(
                 provider_id=str(issue.provider_id),
                 issue_number=issue.issue_number,
+                issue_number_text=issue.issue_number_text,
                 title=issue.title,
                 release_date=issue.release_date,
                 cover_url=issue.cover_url,

@@ -22,6 +22,7 @@ from pullbox.core.source_metadata import (
 from pullbox.core.type_semantics import issue_type_family
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
 from pullbox.models.issue import IssueType
+from pullbox.services.import_file_issue_signals import candidate_issue_number_text
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -303,6 +304,7 @@ def source_metadata_for_import_file(
         series_name=series_name,
         issue_number=issue_number,
         year=imp_file.parsed_year or imp_series.raw_year,
+        issue_number_text=candidate_issue_number_text(imp_file),
         volume=_filename_parse_volume(diagnostics, imp_file.file_name),
         issue_type=_source_issue_type(raw_issue_type),
         comicvine_series_id=_optional_int(diagnostics.get("comicvine_series_id")),
@@ -1004,6 +1006,54 @@ async def source_metadata_for_matching_series(
     if metadata_update:
         return metadata.model_copy(update=metadata_update)
     return metadata
+
+
+def corroborated_import_title_conflict(
+    metadata: SourceMetadata, target_series_title: str
+) -> dict[str, Any] | None:
+    """Protect extended comic titles from a shorter parent-ID or number match."""
+    if metadata.issue_type in _TYPE_QUALIFIED_SERIES_HINT_TYPES:
+        return None
+    filename = metadata.diagnostics.get("filename_parse")
+    if not isinstance(filename, dict):
+        return None
+    source_title = str(filename.get("series_name") or "").strip()
+    exact_types = {"exact", "alternate", "token_set"}
+    target_name = NameMatcher.normalize(target_series_title)
+    # Limit this guard to corroborated title extensions. Alternate catalog names
+    # and type-qualified annual/special buckets still use the established matcher.
+    if (
+        not target_name
+        or not NameMatcher.normalize(source_title).startswith(f"{target_name} ")
+        or _matcher.match(source_title, target_series_title).match_type in exact_types
+    ):
+        return None
+    corroboration: dict[str, str] = {}
+    comicinfo = metadata.diagnostics.get("comicinfo")
+    if isinstance(comicinfo, dict):
+        corroboration["comicinfo"] = str(comicinfo.get("series") or "")
+    hint = _archive_entry_issue_hint(metadata.diagnostics)
+    if hint is not None:
+        corroboration["archive_page_names"] = str(hint.get("series_name") or "")
+    agreeing = [
+        signal
+        for signal, title in corroboration.items()
+        if title and _matcher.match(source_title, title).match_type in exact_types
+    ]
+    if not agreeing:
+        return None
+    return {
+        "kind": "metadata_conflict",
+        "conflict_type": "corroborated_file_series_mismatch",
+        "preserve_series_match": True,
+        "source_series": source_title,
+        "target_series": target_series_title,
+        "corroborating_signals": agreeing,
+        "rejection_reason": (
+            f"The filename and local file metadata identify {source_title}, "
+            f"not {target_series_title}. Choose the correct series and issue for this file."
+        ),
+    }
 
 
 def build_import_metadata_conflict(

@@ -836,7 +836,14 @@ class TestImportShellRouteContracts:
         self,
     ) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
-        template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
+        template = "\n".join(
+            Path("src/pullbox/ui/templates/partials/" + name).read_text()
+            for name in (
+                "import_step_review.html",
+                "import_review_overview.html",
+                "import_review_lane_rail.html",
+            )
+        )
 
         assert "importAllReady: async function () {" not in script
         assert 'data-testid="import-review-guided-summary"' not in template
@@ -847,15 +854,17 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-review-action-bar"' in template
         assert "data-import-review-selection-summary" in template
         assert "data-import-review-import-button" in template
-        assert 'data-testid="import-review-series-filters"' in template
+        assert 'data-testid="import-review-subtabs"' in template
 
     async def test_import_review_row_expansion_is_stable_and_action_scoped(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
-        template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
+        template = Path(
+            "src/pullbox/ui/templates/partials/import_review_workspace_rows.html"
+        ).read_text()
 
         assert 'id="import-review-series-row-{{ active_review_view }}-{{ item.id }}"' in template
         assert 'data-import-review-row-key="{{ active_review_view }}:{{ item.id }}"' in template
-        assert 'data-import-review-pending-subitems="{{ pending_subitem_count }}"' in template
+        assert 'data-import-review-pending-subitems="{{ row.attention_files }}"' in template
         assert "importReviewRowExpansionData" not in template
         assert '@click="toggle()"' not in template
         assert 'x-show="expanded"' not in template
@@ -881,7 +890,14 @@ class TestImportShellRouteContracts:
         self,
     ) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
-        template = Path("src/pullbox/ui/templates/partials/import_step_review.html").read_text()
+        template = "\n".join(
+            Path("src/pullbox/ui/templates/partials/" + name).read_text()
+            for name in (
+                "import_step_review.html",
+                "import_review_overview.html",
+                "import_review_lane_rail.html",
+            )
+        )
 
         assert 'data-testid="import-review-cancel"' in template
         assert 'onclick="cancelImportReview(this)"' in template
@@ -1053,7 +1069,10 @@ class TestImportShellRouteContracts:
         assert "Automatic analysis could not resolve every location" not in response.text
         assert 'data-testid="import-managed-library-root"' in response.text
         assert response.text.count('data-dropdown-select-contract="v1"') >= 2
-        assert "<select" not in response.text
+        # Import controls stay on contract; only the shared reader's sizing control is native.
+        native_selects = re.findall(r"<select\b[^>]*>", response.text, re.DOTALL)
+        assert len(native_selects) == 1
+        assert 'class="comic-reader__fit-select"' in native_selects[0]
         assert 'data-testid="import-library-roots-manage"' in response.text
         assert 'data-testid="import-library-roots-refresh"' in response.text
         assert 'href="/settings?tab=media"' in response.text
@@ -1217,7 +1236,7 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-review-needs-attention-action"' not in response.text
         assert 'data-testid="import-review-story-arc-follow-up-action"' not in response.text
         assert "Review details" not in response.text
-        assert 'data-testid="import-review-series-filters"' in response.text
+        assert 'data-testid="import-review-subtabs"' in response.text
         assert "data-import-review-import-button" in response.text
 
     async def test_split_series_review_requires_future_destination_without_relocation(self) -> None:
@@ -1776,124 +1795,25 @@ class TestImportShellRouteContracts:
             series.cv_match_method = "exact_title_year"
             await session.commit()
 
-        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=series")
 
         assert response.status_code == 200
-        assert "Import settings" not in response.text
-        assert 'data-testid="import-review-library-root-display"' not in response.text
-        assert "Search on add" not in response.text
-        assert 'data-testid="import-review-sort-found_series"' in response.text
-        assert 'data-testid="import-review-sort-status"' in response.text
-        assert '<th class="import-review-cv-year-header w-20">' in response.text
-        assert 'data-testid="import-review-sort-cv_year"' in response.text
-        assert 'data-testid="import-review-sort-cv_id"' in response.text
+        assert 'data-testid="import-review-workspace-table"' in response.text
         assert 'href="https://comicvine.gamespot.com/review-series-1/4050-9001/"' in response.text
         assert 'data-testid="import-review-cv-id-link"' in response.text
-        assert 'class="downloads-sort-btn' in response.text
-        assert 'class="downloads-action-btn is-warn"' in response.text
-        assert 'data-tip="Search ComicVine"' in response.text
-        assert 'data-tip="Why no match"' in response.text
-        assert "return openImportCvSearchModal({ jobId: " in response.text
-        assert "In Library" in response.text
-        assert 'data-testid="import-review-series-details-action"' not in response.text
-        assert 'x-init="init()"' in response.text
-        assert "data-import-review-selection-summary" in response.text
-        assert "data-import-review-import-button" in response.text
-        assert "data-import-review-import-label" in response.text
-        assert "data-import-review-toolbar-selection-summary" in response.text
-        assert "conflictSeriesCount:" in response.text
-        assert "data-import-review-conflict-count" in response.text
-        assert 'x-text="conflictSeriesCount"' in response.text
-        assert (
-            'x-on:import:conflict-visibility.window="visibleFileConflictGroupCount = '
-            'Number(($event.detail && $event.detail.visibleFileConflictGroupCount) || 0)"'
-            in response.text
-        )
-        assert (
-            'x-on:import:conflicts-saved.window="handleConflictsSaved($event.detail)"'
-            in response.text
-        )
-        assert (
-            'x-on:import:conflicts-reset.window="handleConflictsReset($event.detail)"'
-            in response.text
-        )
-        assert "In library" not in response.text
         assert "Test Publisher" in response.text
-        assert "Existing library series matched by ComicVine ID." in response.text
-        assert "87%" in response.text
-        assert "Exact match" in response.text
-        assert "18 issues in series" in response.text
-        assert "exact_title_year" not in response.text
-        assert "h-1 w-10 overflow-hidden" not in response.text
-        assert ':checked="isSelected(1)"' not in response.text
-        assert '@change="toggleSelection(1, $event.target.checked)"' in response.text
-        assert 'data-import-review-selectable="1"' in response.text
-        assert ">All<" in response.text
-        assert "Select all importable" in response.text
-        assert "2 items selected for import" in response.text
-        assert "Import 2 items" in response.text
-        assert "2 of 8 selected" in response.text
-        assert 'data-overall-total="8"' in response.text
-        assert "Status</span>" in response.text
-        assert 'data-testid="import-review-status-header-row"' in response.text
-        assert 'data-testid="import-review-status-tabs-row"' in response.text
-        assert 'aria-label="Select Review Series 9 for import"' not in response.text
-        assert 'aria-label="Select Review Series 11 for import"' not in response.text
-        assert 'data-testid="import-review-why-action"' in response.text
-        assert 'data-testid="import-review-matched-why-action"' in response.text
-        assert 'data-testid="import-review-matched-diagnostics"' in response.text
-        assert (
-            'data-testid="import-review-matched-detail-grid" '
-            'class="grid items-start gap-5 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]"'
-        ) in response.text
-        assert (
-            'data-testid="import-review-duplicate-detail-grid" '
-            'class="grid items-start gap-5 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]"'
-        ) in response.text
-        assert (
-            'data-testid="import-review-no-match-detail-grid" '
-            'class="grid items-start gap-5 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]"'
-        ) in response.text
-        file_breakdown_start = response.text.index(
-            'data-testid="import-review-matched-file-breakdown"'
-        )
-        file_breakdown_header = response.text[
-            file_breakdown_start : response.text.index(
-                '<div class="mt-2 overflow-hidden rounded-lg border border-pb-border">',
-                file_breakdown_start,
-            )
-        ]
-        assert "btn-ghost btn-sm" not in file_breakdown_header
-        assert "Open series details" not in file_breakdown_header
-        assert 'data-testid="import-review-no-match-diagnostics"' in response.text
-        assert "ComicVine candidates" in response.text
-        assert 'data-testid="import-review-candidate-row"' in response.text
+        assert "ready series" in response.text
+        assert "Follow-up" in response.text
         assert "Below 70% threshold" in response.text
-        assert "rounded-xl border border-pb-border bg-pb-card/70" not in response.text
-        assert 'data-testid="import-review-tab-files"' not in response.text
-        assert 'data-testid="import-review-files-content"' not in response.text
-        assert 'data-testid="import-review-tab-series"' in response.text
-        assert 'class="chip-btn chip-btn-sm chip-btn-selected"' in response.text
-        assert "currentView === 'series'" in response.text
-        assert 'class="chip-btn chip-btn-sm chip-btn-neutral"' in response.text
-        assert "'chip-btn-warning': currentView === 'conflicts'" in response.text
-        assert 'id="import-step-review-shell"' in response.text
-        assert "reviewToken:" in response.text
-        assert 'hx-target="#import-step-review-shell"' in response.text
-        assert 'hx-swap="morph:outerHTML"' in response.text
-        assert "data-import-review-toolbar-selection-summary" in response.text
-        assert 'data-testid="import-review-save-conflict-choices"' not in response.text
-        assert 'data-testid="import-review-reset-conflict-choices"' not in response.text
-        assert '@click="saveConflictChoices()"' not in response.text
-        assert '@click="resetConflictChoices()"' not in response.text
+        assert "Candidate Series 11" in response.text
+        assert 'data-import-review-selectable="1"' in response.text
+        assert 'data-import-review-selectable="11"' not in response.text
         assert "Save conflict choices" not in response.text
+        assert "Import settings" not in response.text
         assert "Review your library" not in response.text
-        assert "Import everything Pullbox understands now." not in response.text
-        action_bar_index = response.text.index('data-testid="import-review-action-bar"')
-        status_bar_index = response.text.index('data-testid="import-review-series-filters"')
-        assert action_bar_index < status_bar_index
-        assert 'data-testid="import-review-guided-summary"' not in response.text
-        assert 'data-testid="import-review-details"' not in response.text
+        assert response.text.index('data-testid="import-review-action-bar"') < response.text.index(
+            'data-testid="import-review-subtabs"'
+        )
 
     async def test_import_review_partial_explains_selected_layout_review(
         self,
@@ -2040,30 +1960,19 @@ class TestImportShellRouteContracts:
             duplicate_file.parsed_issue_number = 1.0
             await session.commit()
 
-        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=series")
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-matched-file-targets"' in response.text
-        assert "Matched files" in response.text
+        assert 'data-testid="import-review-file-target"' in response.text
+        assert "CV 81001" in response.text
         assert "Review Series 1 #1.cbz" in response.text
         assert "Review Series 9 #1.cbz" in response.text
-        matched_file_row_start = response.text.index("Review Series 1 #1.cbz")
-        matched_file_row = response.text[
-            matched_file_row_start : response.text.index("</tr>", matched_file_row_start)
-        ]
-        duplicate_file_row_start = response.text.index("Review Series 9 #1.cbz")
-        duplicate_file_row = response.text[
-            duplicate_file_row_start : response.text.index("</tr>", duplicate_file_row_start)
-        ]
-        assert 'class="pill pill-muted">1.0 KB</span>' in matched_file_row
-        assert 'class="pill pill-muted">25.0 KB</span>' in duplicate_file_row
-        assert 'data-testid="import-review-file-cv-issue-link"' in response.text
         assert 'href="https://comicvine.gamespot.com/issue/4000-81001/"' in response.text
         assert 'href="https://comicvine.gamespot.com/issue/4000-89001/"' in response.text
-        assert re.search(r">\s*#4\s*<", response.text)
-        assert re.search(r">\s*#1\s*<", response.text)
+        assert "Issue 4" in response.text
+        assert "Issue 1" in response.text
 
-    async def test_import_review_needs_series_dropdown_renders_file_details(
+    async def test_import_review_needs_series_keeps_files_in_read_only_inventory(
         self,
         authenticated_client,
         sec_db,
@@ -2112,12 +2021,17 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-series-file-details"' in response.text
-        assert 'data-testid="import-review-series-file-group-no_match"' in response.text
-        assert "Source files" in response.text
-        assert "Review Series 11 #1.cbz" in response.text
-        assert "No Match" in response.text
-        assert "Files that stayed unmatched or were blocked for manual review." in response.text
+        assert 'data-testid="import-review-series-file-details"' not in response.text
+        assert 'data-testid="import-review-series-file-group-no_match"' not in response.text
+        assert "Files in this folder" not in response.text
+        assert "Review Series 11 #1.cbz" not in response.text
+        inventory = await authenticated_client.get(
+            f"/import/{job_id}/series/{needs_series.id}/files"
+        )
+        assert inventory.status_code == 200
+        assert "Review Series 11 #1.cbz" in inventory.text
+        assert "/tmp/review-11" in inventory.text
+        assert "Change issue" not in inventory.text
         assert "Files tied to this unresolved series row" not in response.text
         assert "/tmp/review-11/file-1.cbz" not in response.text
         assert "Parsed From File Name" not in response.text
@@ -2138,27 +2052,14 @@ class TestImportShellRouteContracts:
             response = await authenticated_client.get(f"/import/{job_id}/review-partial{query}")
 
             assert response.status_code == 200
-            status_bar = re.search(
-                r'data-testid="import-review-series-filters"[^>]*class="([^"]+)"',
-                response.text,
-            )
-            assert status_bar is not None
-            assert "rounded-xl" not in status_bar.group(1)
-            assert "border-pb-border" not in status_bar.group(1)
-            assert "bg-pb-card/40" not in status_bar.group(1)
-
-            table_shell = re.search(
-                r'<div class="([^"]*downloads-table-wrap[^"]*)">',
-                response.text,
-            )
-            assert table_shell is not None
-            assert "is-clipped" in table_shell.group(1)
-            table_shell_index = response.text.index('class="downloads-table-wrap is-clipped"')
-            toolbar_index = response.text.index('class="downloads-history-toolbar"')
-            table_index = response.text.index('class="downloads-table min-w-[1040px] text-sm"')
-            assert table_shell_index < toolbar_index < table_index
+            assert 'data-testid="import-review-subtabs"' in response.text
+            assert 'class="downloads-table-wrap is-clipped"' in response.text
+            assert 'data-testid="import-review-workspace-table"' in response.text
+            assert response.text.index(
+                'class="downloads-table-wrap is-clipped"'
+            ) < response.text.index('data-testid="import-review-workspace-table"')
             assert 'data-testid="import-collection-conflicts"' not in response.text
-            assert "Loading conflicts..." not in response.text
+            assert "Save conflict choices" not in response.text
 
     async def test_import_review_conflicts_filter_uses_series_count(
         self,
@@ -2171,11 +2072,9 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         conflict_filter = re.search(
-            r'data-testid="import-review-open-conflicts-filter"[\s\S]*?</button>',
-            response.text,
+            r'data-testid="import-review-lane-confirm"[\s\S]*?</button>', response.text
         )
         assert conflict_filter is not None
-        assert ">Conflicts<" in conflict_filter.group(0)
         assert ">2</span>" in conflict_filter.group(0)
         assert ">4</span>" not in conflict_filter.group(0)
 
@@ -2191,16 +2090,15 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-save-conflict-choices"' in response.text
-        assert ':disabled="!hasVisibleFileConflictGroups()"' in response.text
-        assert 'x-data="{ detailsOpen: true }"' in response.text
-        assert 'data-testid="import-conflict-choice-row"' not in response.text
-        assert 'data-testid="import-series-conflict-candidate-radio"' not in response.text
-        assert "Choose one file to keep" in response.text
+        assert 'data-testid="import-review-keep-selected-copy"' in response.text
+        assert 'data-testid="import-review-conflict-card"' in response.text
+        assert "data-import-review-detail-row" in response.text
+        assert 'aria-expanded="false"' in response.text
+        assert "Duplicate copies" in response.text
+        assert "Keep selected copy" in response.text
+        assert "Save conflict choices" not in response.text
+        assert 'data-testid="import-review-copy-choice"' in response.text
         assert 'type="radio"' in response.text
-        detail_row_index = response.text.index('data-testid="import-conflict-detail-row"')
-        radio_index = response.text.index('type="radio"', detail_row_index)
-        assert detail_row_index < radio_index
 
     async def test_import_review_conflicts_view_hides_file_choice_toolbar_for_series_conflicts(
         self,
@@ -2301,12 +2199,10 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Series match conflict" in response.text
-        assert 'class="downloads-action-btn"' in response.text
-        assert "Review ComicVine match" in response.text
-        assert "Conflicting candidates" in response.text
-        assert 'data-testid="import-review-save-conflict-choices"' not in response.text
-        assert 'data-testid="import-review-reset-conflict-choices"' not in response.text
+        assert "Choose between series matches" in response.text
+        assert "Review Series One" in response.text
+        assert "Ambiguous near match" in response.text
+        assert 'data-testid="import-review-search-cv-action"' in response.text
         assert "Save conflict choices" not in response.text
         assert 'type="radio"' not in response.text
 
@@ -2327,7 +2223,8 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-review-pagination"' in response.text
         assert 'data-testid="page-dock-pagination"' in response.text
         assert (
-            f'hx-get="/import/{job_id}/review-partial?sort=confidence&amp;page=1"' in response.text
+            f'hx-get="/import/{job_id}/review-partial?status=confirm&amp;sort=confidence&amp;page=1"'
+            in response.text
         )
         assert 'hx-push-url="false"' in response.text
         assert "per page" in response.text
@@ -2399,20 +2296,13 @@ class TestImportShellRouteContracts:
         response = await authenticated_client.get(f"/import/{job_id}/review-partial")
 
         assert response.status_code == 200
-        assert ">Conflict</div>" in response.text
-        assert "2 strong ComicVine candidates need review." in response.text
-        assert 'data-tip="Review conflict"' in response.text
-        assert "Conflicting ComicVine candidates" in response.text
-        assert "Multiple strong ComicVine candidates conflicted on the best match" in response.text
-        assert "return openImportCvSearchModal({ jobId: " in response.text
+        assert "Choose between series matches" in response.text
         assert "Chicken Devils" in response.text
         assert "Chicken Devil" in response.text
-        conflict_filter = re.search(
-            r'data-testid="import-review-open-conflicts-filter"[\s\S]*?</button>',
-            response.text,
-        )
-        assert conflict_filter is not None
-        assert ">3</span>" in conflict_filter.group(0)
+        assert "Exact title candidate stayed within the ambiguity margin" in response.text
+        assert "Pluralized title outranked an exact-title near-tie" in response.text
+        assert 'data-testid="import-review-search-cv-action"' in response.text
+        assert "Save conflict choices" not in response.text
 
     async def test_import_series_details_partial_renders_grouped_diagnostics(
         self,
@@ -2693,11 +2583,10 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "No wanted or missing issues remain in the existing series" not in response.text
-        assert "All existing issues are already owned" in response.text
-        assert "replacement and upgrade paths are excluded from import review" in response.text
-        assert "/import/1/series/9/details-partial" not in response.text
-        assert 'data-testid="import-review-duplicate-unmatch-action"' in response.text
+        assert 'aria-label="Import ready files for Review Series 9"' not in response.text
+        assert 'aria-label="Import ready files for Review Series 10"' in response.text
+        assert "2 already owned" in response.text
+        assert "Only missing issues can be added" in response.text
 
     async def test_import_review_duplicate_rows_show_not_this_series_action(
         self,
@@ -2711,8 +2600,9 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-duplicate-unmatch-action"' in response.text
+        assert 'data-testid="import-review-unmatch-action"' in response.text
         assert "Not this series" in response.text
+        assert "unmatchDuplicateSeries(" in response.text
 
     async def test_import_review_matched_rows_show_not_this_series_action(
         self,
@@ -2803,12 +2693,11 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert '<th class="w-8"></th>' not in response.text
-        assert 'aria-label="Select Review Series 11 for import"' not in response.text
-        assert 'aria-label="Select Review Series 12 for import"' not in response.text
-        assert "data-import-review-toolbar-selection-summary" in response.text
-        assert "Select all matched" not in response.text
+        assert 'data-import-review-selectable="11"' not in response.text
+        assert 'data-import-review-selectable="12"' not in response.text
+        assert "Select all ready" not in response.text
         assert "Deselect all" not in response.text
+        assert "Search ComicVine" in response.text
 
     async def test_import_review_no_match_filter_excludes_series_conflicts(
         self,
@@ -2887,10 +2776,10 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Needs issue" in response.text
+        assert "Some files need an issue match" in response.text
         assert 'data-testid="import-review-reconcile-action"' in response.text
-        assert 'data-tip="Change ComicVine match"' in response.text
-        assert "Absolute Wonder Woman 2026 Annual" in response.text
+        assert "Match issues" in response.text
+        assert "Change ComicVine match" in response.text
 
     async def test_import_review_needs_issue_match_view_uses_reconcile_action(
         self,
@@ -2927,13 +2816,11 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Review your library" not in response.text
-        assert "Needs Issue Match" in response.text
-        assert "Needs issue" in response.text
         assert 'data-testid="import-review-reconcile-action"' in response.text
-        assert 'data-tip="Reconcile files"' in response.text
-        assert 'data-tip="Change ComicVine match"' in response.text
-        assert 'data-testid="import-review-search-cv-action"' not in response.text
+        assert 'hx-get="/import/' in response.text
+        assert "/reconcile" in response.text
+        assert "Match issues" in response.text
+        assert "Not this series" in response.text
 
     async def test_import_review_needs_issue_match_includes_duplicate_rows(
         self,
@@ -2947,11 +2834,10 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Needs Issue Match" in response.text
         assert "Review Series 9" in response.text
-        assert "In Library" in response.text
-        assert 'data-testid="import-review-reconcile-action"' in response.text
-        assert 'aria-label="Reconcile files for Review Series 9"' in response.text
+        assert "Review Series 10" in response.text
+        assert "Match issues" in response.text
+        assert "Already in library" in response.text
 
     async def test_import_review_needs_series_match_view_keeps_comicvine_search(
         self,
@@ -2965,10 +2851,10 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Review your library" not in response.text
-        assert "Needs Series Match" in response.text
+        assert "Search ComicVine" in response.text
         assert 'data-testid="import-review-search-cv-action"' in response.text
         assert 'data-testid="import-review-reconcile-action"' not in response.text
+        assert "Candidate Series 11" in response.text
 
     async def test_import_review_safety_blocked_view_shows_allow_and_skip_actions(
         self,
@@ -3010,15 +2896,14 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Safety Review" in response.text
-        assert "Safety review" in response.text
+        assert "Large file needs approval" in response.text
         assert "Oversized Omnibus.cbz" in response.text
         assert 'data-testid="import-review-safety-category-summary"' in response.text
-        assert 'data-testid="import-review-safety-category-details"' in response.text
+        assert 'data-testid="import-review-safety-category-details"' not in response.text
         assert "Decompression-size limit" in response.text
         assert "Code: archive_decompressed_size_limit" in response.text
         assert "Retry alone will not help" in response.text
-        assert "Trusted override available" in response.text
+        assert "A one-time exception is available for eligible files" in response.text
         assert "/tmp/review-1/oversized.cbz" not in response.text
         assert 'data-testid="import-review-allow-safety-file"' in response.text
         assert 'data-testid="import-review-skip-safety-file"' in response.text
@@ -3069,9 +2954,9 @@ class TestImportShellRouteContracts:
         assert response.status_code == 200
         assert "Corrupt Download.cbz" in response.text
         assert "Archive inspection failed" in response.text
-        assert "Retry may help after remediation" in response.text
-        assert "Override not allowed" in response.text
-        assert "Cannot override" in response.text
+        assert "Fix the source, then recheck" in response.text
+        assert "This check cannot be overridden" in response.text
+        assert 'data-testid="import-review-skip-safety-file"' in response.text
         assert 'data-testid="import-review-allow-safety-file"' not in response.text
         assert "/safety/allow-once?status=safety_blocked" not in response.text
         assert 'data-testid="import-review-skip-safety-file"' in response.text
@@ -3255,7 +3140,7 @@ class TestImportShellRouteContracts:
         hostile_job_id = '1" autofocus onfocus="alert(1)'
 
         with patch(
-            "pullbox.ui.import_routes.has_pending_import_safety_rematch",
+            "pullbox.ui.import_routes.has_pending_import_review_rematch",
             new=AsyncMock(return_value=True),
         ):
             response = await import_review_rematch_status(  # type: ignore[arg-type]
@@ -3280,8 +3165,9 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert 'name="review_status_filter" value=""' in response.text
-        assert 'data-import-review-view="series"' in response.text
+        assert 'name="review_status_filter" value="series"' in response.text
+        assert 'data-testid="import-review-workspace-table"' in response.text
+        assert "Preparing match" not in response.text
 
     async def test_import_review_reports_remaining_subitems_after_each_safety_skip(
         self,
@@ -3325,7 +3211,7 @@ class TestImportShellRouteContracts:
             series_id = series.id
             blocked_file_ids = [imp_file.id for imp_file in files[:2]]
 
-        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=series")
         assert response.status_code == 200
         assert f'id="import-review-series-row-series-{series_id}"' in response.text
         assert 'data-import-review-pending-subitems="2"' in response.text
@@ -3434,12 +3320,10 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert '<th class="w-8"></th>' in response.text
         assert 'data-testid="import-review-duplicate-select"' in response.text
-        assert 'aria-label="Import matched files for Review Series 9"' in response.text
+        assert 'aria-label="Import ready files for Review Series 9"' in response.text
         assert "toggleDuplicateSeriesFiles(9" in response.text
-        assert "data-import-review-toolbar-selection-summary" in response.text
-        assert "Select all matched" not in response.text
+        assert "Select all ready" not in response.text
         assert "Deselect all" not in response.text
 
     async def test_import_review_non_actionable_duplicate_hides_file_selection_checkbox(
@@ -3481,26 +3365,24 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert 'aria-label="Import matched files for Review Series 9"' not in response.text
-        assert 'aria-label="Import matched files for Review Series 10"' in response.text
+        assert 'aria-label="Import ready files for Review Series 9"' not in response.text
+        assert 'aria-label="Import ready files for Review Series 10"' in response.text
 
-    async def test_import_review_conflicted_matched_rows_are_not_bulk_selectable(
+    async def test_import_review_conflicted_rows_can_select_their_other_matched_files(
         self,
         authenticated_client,
         sec_db,
     ) -> None:  # type: ignore[no-untyped-def]
         job_id = await _seed_import_review_job(sec_db)
 
-        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=confirm")
 
         assert response.status_code == 200
-        assert "Resolve file conflicts before selecting this series." in response.text
-        conflict_pill = r'<span class="pill pill-warning">[\s\S]*?Conflict[\s\S]*?</span>'
-        assert re.search(conflict_pill, response.text)
-        assert '@click="selectAllImportable()"' in response.text
-        assert '@click="deselectAllImportable()"' in response.text
-        assert 'data-import-review-selectable="7"' not in response.text
-        assert 'aria-label="Select Review Series 7 for import"' not in response.text
+        assert 'data-testid="import-review-keep-selected-copy"' in response.text
+        assert "Choose which copy to import" in response.text
+        assert 'data-import-review-selectable="7"' in response.text
+        assert 'data-import-review-selectable="7"' in response.text
+        assert 'aria-label="Select Review Series 7 for import"' in response.text
 
     async def test_import_review_non_importable_status_rows_are_not_selectable(
         self,
@@ -3517,7 +3399,7 @@ class TestImportShellRouteContracts:
             series.selected_for_import = False
             await session.commit()
 
-        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=info")
 
         assert response.status_code == 200
         assert "Review Series 6" in response.text
@@ -3564,10 +3446,9 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert "Owned 1/1" not in response.text
-        assert "0/1" in response.text
-        assert "1 owned, 0 importable, 1 total." in response.text
-        assert "100%" in response.text
+        assert "1 already owned" in response.text
+        assert 'aria-label="Import ready files for Review Series 9"' not in response.text
+        assert "Only missing issues can be added" in response.text
 
     async def test_import_conflicts_partial_renders_conflict_diagnostics(
         self,

@@ -17,7 +17,7 @@
         {% if issue.cover_path %}
         <img
           src="{{ issue.cover_path }}"
-          alt="#{{ issue.issue_number|issue_num }}"
+          alt="#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}"
           data-testid="issue-detail-cover-link"
           class="series-domain-cover-image"
           @click="coverModalUrl = {{ issue.cover_path|tojson|forceescape }}; coverModalOpen = true"
@@ -25,7 +25,7 @@
         {% elif issue.cover_url %}
         <img
           src="{{ issue.cover_url }}"
-          alt="#{{ issue.issue_number|issue_num }}"
+          alt="#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}"
           data-testid="issue-detail-cover-link"
           class="series-domain-cover-image"
           @click="coverModalUrl = {{ issue.cover_url|tojson|forceescape }}; coverModalOpen = true"
@@ -50,12 +50,12 @@
               rel="noopener"
               data-testid="issue-detail-title-link"
               class="series-domain-hero-title-link"
-              aria-label="Open {{ issue.series.title }} #{{ issue.issue_number|issue_num }} on ComicVine"
+              aria-label="Open {{ issue.series.title }} #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }} on ComicVine"
             >
-              {{ issue_title_parts[0]|upper }}{% if issue_title_parts|length > 1 %} <span>{{ issue_title_parts[1]|upper }} #{{ issue.issue_number|issue_num }}</span>{% else %} <span>#{{ issue.issue_number|issue_num }}</span>{% endif %}
+              {{ issue_title_parts[0]|upper }}{% if issue_title_parts|length > 1 %} <span>{{ issue_title_parts[1]|upper }} #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</span>{% else %} <span>#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</span>{% endif %}
             </a>
           {% else %}
-            {{ issue_title_parts[0]|upper }}{% if issue_title_parts|length > 1 %} <span>{{ issue_title_parts[1]|upper }} #{{ issue.issue_number|issue_num }}</span>{% else %} <span>#{{ issue.issue_number|issue_num }}</span>{% endif %}
+            {{ issue_title_parts[0]|upper }}{% if issue_title_parts|length > 1 %} <span>{{ issue_title_parts[1]|upper }} #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</span>{% else %} <span>#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</span>{% endif %}
           {% endif %}
         </h2>
         {% if issue.title %}

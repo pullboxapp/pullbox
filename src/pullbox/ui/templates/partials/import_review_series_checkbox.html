@@ -1,0 +1,5 @@
+{% if duplicate_selectable %}
+<input type="checkbox" class="checkbox-pb" {% if duplicate_selected_files > 0 %}checked{% endif %} data-import-review-duplicate-selectable="{{ item.id }}" data-testid="import-review-duplicate-select" @change="toggleDuplicateSeriesFiles({{ item.id }}, $event.target.checked, $event.target)" aria-label="Import ready files for {{ item.raw_series_name }}">
+{% elif series_selectable %}
+<input type="checkbox" class="checkbox-pb" {% if item.selected_for_import %}checked{% endif %} data-import-review-selectable="{{ item.id }}" @change="toggleSelection({{ item.id }}, $event.target.checked)" aria-label="Select {{ item.raw_series_name }} for import">
+{% endif %}

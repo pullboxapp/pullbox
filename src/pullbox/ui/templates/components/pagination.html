@@ -5,7 +5,7 @@
                    (for full-page responses). Pass "" to skip hx-select entirely
                    (for routes that return partials directly).
 -#}
-{% macro pagination(page, total_pages, base_url, hx_target="#content", hx_swap="outerHTML transition:true", hx_select=none, page_param="page", hx_base_url=none, hx_sync=none, hx_select_oob=none, hx_push_url="true", hx_indicator=none) %}
+{% macro pagination(page, total_pages, base_url, hx_target="#content", hx_swap="outerHTML transition:true", hx_select=none, page_param="page", hx_base_url=none, hx_sync=none, hx_select_oob=none, hx_push_url="true", hx_indicator=none, id_prefix="") %}
 {%- set sep = "&" if "?" in base_url else "?" -%}
 {%- set actual_hx_base_url = hx_base_url if hx_base_url is not none else base_url -%}
 {%- set hx_sep = "&" if "?" in actual_hx_base_url else "?" -%}
@@ -41,7 +41,7 @@
   {#- Previous button -#}
   {% if page > 1 %}
   <button type="button"
-     id="pagination-prev"
+     id="{{ id_prefix }}pagination-prev"
      data-testid="series-pagination-prev"
      data-page-url="{{ base_url }}{{ sep }}{{ page_param }}={{ page - 1 }}"
      hx-get="{{ actual_hx_base_url }}{{ hx_sep }}{{ page_param }}={{ page - 1 }}"
@@ -56,17 +56,17 @@
     &laquo; Prev
   </button>
   {% else %}
-    <span id="pagination-prev" class="px-3 py-2 rounded-md text-sm font-medium text-pb-text-dim cursor-not-allowed">&laquo; Prev</span>
+    <span id="{{ id_prefix }}pagination-prev" class="px-3 py-2 rounded-md text-sm font-medium text-pb-text-dim cursor-not-allowed">&laquo; Prev</span>
   {% endif %}
 
   {#- Fixed-width page tokens -#}
   {% for token in pager.tokens %}
     {% if token.type == "page" %}
       {% if token.value == page %}
-    <span id="pagination-page-{{ token.value }}" class="px-3 py-2 rounded-md text-sm font-medium bg-pb-interactive text-white">{{ token.value }}</span>
+    <span id="{{ id_prefix }}pagination-page-{{ token.value }}" class="px-3 py-2 rounded-md text-sm font-medium bg-pb-interactive text-white">{{ token.value }}</span>
       {% else %}
     <button type="button"
-       id="pagination-page-{{ token.value }}"
+       id="{{ id_prefix }}pagination-page-{{ token.value }}"
        data-testid="series-pagination-page-{{ token.value }}"
        data-page-url="{{ base_url }}{{ sep }}{{ page_param }}={{ token.value }}"
        hx-get="{{ actual_hx_base_url }}{{ hx_sep }}{{ page_param }}={{ token.value }}"
@@ -82,14 +82,14 @@
     </button>
       {% endif %}
     {% else %}
-    <span id="pagination-gap-{{ token.value }}" class="px-3 py-2 text-sm text-pb-text-dim">&hellip;</span>
+    <span id="{{ id_prefix }}pagination-gap-{{ token.value }}" class="px-3 py-2 text-sm text-pb-text-dim">&hellip;</span>
     {% endif %}
   {% endfor %}
 
   {#- Next button -#}
   {% if page < total_pages %}
   <button type="button"
-     id="pagination-next"
+     id="{{ id_prefix }}pagination-next"
      data-testid="series-pagination-next"
      data-page-url="{{ base_url }}{{ sep }}{{ page_param }}={{ page + 1 }}"
      hx-get="{{ actual_hx_base_url }}{{ hx_sep }}{{ page_param }}={{ page + 1 }}"
@@ -104,7 +104,7 @@
     Next &raquo;
   </button>
   {% else %}
-  <span id="pagination-next" class="px-3 py-2 rounded-md text-sm font-medium text-pb-text-dim cursor-not-allowed">Next &raquo;</span>
+  <span id="{{ id_prefix }}pagination-next" class="px-3 py-2 rounded-md text-sm font-medium text-pb-text-dim cursor-not-allowed">Next &raquo;</span>
   {% endif %}
 </nav>
 {% endif %}

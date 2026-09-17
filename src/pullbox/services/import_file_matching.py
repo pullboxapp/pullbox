@@ -76,6 +76,7 @@ from pullbox.services.import_progress_runtime import (
     scan_review_progress_pct,
 )
 from pullbox.services.import_source_metadata import (
+    corroborated_import_title_conflict,
     import_file_has_deferred_archive_metadata,
     load_archive_entry_issue_hint_for_import_file,
 )
@@ -2027,6 +2028,11 @@ def _evaluate_file_match_candidate(
     metadata_conflict: dict[str, Any] | None = None
 
     if match_candidate is not None:
+        metadata_conflict = corroborated_import_title_conflict(
+            file_metadata, imp_series.cv_title or imp_series.raw_series_name
+        )
+        if metadata_conflict is not None:
+            return None, metadata_conflict
         if trusted_source_issue_identity_matches_target(
             imp_series,
             imp_file,
@@ -2044,6 +2050,11 @@ def _evaluate_file_match_candidate(
                 metadata=file_metadata,
                 wanted_series=target_context.series_title,
                 wanted_issue=float(target_context.issue_number or 0.0),
+                wanted_issue_number_text=(
+                    match_candidate.matched_issue.effective_issue_number_text
+                    if match_candidate.matched_issue is not None
+                    else file_metadata.issue_number_text
+                ),
                 wanted_year=target_context.series_year,
                 wanted_issue_type=target_context.issue_type,
                 wanted_issue_cv_id=target_context.issue_cv_id,

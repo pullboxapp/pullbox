@@ -8,7 +8,11 @@ import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
-from pullbox.api.deps import AuthenticatedStreamUser, get_request_session_factory
+from pullbox.api.deps import (
+    AuthenticatedStreamUser,
+    InteractiveOperatorUser,
+    get_request_session_factory,
+)
 from pullbox.config import get_settings
 from pullbox.core.events import (
     ReaderCompletionChanged,
@@ -123,6 +127,108 @@ def _raise_http_error(exc: PageSourceError) -> Never:
         status_code=_ERROR_STATUS[exc.code],
         detail={"code": exc.code.value, "message": str(exc)},
     ) from exc
+
+
+async def _import_source(request: Request, job_id: int, file_id: int) -> ResolvedReaderSource:
+    from pullbox.core.exceptions import ConfigurationError, ValidationError
+    from pullbox.services.import_reader_service import (
+        load_import_reader_record,
+        resolve_import_reader_source,
+    )
+
+    _require_reader_enabled()
+    try:
+        async with get_request_session_factory(request)() as session:
+            record = await load_import_reader_record(session, job_id, file_id)
+        return await anyio.to_thread.run_sync(resolve_import_reader_source, record)
+    except (ValidationError, ConfigurationError, ValueError, OSError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="This file changed, is unavailable, or cannot be previewed safely. "
+            "Close the reader and recheck it, or choose Skip.",
+        ) from exc
+    except PageSourceError as exc:
+        _raise_import_reader_error(exc)
+
+
+def _raise_import_reader_error(exc: PageSourceError) -> Never:
+    message = str(exc)
+    if exc.code in {PageSourceErrorCode.CORRUPT_SOURCE, PageSourceErrorCode.EMPTY_SOURCE}:
+        message = "This archive or its image is damaged or contains no readable pages."
+    raise HTTPException(
+        status_code=_ERROR_STATUS[exc.code],
+        detail={
+            "code": exc.code.value,
+            "message": message
+            + " Close the reader and choose Skip if you do not want to import it.",
+        },
+    ) from exc
+
+
+@router.get("/imports/{job_id}/files/{file_id}/manifest")
+async def import_reader_manifest(
+    request: Request, job_id: int, file_id: int, _user: InteractiveOperatorUser
+) -> JSONResponse:
+    """Preview a staged file without approval, registration, or reading-state writes."""
+    source = await _import_source(request, job_id, file_id)
+    try:
+        service = _content_service(request)
+        manifest = await service.get_manifest(source)
+        if manifest.page_count != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="This file is no longer a one-page archive. "
+                "Close the reader and recheck it, or choose Skip.",
+            )
+        # Validate the image too, so a broken page gets an actionable reader error.
+        await service.get_page(source, page_index=0, revision=manifest.revision)
+    except ReaderWorkerBusyError as exc:
+        _raise_reader_busy(exc)
+    except PageSourceError as exc:
+        _raise_import_reader_error(exc)
+    return JSONResponse(
+        content={
+            "title": manifest.title,
+            "issue_label": "Import preview",
+            "page_count": manifest.page_count,
+            "revision": manifest.revision,
+            "initial_page_index": 0,
+            "page_url_template": (
+                f"/api/v1/reader/imports/{job_id}/files/{file_id}/pages/{{page_index}}"
+                f"?revision={manifest.revision}"
+            ),
+        },
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@router.get("/imports/{job_id}/files/{file_id}/pages/{page_index}")
+async def import_reader_page(
+    request: Request,
+    job_id: int,
+    file_id: int,
+    page_index: int,
+    _user: InteractiveOperatorUser,
+    revision: Annotated[str, Query(min_length=1, max_length=64)],
+) -> Response:
+    source = await _import_source(request, job_id, file_id)
+    if page_index != 0:
+        raise HTTPException(status_code=404, detail="Preview page not found.")
+    try:
+        page = await _content_service(request).get_page(source, page_index=0, revision=revision)
+    except ReaderWorkerBusyError as exc:
+        _raise_reader_busy(exc)
+    except StaleReaderRevisionError as exc:
+        raise HTTPException(
+            status_code=409, detail="The file changed. Open View File again."
+        ) from exc
+    except PageSourceError as exc:
+        _raise_import_reader_error(exc)
+    return FileResponse(
+        page.path,
+        media_type=page.media_type,
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get("/issues/{issue_id}/manifest", response_model=ReaderManifestResponse)

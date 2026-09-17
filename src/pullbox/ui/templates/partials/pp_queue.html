@@ -103,7 +103,7 @@
                   </td>
                   <td>
                     {% if dl.issue and dl.issue.series %}
-                      <a href="/issues/{{ dl.issue.id }}" hx-boost="false" class="downloads-issue-link">{{ dl.issue.series.title }} #{{ dl.issue.issue_number|issue_num }}</a>
+                      <a href="/issues/{{ dl.issue.id }}" hx-boost="false" class="downloads-issue-link">{{ dl.issue.series.title }} #{{ dl.issue.issue_number|issue_num(dl.issue.issue_number_text|default(none)) }}</a>
                     {% else %}
                       <span class="downloads-muted-text">No linked issue</span>
                     {% endif %}
@@ -227,7 +227,7 @@
                   </td>
                   <td>
                     {% if dl.issue and dl.issue.series %}
-                      <a href="/issues/{{ dl.issue.id }}" hx-boost="false" class="downloads-issue-link">{{ dl.issue.series.title }} #{{ dl.issue.issue_number|issue_num }}</a>
+                      <a href="/issues/{{ dl.issue.id }}" hx-boost="false" class="downloads-issue-link">{{ dl.issue.series.title }} #{{ dl.issue.issue_number|issue_num(dl.issue.issue_number_text|default(none)) }}</a>
                     {% else %}
                       <span class="downloads-muted-text">—</span>
                     {% endif %}

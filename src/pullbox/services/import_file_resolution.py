@@ -11,6 +11,7 @@ from pullbox.models.import_job import ImportedFile, ImportedFileStatus, Imported
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.services.import_file_issue_signals import candidate_issue_number_text
+from pullbox.services.import_file_selection import not_excluded_from_review
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,7 @@ async def load_importable_files(
     file_filters = [
         ImportedFile.import_series_id == item.id,
         ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
+        not_excluded_from_review(),
     ]
     if duplicate_mode:
         file_filters.append(ImportedFile.include_in_import.is_(True))

@@ -51,7 +51,7 @@ from pullbox.services.import_workflow_state import (
     snapshot_mode_for_job,
 )
 from pullbox.tasks.import_task import trigger_import_safety_bulk_rematch
-from pullbox.ui import import_orphaned_routes
+from pullbox.ui import import_orphaned_routes, import_review_file_routes
 from pullbox.ui.comicvine_series_search import (
     COMICVINE_SERIES_SEARCH_LIMIT,
     IMPORT_CV_MATCH_DISPLAY_LIMIT,
@@ -73,7 +73,7 @@ from pullbox.ui.import_history import (
 from pullbox.ui.import_progress_snapshot import build_import_progress_snapshot
 from pullbox.ui.import_results_context import load_import_results_context
 from pullbox.ui.import_review_context import (
-    has_pending_import_safety_rematch,
+    has_pending_import_review_rematch,
     load_import_review_context,
 )
 from pullbox.ui.import_review_summary import load_import_review_summary
@@ -81,6 +81,7 @@ from pullbox.ui.import_series_details_context import load_import_series_details_
 from pullbox.ui.import_story_arc_entry_review import StoryArcEntryResolutionFilter
 
 router = APIRouter()
+router.include_router(import_review_file_routes.router)
 
 _GetTemplates = Callable[[], Jinja2Templates]
 _BuildContext = Callable[..., dict[str, object]]
@@ -563,7 +564,7 @@ async def import_review_rematch_status(
     if job is None:
         raise NotFoundError("ImportJob", job_id)
 
-    pending = await has_pending_import_safety_rematch(session, job_id)
+    pending = await has_pending_import_review_rematch(session, job_id)
     if pending:
         escaped_job_id = escape(str(job_id), quote=True)
         return HTMLResponse(
@@ -594,6 +595,13 @@ async def _render_import_review_partial(
 ) -> Response:
     """Render the canonical review partial with optional route-local state."""
 
+    from sqlalchemy import inspect
+
+    from pullbox.models.user import User
+
+    # Rollback expires ORM attributes, but the authenticated identity remains available.
+    identity = inspect(user).identity if isinstance(user, User) else None
+
     job = await session.get(ImportJob, job_id)
     if job is None:
         raise NotFoundError("ImportJob", job_id)
@@ -607,6 +615,8 @@ async def _render_import_review_partial(
         story_arc_id=story_arc_id,
         arc_entry_state=arc_entry_state,
         arc_entry_page=arc_entry_page,
+        reason=request.query_params.get("reason"),
+        actor_id=int(identity[0]) if identity else None,
     )
     if extra_context:
         template_ctx.update(extra_context)
@@ -1464,6 +1474,7 @@ async def import_cv_search(
     user: AuthenticatedUser,
     session: DbSession,
     q: str = Query(""),
+    file_id: Annotated[int | None, Query(gt=0)] = None,
 ) -> Response:
     """Search ComicVine for matching series and return inline result partial."""
     from pullbox.core.comicvine_key import get_comicvine_api_key
@@ -1475,6 +1486,12 @@ async def import_cv_search(
     item = await session.get(ImportedSeries, series_id)
     if item is None or item.import_job_id != job_id:
         raise NotFoundError("ImportedSeries", series_id)
+    if file_id is not None:
+        from pullbox.services.import_review_file_assignment import load_review_file
+
+        _job, file_parent, _file = await load_review_file(session, job_id, file_id)
+        if file_parent.id != series_id:
+            raise NotFoundError("ImportedFile", file_id)
 
     results: list[dict[str, object]] = []
     search_error = ""
@@ -1530,6 +1547,7 @@ async def import_cv_search(
             job_id=job_id,
             series_id=series_id,
             query=q,
+            file_id=file_id,
             results=results,
             results_limit=IMPORT_CV_MATCH_DISPLAY_LIMIT,
             search_error=search_error,

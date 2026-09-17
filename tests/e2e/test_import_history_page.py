@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from playwright.sync_api import expect
 
 from tests.e2e.pages.import_page import ImportPage
 
@@ -121,13 +122,28 @@ class TestImportHistoryTab:
         import_page.history_sort_button("source_path").click()
         import_page.wait_for_htmx()
 
-        first_row = authed_page.locator("[data-testid^='import-history-job-']").first
-
         assert import_page.workspace_root.is_visible()
         assert import_page.history_panel.is_visible()
         assert import_page.history_results.is_visible()
         assert "/import?tab=history&sort=-source_path" in authed_page.url
-        assert "/tmp/imports/review-queue" in (first_row.text_content() or "")
+        sources = authed_page.locator(
+            "[data-testid^='import-history-job-'] td:nth-child(2) [data-tooltip-measure]"
+        )
+        descending = sources.all_text_contents()
+        assert len(set(descending)) >= 2
+        assert descending == sorted(descending, reverse=True)
+
+        import_page.history_sort_button("source_path").click()
+        import_page.wait_for_htmx()
+        expect(authed_page).to_have_url(
+            f"{seeded_server}/import?tab=history&sort=source_path&page=1"
+        )
+        expect(sources).not_to_have_text(descending)
+        ascending = sources.all_text_contents()
+        assert len(set(ascending)) >= 2
+        assert ascending == sorted(ascending)
+        assert import_page.workspace_root.is_visible()
+        assert import_page.history_panel.is_visible()
 
     def test_import_history_log_panel_opens_without_disturbing_shell(
         self,

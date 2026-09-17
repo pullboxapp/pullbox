@@ -53,6 +53,11 @@ _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS = (
     "metadata_signals",
     "source_metadata",
     "mylar3_cross_folder_reconciliation",
+    "mylar3_path_reconciliation",
+    "review_selection",
+    "review_source_action",
+    "review_source_previous",
+    "review_deferred",
 )
 
 
@@ -101,7 +106,7 @@ def apply_matched_file_outcome(
 
         target_state = duplicate_target_state(matched_issue)
         imp_file.status = ImportedFileStatus.MATCHED
-        imp_file.include_in_import = False
+        imp_file.include_in_import = source_evidence.get("review_selection") is True
         imp_file.diagnostics = {
             **source_evidence,
             **_duplicate_file_diagnostics(
@@ -122,7 +127,7 @@ def apply_matched_file_outcome(
         )
 
     imp_file.status = ImportedFileStatus.MATCHED
-    imp_file.include_in_import = False
+    imp_file.include_in_import = source_evidence.get("review_selection") is True
     if (
         match_candidate.method
         in {

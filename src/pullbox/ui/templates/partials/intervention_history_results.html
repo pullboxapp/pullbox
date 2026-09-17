@@ -77,7 +77,7 @@
                 </td>
                 <td>
                   {% if pm.issue and pm.issue.series %}
-                    <a href="/issues/{{ pm.issue.id }}" hx-boost="false" class="downloads-issue-link">{{ pm.issue.series.title }} #{{ pm.issue.issue_number|issue_num }}</a>
+                    <a href="/issues/{{ pm.issue.id }}" hx-boost="false" class="downloads-issue-link">{{ pm.issue.series.title }} #{{ pm.issue.issue_number|issue_num(pm.issue.issue_number_text|default(none)) }}</a>
                   {% else %}
                     <span class="downloads-muted-text">No linked issue</span>
                   {% endif %}

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 
-from sqlalchemy import or_
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +19,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.services.import_duplicates import duplicate_merge_is_actionable, is_duplicate_series
+from pullbox.services.import_file_selection import set_review_file_selection
 from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
 from pullbox.services.import_story_arc_resolution import (
     refresh_story_arc_entries_for_import_files,
@@ -161,7 +161,7 @@ async def resolve_conflicts(
             if imp_file.id == normalized_chosen_file_id:
                 imp_file.status = ImportedFileStatus.CONFIRMED
                 imp_file.is_preferred = True
-                imp_file.include_in_import = True
+                set_review_file_selection(imp_file, True)
             else:
                 imp_file.status = ImportedFileStatus.SKIPPED
                 imp_file.is_preferred = False
@@ -301,8 +301,6 @@ async def update_series_selection(
         raise NotFoundError("ImportedSeries", imported_series_id)
     if imported_series.status != ImportSeriesStatus.MATCHED:
         raise ValidationError("Only matched series can be selected for import")
-    if (imported_series.files_conflict or 0) > 0:
-        raise ValidationError("Resolve file conflicts before selecting this series")
     if include_in_import and (imported_series.files_matched or 0) <= 0:
         raise ValidationError("This series has no importable files to select")
 
@@ -644,10 +642,6 @@ async def bulk_update_series_selection(
             filters.extend(
                 [
                     ImportedSeries.status == ImportSeriesStatus.MATCHED,
-                    or_(
-                        ImportedSeries.files_conflict.is_(None),
-                        ImportedSeries.files_conflict == 0,
-                    ),
                     ImportedSeries.files_matched > 0,
                 ]
             )
@@ -682,15 +676,6 @@ async def bulk_update_series_selection(
             f"resolve or exclude these items first: {invalid}"
         )
 
-    unresolved_conflicts = {
-        item.id: item.files_conflict for item in items if (item.files_conflict or 0) > 0
-    }
-    if unresolved_conflicts:
-        raise ValidationError(
-            "Resolve file conflicts before selecting import series; "
-            f"conflicted series: {unresolved_conflicts}"
-        )
-
     empty_matches = {
         item.id for item in items if include_in_import and (item.files_matched or 0) <= 0
     }
@@ -714,7 +699,7 @@ async def update_file_selection(
     *,
     include_in_import: bool,
 ) -> ImportedFile:
-    """Persist include/exclude state for an importable duplicate-series file."""
+    """Persist an explicit choice for a ready file without changing its match."""
     job = await session.get(ImportJob, job_id)
     if job is None:
         raise NotFoundError("ImportJob", job_id)
@@ -726,14 +711,17 @@ async def update_file_selection(
         raise NotFoundError("ImportedFile", file_id)
 
     parent_series = await session.get(ImportedSeries, imp_file.import_series_id)
-    if not is_duplicate_series(parent_series):
-        raise ValidationError("Only duplicate-series files can be selected individually")
-    if not duplicate_merge_is_actionable(parent_series):
+    if parent_series is None or parent_series.status not in {
+        ImportSeriesStatus.MATCHED,
+        ImportSeriesStatus.DUPLICATE,
+    }:
+        raise ValidationError("Only files in an identified series can be selected individually")
+    if is_duplicate_series(parent_series) and not duplicate_merge_is_actionable(parent_series):
         raise ValidationError("This duplicate series has no wanted or missing issues to import.")
-    if imp_file.status != ImportedFileStatus.MATCHED:
+    if imp_file.status not in {ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED}:
         raise ValidationError("Only importable matched files can be selected")
 
-    imp_file.include_in_import = include_in_import
+    set_review_file_selection(imp_file, include_in_import)
     await session.flush()
     return imp_file
 

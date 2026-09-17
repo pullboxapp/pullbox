@@ -18,6 +18,93 @@ from pullbox.models.import_job import (
 )
 
 
+@pytest.mark.parametrize("job_status", [ImportJobStatus.REVIEW, ImportJobStatus.SCANNING])
+async def test_missing_references_are_not_files_or_unfinished_decisions(db_session, job_status):
+    from pullbox.ui.import_review_lanes import load_review_rows
+    from pullbox.ui.import_review_summary import load_import_review_summary
+
+    job = ImportJob(
+        source_path="/fixture",
+        source_type=ImportSourceType.MYLAR3,
+        status=job_status,
+        scan_total_files=4,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    series = ImportedSeries(
+        import_job_id=job.id, raw_series_name="Example", status=ImportSeriesStatus.MATCHED
+    )
+    db_session.add(series)
+    await db_session.flush()
+    for index, (status, code) in enumerate(
+        [
+            (ImportedFileStatus.MATCHED, None),
+            (ImportedFileStatus.SAFETY_BLOCKED, "single_page_comic"),
+            (ImportedFileStatus.SAFETY_BLOCKED, "source_missing"),
+            (ImportedFileStatus.SKIPPED, "source_missing"),
+        ]
+    ):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                file_name=f"{index}.cbz",
+                file_path=f"/fixture/{index}.cbz",
+                file_format="cbz",
+                status=status,
+                diagnostics={"safety_block": {"code": code}} if code else {},
+            )
+        )
+    await db_session.flush()
+    summary = await load_import_review_summary(db_session, job)
+    assert summary["files_total"] == 4
+    assert summary.get("files_present") == 2
+    assert summary.get("files_missing_references") == 2
+    assert summary["files_safety_blocked"] == 1
+    assert summary["review_files_settled"] == 1
+    assert summary["review_files_open"] == 1
+    assert summary["needs_attention_files_total"] == 1
+    row = (await load_review_rows(db_session, job.id))[series.id]
+    assert row.missing_references == 2
+    assert row.decision_files == 1
+    assert row.attention_files == 2  # Keep unresolved references expandable in Info.
+
+
+async def test_conflict_summary_distinguishes_groups_files_and_series(db_session):
+    from pullbox.ui.import_review_summary import load_import_review_summary
+
+    job = ImportJob(
+        source_path="/fixture", source_type=ImportSourceType.MYLAR3, status=ImportJobStatus.REVIEW
+    )
+    db_session.add(job)
+    await db_session.flush()
+    series = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Annuals",
+        status=ImportSeriesStatus.MATCHED,
+        files_conflict=4,
+    )
+    db_session.add(series)
+    await db_session.flush()
+    for i in range(4):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                file_name=f"Annual {i}.cbz",
+                file_path=f"/fixture/Annual {i}.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.CONFLICT,
+                conflict_group_id=i // 2 + 1,
+            )
+        )
+    await db_session.flush()
+    summary = await load_import_review_summary(db_session, job)
+    assert summary["series_file_conflicts"] == 1
+    assert summary["files_conflict"] == 4
+    assert summary.get("file_conflict_groups") == 2
+
+
 @pytest.mark.asyncio
 async def test_load_import_review_summary_uses_persisted_review_rows(
     db_session,
@@ -148,6 +235,7 @@ async def test_load_import_review_summary_uses_persisted_review_rows(
             "bulk_overrideable_count": 1,
             "bulk_overrideable": True,
             "examples": ["Crossed Annual.cbz"],
+            "series_count": 1,
         }
     ]
     assert "/mnt/user/private" not in str(safety_summary)
@@ -234,6 +322,7 @@ async def test_load_import_safety_failure_summary_classifies_source_revalidation
             "bulk_overrideable_count": 0,
             "bulk_overrideable": False,
             "examples": ["Changed Source 001.cbz"],
+            "series_count": 1,
         }
     ]
     assert "/mnt/private" not in str(summary)

@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from pullbox.core.issue_numbers import format_issue_number, normalize_issue_number_text
 from pullbox.core.issue_title import collection_title_number, collection_title_subtitle
 from pullbox.core.name_matcher import NameMatcher, NameMatchResult
 from pullbox.core.naming import extract_base_series_title
@@ -151,6 +152,7 @@ class SemanticMatchEngine:
         metadata: SourceMetadata,
         wanted_series: str,
         wanted_issue: float,
+        wanted_issue_number_text: str | None = None,
         wanted_year: int | None = None,
         wanted_issue_type: IssueType = IssueType.ISSUE,
         alternate_names: list[str] | None = None,
@@ -290,6 +292,25 @@ class SemanticMatchEngine:
             effective_issue = metadata.issue_number
             if effective_issue is None and metadata.volume and compatibility.prefer_volume_number:
                 effective_issue = _normalize_volume_number(metadata.volume)
+
+            wanted_text = normalize_issue_number_text(wanted_issue_number_text or wanted_issue)
+            source_value = metadata.issue_number_text or effective_issue
+            source_text = (
+                normalize_issue_number_text(source_value) if source_value is not None else None
+            )
+            qualified_identity = wanted_text != format_issue_number(wanted_issue) or (
+                source_text is not None
+                and effective_issue is not None
+                and source_text != format_issue_number(effective_issue)
+            )
+            if qualified_identity and source_text != wanted_text:
+                return IssueMatchDecision(
+                    is_match=False,
+                    confidence=MatchConfidence.LOW,
+                    match_method="issue_mismatch",
+                    rejection_reason=f"Issue mismatch: got {source_text} wanted {wanted_text}",
+                    match_diagnostics={"type_mode": compatibility.mode},
+                )
 
             wanted_is_collection = issue_type_family(wanted_issue_type) == TypeFamily.COLLECTION
             issue_omitted_ok = effective_issue is None and wanted_issue == 1.0

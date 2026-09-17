@@ -1,0 +1,78 @@
+{% from "components/settings_shell.html" import ui_icon %}
+{% set ready_table = active_review_view == 'ready' %}
+{% macro review_expander(item, row, compact_one_page, label='', primary=false) %}
+<button type="button" class="{{ 'btn-primary btn-sm' if primary else 'text-xs text-pb-interactive hover:underline' if label else 'downloads-action-btn' }}"
+  data-testid="{{ 'import-review-primary-action' if primary else 'import-review-expand' }}" data-import-review-expand-action
+  {% if compact_one_page %}data-import-review-one-page-expand{% endif %}
+  aria-label="{{ label or ('Review files for ' ~ (item.cv_title or item.raw_series_name)) }}"
+  onclick="toggleImportReviewRow(this)" aria-expanded="false" aria-controls="import-review-detail-{{ item.id }}">
+  {% if label %}{{ label }}{% else %}<svg data-import-review-expand-icon class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>{% endif %}
+</button>
+{% endmacro %}
+<div class="overflow-x-auto">
+<table class="downloads-table table-fixed {{ 'min-w-[820px]' if ready_table else 'min-w-[720px]' }} text-sm" data-testid="import-review-workspace-table">
+  <thead><tr>
+    {% if ready_table %}<th class="w-10"><label><span class="sr-only">Select all on this page</span><input type="checkbox" class="checkbox-pb" data-import-review-page-select @change="selectReviewPage($event.target.checked, $event.target)"></label></th>{% endif %}
+    <th class="{{ 'w-[30%]' if not ready_table else 'w-[35%]' }}"><button type="button" class="downloads-sort-btn" hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}&sort={{ '-found_series' if sort == 'found_series' else 'found_series' }}{% if active_reason %}&reason={{ active_reason }}{% endif %}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">Series</button></th>
+    <th class="{{ 'w-[12%]' if not ready_table else 'w-[150px]' }}">Files</th>
+    {% if ready_table %}<th>ComicVine match</th><th class="w-[110px]">Confidence</th><th class="w-14"><span class="sr-only">Actions</span></th>
+    {% else %}<th class="w-[34%]">What needs attention</th><th class="w-[24%]">Action</th><th class="w-12"><span class="sr-only">Details</span></th>{% endif %}
+  </tr></thead>
+  {% for item in series_items %}
+  {% set row = review_rows[item.id] %}
+  {% set reason_key = active_reason if active_reason in row.reasons else row.reasons[0] %}
+  {% set one_page = one_page_review.get(item.id) %}
+  {% set compact_one_page = one_page and reason_key == 'single_page_comic' %}
+  {% set series_diagnostics = item.diagnostics or {} %}
+  {% set known_series_target = item.cv_id or item.user_selected_cv_id or item.series_id %}
+  {% set series_selectable = item.status.value == 'matched' and item.files_matched > 0 %}
+  {% set duplicate_selectable = item.id in actionable_duplicate_ids and item.files_matched > 0 %}
+  {% set duplicate_selected_files = duplicate_selected_file_counts.get(item.id, 0) %}
+  <tbody id="import-review-series-row-{{ active_review_view }}-{{ item.id }}" data-import-review-series-row="{{ item.id }}" data-import-review-row-key="{{ active_review_view }}:{{ item.id }}" data-import-review-row-status="{{ item.status.value }}" data-import-review-state="{{ row.lane }}" data-import-review-reasons="{{ row.reasons|join(' ') }}" data-import-review-pending-subitems="{{ row.attention_files }}">
+    <tr>
+      {% if ready_table %}<td>{% include "partials/import_review_series_checkbox.html" %}</td>{% endif %}
+      <td>
+        <p class="font-medium text-pb-text">{{ item.cv_title or item.raw_series_name }}</p>
+        <div class="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-pb-text-sec">
+          <span>{{ item.cv_year or item.raw_year or 'Year unknown' }}{% if item.cv_publisher or item.raw_publisher %} &middot; {{ item.cv_publisher or item.raw_publisher }}{% endif %}</span>
+          {% if item.source_folder %}<span class="font-mono text-pb-text-sec [overflow-wrap:anywhere]">{{ item.source_folder.replace('\\', '/').rstrip('/').split('/')[-1] }}</span>{% endif %}
+        </div>
+      </td>
+      {% set available_files = [0, item.files_total - row.missing_references]|max %}
+      <td>{% if ready_table %}<span class="text-pb-success">{{ row.ready_files }} ready</span>{% if row.decision_files %}<p class="mt-1 text-xs text-pb-text-dim">{{ row.decision_files }} need review</p>{% endif %}
+        {% elif available_files %}<span class="{{ 'text-pb-warning' if row.ready_files else 'text-pb-error' }}" aria-label="{{ row.ready_files }} of {{ available_files }} files matched">{{ row.ready_files }}/{{ available_files }}</span>{% else %}<span class="text-pb-text-dim">No available files</span>{% endif %}
+        {% if row.missing_references %}<p class="mt-1 text-xs text-pb-text-dim">{{ row.missing_references }} missing reference{{ 's' if row.missing_references != 1 else '' }}</p>{% endif %}
+        {% if item.files_already_owned %}<p class="mt-1 text-xs text-pb-text-dim">{{ item.files_already_owned }} already owned</p>{% endif %}
+      </td>
+      {% if ready_table %}
+      <td><p class="text-sm text-pb-text">{{ item.cv_title or 'Known series' }}{% if item.cv_year %} ({{ item.cv_year }}){% endif %}</p><p class="mt-1 text-xs text-pb-text-dim">{{ item.cv_publisher or '' }} {% if item.cv_id or item.user_selected_cv_id %}<a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="https://comicvine.gamespot.com/volume/4050-{{ item.user_selected_cv_id or item.cv_id }}/" target="_blank" rel="noopener noreferrer">CV {{ item.user_selected_cv_id or item.cv_id }}</a>{% endif %}</p></td>
+      <td><span class="font-mono text-xs text-pb-success">{% if item.cv_match_score is not none %}{{ (item.cv_match_score * 100)|round|int }}%{% else %}&mdash;{% endif %}</span></td>
+      <td>{% include "partials/import_review_row_menu.html" %}{{ review_expander(item, row, false) }}</td>
+      {% else %}
+      <td><p class="font-semibold text-pb-text">{{ review_reasons[reason_key][0] }}</p><p class="mt-0.5 text-xs leading-[18px] text-pb-text-sec">{{ reason_descriptions.get(reason_key, 'Review the saved evidence and choose the next step.') }} {{ review_expander(item, row, compact_one_page, 'Technical detail' if row.lane in ('fix_source', 'blocked') else 'Why?') }}</p>
+      {% if row.updating %}<span class="pill pill-info" role="status"><svg class="h-3 w-3 animate-spin motion-reduce:animate-none" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2"/></svg>Updating match</span>{% endif %}</td>
+      <td><div class="flex flex-wrap items-center gap-1.5">
+        {% if compact_one_page %}
+          {% include "partials/import_review_one_page_actions.html" %}
+        {% elif reason_key in ('needs_series', 'series_conflict') %}
+          <button type="button" class="btn-primary btn-sm" data-testid="import-review-primary-action" onclick='return openImportCvSearchModal({jobId: {{ job.id }}, seriesId: {{ item.id }}, query: {{ item.raw_series_name|tojson|forceescape }} })'>Search ComicVine</button>
+          <button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ item.id }}/review-skip" hx-target="#cv-search-modal" hx-swap="innerHTML">Skip series</button>
+        {% elif reason_key == 'duplicate_copy_confirm' %}
+          {% set suggestions = namespace(items=[]) %}{% for group in inline_conflicts.get(item.id, []) if group.preferred_file_id %}{% set suggestions.items = suggestions.items + [{'conflict_group_id': group.id, 'chosen_file_id': group.preferred_file_id}] %}{% endfor %}
+          {% if suggestions.items %}<button type="button" class="btn-primary btn-sm" :disabled="reviewActionPending" @click='keepSuggestedCopies({{ suggestions.items|tojson|forceescape }}, $event.currentTarget)'>Keep suggested</button>{% endif %}
+          {{ review_expander(item, row, false, 'Change', not suggestions.items) }}
+        {% else %}{{ review_expander(item, row, false, row.action, true) }}{% endif %}
+        {% if not compact_one_page %}{% include "partials/import_review_row_menu.html" %}{% endif %}
+      </div></td><td>{{ review_expander(item, row, compact_one_page) }}</td>
+      {% endif %}
+    </tr>
+    <tr id="import-review-detail-{{ item.id }}" hidden data-import-review-detail-row class="table-detail-row">
+      <td colspan="{{ 6 if ready_table else 5 }}" class="bg-pb-card-hover/40 px-5 py-4">
+        {% if not ready_table and (series_selectable or duplicate_selectable) %}<label class="mb-3 flex items-center gap-2 text-xs text-pb-text-sec">{% include "partials/import_review_series_checkbox.html" %}Import the {{ row.ready_files }} ready files while the remaining files stay in review.</label>{% endif %}
+        {% if compact_one_page %}{% include "partials/import_review_one_page_files.html" %}{% else %}{% include "partials/import_review_workspace_detail.html" %}{% endif %}
+      </td>
+    </tr>
+  </tbody>
+  {% else %}<tbody><tr><td colspan="{{ 6 if ready_table else 5 }}" class="px-4 py-10 text-center text-pb-text-dim">Nothing to review in this lane.</td></tr></tbody>{% endfor %}
+</table>
+</div>

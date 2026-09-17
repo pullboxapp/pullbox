@@ -254,11 +254,11 @@ class ImportPage(BasePage):
 
     @property
     def review_series_tab(self) -> Locator:
-        return self.page.locator("[data-testid='import-review-tab-series']").first
+        return self.page.get_by_test_id("import-review-lane-decide")
 
     @property
     def review_matched_tab(self) -> Locator:
-        return self.page.locator("[data-testid='import-review-series-filter-matched']").first
+        return self.page.get_by_test_id("import-review-lane-ready")
 
     def review_sort_button(self, field: str) -> Locator:
         return self.page.locator(f"[data-testid='import-review-sort-{field}']").first
@@ -279,23 +279,25 @@ class ImportPage(BasePage):
 
     @property
     def review_matched_details_button(self) -> Locator:
-        return self.page.locator("[data-testid='import-review-matched-why-action']").first
+        return self.review_panel.locator(
+            "[data-import-review-series-row] > tr:first-child [data-import-review-expand-action]"
+        ).first
 
     @property
     def review_matched_diagnostics(self) -> Locator:
-        return self.page.locator("[data-testid='import-review-matched-diagnostics']").first
+        return self.page.locator("[data-import-review-detail-row]").first
 
     @property
     def conflicts_tab(self) -> Locator:
-        return self.page.locator("[data-testid='import-review-open-conflicts-filter']").first
+        return self.page.get_by_test_id("import-review-lane-confirm")
 
     @property
     def conflicts_panel(self) -> Locator:
-        return self.page.locator("[data-testid='import-collection-conflicts']").first
+        return self.page.locator("#import-review-workspace")
 
     @property
     def conflicts_table(self) -> Locator:
-        return self.page.locator("[data-testid='import-conflicts-table']").first
+        return self.page.get_by_test_id("import-review-workspace-table")
 
     @property
     def save_conflict_choices_button(self) -> Locator:

@@ -13,6 +13,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.services.import_duplicates import duplicate_merge_is_actionable
+from pullbox.services.import_file_selection import not_excluded_from_review
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +31,6 @@ async def load_import_review_selection_state(
         .where(
             ImportedSeries.import_job_id == job_id,
             ImportedSeries.status == ImportSeriesStatus.MATCHED,
-            or_(ImportedSeries.files_conflict.is_(None), ImportedSeries.files_conflict == 0),
             ImportedSeries.files_matched > 0,
         )
         .order_by(ImportedSeries.id.asc())
@@ -42,9 +42,22 @@ async def load_import_review_selection_state(
         .where(
             ImportedSeries.import_job_id == job_id,
             ImportedSeries.status == ImportSeriesStatus.MATCHED,
-            or_(ImportedSeries.files_conflict.is_(None), ImportedSeries.files_conflict == 0),
             ImportedSeries.files_matched > 0,
             ImportedSeries.selected_for_import.is_(True),
+            or_(
+                select(ImportedFile.id)
+                .where(
+                    ImportedFile.import_series_id == ImportedSeries.id,
+                    ImportedFile.status.in_(_IMPORTABLE_FILE_STATUSES),
+                    not_excluded_from_review(),
+                )
+                .exists(),
+                ~select(ImportedFile.id)
+                .where(
+                    ImportedFile.import_series_id == ImportedSeries.id,
+                )
+                .exists(),
+            ),
         )
         .order_by(ImportedSeries.id.asc())
     )
