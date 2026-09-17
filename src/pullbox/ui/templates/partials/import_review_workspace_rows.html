@@ -38,8 +38,10 @@
           {% if item.source_folder %}<span class="font-mono text-pb-text-sec [overflow-wrap:anywhere]">{{ item.source_folder.replace('\\', '/').rstrip('/').split('/')[-1] }}</span>{% endif %}
         </div>
       </td>
-      <td>{% if ready_table %}<span class="text-pb-success">{{ row.ready_files }} ready</span>{% if row.attention_files %}<p class="mt-1 text-xs text-pb-text-dim">{{ row.attention_files }} need review</p>{% endif %}
-        {% else %}<span class="{{ 'text-pb-warning' if row.ready_files else 'text-pb-error' }}" aria-label="{{ row.ready_files }} of {{ item.files_total }} files matched">{{ row.ready_files }}/{{ item.files_total }}</span>{% endif %}
+      {% set available_files = [0, item.files_total - row.missing_references]|max %}
+      <td>{% if ready_table %}<span class="text-pb-success">{{ row.ready_files }} ready</span>{% if row.decision_files %}<p class="mt-1 text-xs text-pb-text-dim">{{ row.decision_files }} need review</p>{% endif %}
+        {% elif available_files %}<span class="{{ 'text-pb-warning' if row.ready_files else 'text-pb-error' }}" aria-label="{{ row.ready_files }} of {{ available_files }} files matched">{{ row.ready_files }}/{{ available_files }}</span>{% else %}<span class="text-pb-text-dim">No available files</span>{% endif %}
+        {% if row.missing_references %}<p class="mt-1 text-xs text-pb-text-dim">{{ row.missing_references }} missing reference{{ 's' if row.missing_references != 1 else '' }}</p>{% endif %}
         {% if item.files_already_owned %}<p class="mt-1 text-xs text-pb-text-dim">{{ item.files_already_owned }} already owned</p>{% endif %}
       </td>
       {% if ready_table %}

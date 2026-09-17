@@ -640,9 +640,8 @@ async def _load_mylar3_discovered_series(
     in_place_root_boundaries = (
         await load_mylar_reference_root_boundaries(session) if in_place else ()
     )
-    reader_options: dict[str, object] = {}
+    reader_options: dict[str, object] = {"include_missing_files": True}
     if in_place:
-        reader_options["include_missing_files"] = True
         reader_options["reference_root_boundaries"] = tuple(
             (boundary.lexical, boundary.resolved) for boundary in in_place_root_boundaries
         )
@@ -763,10 +762,13 @@ async def _load_mylar3_discovered_series(
     incompatible_series = 0
     series_count = 0
     file_count = 0
+    missing_reference_count = 0
+    reconciled_reference_count = 0
     fallback_source_folders: set[str] = set()
 
     async def persist_series_page(raw_page: tuple[Any, ...]) -> None:
         nonlocal incompatible_series, mapping_applied_series, series_count, file_count
+        nonlocal missing_reference_count, reconciled_reference_count
         await check_mylar_staging_cancellation()
         page = cast("list[DiscoveredSeries]", list(raw_page))
         if not page:
@@ -802,6 +804,14 @@ async def _load_mylar3_discovered_series(
         for series in page:
             series_count += 1
             file_count += series.file_count
+            for file in series.files:
+                block = file.metadata_diagnostics.get("file_safety")
+                missing_reference_count += int(
+                    isinstance(block, dict) and block.get("code") == "source_missing"
+                )
+                reconciled_reference_count += int(
+                    "mylar3_path_reconciliation" in file.metadata_diagnostics
+                )
             if materialize_discovered_scan_results is None and series.source_folder:
                 fallback_source_folders.add(series.source_folder)
             path_details = series.diagnostics.get("mylar3_path")
@@ -825,6 +835,10 @@ async def _load_mylar3_discovered_series(
             message=f"Prepared {series_count} series and {file_count} file records from Mylar.",
             series_found=series_count,
             files_found=file_count,
+            file_handling_mode=job.file_handling_mode.value,
+            files_present=file_count - missing_reference_count,
+            missing_references=missing_reference_count,
+            reconciled_references=reconciled_reference_count,
             inspection_duration_ms=inspection_duration_ms,
             persistence_duration_ms=persistence_duration_ms,
             duration_ms=round((time.monotonic() - page_started_at) * 1000),

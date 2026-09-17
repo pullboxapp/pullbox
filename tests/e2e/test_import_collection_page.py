@@ -2242,6 +2242,26 @@ class TestImportCollectionTab:
             "conflicts": 3,
         }
 
+    def test_scan_summary_does_not_count_missing_references_as_files(
+        self, authed_page, seeded_server: str
+    ) -> None:
+        ImportPage(authed_page, seeded_server).goto(tab="collection")
+        state = authed_page.evaluate("""() => {
+            const controller = window.importProgressData(42, 2, 'mylar3', {}, 'scan');
+            controller.applyJobState({
+                status: 'scanning', mode: 'scan', scan_total_files: 7952,
+                review_summary: {files_total: 7952, files_present: 7719,
+                    files_missing_references: 233},
+            });
+            const scanning = {...controller.reviewSummary};
+            controller.applyJobState({status: 'review', mode: 'scan', scan_total_files: 7952,
+                review_summary: {files_total: 7952, files_present: 7719,
+                    files_missing_references: 233}});
+            return [scanning.filesPresent, scanning.missingReferences,
+                controller.reviewSummary.filesPresent, controller.reviewSummary.missingReferences];
+        }""")
+        assert state == [7719, 233, 7719, 233]
+
     def test_import_collection_paused_import_resumes_even_if_control_state_is_stale(
         self,
         authed_page,

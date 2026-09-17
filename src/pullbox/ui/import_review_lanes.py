@@ -66,6 +66,7 @@ class ReviewFacts:
     failed_files: int = 0
     identity_conflict: bool = False
     safety_counts: dict[str, int] = field(default_factory=dict)
+    missing_references: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,12 @@ class ReviewRow:
     ready_files: int
     attention_files: int
     updating: bool = False
+    missing_references: int = 0
+    open_missing_references: int = 0
+
+    @property
+    def decision_files(self) -> int:
+        return max(0, self.attention_files - self.open_missing_references)
 
     @property
     def label(self) -> str:
@@ -89,7 +96,9 @@ def classify_review_row(facts: ReviewFacts) -> ReviewRow:
     """Derive a display lane without changing persisted outcomes."""
     reasons: list[str] = []
     if facts.status in {"skipped", "imported"}:
-        return ReviewRow("info", ("already_handled",), 0, 0)
+        return ReviewRow(
+            "info", ("already_handled",), 0, 0, missing_references=facts.missing_references
+        )
     if facts.kind in {"series_conflict", "source_layout_review"}:
         reasons.append(facts.kind)
     elif (
@@ -128,6 +137,8 @@ def classify_review_row(facts: ReviewFacts) -> ReviewRow:
         + facts.failed_files
         + sum(facts.safety_counts.values()),
         facts.pending,
+        max(facts.missing_references, facts.safety_counts.get("source_missing", 0)),
+        facts.safety_counts.get("source_missing", 0),
     )
 
 
@@ -135,6 +146,7 @@ async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, Revi
     """Project compact saved facts; never load archives or change matching state."""
     status_counts: dict[int, Counter[str]] = defaultdict(Counter)
     safety_counts: dict[int, Counter[str]] = defaultdict(Counter)
+    missing_references: Counter[int] = Counter()
     identity_conflicts = await _identity_conflict_series_ids(session, job_id)
     block = ImportedFile.diagnostics["safety_block"]
     category = block["category"].as_string()
@@ -163,6 +175,8 @@ async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, Revi
     )
     for series_id, status, raw_category, raw_code, raw_reason, group_class, count in groups:
         status_counts[series_id][status.value] += count
+        if raw_code == "source_missing":
+            missing_references[series_id] += count
         if status.value == "safety_blocked":
             normalized = normalize_import_safety_diagnostics(
                 {"category": raw_category, "code": raw_code, "reason": raw_reason or raw_code or ""}
@@ -197,6 +211,7 @@ async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, Revi
                 failed_files=counts["failed"],
                 identity_conflict=series_id in identity_conflicts,
                 safety_counts=dict(safety_counts[series_id]),
+                missing_references=missing_references[series_id],
             )
         )
     return rows

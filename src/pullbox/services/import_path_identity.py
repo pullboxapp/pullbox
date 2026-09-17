@@ -11,10 +11,35 @@ from pullbox.core.library_file_ownership import (
     validate_file_identity_signature,
 )
 from pullbox.core.name_matcher import NameMatcher
-from pullbox.core.source_metadata import MetadataSignal, SourceMetadata
+from pullbox.core.release_parser import parse_release_title
+from pullbox.core.source_metadata import MetadataSignal, SourceMetadata, SourceMetadataExtractor
+from pullbox.models.issue import IssueType
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _same_issue_type(recorded: SourceMetadata, actual: SourceMetadata) -> bool:
+    if recorded.issue_type == actual.issue_type:
+        return True
+    # Mylar's ordinary issue table also holds numbered collected volumes.
+    parsed = SourceMetadataExtractor().from_release_title(recorded.original_title)
+    return bool(
+        recorded.issue_type == IssueType.ISSUE
+        and actual.issue_type == IssueType.VOLUME
+        and parsed.issue_type == IssueType.VOLUME
+        and parsed.volume is not None
+        and parsed.issue_number == recorded.issue_number
+    )
+
+
+def _publication_year(metadata: SourceMetadata) -> int | None:
+    comicinfo = metadata.diagnostics.get("comicinfo")
+    year = comicinfo.get("year") if isinstance(comicinfo, dict) else None
+    if isinstance(year, int) and not isinstance(year, bool) and year > 0:
+        return year
+    parsed = parse_release_title(metadata.original_title)
+    return parsed.year if parsed is not None else None
 
 
 def same_trusted_issue(recorded: SourceMetadata, actual: SourceMetadata) -> bool:
@@ -26,7 +51,8 @@ def same_trusted_issue(recorded: SourceMetadata, actual: SourceMetadata) -> bool
         or actual.signals.get("comicvine_issue_id") != MetadataSignal.COMICINFO
         or recorded.diagnostics.get("identity_conflicts")
         or actual.diagnostics.get("identity_conflicts")
-        or recorded.issue_type != actual.issue_type
+        or actual.diagnostics.get("comicinfo_issue_number_ignored")
+        or not _same_issue_type(recorded, actual)
     ):
         return False
     if (
@@ -51,11 +77,13 @@ def same_trusted_issue(recorded: SourceMetadata, actual: SourceMetadata) -> bool
         return False
     recorded_issue = recorded.diagnostics.get("mylar3_issue")
     date = recorded_issue.get("release_date") if isinstance(recorded_issue, dict) else None
+    # SourceMetadata.year may be ComicInfo.Volume (the series start year).
+    publication_year = _publication_year(actual)
     return not (
         isinstance(date, str)
         and date[:4].isdigit()
-        and actual.year is not None
-        and int(date[:4]) != actual.year
+        and publication_year is not None
+        and int(date[:4]) != publication_year
     )
 
 

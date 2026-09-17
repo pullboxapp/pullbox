@@ -48,6 +48,7 @@ def _archive(
     pages=2,
     series="Firefly: Bad Company",
     nested_incomplete=False,
+    year=2019,
 ):
     path.parent.mkdir(parents=True, exist_ok=True)
     notes = (
@@ -64,7 +65,7 @@ def _archive(
         archive.writestr(
             "ComicInfo.xml",
             f"<ComicInfo><Series>{series}</Series><Number>{number}</Number>"
-            f"<Year>2019</Year><Web>https://comicvine.gamespot.com/issue/4000-{issue_id}/</Web>"
+            f"<Year>{year}</Year><Web>https://comicvine.gamespot.com/issue/4000-{issue_id}/</Web>"
             f"{notes}</ComicInfo>",
         )
         for page in range(pages):
@@ -167,6 +168,7 @@ async def test_scan_reconciles_renamed_collection_with_exact_comicvine_identity(
         number="1",
         pages=298,
         series="Revival Deluxe Edition",
+        year=2013,
     )
     recorded_name = "Revival 01 (2013) Deluxe 01 - Volume One.cbz"
     db = tmp_path / "mylar.db"

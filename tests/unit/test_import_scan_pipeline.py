@@ -349,7 +349,8 @@ async def test_load_mylar3_discovered_series_passes_frozen_layout_to_reader(
     captured_layouts: list[SourceLayoutSpec] = []
 
     class ReaderDouble:
-        def __init__(self, *, db_path, path_map, source_layout) -> None:
+        def __init__(self, *, db_path, path_map, source_layout, include_missing_files) -> None:
+            assert include_missing_files is True
             captured_layouts.append(source_layout)
 
         async def read_series(self) -> list[DiscoveredSeries]:
@@ -392,7 +393,8 @@ async def test_load_mylar3_rejects_unconfirmed_legacy_path_map_instead_of_detect
     detector_calls: list[Path] = []
 
     class ReaderDouble:
-        def __init__(self, *, db_path, path_map, source_layout) -> None:
+        def __init__(self, *, db_path, path_map, source_layout, include_missing_files) -> None:
+            assert include_missing_files is True
             captured_maps.append(path_map)
 
         async def read_series(self) -> list[DiscoveredSeries]:
@@ -443,7 +445,8 @@ async def test_load_mylar3_respects_confirmed_empty_identity_map(
     detector_calls: list[Path] = []
 
     class ReaderDouble:
-        def __init__(self, *, db_path, path_map, source_layout) -> None:
+        def __init__(self, *, db_path, path_map, source_layout, include_missing_files) -> None:
+            assert include_missing_files is True
             captured_maps.append(path_map)
 
         async def read_series(self) -> list[DiscoveredSeries]:

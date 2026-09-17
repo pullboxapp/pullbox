@@ -5384,6 +5384,8 @@ function importProgressData(jobId, nextStep, sourceType) {
       duplicateCopies: 0,
       noMatch: 0,
       filesTotal: 0,
+      filesPresent: 0,
+      missingReferences: 0,
       conflicts: 0,
     },
 
@@ -6334,6 +6336,8 @@ function importProgressData(jobId, nextStep, sourceType) {
               files_duplicate: this.reviewSummary.duplicateCopies || 0,
               series_no_match: this.reviewSummary.noMatch || 0,
               files_total: this.reviewSummary.filesTotal || 0,
+              files_present: this.reviewSummary.filesPresent || 0,
+              files_missing_references: this.reviewSummary.missingReferences || 0,
               files_conflict: this.reviewSummary.conflicts || 0,
             },
             stats: {
@@ -6443,6 +6447,12 @@ function importProgressData(jobId, nextStep, sourceType) {
             data && data.scan_total_files,
           );
         }
+        if (summary.files_missing_references != null) {
+          this.reviewSummary.missingReferences = this.numberOrZero(summary.files_missing_references);
+        }
+        this.reviewSummary.filesPresent = summary.files_present != null
+          ? this.numberOrZero(summary.files_present)
+          : Math.max(0, this.reviewSummary.filesTotal - this.reviewSummary.missingReferences);
         if (summary.files_conflict != null) {
           this.reviewSummary.conflicts = this.mergeScanSummaryMetric(
             summary.files_conflict,
@@ -6466,6 +6476,9 @@ function importProgressData(jobId, nextStep, sourceType) {
         0;
       this.reviewSummary.conflicts =
         Number(data && data.total_files_conflict) || Number(this.fileStats.conflicts) || 0;
+      this.reviewSummary.filesPresent = Math.max(
+        0, this.reviewSummary.filesTotal - this.reviewSummary.missingReferences,
+      );
     },
 
     latestLogEntry: function (entries) {

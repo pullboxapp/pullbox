@@ -34,6 +34,34 @@ recovery is available in Import Follow-up and does not require an
 offline command. It works for Mylar and folder imports. This is not a full
 rescan, a database restore, or an import.
 
+## Mylar Inventory And Missing References
+
+Copy and keep-in-place scans retain the same Mylar file inventory, including
+recorded filenames that no longer exist. Missing-only annual groups retain their
+own series identity; a missing annual must not disappear in copy mode or become
+an ordinary numbered issue. Keep-in-place reference-root checks still apply
+independently of discovery.
+
+Steps 2 and 3 report available file records separately from missing references.
+Missing references remain visible in review (in Info when no other issue needs
+attention), but are not counted as available comics, archive safety decisions,
+or unsettled file-review work. Durable
+`scan_total_files` and `files_total` remain record totals for compatibility.
+`files_present` and `files_missing_references` expose the split. Mylar batch
+diagnostics also record the handling mode and reconciled-reference count.
+
+A renamed source can replace a stale Mylar path only when one same-folder file
+has an independent, agreeing ComicInfo issue ID. Reconciliation checks the
+issue publication year, not ComicInfo.Volume's series start year. A Mylar
+ordinary-issue row may represent a collected volume only when its saved
+filename explicitly identifies a volume. Conflicting IDs, numbers, publication
+years, annual types, and competing copies remain unresolved. Source signature,
+root boundary, archive safety, and manual-review protections still apply.
+
+The shared checks cover fresh Mylar discovery and saved-review reconciliation.
+They do not modify Mylar, rename source files, or change completed-import
+recovery and ownership rules. No metadata-provider requests are introduced.
+
 ## Import Follow-up
 
 The Follow-up tab groups actionable work by import job rather than rendering

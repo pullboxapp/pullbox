@@ -596,7 +596,7 @@ async def load_import_review_context(
         "one_page_review": one_page_review,
         "review_rows": review_rows,
         "review_open_series": sum(
-            row.attention_files > 0 or row.updating for row in review_rows.values()
+            row.decision_files > 0 or row.updating for row in review_rows.values()
         ),
         "inline_conflicts": await _load_inline_conflicts(
             session, job_id, [item.id for item in series_items]
@@ -606,7 +606,7 @@ async def load_import_review_context(
         "review_reasons": REASONS,
         "lane_counts": lane_counts,
         "lane_file_counts": {
-            lane: sum(row.attention_files for row in review_rows.values() if row.lane == lane)
+            lane: sum(row.decision_files for row in review_rows.values() if row.lane == lane)
             for lane in LANES
         },
         "reason_counts": reason_counts,

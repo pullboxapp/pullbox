@@ -7,6 +7,36 @@ from tests.ui.test_import_collection_shell_ui_routes import _seed_import_review_
 pytest_plugins = ["conftest_security"]
 
 
+async def test_review_shows_missing_references_outside_file_progress(authenticated_client, sec_db):
+    from sqlalchemy import select
+
+    from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+
+    job_id = await _seed_import_review_job(sec_db)
+    async with sec_db() as session:
+        series = await session.scalar(
+            select(ImportedSeries).where(ImportedSeries.import_job_id == job_id)
+        )
+        session.add(
+            ImportedFile(
+                import_job_id=job_id,
+                import_series_id=series.id,
+                file_name="Old filename.cbz",
+                file_path="/fixture/Old filename.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_BLOCKED,
+                diagnostics={
+                    "safety_block": {"code": "source_missing", "category": "source_missing"}
+                },
+            )
+        )
+        await session.commit()
+    response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=info")
+    assert response.status_code == 200
+    assert 'data-testid="import-review-missing-references"' in response.text
+    assert "1 missing file reference" in response.text
+
+
 async def test_v2_header_rail_and_problem_table(authenticated_client, sec_db):
     job_id = await _seed_import_review_job(sec_db)
     response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=decide")

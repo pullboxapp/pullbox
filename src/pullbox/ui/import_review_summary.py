@@ -60,13 +60,24 @@ async def load_import_review_summary(
     }
 
     file_counts_result = await session.execute(
-        select(ImportedFile.status, ImportedSeries.status, func.count(ImportedFile.id))
+        select(
+            ImportedFile.status,
+            ImportedSeries.status,
+            ImportedFile.diagnostics["safety_block"]["code"].as_string(),
+            func.count(ImportedFile.id),
+        )
         .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
         .where(ImportedFile.import_job_id == job.id)
-        .group_by(ImportedFile.status, ImportedSeries.status)
+        .group_by(
+            ImportedFile.status,
+            ImportedSeries.status,
+            ImportedFile.diagnostics["safety_block"]["code"].as_string(),
+        )
     )
     file_counts: Counter[str] = Counter()
     settled_count = 0
+    missing_references = 0
+    missing_blocked = 0
     settled_file_statuses = {
         ImportedFileStatus.MATCHED,
         ImportedFileStatus.CONFIRMED,
@@ -75,8 +86,13 @@ async def load_import_review_summary(
         ImportedFileStatus.ALREADY_OWNED,
         ImportedFileStatus.IMPORTED,
     }
-    for status, parent_status, count in file_counts_result.all():
+    for status, parent_status, safety_code, count in file_counts_result.all():
         file_counts[status.value] += count
+        if safety_code == "source_missing":
+            missing_references += count
+            if status == ImportedFileStatus.SAFETY_BLOCKED:
+                missing_blocked += count
+            continue
         if status in settled_file_statuses or parent_status == ImportSeriesStatus.SKIPPED:
             settled_count += count
 
@@ -209,7 +225,7 @@ async def load_import_review_summary(
 
     row_summary = {
         "review_files_settled": settled_count,
-        "review_files_open": sum(file_counts.values()) - settled_count,
+        "review_files_open": sum(file_counts.values()) - missing_references - settled_count,
         "series_total": sum(series_counts.values()),
         "series_in_library": series_counts.get(ImportSeriesStatus.DUPLICATE.value, 0),
         "series_matched": series_counts.get(ImportSeriesStatus.MATCHED.value, 0),
@@ -222,13 +238,16 @@ async def load_import_review_summary(
         "series_imported": series_counts.get(ImportSeriesStatus.IMPORTED.value, 0),
         "series_failed": series_counts.get(ImportSeriesStatus.FAILED.value, 0),
         "files_total": sum(file_counts.values()),
+        "files_present": sum(file_counts.values()) - missing_references,
+        "files_missing_references": missing_references,
         "files_matched": file_counts.get(ImportedFileStatus.MATCHED.value, 0),
         "files_duplicate": file_counts.get(ImportedFileStatus.DUPLICATE_FILE.value, 0),
         "files_already_owned": file_counts.get(ImportedFileStatus.ALREADY_OWNED.value, 0),
         "files_confirmed": file_counts.get(ImportedFileStatus.CONFIRMED.value, 0),
         "files_conflict": file_counts.get(ImportedFileStatus.CONFLICT.value, 0),
         "files_no_match": file_counts.get(ImportedFileStatus.NO_MATCH.value, 0),
-        "files_safety_blocked": file_counts.get(ImportedFileStatus.SAFETY_BLOCKED.value, 0),
+        "files_safety_blocked": file_counts.get(ImportedFileStatus.SAFETY_BLOCKED.value, 0)
+        - missing_blocked,
         "files_imported": file_counts.get(ImportedFileStatus.IMPORTED.value, 0),
         "files_failed": file_counts.get(ImportedFileStatus.FAILED.value, 0),
         "duplicate_files_importable": duplicate_file_counts.get(ImportedFileStatus.MATCHED.value, 0)
@@ -245,7 +264,7 @@ async def load_import_review_summary(
         "importable_items_total": _object_to_int(selection_state["importable_item_count"]),
         "ready_to_import_total": _object_to_int(selection_state["importable_item_count"]),
         "needs_attention_total": needs_attention_series_total,
-        "needs_attention_files_total": needs_attention_files_total,
+        "needs_attention_files_total": needs_attention_files_total - missing_blocked,
         "resolved_file_conflict_groups": resolved_file_conflict_groups,
         "story_arcs_total": sum(story_arc_counts.values()),
         "story_arcs_detected": story_arc_counts.get(ImportedStoryArcStatus.DETECTED.value, 0),

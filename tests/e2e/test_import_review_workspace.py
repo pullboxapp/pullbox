@@ -81,6 +81,17 @@ def test_series_file_inventory_preserves_review_and_focus(authed_page, seeded_se
     page.get_by_test_id("import-review-lane-decide").click()
     page.get_by_test_id("import-review-reason-needs_series").click()
     row = page.locator(f'[data-import-review-series-row="{series_id}"]')
+    expect(page.get_by_test_id("import-review-missing-references")).to_contain_text(
+        "1 missing file reference tracked separately"
+    )
+    expect(row.locator('[aria-label="0 of 26 files matched"]')).to_have_text("0/26")
+    expect(row.get_by_text("1 missing reference", exact=True)).to_be_visible()
+    output = Path(__file__).resolve().parents[2] / "test-results/review-workspace"
+    output.mkdir(parents=True, exist_ok=True)
+    for theme in ("light", "dark"):
+        page.evaluate("theme => applyTheme(theme)", theme)
+        page.screenshot(path=str(output / f"{browser_name}-missing-references-{theme}.png"))
+        row.screenshot(path=str(output / f"{browser_name}-missing-reference-row-{theme}.png"))
     expander = row.locator("td:last-child > [data-import-review-expand-action]")
     expander.click()
     expect(row.get_by_text("Files in this folder", exact=True)).to_have_count(0)

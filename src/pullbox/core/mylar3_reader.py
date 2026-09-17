@@ -1648,7 +1648,7 @@ class Mylar3Reader:
         series_resolution: _ResolvedMylarPath,
         issue_records: list[_MylarIssueRecord],
     ) -> list[Path]:
-        """Merge safely resolved records, retaining missing paths only in-place."""
+        """Merge safely resolved records, retaining missing paths when requested."""
         paths = set(comic_paths)
         for record in issue_records:
             if not record.location:

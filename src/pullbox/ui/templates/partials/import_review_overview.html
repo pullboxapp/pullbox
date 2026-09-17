@@ -6,7 +6,7 @@
         {% if review_summary.review_files_open %}<span class="text-pb-warning">&middot; {{ review_summary.review_files_open }} files need you</span>{% else %}<span class="text-pb-success">&middot; all decisions made</span>{% endif %}
       </h2>
       {% set settled = review_summary.review_files_settled %}
-      {% set file_total = review_summary.files_total %}
+      {% set file_total = review_summary.files_present|default(review_summary.files_total) %}
       {% set percent = (100 * settled / file_total)|round(1) if file_total else 100 %}
       <div class="max-w-[560px] space-y-2">
         <div class="app-progress-track h-1.5" data-testid="import-review-progress" role="progressbar" aria-label="Files ready or handled" aria-valuemin="0" aria-valuemax="{{ file_total or 1 }}" aria-valuenow="{{ settled if file_total else 1 }}" aria-valuetext="{{ settled }} of {{ file_total }} files ready or handled">
@@ -17,6 +17,7 @@
           <span><span class="text-pb-warning" aria-hidden="true">&bull;</span> Still open {{ review_summary.review_files_open }} files in {{ review_open_series }} series</span>
           {% if lane_counts.blocked %}<span><span class="text-pb-error" aria-hidden="true">&bull;</span> Cannot import: {{ lane_counts.blocked }} series</span>{% endif %}
         </div>
+        {% if review_summary.files_missing_references %}<p data-testid="import-review-missing-references" class="text-xs text-pb-text-dim">{{ review_summary.files_missing_references }} missing file reference{{ 's' if review_summary.files_missing_references != 1 else '' }} tracked separately. Ready files can still import.</p>{% endif %}
       </div>
     </div>
     <div class="flex flex-1 basis-[360px] flex-col items-end gap-1.5">
