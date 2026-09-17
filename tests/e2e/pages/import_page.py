@@ -279,7 +279,9 @@ class ImportPage(BasePage):
 
     @property
     def review_matched_details_button(self) -> Locator:
-        return self.page.get_by_test_id("import-review-primary-action").first
+        return self.review_panel.locator(
+            "[data-import-review-series-row] > tr:first-child [data-import-review-expand-action]"
+        ).first
 
     @property
     def review_matched_diagnostics(self) -> Locator:

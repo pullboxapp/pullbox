@@ -734,7 +734,7 @@ class TestImportCollectionTab:
         import_page = ImportPage(authed_page, seeded_server)
         self._goto_review_step(import_page, authed_page, seeded_server)
 
-        toggle = authed_page.get_by_test_id("import-review-primary-action").first
+        toggle = import_page.review_matched_details_button
 
         toggle.click()
         assert toggle.get_attribute("aria-expanded") == "true"
@@ -753,7 +753,7 @@ class TestImportCollectionTab:
             }"""
         )
 
-        refreshed_toggle = authed_page.locator("[data-testid='import-review-primary-action']").first
+        refreshed_toggle = import_page.review_matched_details_button
         assert refreshed_toggle.get_attribute("aria-expanded") == "true"
         authed_page.locator("[data-import-review-detail-row]").first.wait_for(
             state="visible",
@@ -765,6 +765,8 @@ class TestImportCollectionTab:
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
+        from playwright.sync_api import expect
+
         page_errors: list[str] = []
         authed_page.on("pageerror", lambda exc: page_errors.append(str(exc)))
 
@@ -776,7 +778,9 @@ class TestImportCollectionTab:
 
         diagnostics_text = import_page.review_matched_diagnostics.text_content() or ""
         assert "Importable files" in diagnostics_text
-        assert "CV Issue ID" in diagnostics_text
+        target = import_page.review_matched_diagnostics.get_by_test_id("import-review-file-target")
+        expect(target).to_have_text("Issue 1 · CV 50001")
+        expect(target).to_have_attribute("href", "https://comicvine.gamespot.com/issue/4000-50001/")
         assert page_errors == []
 
     def test_import_collection_conflict_review_uses_shared_table_without_staged_save(

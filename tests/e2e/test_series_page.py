@@ -1095,23 +1095,29 @@ class TestSeriesPage:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         series = SeriesListPage(authed_page, seeded_server)
-        series.goto("per_page=2")
+        series.goto("sort=title&per_page=2")
 
-        series.toggle_row_selection("Batman")
+        # Other tests can add series to the session-scoped library.
+        first_title = series.first_visible_series_title()
+        assert first_title
+        series.toggle_row_selection(first_title)
         assert series.selected_count_text() == "1 selected"
-        assert series.row_is_selected("Batman")
+        assert series.row_is_selected(first_title)
 
         series.click_next_page()
-        series.toggle_row_selection("Saga", modifiers=["ControlOrMeta"])
+        second_title = series.first_visible_series_title()
+        assert second_title and second_title != first_title
+        series.toggle_row_selection(second_title, modifiers=["ControlOrMeta"])
         assert series.selected_count_text() == "2 selected"
+        assert series.row_is_selected(second_title)
 
         series.click_prev_page()
-        assert series.row_is_selected("Batman")
+        assert series.row_is_selected(first_title)
 
         series.clear_bulk_selection()
         assert series.selected_count_text() == "0 selected"
         assert not series.select_mode_toolbar.is_visible()
-        assert not series.row_is_selected("Batman")
+        assert not series.row_is_selected(first_title)
 
     @pytest.mark.parametrize(
         ("view", "additive_modifier"),
@@ -1229,32 +1235,47 @@ class TestSeriesPage:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         series = SeriesListPage(authed_page, seeded_server)
-        series.goto("per_page=2")
+        series.goto("sort=title&per_page=2")
+        total = int(
+            authed_page.locator("[data-series-total]").first.get_attribute("data-series-total")
+        )
+        assert total >= 6
 
         series.open_select_mode()
+        checkboxes = authed_page.locator("[data-testid='series-row-checkbox']:visible")
+        first_page_ids = set(checkboxes.evaluate_all("items => items.map(item => item.value)"))
+        assert len(first_page_ids) == 2
+
+        def selected_visible_ids() -> set[str]:
+            return set(
+                checkboxes.evaluate_all(
+                    "items => items.filter(item => item.checked).map(item => item.value)"
+                )
+            )
+
         series.select_visible()
         assert series.selected_count_text() == "2 selected"
-        assert series.row_is_selected("Batman")
-        assert series.row_is_selected("Batman Beyond")
+        assert selected_visible_ids() == first_page_ids
 
         series.click_next_page()
+        second_page_ids = set(checkboxes.evaluate_all("items => items.map(item => item.value)"))
+        assert len(second_page_ids) == 2
+        assert first_page_ids.isdisjoint(second_page_ids)
+        assert selected_visible_ids() == set()
         assert series.select_visible_disabled() is False
         series.select_visible()
         assert series.selected_count_text() == "4 selected"
-        assert series.row_is_selected("Planetary")
-        assert series.row_is_selected("Saga")
+        assert selected_visible_ids() == second_page_ids
 
         series.select_all_results()
-        assert series.selected_count_text() == "6 selected"
-        assert series.row_is_selected("Planetary")
-        assert series.row_is_selected("Saga")
+        assert series.selected_count_text() == f"{total} selected"
+        assert selected_visible_ids() == second_page_ids
 
         series.deselect_all_visible()
         assert series.selected_count_text() == "0 selected"
         assert series.toolbar_mode() == "select"
         assert series.visible_row_checkbox_count() > 0
-        assert not series.row_is_selected("Planetary")
-        assert not series.row_is_selected("Saga")
+        assert selected_visible_ids() == set()
 
     def test_done_clears_selection_and_restores_browse_controls(
         self,
