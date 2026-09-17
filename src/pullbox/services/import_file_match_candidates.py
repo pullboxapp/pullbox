@@ -153,6 +153,11 @@ def _target_issue_type(
     return IssueType.ISSUE
 
 
+def _provisional_file_type(file: ImportedFile, fallback: IssueType | None) -> IssueType | None:
+    source_type = _coerce_issue_type((file.diagnostics or {}).get("source_issue_type"))
+    return source_type or _file_source_issue_type(file) or fallback
+
+
 def select_file_match_candidate(
     imp_file: ImportedFile,
     target_index: FileMatchTargetIndex,
@@ -201,6 +206,10 @@ def select_file_match_candidate(
         if target_issue_number is None:
             return None
         provisional_type = target_index.provisional_exact_types.get(exact_issue_number or "")
+        if provisional_type is not None:
+            # A provisional slot has no catalog identity; its type belongs to
+            # this file, not whichever same-number file populated the page first.
+            provisional_type = _provisional_file_type(imp_file, provisional_type)
         return FileMatchCandidate(
             matched_issue_id=matched_issue_id,
             matched_issue_cv_id=matched_issue_cv_id,
@@ -221,6 +230,8 @@ def select_file_match_candidate(
             target_index.number_map[issue_number]
         )
         synthetic_issue_type = target_index.synthetic_issue_types.get(issue_number)
+        if issue_number in target_index.provisional_issue_numbers:
+            synthetic_issue_type = _provisional_file_type(imp_file, synthetic_issue_type)
         return FileMatchCandidate(
             matched_issue_id=matched_issue_id,
             matched_issue_cv_id=matched_issue_cv_id,

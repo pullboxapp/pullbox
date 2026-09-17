@@ -22,6 +22,7 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import ImportProviderDegradedError, JobPausedError
+from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -66,6 +67,7 @@ from pullbox.services.import_file_matching_progress import (
 from pullbox.services.import_file_split_series import (
     split_explicit_issue_series_mismatches as _split_explicit_issue_series_mismatches,
 )
+from pullbox.services.import_known_annuals import reassign_to_known_annual_series
 from pullbox.services.import_progress_runtime import (
     ScanReviewFileMatchProfile,
     ScanReviewProgressPlan,
@@ -1402,9 +1404,15 @@ async def run_import_file_matching(
             reset_file_match_state(imp_file)
             file_metadata = source_metadata_for_import_file(imp_series, imp_file)
             if (
-                imp_series.cv_match_method == "mylar3_cv_id"
-                and load_deferred_source_metadata_for_import_file is not None
+                load_deferred_source_metadata_for_import_file is not None
                 and _file_has_deferred_archive_metadata(imp_file)
+                and (
+                    imp_series.cv_match_method == "mylar3_cv_id"
+                    or (
+                        (release := parse_release_title(imp_file.file_name)) is not None
+                        and release.issue_type.value in {"annual", "volume"}
+                    )
+                )
             ):
                 deferred_metadata_loads += 1
                 deferred_metadata_started_at = time.monotonic()
@@ -1428,6 +1436,26 @@ async def run_import_file_matching(
                         duplicate_series=duplicate_series,
                         metadata_provider=metadata_provider,
                     )
+            annual_series = await reassign_to_known_annual_series(
+                session, imp_series, imp_file, file_metadata
+            )
+            if annual_series is not None:
+                created_split_series_ids.append(annual_series.id)
+                await log_event(
+                    session,
+                    job.id,
+                    "INFO",
+                    "import_file_assigned_to_known_annual",
+                    message=(
+                        f"Assigned {imp_file.file_name} to known annual series "
+                        f"{annual_series.cv_title}; issue matching will follow."
+                    ),
+                    file_name=imp_file.file_name,
+                    source_import_series_id=imp_series.id,
+                    target_import_series_id=annual_series.id,
+                    target_series_cv_id=annual_series.cv_id,
+                )
+                continue
             file_evaluation_started_at = time.monotonic()
             match_candidate, metadata_conflict = _evaluate_file_match_candidate(
                 imp_series=imp_series,
@@ -1544,7 +1572,9 @@ async def run_import_file_matching(
                 live_only=True,
             )
 
-        return files, created_split_series_ids
+        return [
+            file for file in files if file.import_series_id == imp_series.id
+        ], created_split_series_ids
 
     async def process_split_series_batch(batch_ids: list[int]) -> None:
         nonlocal conflict_group_counter

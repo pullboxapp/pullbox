@@ -72,6 +72,21 @@ decisions, skips, and safety blocks are not overridden. Reads are paged, source
 signatures and files are unchanged, and no provider requests are added. The
 shared finalization applies to Mylar and folder imports in either handling mode.
 
+Provisional targets use each file's inspected issue type, not the type of the
+first same-number file in a matching page. This preserves numbered collected
+volumes when deferred ComicInfo changes an initial ordinary-issue classification
+and keeps regular issues separate from same-number annuals.
+
+An unrecorded annual can join an already identified annual series in the same
+source folder when its filename and ComicInfo agree on the annual title and
+exact issue designation, its publication year matches, and exactly one trusted
+series is eligible. Conflicting IDs, dates, competing series identities, safety
+blocks, and manual decisions remain untouched. This only changes the import
+review grouping: it never moves source files, borrows a missing reference's
+issue ID, or dismisses that reference. Normal issue matching and duplicate review
+still run afterward. The rule applies to Mylar and folder imports, for both
+copy and keep-in-place modes, without metadata-provider requests.
+
 Exact issue designations retain letter suffixes and their hyphens, including
 `13A`, `50-X`, and `50-O`. ComicVine metadata, local catalog reads, Mylar and
 folder discovery, and release validation share this identity policy. A dashed

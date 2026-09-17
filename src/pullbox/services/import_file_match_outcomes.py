@@ -81,6 +81,10 @@ def apply_matched_file_outcome(
     imp_file.matched_issue_cv_id = match_candidate.matched_issue_cv_id
     imp_file.match_confidence = match_candidate.confidence
     imp_file.match_method = match_candidate.method
+    if imp_file.parsed_issue_number is None:
+        # Volume designations can be discovered after the initial filename scan.
+        # Persist the accepted number so paged duplicate/conflict grouping sees it.
+        imp_file.parsed_issue_number = match_candidate.target_issue_number
 
     if duplicate_series and match_candidate.matched_issue is not None:
         matched_issue = match_candidate.matched_issue
