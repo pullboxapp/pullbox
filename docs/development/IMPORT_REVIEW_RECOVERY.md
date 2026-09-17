@@ -62,6 +62,16 @@ The shared checks cover fresh Mylar discovery and saved-review reconciliation.
 They do not modify Mylar, rename source files, or change completed-import
 recovery and ownership rules. No metadata-provider requests are introduced.
 
+Before copy/conflict grouping, matching reconciles automatic provisional issue
+targets against exact identities discovered in the same import-series row.
+This runs after all file pages, so an untagged CBR and a later tagged CBZ cannot
+escape copy review merely because their identities were learned at different
+times. Only an unambiguous target with the same exact issue designation and
+issue type is reused; annuals, lettered issues, conflicting metadata, manual
+decisions, skips, and safety blocks are not overridden. Reads are paged, source
+signatures and files are unchanged, and no provider requests are added. The
+shared finalization applies to Mylar and folder imports in either handling mode.
+
 ## Import Follow-up
 
 The Follow-up tab groups actionable work by import job rather than rendering

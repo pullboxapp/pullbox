@@ -75,6 +75,7 @@ from pullbox.services.import_progress_runtime import (
     scan_review_file_target_weight,
     scan_review_progress_pct,
 )
+from pullbox.services.import_provisional_targets import reconcile_provisional_targets
 from pullbox.services.import_source_metadata import (
     corroborated_import_title_conflict,
     import_file_has_deferred_archive_metadata,
@@ -721,6 +722,19 @@ async def _finalize_import_series_file_groups(
     log_event: LogEventFunc,
     raise_if_cancelled: RaiseIfCancelledFunc,
 ) -> tuple[int, int]:
+    reconciled = await reconcile_provisional_targets(
+        session, job, imp_series, raise_if_cancelled=raise_if_cancelled
+    )
+    if reconciled:
+        await log_event(
+            session,
+            job.id,
+            "DEBUG",
+            "import_provisional_targets_reconciled",
+            message=f"Resolved {reconciled} provisional issue targets before copy review.",
+            series=imp_series.raw_series_name,
+            files_reconciled=reconciled,
+        )
     for kind in _FILE_TARGET_COHORT_KINDS:
         async for cohorts in _iter_file_target_cohort_batches(
             session,

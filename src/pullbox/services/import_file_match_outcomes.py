@@ -54,6 +54,7 @@ _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS = (
     "source_metadata",
     "mylar3_cross_folder_reconciliation",
     "mylar3_path_reconciliation",
+    "provisional_target_reconciliation",
     "review_selection",
     "review_source_action",
     "review_source_previous",
