@@ -95,6 +95,33 @@ must not collapse into the same target. Refreshing live metadata can correct
 an older zero-number fallback using its existing ComicVine issue ID without
 discarding ownership. No schema migration or source-file rename is required.
 
+## Source Volume Folders And Mylar Provenance
+
+Automatic folder discovery recognizes `Series/v2017`, `Publisher/Series/v2017`,
+`Series/v2`, and `Publisher/Series/v2`. The parent supplies a series-name hint;
+`v2017` supplies a series-year hint, while `v2` is an ordinal volume, never an
+issue number or a year. Filename identity with an issue designation or agreeing
+local sidecar/ComicInfo evidence must corroborate the parent. Layout recognition
+is not a confirmed ComicVine match. An ordinal folder without an explicit
+series-year or series ID remains in the existing series-review workflow.
+
+Step 1 remains filename-only and does not open archives or call providers.
+The scan reuses its existing local metadata reads for corroboration. Weak or
+contradictory evidence stays reviewable per file, while proven per-file identities
+continue through existing mixed-folder recovery. A legitimate series named `V2`
+is not replaced by its parent. Custom source layouts remain authoritative, and
+parent sidecars are not inherited across releases. No source folder or file is
+renamed, moved, or rewritten by this recognition, and it never selects a future
+managed-library layout. Existing copy/in-place policies remain independent.
+
+Mylar scans log `mylar3_source_provenance`, including optional
+`mylar_info.DatabaseVersion`, series count, Story Arc/reading-list presence,
+reading-list count, and supported configuration key names. Missing or malformed
+version data becomes `unknown`; future numeric versions remain diagnostic data,
+not admission gates. `config.ini` remains optional and no configuration values
+or credentials are logged. Both paged and full snapshot readers remain read-only.
+This introduces no database migration, monitoring change, or new import card.
+
 ## Import Follow-up
 
 The Follow-up tab groups actionable work by import job rather than rendering

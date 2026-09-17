@@ -677,7 +677,24 @@ async def _load_mylar3_discovered_series(
             readlist_count=legacy_snapshot.readlist_count,
             arc_settings=legacy_snapshot.arc_settings,
             series_count=len(legacy_snapshot.series),
+            database_version=legacy_snapshot.database_version,
         )
+
+    await log_event(
+        session,
+        job_id,
+        "INFO",
+        "mylar3_source_provenance",
+        message="Read Mylar source database provenance",
+        source_kind="mylar3",
+        database_version=metadata.database_version,
+        series_count=metadata.series_count,
+        storyarcs_present=metadata.storyarcs_present,
+        readlist_present=metadata.readlist_present,
+        readlist_count=metadata.readlist_count,
+        config_present=metadata.arc_settings.present,
+        supported_config_keys=[value.key for value in metadata.arc_settings.values],
+    )
 
     story_arc_staging = StoryArcStagingResult(
         readlist_present=metadata.readlist_present,

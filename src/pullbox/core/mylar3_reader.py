@@ -135,6 +135,7 @@ class Mylar3CollectionSnapshot:
     readlist_present: bool
     readlist_count: int
     arc_settings: Mylar3ArcSettingsSnapshot
+    database_version: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +147,7 @@ class Mylar3ImportMetadataSnapshot:
     readlist_count: int
     arc_settings: Mylar3ArcSettingsSnapshot
     series_count: int = 0
+    database_version: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +462,7 @@ class Mylar3Reader:
             issue_records = self._read_issue_records(conn)
             story_arc_rows, storyarcs_present = self._read_story_arc_rows(conn)
             readlist_present, readlist_count = self._read_readlist_count(conn)
+            database_version = self._read_database_version(conn)
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"
             raise MylarReadError(msg) from exc
@@ -473,6 +476,7 @@ class Mylar3Reader:
             readlist_present=readlist_present,
             readlist_count=readlist_count,
             arc_settings=self._read_arc_settings(),
+            database_version=database_version,
         )
 
     def _require_database(self) -> None:
@@ -504,6 +508,7 @@ class Mylar3Reader:
             storyarcs_present = self._table_exists(conn, "storyarcs")
             readlist_present, readlist_count = self._read_readlist_count(conn)
             series_count = int(conn.execute("SELECT COUNT(*) FROM comics").fetchone()[0])
+            database_version = self._read_database_version(conn)
         except sqlite3.DatabaseError as exc:
             msg = f"Could not read Mylar3 database: {exc}"
             raise MylarReadError(msg) from exc
@@ -516,7 +521,23 @@ class Mylar3Reader:
             readlist_count=readlist_count,
             arc_settings=self._read_arc_settings(),
             series_count=series_count,
+            database_version=database_version,
         )
+
+    def _read_database_version(self, conn: sqlite3.Connection) -> str:
+        """Read optional schema provenance without rejecting older/future sources."""
+        try:
+            columns = self._table_columns(conn, "mylar_info")
+            if "databaseversion" not in {column.casefold() for column in columns}:
+                return "unknown"
+            rows = conn.execute("SELECT DatabaseVersion FROM mylar_info LIMIT 2").fetchall()
+        except sqlite3.DatabaseError:
+            logger.warning("mylar3_database_version_unavailable")
+            return "unknown"
+        if len(rows) != 1 or not isinstance(rows[0][0], str | int):
+            return "unknown"
+        value = str(rows[0][0]).strip()
+        return value if re.fullmatch(r"[0-9]{1,9}(?:\.[0-9]{1,9}){0,2}", value) else "unknown"
 
     def _read_import_series_page_sync(
         self,
@@ -2536,6 +2557,7 @@ class Mylar3Reader:
             "annuals": "PRAGMA table_info(annuals)",
             "storyarcs": "PRAGMA table_info(storyarcs)",
             "readlist": "PRAGMA table_info(readlist)",
+            "mylar_info": "PRAGMA table_info(mylar_info)",
         }
         query = queries.get(table_name)
         if query is None:
