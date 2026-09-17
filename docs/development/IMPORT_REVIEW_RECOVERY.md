@@ -190,6 +190,27 @@ refreshed evidence, then commit that page before reading more archives. This
 keeps slow archive I/O outside SQLite's single-writer window, bounds memory, and
 leaves completed pages durable if a later source needs another attempt.
 
+An identity-conflicted failed file remains assignable in Follow-up; archive
+safety failures do not become assignable through that exception. A manual
+issue assignment may supersede a disagreement between `series.json` and
+`cvinfo` only when freshly inspected ComicInfo proves the assigned issue, its
+series identity does not contradict the reviewed series, and issue-number
+checks pass. The original folder conflict is retained as resolved evidence;
+other metadata conflicts retain their specific IDs in the failure diagnostics.
+Step 4 also verifies that the assigned issue belongs to the chosen local series.
+
+Known-series, deferred, mixed-folder, and manually assigned recovery can
+revalidate a device-number-only change after a container remount. The path,
+inode, size, timestamp, and signature version must still agree. An archive
+inspection under the approved source roots and an exact embedded issue-ID
+check are required before refreshing the saved signature. The pre-inspection
+and post-inspection identities must agree, and normal registration revalidates
+the root and refreshed signature again. Existing approved size or single-page
+exceptions remain scoped to that file; dangerous archive checks still run.
+Ordinary signature validation, source files, Mylar metadata, and already-owned
+library files are unchanged. These recovery rules apply to Mylar and folder
+imports, in both copy and keep-in-place modes.
+
 Recovery queries must not expand an entire library into SQL bind parameters.
 Mixed-folder lookups join existing references and discard exact same-title
 rows before loading archive diagnostics; the final shared identity rules still

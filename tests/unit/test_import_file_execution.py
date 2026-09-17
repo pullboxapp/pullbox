@@ -76,6 +76,168 @@ def _make_service(
     )
 
 
+@pytest.mark.parametrize("source_type", list(ImportSourceType))
+@pytest.mark.parametrize("in_place", [True, False])
+@pytest.mark.parametrize("manual", [True, False])
+@pytest.mark.parametrize("approval", [None, "archive_decompressed_size_limit", "single_page_comic"])
+async def test_recovery_rechecks_device_renumbering_without_changing_sources(
+    db_session, monkeypatch, source_type, in_place, manual, approval
+):
+    job, item, files, series, _issues = await _setup_full_scenario(db_session, num_issues=1)
+    file = files[0]
+    path = Path(file.file_path)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            (
+                "<ComicInfo><Series>Batman</Series><Number>1</Number>"
+                "<Web>https://comicvine.gamespot.com/issue/4000-100001/</Web></ComicInfo>"
+            ),
+        )
+        archive.writestr("1.jpg", b"image")
+        if approval != "single_page_comic":
+            archive.writestr("2.jpg", b"image")
+    root = LibraryRoot(name="Source", path=str(path.parent), enabled=True)
+    db_session.add(root)
+    await db_session.flush()
+    signature = build_file_identity_signature(path)
+    if source_type is ImportSourceType.MYLAR3:
+        signature[MYLAR_REFERENCE_ROOT_ID_SIGNATURE_KEY] = root.id
+    file.source_signature = {**signature, "device": int(signature["device"]) + 1}
+    file.file_size = path.stat().st_size
+    file.comicvine_issue_id = 100001
+    file.matched_issue_cv_id = 100001
+    file.diagnostics = {"target_issue_summary": {"provider_id": "100001", "issue_number": 1.0}}
+    if approval:
+        file.diagnostics["safety_exception"] = {
+            "allowed_once": True,
+            "previous_block": {"code": approval, "overrideable": True},
+        }
+    if approval == "archive_decompressed_size_limit":
+        monkeypatch.setattr(
+            "pullbox.services.import_recovery_source.get_archive_size_limit_bytes",
+            AsyncMock(return_value=1),
+        )
+    if manual:
+        file.match_method = "orphan_recovery"
+        item.user_selected_cv_id = item.cv_id
+        (path.parent / "series.json").write_text('{"metadata":{"comicid":97508}}')
+        (path.parent / "cvinfo").write_text("https://comicvine.gamespot.com/other/4050-53301/")
+        file.diagnostics["source_metadata"] = {
+            "identity_conflicts": [
+                {"field": "comicvine_series_id", "series.json": 97508, "cvinfo": 53301}
+            ]
+        }
+    item.diagnostics = {"kind": "known_series_recovery"}
+    item.source_folder = str(path.parent)
+    job.source_type = source_type
+    job.file_handling_mode = (
+        ImportFileHandlingMode.IN_PLACE if in_place else ImportFileHandlingMode.MANAGED_COPY
+    )
+    job.move_to_library = not in_place
+    job.effective_transfer_method = "leave_in_place" if in_place else "copy"
+    job.convert_to_preferred_format = False
+    job.update_embedded_comicinfo_from_match = False
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    await db_session.flush()
+    register = _mock_register_library_file()
+    series_service = AsyncMock()
+    series_service.add_from_comicvine.return_value = series
+    service = _make_service(series_service=series_service)
+
+    with patch("pullbox.services.import_service.register_library_file", register):
+        await service.run_import(db_session, job.id)
+
+    assert register.call_count == 1
+    assert file.source_signature == signature
+    assert file.diagnostics["source_recheck"]["reason"] == "device_renumbered"
+    assert file.status is ImportedFileStatus.IMPORTED
+    if manual:
+        assert file.diagnostics["source_metadata"]["reviewed_folder_identity"]["issue_id"] == 100001
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("source_type", list(ImportSourceType))
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "mtime",
+        "inode",
+        "size",
+        "path",
+        "wrong_issue",
+        "wrong_series",
+        "no_embedded_id",
+        "unsafe_archive",
+        "lost_root",
+        "changed_during_inspection",
+    ],
+)
+async def test_recovery_device_refresh_keeps_source_safety_guards(
+    db_session, monkeypatch, source_type, problem
+):
+    from pullbox.core.library_file_ownership import ReferencedFileValidationError
+    from pullbox.services import import_review_recheck
+    from pullbox.services.import_recovery_source import refresh_recovery_source
+
+    job, item, files, _series, _issues = await _setup_full_scenario(db_session, num_issues=1)
+    file = files[0]
+    path = Path(file.file_path)
+    issue_id = 999999 if problem == "wrong_issue" else 100001
+    web = (
+        ""
+        if problem == "no_embedded_id"
+        else f"https://comicvine.gamespot.com/issue/4000-{issue_id}/"
+    )
+    if problem == "wrong_series":
+        web += " https://comicvine.gamespot.com/series/4050-999999/"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            f"<ComicInfo><Series>Batman</Series><Number>1</Number><Web>{web}</Web></ComicInfo>",
+        )
+        archive.writestr("1.jpg", b"image")
+        archive.writestr("2.jpg", b"image")
+        if problem == "unsafe_archive":
+            archive.writestr("../escaped.jpg", b"image")
+    root = LibraryRoot(name="Source", path=str(path.parent), enabled=problem != "lost_root")
+    db_session.add(root)
+    await db_session.flush()
+    signature = build_file_identity_signature(path)
+    signature["device"] = int(signature["device"]) + 1
+    if source_type is ImportSourceType.MYLAR3:
+        signature[MYLAR_REFERENCE_ROOT_ID_SIGNATURE_KEY] = root.id
+    for field, mutation in {"mtime": "mtime_ns", "size": "size", "inode": "inode"}.items():
+        if problem == field:
+            signature[mutation] = int(signature[mutation]) + 1
+    if problem == "path":
+        signature["resolved_path"] = str(path.parent / "different.cbz")
+    file.source_signature = signature
+    file.matched_issue_cv_id = 100001
+    file.diagnostics = {"target_issue_summary": {"provider_id": "100001", "issue_number": 1.0}}
+    item.diagnostics = {"kind": "known_series_recovery"}
+    job.source_type = source_type
+    job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+    if problem == "lost_root" and source_type is ImportSourceType.FILESYSTEM:
+        job.source_path = str(path.parent / "unavailable")
+    before = dict(signature)
+    if problem == "changed_during_inspection":
+        inspect = import_review_recheck.run_safety_checks
+
+        def replacing_inspection(path, **kwargs):
+            result = inspect(path, **kwargs)
+            path.write_bytes(b"replacement during inspection")
+            return result
+
+        monkeypatch.setattr(import_review_recheck, "run_safety_checks", replacing_inspection)
+    await db_session.flush()
+
+    with pytest.raises(ReferencedFileValidationError):
+        await refresh_recovery_source(db_session, job, item, file)
+
+    assert file.source_signature == before
+
+
 def test_placeholder_issue_target_preserves_only_base_compatible_exact_text() -> None:
     from pullbox.services.import_file_execution import (
         _placeholder_issue_target_from_diagnostics,

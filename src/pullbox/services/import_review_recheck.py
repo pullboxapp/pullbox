@@ -177,6 +177,30 @@ def inspect_review_source(
                 archive_member_evidence=evidence,
             ),
         )
+        embedded = extractor.from_path(
+            path,
+            sidecar_data={
+                **sidecars[folder],
+                "series_id": None,
+                "issue_id": None,
+                "booktype": None,
+                "identity_conflicts": [],
+            },
+            archive_member_evidence=evidence,
+        )
+        fresh = fresh.model_copy(
+            update={
+                "diagnostics": {
+                    **fresh.diagnostics,
+                    "embedded_identity": {
+                        "series_id": embedded.comicvine_series_id,
+                        "issue_id": embedded.comicvine_issue_id,
+                        "issue_number": embedded.issue_number,
+                        "issue_number_text": embedded.issue_number_text,
+                    },
+                }
+            }
+        )
         # Do not accept evidence from a file replaced during the inspection.
         validate_file_identity_signature(
             dict(current_signature), build_file_identity_signature(path)
@@ -248,6 +272,7 @@ def _apply_completed_file_recheck(
     """Refresh source evidence without changing the saved import decision."""
     diagnostics = dict(file.diagnostics or {})
     previous_signature = dict(file.source_signature or {})
+    metadata = _reviewed_folder_identity(file, metadata, reviewed_series_cv_id)
     source = {**metadata.diagnostics, **content}
     block = _completed_file_recheck_block(
         file,
@@ -312,6 +337,8 @@ def _completed_file_recheck_block(
     reviewed_series_cv_id: int | None,
 ) -> dict[str, Any] | None:
     """Return the final safety block after archive and identity checks."""
+    metadata = _reviewed_folder_identity(file, metadata, reviewed_series_cv_id)
+    source = {**source, "identity_conflicts": metadata.diagnostics.get("identity_conflicts")}
     raw_block = source.get("file_safety")
     block = dict(raw_block) if isinstance(raw_block, dict) else None
     identity_conflicts = source.get("identity_conflicts")
@@ -328,6 +355,7 @@ def _completed_file_recheck_block(
             source="completed_import_recheck",
             overrideable_hint=False,
         )
+        block["identity_conflicts"] = [*identity_conflicts, *saved_target_conflicts]
     if block is None and saved_target_conflicts:
         block = build_import_safety_diagnostics(
             "The replacement source does not match the issue reviewed during import.",
@@ -338,6 +366,50 @@ def _completed_file_recheck_block(
         )
         block["identity_conflicts"] = saved_target_conflicts
     return block
+
+
+def _reviewed_folder_identity(
+    file: ImportedFile,
+    metadata: SourceMetadata,
+    reviewed_series_cv_id: int | None,
+) -> SourceMetadata:
+    """Honor an exact issue assignment without ignoring embedded ID conflicts."""
+    embedded = metadata.diagnostics.get("embedded_identity")
+    conflicts = metadata.diagnostics.get("identity_conflicts")
+    if (
+        file.match_method != "orphan_recovery"
+        or not reviewed_series_cv_id
+        or not file.matched_issue_cv_id
+        or not isinstance(embedded, dict)
+        or embedded.get("issue_id") != file.matched_issue_cv_id
+        or embedded.get("series_id") not in (None, reviewed_series_cv_id)
+        or not isinstance(conflicts, list)
+        or not conflicts
+    ):
+        return metadata
+    # Only a disagreement between the two folder sidecars is superseded.
+    # Mylar/ComicInfo issue conflicts and unknown evidence remain blocking.
+    if not all(
+        isinstance(conflict, dict)
+        and set(conflict) == {"field", "series.json", "cvinfo"}
+        and conflict["field"] == "comicvine_series_id"
+        and reviewed_series_cv_id in (conflict["series.json"], conflict["cvinfo"])
+        for conflict in conflicts
+    ):
+        return metadata
+    diagnostics = dict(metadata.diagnostics)
+    diagnostics.pop("identity_conflicts", None)
+    diagnostics["reviewed_folder_identity"] = {
+        "series_id": reviewed_series_cv_id,
+        "issue_id": file.matched_issue_cv_id,
+        "conflicts": conflicts,
+    }
+    return metadata.model_copy(
+        update={
+            "comicvine_series_id": reviewed_series_cv_id,
+            "diagnostics": diagnostics,
+        }
+    )
 
 
 def _saved_target_identity_conflicts(

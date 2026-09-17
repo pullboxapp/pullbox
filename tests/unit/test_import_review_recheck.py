@@ -886,3 +886,63 @@ async def test_retry_failed_rejects_replacement_for_different_saved_issue(
     assert changed.include_in_import is False
     assert changed.matched_issue_cv_id == 100008
     assert changed.diagnostics["source_revalidation"]["code"] == "source_identity_changed"
+
+
+@pytest.mark.parametrize("source_type", list(ImportSourceType))
+@pytest.mark.parametrize(
+    ("manual", "embedded_id", "number", "ready"),
+    [
+        (True, 100008, "8", True),
+        (False, 100008, "8", False),
+        (True, 999999, "8", False),
+        (True, 100008, "9", False),
+    ],
+)
+async def test_completed_recheck_respects_proven_issue_assignment_over_folder_conflict(
+    db_session, tmp_path, source_type, manual, embedded_id, number, ready
+):
+    job, item, files = await _fixture(db_session, tmp_path, source_type)
+    job.status = ImportJobStatus.COMPLETED
+    item.cv_id = 115251
+    item.user_selected_cv_id = 115251 if manual else None
+    file = files[1]
+    file.status = ImportedFileStatus.FAILED
+    file.matched_issue_cv_id = 100008
+    file.match_method = "orphan_recovery" if manual else "comicvine_issue_id"
+    file.diagnostics = {
+        **file.diagnostics,
+        "target_issue_summary": {"provider_id": "100008", "issue_number": 8.0},
+        "source_revalidation": {"code": "source_changed", "retryable": True},
+    }
+    (tmp_path / "Firefly (2018)" / "cvinfo").write_text(
+        "https://comicvine.gamespot.com/other/4050-123456/"
+    )
+    path = Path(file.file_path)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            (
+                f"<ComicInfo><Series>Firefly</Series><Number>{number}</Number>"
+                f"<Web>https://comicvine.gamespot.com/issue/4000-{embedded_id}/</Web></ComicInfo>"
+            ),
+        )
+        archive.writestr("1.jpg", b"image")
+        archive.writestr("2.jpg", b"image")
+    before = {p: p.read_bytes() for p in path.parent.iterdir() if p.is_file()}
+    await db_session.flush()
+
+    report = await prepare_completed_import_file_recheck(
+        db_session, job.id, source_roots=[tmp_path], apply=True, accept_replaced_files=True
+    )
+
+    assert report["files_prepared"] == int(ready)
+    assert report["blocked_files"] == int(not ready)
+    if ready:
+        evidence = file.diagnostics["source_metadata"]["reviewed_folder_identity"]
+        assert evidence["series_id"] == 115251
+        assert evidence["issue_id"] == 100008
+        assert evidence["conflicts"]
+        assert not file.diagnostics["source_metadata"].get("identity_conflicts")
+    else:
+        assert file.diagnostics["source_revalidation"]["identity_conflicts"]
+    assert before == {p: p.read_bytes() for p in before}
