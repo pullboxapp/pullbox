@@ -329,7 +329,8 @@ _CLEANUP_ACTION_PRESENTATION = {
         "label": "Recheck deferred files",
         "description": (
             "Group repeated file records, recognize completed imports, and recover exact issue "
-            "matches. Missing series catalogs are checked in the background. "
+            "matches, including misplaced files already kept in place. Missing series catalogs "
+            "are checked in the background. Source files are not moved or changed. "
             "Files that still need a decision remain here."
         ),
         "button_label": "Recheck files",

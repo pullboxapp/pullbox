@@ -36,6 +36,10 @@ from pullbox.services.import_deferred_recovery import (
     provider_ids,
     refresh_recovered_groups,
 )
+from pullbox.services.import_reference_recovery import (
+    reference_candidates,
+    repair_catalog_references,
+)
 from pullbox.services.import_source_metadata import source_metadata_for_import_file
 from pullbox.services.import_workflow_state import (
     emit_live_progress,
@@ -116,13 +120,17 @@ def _filename_catalog_identity(
 async def _catalog_title_candidates(
     session: AsyncSession,
     job: ImportJob,
+    references: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Group deterministic filename searches so each catalog title is queried once."""
     candidates: dict[str, dict[str, Any]] = {}
-    for file, item in await load_deferred_rows(session, job.id):
-        identity = _filename_catalog_identity(file, item)
-        if identity is None:
-            continue
+    identities = [
+        identity
+        for file, item in await load_deferred_rows(session, job.id)
+        if (identity := _filename_catalog_identity(file, item)) is not None
+    ]
+    identities.extend((references or {}).values())
+    for identity in identities:
         key = str(identity["key"])
         candidate = candidates.setdefault(
             key,
@@ -207,6 +215,10 @@ async def _search_exact_title_catalog(
                     "cv_id": int(result.provider_id),
                     "title": result.title,
                     "year": result.year_start,
+                    "issue_count": result.issue_count,
+                    "publisher": result.publisher,
+                    "cover_url": result.cover_url,
+                    "comicvine_url": result.comicvine_url,
                     "summary": _catalog_summary_payload(summary),
                 }
             )
@@ -544,7 +556,12 @@ async def prepare_deferred_recovery(
 
     revision_state = {"value": int(job.progress_revision or 0)}
 
-    def progress_event(current: int, total: int, message: str) -> ImportProgressEvent:
+    def progress_event(
+        current: int,
+        total: int,
+        message: str,
+        unit: str,
+    ) -> ImportProgressEvent:
         return ImportProgressEvent(
             job_id=job_id,
             status=ImportJobStatus.IMPORTING,
@@ -556,7 +573,7 @@ async def prepare_deferred_recovery(
             current_file_progress_current=current,
             current_file_progress_total=total,
             current_file_progress_pct=round(100 * current / max(total, 1)),
-            current_file_progress_unit="catalogs",
+            current_file_progress_unit=unit,
         )
 
     async def report(
@@ -566,10 +583,11 @@ async def prepare_deferred_recovery(
         *,
         durable: bool = True,
         check_control: bool = True,
+        unit: str = "catalogs",
     ) -> None:
         if check_control:
             await raise_if_job_cancelled(session, job_id)
-        event = progress_event(current, total, message)
+        event = progress_event(current, total, message, unit)
         if durable:
             event.progress_revision = revision_state["value"] + 1
             await emit_progress(session, job, event, progress_callback)
@@ -591,13 +609,18 @@ async def prepare_deferred_recovery(
         await report(0, 1, "Reconciling deferred files with the existing library...")
         local_counts = await apply_deferred_recovery(session, job, running=True)
         state = recovery_state(job)
+        references = state.get("reference_candidates")
+        if references is None:
+            references = await reference_candidates(session, job.id)
         state.update(
             state="catalogs",
             local_counts=local_counts,
             candidates=await _catalog_candidates(session, job),
             completed=[],
             matches={},
-            title_candidates=await _catalog_title_candidates(session, job),
+            reference_candidates=references,
+            reference_files_repaired=0,
+            title_candidates=await _catalog_title_candidates(session, job, references),
             title_completed=[],
             title_matches={},
         )
@@ -705,11 +728,31 @@ async def prepare_deferred_recovery(
     await report(len(completed), max(len(candidates), 1), "Preparing verified files for import...")
     catalog_count = await _prepare_catalog_targets(session, job)
     title_catalog_count = await _prepare_title_catalog_targets(session, job)
+    await session.commit()
+
+    async def reference_progress(current: int, total: int) -> None:
+        await report(
+            current,
+            total,
+            f"Checking misplaced references {current} of {total}...",
+            durable=False,
+            unit="files",
+        )
+
+    reference_count = await repair_catalog_references(
+        session,
+        job,
+        metadata_service,
+        state.get("reference_candidates", {}),
+        state.get("title_matches", {}),
+        progress=reference_progress,
+    )
     state = recovery_state(job)
     state.update(
         state="prepared",
         catalog_files_prepared=catalog_count,
         title_catalog_files_prepared=title_catalog_count,
+        reference_files_repaired=reference_count,
     )
     job.error_message = None
     if not state.get("series_ids"):
@@ -735,6 +778,7 @@ async def prepare_deferred_recovery(
                 "catalog_files_prepared": catalog_count,
                 "title_catalogs_checked": len(title_completed),
                 "title_catalog_files_prepared": title_catalog_count,
+                "reference_files_repaired": reference_count,
                 "source_preserved": True,
             },
         )

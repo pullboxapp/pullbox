@@ -199,6 +199,28 @@ ineligible.
   them again. A different file for an owned issue remains a review decision;
   it is never automatically substituted for the owned copy.
 
+The same recheck can repair already-imported, referenced comics in mixed folders,
+even when their correct series or issue is not in Pullbox yet. It groups exact
+title lookups against the local catalog and requires a unique issue number, type,
+and agreeing per-file publication year (within one year for dated files).
+Filename-only evidence without a publication year remains review-only. Trusted
+embedded IDs must agree. Manual choices, safety decisions, managed artifacts,
+duplicate candidates, and targets with another owned file are not overwritten.
+Before changing an assignment, the worker rechecks the source path, size, and
+timestamp inside an enabled reference-capable root. This also works with a
+read-only root; no source bytes, filenames, or directories are changed.
+
+Missing metadata targets are registered as partial catalogs, without creating a
+series folder or running file import/conversion. The existing LibraryFile row is
+retained and assigned to the verified issue; old and new ownership counters and
+import Story Arc links are refreshed. Reading history remains unchanged.
+Empty provisional issues left under the wrong series are kept for audit but
+marked skipped rather than becoming new wanted downloads.
+Each repair records its previous assignment and commits with its recovery
+checkpoint. Resume preserves completed repairs, and repeated runs do not create
+another file registration. This is logical library repair, not authorization to
+reorganize the user's filesystem.
+
 The deferred pass uses complete local catalogs first. Exact issue identity may
 correct stale Mylar ownership only when the file's title, issue number, type,
 and embedded identity agree with the target. Conflicting embedded IDs remain
@@ -218,7 +240,7 @@ are stored. Live provider progress does not rewrite the full durable recovery
 snapshot; each completed catalog produces one durable checkpoint, so a worker
 restart resumes after the last completed catalog without replaying it.
 
-Recovered files run through normal Step 4 safety, current-source validation,
+Previously unimported recovered files run through normal Step 4 safety, current-source validation,
 ownership checks, and the original copy or keep-in-place settings. Only newly
 prepared recovery groups execute, not unrelated ready files or Story Arcs.
 Cancellation stops this pass without rolling back the original import or

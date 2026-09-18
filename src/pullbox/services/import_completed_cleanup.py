@@ -252,7 +252,14 @@ def _eligible_conflict_groups(job_id: int) -> Any:
 def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[Any, ...]:
     filters: list[Any] = [ImportedFile.import_job_id == job_id]
     if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
-        filters.append(ImportedFile.status == ImportedFileStatus.NO_MATCH)
+        from pullbox.services.import_reference_recovery import reference_candidate_ids
+
+        filters.append(
+            or_(
+                ImportedFile.status == ImportedFileStatus.NO_MATCH,
+                ImportedFile.id.in_(reference_candidate_ids(job_id)),
+            )
+        )
     elif action is CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES:
         filters.append(
             or_(
@@ -1340,9 +1347,12 @@ async def _apply_recommended_conflicts(
 async def _apply_mixed_folder_resolutions(
     session: AsyncSession,
     job: ImportJob,
+    *,
+    resolutions: tuple[_MixedFolderResolution, ...] | None = None,
 ) -> tuple[set[int], set[int]]:
     """Rebucket exact embedded identities while preserving every source artifact."""
-    resolutions = await _load_mixed_folder_resolutions(session, int(job.id))
+    if resolutions is None:
+        resolutions = await _load_mixed_folder_resolutions(session, int(job.id))
     if not resolutions:
         return set(), set()
 
@@ -1477,6 +1487,8 @@ async def _apply_mixed_folder_resolutions(
             "evidence_source": resolution.evidence_source,
             "source_import_series_id": resolution.source_import_series_id,
             "source_import_series_name": resolution.source_import_series_name,
+            "source_issue_id": resolution.source_issue_id,
+            "source_library_file_id": resolution.source_library_file_id,
             "source_series_name": resolution.source_series_name,
             "target_import_series_id": target_import_series.id,
             "target_series_id": resolution.target_series_id,
@@ -1723,6 +1735,7 @@ async def apply_completed_import_cleanup(
         raise ValidationError("The cleanup scope changed. Preview the action again.")
 
     if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        from pullbox.services.import_reference_recovery import reference_candidates
         from pullbox.services.import_retry_helpers import require_retained_import_destination
 
         require_retained_import_destination(job)
@@ -1734,6 +1747,7 @@ async def apply_completed_import_cleanup(
                 "run_id": uuid4().hex,
                 "series_ids": [],
                 "stale_series_ids": stale_series_ids,
+                "reference_candidates": await reference_candidates(session, job_id),
                 "actor_id": actor_id,
             },
             "mode": "import",
