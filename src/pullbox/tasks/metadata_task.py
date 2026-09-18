@@ -35,7 +35,7 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
 from pullbox.providers.metadata.comicvine import ComicVineError, ComicVineProvider
 from pullbox.services.metadata_service import MetadataService
-from pullbox.tasks.metadata_sweep_state import save_sweep, schedule_sweep, start_sweep
+from pullbox.tasks.metadata_sweep_state import load_sweep, save_sweep, schedule_sweep, start_sweep
 
 logger = structlog.get_logger(__name__)
 
@@ -283,6 +283,13 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
     async with factory() as session:
         api_key = await get_comicvine_api_key(session)
         if not api_key:
+            state = await load_sweep(session, task_id)
+            if state.active:
+                state.active = False
+                state.retry_at = 0
+                await save_sweep(session, task_id, state)
+                await session.commit()
+            schedule_sweep(task_id, state)
             log_deduped_warning(
                 logger,
                 f"{task_id}_missing_comicvine_key",

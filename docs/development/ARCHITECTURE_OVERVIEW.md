@@ -565,6 +565,10 @@ checks a two-minute budget between series; an individual series has a separate
 after restart. Provider throttling pauses the sweep at its saved position instead
 of repeatedly failing every remaining series. Series metadata writes are committed
 before subsequent cover or issue-provider waits.
+Removing the ComicVine key stops the active sweep and clears its continuation.
+Post-restore aftercare keeps its recovery marker while continuation batches remain
+active; it observes completion without retaining a database transaction between checks.
+Cancellation leaves the marker and sweep checkpoint available for the next startup.
 
 ComicVine and Newznab clients share process-local account cooldowns, so creating a
 new client does not bypass a throttle response. Newznab also serializes request
