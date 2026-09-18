@@ -241,6 +241,23 @@ checkpoint. Resume preserves completed repairs, and repeated runs do not create
 another file registration. This is logical library repair, not authorization to
 reorganize the user's filesystem.
 
+Recovery reads the original per-file ComicInfo title and issue designation even
+when older imports saved the parent folder's name as the parsed title. Explicit
+reading-order prefixes and `(converted)` annotations are removed for candidate
+lookups only; filenames remain unchanged. Deferred and referenced files share
+the same per-file catalog checks, including publication dates and issue types.
+A date accepted for one file never authorizes another file in the same batch.
+Conflicting embedded identities, manual decisions, unsafe sources and duplicate
+copies remain protected. Unresolved catalog candidates retain their proposed
+series, issue and reason in `mixed_folder_recovery` diagnostics.
+
+An issue mistakenly registered under the parent series can itself be reassigned
+only when its embedded ComicVine issue ID agrees with the unique catalog target,
+it is the current referenced issue, and no other file or imported registration
+owns it. The issue ID and reader history are preserved. The old series identity
+is retained in the cleanup audit. A provisional issue is not offered under a
+folder series when independent file evidence identifies an unrelated series.
+
 The deferred pass uses complete local catalogs first. Exact issue identity may
 correct stale Mylar ownership only when the file's title, issue number, type,
 and embedded identity agree with the target. Conflicting embedded IDs remain

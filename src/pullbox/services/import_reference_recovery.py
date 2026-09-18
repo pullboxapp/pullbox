@@ -13,10 +13,8 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import and_, or_, select
 
 from pullbox.core.exceptions import ConfigurationError
-from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.name_matcher import NameMatcher
-from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -30,10 +28,14 @@ from pullbox.providers.base import IssueSummary
 from pullbox.services.catalog.reader import CatalogIssueSummary, CatalogSeriesMetadata
 from pullbox.services.import_deferred_recovery import (
     apply_proven_identity,
-    positive_id,
     provider_ids,
     refresh_recovered_groups,
     same_source,
+)
+from pullbox.services.import_recovery_identity import (
+    catalog_file_identity,
+    catalog_target_agrees,
+    record_catalog_review,
 )
 
 if TYPE_CHECKING:
@@ -69,6 +71,9 @@ def reference_candidate_ids(job_id: int) -> Select[tuple[int]]:
             ),
             or_(
                 ImportedFile.parsed_series != ImportedSeries.raw_series_name,
+                ImportedFile.diagnostics["source_metadata"]["comicinfo"]["series"].as_string()
+                != ImportedSeries.raw_series_name,
+                ImportedFile.match_method == "import_reconcile_provisional_issue",
                 and_(
                     ImportedSeries.files_no_match > 0,
                     ImportedFile.diagnostics["metadata_signals"]["issue_number"].as_string()
@@ -112,8 +117,6 @@ def _stamp(file: ImportedFile, item: ImportedSeries, library: LibraryFile) -> st
 
 async def reference_candidates(session: AsyncSession, job_id: int) -> dict[str, dict[str, Any]]:
     """Freeze exact identity evidence without inspecting or modifying source files."""
-    from pullbox.services.import_completed_cleanup import _mixed_folder_source_identity
-
     result: dict[str, dict[str, Any]] = {}
     rows = await session.stream(
         select(ImportedFile, ImportedSeries, LibraryFile, Issue)
@@ -145,10 +148,11 @@ async def reference_candidates(session: AsyncSession, job_id: int) -> dict[str, 
                 or source.get("identity_conflicts")
             ):
                 continue
-            identity = _mixed_folder_source_identity(file)
+            identity = catalog_file_identity(file)
             if identity is None:
                 continue
-            title, raw_number, series_cv_id, issue_cv_id, evidence = identity
+            issue_cv_id = identity["issue_cv_id"]
+            evidence = identity["evidence"]
             # A derived old match is not source evidence. Any other saved ID must
             # agree with the trusted embedded identity, or remain for review.
             allowed_ids = {value for value in (old_issue.comicvine_id, issue_cv_id) if value}
@@ -158,27 +162,11 @@ async def reference_candidates(session: AsyncSession, job_id: int) -> dict[str, 
                 or (source.get("comicinfo") and evidence == "filename_parse" and provider_ids(file))
             ):
                 continue
-            key = NameMatcher.normalize(title)
+            key = identity["key"]
             if not key or key == NameMatcher.normalize(item.cv_title or item.raw_series_name):
                 continue
-            try:
-                number = normalize_issue_number_text(raw_number)
-            except ValueError:
-                continue
-            parsed = parse_release_title(file.file_name)
-            year = parsed.year if parsed is not None else file.parsed_year
-            issue_type = str(diagnostics.get("source_issue_type") or "issue")
-            if evidence == "filename_parse" and parsed is not None:
-                issue_type = parsed.issue_type.value
             result[str(file.id)] = {
-                "key": key,
-                "query": title,
-                "issue_number": number,
-                "year": year or 0,
-                "issue_type": issue_type,
-                "series_cv_id": series_cv_id,
-                "issue_cv_id": issue_cv_id,
-                "evidence": evidence,
+                **identity,
                 "stamp": _stamp(file, item, library),
             }
     finally:
@@ -187,25 +175,7 @@ async def reference_candidates(session: AsyncSession, job_id: int) -> dict[str, 
 
 
 def _target_agrees(identity: dict[str, Any], target: dict[str, Any]) -> bool:
-    summary = target["summary"]
-    if (
-        NameMatcher.normalize(str(target["title"])) != identity["key"]
-        or str(summary.get("issue_type") or "issue") != identity["issue_type"]
-        or (identity["series_cv_id"] and identity["series_cv_id"] != target["cv_id"])
-        or (
-            identity["issue_cv_id"]
-            and identity["issue_cv_id"] != positive_id(summary["provider_id"])
-        )
-    ):
-        return False
-    release_date = summary.get("release_date")
-    if identity["year"] and release_date:
-        try:
-            return abs(int(str(release_date)[:4]) - int(identity["year"])) <= 1
-        except ValueError:
-            return False
-    # Filename-only evidence cannot distinguish same-name reboots without a date.
-    return bool(identity["evidence"] != "filename_parse")
+    return catalog_target_agrees(identity, target)
 
 
 def _unchanged_source(path: str, signature: dict[str, Any], root_path: str) -> bool:
@@ -251,6 +221,16 @@ async def repair_catalog_references(
         options = [option for option in options if _target_agrees(identity, option)]
         if len(options) == 1:
             plans.append((int(file_id_text), identity, options[0]))
+        else:
+            file = await session.get(ImportedFile, int(file_id_text))
+            if file is not None:
+                record_catalog_review(
+                    file,
+                    identity,
+                    "Multiple catalog issues agree; choose the correct series and issue."
+                    if options
+                    else "No catalog issue agrees with this file's title, number, type and year.",
+                )
     counts = Counter(str(target["summary"]["provider_id"]) for _, _, target in plans)
     state = dict(job.progress_snapshot.get("deferred_recovery") or {})
     repaired = int(state.get("reference_files_repaired", 0))
@@ -258,6 +238,11 @@ async def repair_catalog_references(
         if progress is not None:
             await progress(position, len(plans))
         if counts[str(target["summary"]["provider_id"])] != 1:
+            file = await session.get(ImportedFile, file_id)
+            if file is not None:
+                record_catalog_review(
+                    file, identity, "Multiple files claim this issue; choose which copy to keep."
+                )
             continue
         await raise_if_job_cancelled(session, job.id)
         file = await session.get(ImportedFile, file_id)
@@ -296,15 +281,36 @@ async def repair_catalog_references(
         series = await session.scalar(select(Series).where(Series.comicvine_id == cv_id))
         created_series = series is None
         issue = await session.scalar(select(Issue).where(Issue.comicvine_id == issue_cv_id))
-        if issue is not None and (series is None or issue.series_id != series.id):
+        reparent_issue = issue is not None and (series is None or issue.series_id != series.id)
+        if reparent_issue and (
+            issue is None
+            or issue.id != library.issue_id
+            or issue.series_id != item.series_id
+            or identity.get("issue_cv_id") != issue.comicvine_id
+            or identity["evidence"] != "comicinfo"
+        ):
             continue
         if issue is not None and (
             issue.effective_issue_number_text != identity["issue_number"]
-            or issue.issue_type.value != identity["issue_type"]
+            or issue.issue_type.value != str(target["summary"].get("issue_type") or "issue")
         ):
             continue
         if issue is not None and await session.scalar(
-            select(LibraryFile.id).where(LibraryFile.issue_id == issue.id)
+            select(LibraryFile.id).where(
+                LibraryFile.issue_id == issue.id, LibraryFile.id != library.id
+            )
+        ):
+            continue
+        if (
+            reparent_issue
+            and issue is not None
+            and await session.scalar(
+                select(ImportedFile.id).where(
+                    ImportedFile.matched_issue_id == issue.id,
+                    ImportedFile.id != file.id,
+                    ImportedFile.status == ImportedFileStatus.IMPORTED,
+                )
+            )
         ):
             continue
         if await session.scalar(
@@ -315,7 +321,7 @@ async def repair_catalog_references(
             )
         ):
             continue
-        if series is not None and issue is None:
+        if series is not None and (issue is None or reparent_issue):
             existing = list(
                 await session.scalars(select(Issue).where(Issue.series_id == series.id))
             )
@@ -341,6 +347,11 @@ async def repair_catalog_references(
             )
             series.monitored = False
             series.issue_catalog_state = IssueCatalogState.PARTIAL
+        previous_series_id = issue.series_id if reparent_issue and issue is not None else None
+        if reparent_issue and issue is not None:
+            # The exact embedded identity and catalog agree, and this is the
+            # only registration. Retain the issue ID (including reader state).
+            issue.series_id = series.id
         if issue is None:
             payload = target["summary"]
             cutoff = payload.get("source_cutoff_at")
@@ -373,6 +384,15 @@ async def repair_catalog_references(
             source_updated_at=file.updated_at.isoformat(),
         )
         affected, _ = await _apply_mixed_folder_resolutions(session, job, resolutions=(resolution,))
+        if previous_series_id is not None:
+            file.diagnostics = {
+                **file.diagnostics,
+                "completed_import_cleanup": {
+                    **file.diagnostics["completed_import_cleanup"],
+                    "source_catalog_series_id": previous_series_id,
+                    "issue_identity_preserved": True,
+                },
+            }
         previous_issue = await session.get(Issue, resolution.source_issue_id)
         if (
             previous_issue is not None

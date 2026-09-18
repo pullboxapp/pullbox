@@ -37,6 +37,11 @@ from pullbox.services.import_deferred_recovery import (
     refresh_recovered_groups,
 )
 from pullbox.services.import_recovery_checkpoint import compact_recovery_state
+from pullbox.services.import_recovery_identity import (
+    catalog_file_identity,
+    catalog_target_agrees,
+    record_catalog_review,
+)
 from pullbox.services.import_reference_recovery import (
     reference_candidates,
     repair_catalog_references,
@@ -80,45 +85,31 @@ def _catalog_summary_payload(summary: IssueSummary) -> dict[str, Any]:
 def _filename_catalog_identity(
     file: ImportedFile,
     item: ImportedSeries,
-) -> dict[str, str | int] | None:
+) -> dict[str, Any] | None:
     """Return bounded filename identity eligible for local-catalog recovery."""
-    if protected_file(file, item) or provider_ids(file):
+    if protected_file(file, item):
         return None
     diagnostics = dict(file.diagnostics or {})
-    source = source_metadata_for_import_file(item, file).diagnostics
-    if source.get("identity_conflicts"):
+    identity = catalog_file_identity(file)
+    if identity is None:
         return None
-    parsed = source.get("filename_parse")
-    parsed = parsed if isinstance(parsed, dict) else {}
-    source_title = str(parsed.get("series_name") or "").strip()
-    raw_number = parsed.get("issue_number_text") or parsed.get("issue_number")
-    if not source_title or raw_number is None:
+    ids = provider_ids(file)
+    if ids and ids != {identity.get("issue_cv_id")}:
         return None
-    try:
-        issue_number = normalize_issue_number_text(str(raw_number))
-    except ValueError:
-        return None
-    issue_type = str(parsed.get("issue_type") or diagnostics.get("source_issue_type") or "issue")
-    if issue_type in {"annual", "special"}:
-        label = issue_type.title()
-        if not NameMatcher.normalize(source_title).endswith(f" {NameMatcher.normalize(label)}"):
-            source_title = f"{source_title} {label}"
-    normalized_title = NameMatcher.normalize(source_title)
+    source_title = identity["query"]
+    normalized_title = identity["key"]
     parent_title = NameMatcher.normalize(item.cv_title or item.raw_series_name)
     if not normalized_title or normalized_title == parent_title:
         return None
     title_match = NameMatcher().match(source_title, item.cv_title or item.raw_series_name)
     corroborated = diagnostics.get("conflict_type") == "corroborated_file_series_mismatch"
-    if title_match.is_match and not corroborated and issue_type not in {"annual", "special"}:
+    if (
+        title_match.is_match
+        and not corroborated
+        and identity["issue_type"] not in {"annual", "special"}
+    ):
         return None
-    year = parsed.get("year") or file.parsed_year
-    return {
-        "key": normalized_title,
-        "query": source_title,
-        "issue_number": issue_number,
-        "year": int(year) if isinstance(year, int | float) else 0,
-        "issue_type": issue_type,
-    }
+    return identity
 
 
 async def _catalog_title_candidates(
@@ -435,7 +426,17 @@ async def _prepare_title_catalog_targets(session: AsyncSession, job: ImportJob) 
             continue
         options_by_number = title_matches.get(str(identity["key"]), {})
         options = options_by_number.get(str(identity["issue_number"]), [])
+        options = [option for option in options if catalog_target_agrees(identity, option)]
         if len(options) != 1:
+            record_catalog_review(
+                file,
+                identity,
+                (
+                    "Multiple catalog issues agree; choose the correct series and issue."
+                    if options
+                    else "No catalog issue agrees with this file's title, number, type and year."
+                ),
+            )
             continue
         eligible.append((file, item, options[0]))
 
@@ -469,6 +470,15 @@ async def _prepare_title_catalog_targets(session: AsyncSession, job: ImportJob) 
             or counts[str(issue_cv_id)] != 1
             or issue_cv_id in existing_issue_ids
         ):
+            identity = _filename_catalog_identity(file, original)
+            if identity is not None:
+                record_catalog_review(
+                    file,
+                    identity,
+                    "Multiple files claim this issue; choose which copy to keep."
+                    if counts[str(issue_cv_id)] != 1
+                    else "This issue already has a catalog entry; review its existing ownership.",
+                )
             continue
         target_item = targets.get(target_cv_id)
         if target_item is None:
