@@ -42,7 +42,7 @@ from pullbox.services.cover_cache_service import purge_series_cover_cache
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from pullbox.providers.base import IssueMetadata, IssueSummary
+    from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesSearchResult
     from pullbox.providers.metadata.comicvine import ComicVineProvider
     from pullbox.services.catalog.reader import CatalogReader
 
@@ -307,6 +307,26 @@ class MetadataService:
             return dict(zip(comicvine_ids, metadata, strict=True))
         except ComicVineError as exc:
             raise _provider_error_from_comicvine(exc) from exc
+
+    async def search_catalog_series(
+        self,
+        query: str,
+        *,
+        limit: int = 1_000,
+    ) -> list[SeriesSearchResult]:
+        """Search only the installed local catalog for recovery candidates."""
+        if self._catalog is None or not self._catalog.available:
+            return []
+        return await self._catalog.search(query, limit=min(max(1, limit), 1_000))
+
+    async def get_catalog_issue_summaries_for_series(
+        self,
+        comicvine_id: int,
+    ) -> list[IssueSummary]:
+        """Read issue identities only from the installed local catalog."""
+        if self._catalog is None or not self._catalog.available:
+            return []
+        return await self._catalog.issues(comicvine_id)
 
     async def get_cached_series_metadata(
         self,

@@ -1086,6 +1086,15 @@ async def test_mixed_folder_cleanup_leaves_ambiguous_series_and_files_untouched(
         monitored=True,
     )
     db_session.add(duplicate_title)
+    await db_session.flush()
+    db_session.add(
+        Issue(
+            series_id=duplicate_title.id,
+            issue_number=1002,
+            issue_number_text="1002",
+            comicvine_id=8001002,
+        )
+    )
     await db_session.commit()
 
     with pytest.raises(ValidationError, match="No files are eligible"):
@@ -1100,26 +1109,57 @@ async def test_mixed_folder_cleanup_leaves_ambiguous_series_and_files_untouched(
 
 
 @pytest.mark.asyncio
-async def test_mixed_folder_cleanup_does_not_trust_filename_only_identity(
+async def test_mixed_folder_cleanup_uses_unique_filename_title_and_issue_identity(
     db_session: AsyncSession,
 ) -> None:
     (
         job,
-        _source_series,
-        _target_import_series,
+        source_series,
+        target_import_series,
         mixed_file,
-        _issue,
-    ) = await _seed_mixed_folder_candidate(db_session, source_signal="release_title")
-
-    with pytest.raises(ValidationError, match="No files are eligible"):
-        await preview_completed_import_cleanup(
-            db_session,
-            job.id,
-            CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
-            actor_id=42,
+        issue,
+    ) = await _seed_mixed_folder_candidate(
+        db_session,
+        target_title="Thunderbolts",
+        target_year=2006,
+        source_signal="release_title",
+    )
+    source_series.files_no_match = 1
+    mixed_file.file_path = "/comics/Fritzi Ritz (1953)/042 - Thunderbolts 105 (converted).cbz"
+    mixed_file.file_name = "042 - Thunderbolts 105 (converted).cbz"
+    mixed_file.parsed_issue_number = 105
+    mixed_file.issue_number_raw = "105"
+    issue.issue_number = 105
+    issue.issue_number_text = "105"
+    db_session.add(
+        Series(
+            title="Thunderbolts",
+            sort_title="thunderbolts",
+            year_start=2016,
+            monitored=True,
         )
+    )
+    await db_session.commit()
+
+    preview = await preview_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
+        actor_id=42,
+    )
+    result = await apply_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+
     await db_session.refresh(mixed_file)
-    assert mixed_file.status is ImportedFileStatus.NO_MATCH
+    assert result.requires_import_retry is True
+    assert mixed_file.import_series_id == target_import_series.id
+    assert mixed_file.matched_issue_id == issue.id
+    assert mixed_file.status is ImportedFileStatus.CONFIRMED
 
 
 @pytest.mark.asyncio

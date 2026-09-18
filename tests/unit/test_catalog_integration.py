@@ -28,6 +28,19 @@ async def test_metadata_hydration_uses_catalog_without_provider_calls(tmp_path):
     live.get_issues_for_series.assert_not_awaited()
 
 
+async def test_recovery_title_search_is_local_catalog_only(tmp_path):
+    reader = installed_reader(tmp_path)
+    live = AsyncMock()
+    service = MetadataService(live, tmp_path, catalog=reader)
+
+    results = await service.search_catalog_series("Batman", limit=5_000)
+    issues = await service.get_catalog_issue_summaries_for_series(10)
+
+    assert [result.provider_id for result in results] == ["10"]
+    assert [issue.provider_id for issue in issues] == ["100"]
+    assert live.mock_calls == []
+
+
 @pytest.mark.parametrize("ids", [[999, 10, 10], [10, 999]])
 async def test_catalog_profile_batch_preserves_matches_when_a_series_is_missing(tmp_path, ids):
     live = AsyncMock()

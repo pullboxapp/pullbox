@@ -229,6 +229,13 @@ _SCENE_PREFIX_NUMBERED_RE = re.compile(
 _MINIMAL_SEPARATOR_ISSUE_RE = re.compile(
     r"^(?P<series>.+?)[._](?P<issue>0*\d{1,3}(?:\.\d+)?(?:-?[A-Za-z]+)?)$"
 )
+_DOTTED_LOCAL_ISSUE_RE = re.compile(
+    r"(?<=\D)\.(?P<issue>[+-]?\d+(?:\.\d+)?(?:-?[A-Za-z]+)?)\.(?=\s|\()"
+)
+_SPECIAL_POSITIONAL_ISSUE_RE = re.compile(
+    r"(?<=\s)(?P<issue>-[0-9]+(?:\.[0-9]+)?(?:-?[A-Za-z]+)?|"
+    r"0\.[0-9]+(?:-?[A-Za-z]+)?)(?=\s|$)"
+)
 _GENERIC_MINIMAL_SERIES_TOKENS = frozenset(
     {"scan", "scans", "page", "pages", "img", "image", "images", "cover", "covers", "comic"}
 )
@@ -390,6 +397,11 @@ def parse_release_title(
     if scene_match:
         scan_group = scan_group or scene_match.group("group")
         working = scene_match.group("title")
+
+    # Some local libraries use one dot on each side of the issue designation,
+    # followed by a parenthesized year. Normalize only that bounded shape; a
+    # general dot replacement would damage decimal issues and dotted titles.
+    working = _DOTTED_LOCAL_ISSUE_RE.sub(r" \g<issue> ", working)
 
     # Step c: Normalize separators (dots → spaces for dot-separated format)
     is_dot_separated = _is_dot_format(working) or _is_minimal_separator_issue_format(working)
@@ -789,7 +801,15 @@ def _extract_issue_number(
         remaining = clean[: m.start()] + clean[m.end() :]
         return num, remaining.strip(), exact_text
 
-    # Priority 6: Long-running series may omit "Prog" or "#" before issue 2487.
+    # Priority 6: Decimal issues below one and negative issue designations are
+    # valid catalog identities but fall outside the ordinary positional rules.
+    m = _SPECIAL_POSITIONAL_ISSUE_RE.search(clean)
+    if m:
+        num, exact_text = parse_issue_number_text(m.group("issue"))
+        remaining = clean[: m.start()] + clean[m.end() :]
+        return num, remaining.strip(), exact_text
+
+    # Priority 7: Long-running series may omit "Prog" or "#" before issue 2487.
     # Require a known series prefix: a title such as Marvel 1602 is not issue 1602.
     m = _LONG_POSITIONAL_ISSUE_RE.search(clean)
     if m and expected_series:
@@ -811,7 +831,7 @@ def _extract_issue_number(
             num, exact_text = parse_issue_number_text(token)
             return num, prefix, exact_text
 
-    # Priority 7: Positional number — a 2-3 digit number that sits between
+    # Priority 8: Positional number — a 2-3 digit number that sits between
     # the series name and metadata (year/brackets)
     # Match a number preceded by space (or after series-name text)
     # but NOT part of an alphanumeric word like "D4VE2" or "Spider-Man 2099"
@@ -837,7 +857,7 @@ def _extract_issue_number(
         remaining = clean[: m.start()] + clean[m.end() :]
         return num, remaining.strip(), exact_text
 
-    # Priority 8: Single digit number at word boundary after text
+    # Priority 9: Single digit number at word boundary after text
     # Must NOT be followed by a word (e.g. "4 Covers" is a count, not issue #4)
     m = re.search(r"(?<=\s)(\d(?:-?[A-Za-z]+)?)(?=\s|$)", clean)
     if m:

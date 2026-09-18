@@ -12,6 +12,7 @@ from pullbox.services.import_file_matching import _evaluate_file_match_candidate
 from pullbox.services.import_source_metadata import (
     build_import_metadata_conflict,
     corroborated_import_title_conflict,
+    source_metadata_for_import_file,
 )
 from pullbox.services.semantic_matching import ImportPolicy, SemanticMatchEngine
 
@@ -101,6 +102,141 @@ def test_uncontradicted_mylar_identity_keeps_local_fast_path():
     assert candidate is not None
     assert conflict is None
     engine.match_against_issue.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("file_title", "issue_number", "issue_cv_id"),
+    [
+        ("Action Comics", 969, 566668),
+        ("Thunderbolts", 105, 234803),
+    ],
+)
+def test_corroborated_unrelated_title_blocks_parent_issue_number_inheritance(
+    file_title: str, issue_number: int, issue_cv_id: int
+) -> None:
+    parent = ImportedSeries(
+        raw_series_name="Fritzi Ritz",
+        cv_title="Fritzi Ritz",
+        cv_id=31895,
+        cv_match_method="mylar3_cv_id",
+        status=ImportSeriesStatus.MATCHED,
+    )
+    file = ImportedFile(
+        file_name=f"{file_title} {issue_number} (2017).cbz",
+        parsed_series="Fritzi Ritz",
+        parsed_issue_number=issue_number,
+        diagnostics={
+            "comicvine_series_id": 31895,
+            "metadata_signals": {"comicvine_series_id": "mylar3"},
+        },
+    )
+    metadata = SourceMetadata(
+        original_title=file.file_name,
+        series_name="Fritzi Ritz",
+        issue_number=issue_number,
+        issue_type=IssueType.ISSUE,
+        diagnostics={
+            "filename_parse": {
+                "series_name": file_title,
+                "issue_number": issue_number,
+                "year": 2017,
+            },
+            "comicinfo": {"series": file_title, "number": str(issue_number)},
+        },
+    )
+    entry = (None, issue_cv_id, False, None, "Existing parent issue")
+
+    candidate, conflict = _evaluate_file_match_candidate(
+        imp_series=parent,
+        imp_file=file,
+        target_index=FileMatchTargetIndex(number_map={issue_number: entry}),
+        target_series=None,
+        file_metadata=metadata,
+        semantic_match_engine=SemanticMatchEngine(policy=ImportPolicy()),
+        build_import_metadata_conflict=build_import_metadata_conflict,
+        series_high_confidence=True,
+    )
+
+    assert candidate is None
+    assert conflict is not None
+    assert conflict["conflict_type"] == "corroborated_file_series_mismatch"
+    assert conflict["source_series"] == file_title
+    assert conflict["target_series"] == "Fritzi Ritz"
+    assert conflict["preserve_series_match"] is True
+
+
+def test_unrelated_reading_order_filename_keeps_parent_issue_match_review_only() -> None:
+    """A clear foreign title cannot inherit a parent issue merely by sharing its number."""
+    parent = ImportedSeries(
+        raw_series_name="Fritzi Ritz",
+        cv_title="Fritzi Ritz",
+        cv_id=31895,
+        cv_match_method="mylar3_cv_id",
+        status=ImportSeriesStatus.MATCHED,
+    )
+    file = ImportedFile(
+        file_name="042 - Thunderbolts 105 (converted).cbz",
+        parsed_series="Fritzi Ritz",
+        parsed_issue_number=105,
+        diagnostics={
+            "source_issue_type": IssueType.ISSUE.value,
+            "comicvine_series_id": 31895,
+            "metadata_signals": {
+                "comicvine_series_id": "mylar3",
+                "issue_number": "release_title",
+            },
+            "source_metadata": {
+                "archive_metadata_loaded": True,
+                "archive_entry_issue_hint_checked": True,
+            },
+        },
+    )
+    metadata = source_metadata_for_import_file(parent, file)
+    entry = (None, None, False, None, "Coincidental parent issue")
+
+    assert metadata.diagnostics["filename_parse"]["series_name"] == (
+        "042 - Thunderbolts (converted)"
+    )
+
+    candidate, conflict = _evaluate_file_match_candidate(
+        imp_series=parent,
+        imp_file=file,
+        target_index=FileMatchTargetIndex(number_map={105: entry}),
+        target_series=None,
+        file_metadata=metadata,
+        semantic_match_engine=SemanticMatchEngine(policy=ImportPolicy()),
+        build_import_metadata_conflict=build_import_metadata_conflict,
+        series_high_confidence=True,
+    )
+
+    assert candidate is None
+    assert conflict is not None
+    assert conflict["conflict_type"] == "corroborated_file_series_mismatch"
+    assert conflict["corroborating_signals"] == ["filename_parse"]
+    assert conflict["preserve_series_match"] is True
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        "original issue name 001.cbz",
+        "Saga 001 dup.cbz",
+    ],
+)
+def test_uncorroborated_free_form_filename_does_not_override_parent(file_name: str) -> None:
+    metadata = SourceMetadata(
+        original_title=file_name,
+        series_name="Batman",
+        issue_number=1,
+        diagnostics={
+            "filename_parse": {
+                "series_name": file_name.rsplit(" ", 1)[0],
+                "issue_number": 1,
+            }
+        },
+    )
+
+    assert corroborated_import_title_conflict(metadata, "Batman") is None
 
 
 @pytest.mark.parametrize("corroboration", ["comicinfo", "archive_entry_issue_hint"])

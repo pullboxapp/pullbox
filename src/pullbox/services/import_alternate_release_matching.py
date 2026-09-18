@@ -16,6 +16,7 @@ from pullbox.services.import_cv_candidate_ranking import build_selected_candidat
 from pullbox.services.import_cv_search import search_with_retry
 from pullbox.services.import_known_cv_match import ComicVineMatchEvaluation
 from pullbox.services.import_match_candidates import (
+    build_ambiguous_series_conflict_diagnostics,
     build_candidate_diagnostics,
     build_signal_conflict_series_diagnostics,
     candidate_has_exact_title_match,
@@ -299,6 +300,41 @@ async def evaluate_alternate_release_candidates(
             ),
             reverse=True,
         )
+        competing_exact_candidate = next(
+            (
+                candidate
+                for candidate in candidate_diagnostics
+                if int(candidate.get("cv_id") or 0) != int(best_result.provider_id)
+                and candidate_has_exact_title_match(best_candidate)
+                and candidate_has_exact_title_match(candidate)
+                and candidate.get("normalized_title") == best_candidate.get("normalized_title")
+                and candidate.get("year") == best_candidate.get("year")
+                and float(candidate.get("score", 0.0)) >= match_threshold
+                and abs(float(candidate.get("score", 0.0)) - best_score)
+                <= _AMBIGUOUS_SERIES_MATCH_DELTA
+            ),
+            None,
+        )
+        if competing_exact_candidate is not None:
+            return ComicVineMatchEvaluation(
+                match=None,
+                diagnostics=build_ambiguous_series_conflict_diagnostics(
+                    raw_name=raw_name,
+                    raw_year=raw_year,
+                    match_threshold=match_threshold,
+                    selected_candidate={
+                        **best_candidate,
+                        "match_method": "alternate_release_candidate",
+                        "alternate_series_name": alternate_series,
+                    },
+                    competing_candidate={
+                        **competing_exact_candidate,
+                        "match_method": "alternate_release_candidate",
+                        "alternate_series_name": alternate_series,
+                    },
+                    top_candidates=_dedupe_and_sort_top_candidates(top_candidates)[:3],
+                ),
+            )
         evaluation = ComicVineMatchEvaluation(
             match={
                 "cv_id": int(best_result.provider_id),

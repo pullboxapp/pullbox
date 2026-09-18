@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +20,8 @@ from pullbox.core.config_resolver import get_application_secret
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.issue_numbers import parse_issue_number_text
 from pullbox.core.name_matcher import NameMatcher
+from pullbox.core.release_parser import parse_release_title
+from pullbox.core.story_arc_ordering import extract_story_arc_order_prefix
 from pullbox.models.audit_log import AuditEventType
 from pullbox.models.import_job import (
     ImportedFile,
@@ -29,7 +32,7 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
-from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryFile, LibraryFileStorageMode
 from pullbox.models.series import Series
 from pullbox.services.audit_service import AuditService
@@ -374,38 +377,72 @@ def _mixed_folder_source_identity(
     series_signal = str(signals.get("series_name") or "")
     issue_signal = str(signals.get("issue_number") or "")
     trusted_signals = {"comicinfo", "sidecar"}
-    if series_signal not in trusted_signals or issue_signal not in trusted_signals:
-        return None
-
     source_metadata = _mapping(diagnostics.get("source_metadata"))
     comicinfo = _mapping(source_metadata.get("comicinfo"))
-    if series_signal == "comicinfo":
-        source_series_name = str(comicinfo.get("series") or "").strip()
-    else:
-        source_series_name = str(imported_file.parsed_series or "").strip()
-    if issue_signal == "comicinfo":
-        source_issue_number = comicinfo.get("number")
-    else:
-        source_issue_number = imported_file.issue_number_raw or imported_file.parsed_issue_number
-    if not source_series_name or not isinstance(source_issue_number, str | float | int):
+    if series_signal in trusted_signals and issue_signal in trusted_signals:
+        if series_signal == "comicinfo":
+            source_series_name = str(comicinfo.get("series") or "").strip()
+        else:
+            source_series_name = str(imported_file.parsed_series or "").strip()
+        if issue_signal == "comicinfo":
+            source_issue_number = comicinfo.get("number")
+        else:
+            source_issue_number = (
+                imported_file.issue_number_raw or imported_file.parsed_issue_number
+            )
+        if not source_series_name or not isinstance(source_issue_number, str | float | int):
+            return None
+
+        trusted_series_cv_id = (
+            _safe_int(diagnostics.get("comicvine_series_id"))
+            if str(signals.get("comicvine_series_id") or "") in trusted_signals
+            else None
+        )
+        trusted_issue_cv_id = (
+            imported_file.comicvine_issue_id
+            if str(signals.get("comicvine_issue_id") or "") in trusted_signals
+            else None
+        )
+        return (
+            source_series_name,
+            source_issue_number,
+            trusted_series_cv_id,
+            trusted_issue_cv_id,
+            series_signal,
+        )
+
+    # Filename evidence may propose a review correction only when no trusted
+    # issue identity would be overridden. The later local lookup still requires
+    # a unique exact title-and-issue target before this becomes actionable.
+    if (
+        imported_file.comicvine_issue_id is not None
+        and str(signals.get("comicvine_issue_id") or "") in trusted_signals
+    ):
+        return None
+    identity_conflicts = source_metadata.get("identity_conflicts")
+    if isinstance(identity_conflicts, list) and identity_conflicts:
         return None
 
-    trusted_series_cv_id = (
-        _safe_int(diagnostics.get("comicvine_series_id"))
-        if str(signals.get("comicvine_series_id") or "") in trusted_signals
-        else None
-    )
-    trusted_issue_cv_id = (
-        imported_file.comicvine_issue_id
-        if str(signals.get("comicvine_issue_id") or "") in trusted_signals
-        else None
-    )
+    file_name = imported_file.file_name
+    order_prefix = extract_story_arc_order_prefix(file_name)
+    if order_prefix is not None:
+        file_name = order_prefix.residual_file_name
+    file_name = re.sub(r"\s*\(converted\)\s*", " ", file_name, flags=re.IGNORECASE)
+    parsed = parse_release_title(file_name)
+    if (
+        parsed is None
+        or parsed.is_pack
+        or parsed.issue_type is not IssueType.ISSUE
+        or not parsed.series_name
+        or parsed.issue_number is None
+    ):
+        return None
     return (
-        source_series_name,
-        source_issue_number,
-        trusted_series_cv_id,
-        trusted_issue_cv_id,
-        series_signal,
+        parsed.series_name,
+        parsed.issue_number_text or parsed.issue_number,
+        None,
+        None,
+        "filename_parse",
     )
 
 
@@ -423,6 +460,26 @@ async def _load_mixed_folder_resolutions(
         ),
         else_=ImportedFile.parsed_series,
     )
+    trusted_identity_filter = and_(
+        series_signal.in_(("comicinfo", "sidecar")),
+        issue_signal.in_(("comicinfo", "sidecar")),
+        func.lower(func.trim(source_title_expression))
+        != func.lower(
+            func.trim(
+                func.coalesce(
+                    func.nullif(ImportedSeries.cv_title, ""), ImportedSeries.raw_series_name
+                )
+            )
+        ),
+    )
+    filename_review_filter = and_(
+        ImportedSeries.files_no_match > 0,
+        or_(
+            issue_signal == "release_title",
+            ImportedFile.diagnostics["conflict_type"].as_string()
+            == "corroborated_file_series_mismatch",
+        ),
+    )
     source_rows = (
         await session.execute(
             select(ImportedFile, ImportedSeries, LibraryFile)
@@ -431,16 +488,7 @@ async def _load_mixed_folder_resolutions(
             .where(
                 ImportedFile.import_job_id == job_id,
                 ImportedFile.status.in_((ImportedFileStatus.NO_MATCH, ImportedFileStatus.IMPORTED)),
-                series_signal.in_(("comicinfo", "sidecar")),
-                issue_signal.in_(("comicinfo", "sidecar")),
-                func.lower(func.trim(source_title_expression))
-                != func.lower(
-                    func.trim(
-                        func.coalesce(
-                            func.nullif(ImportedSeries.cv_title, ""), ImportedSeries.raw_series_name
-                        )
-                    )
-                ),
+                or_(trusted_identity_filter, filename_review_filter),
             )
             .order_by(ImportedFile.id)
         )
@@ -501,20 +549,26 @@ async def _load_mixed_folder_resolutions(
     if not source_candidates:
         return ()
 
-    local_series = list((await session.scalars(select(Series))).all())
-    series_by_cv_id = {
-        int(series.comicvine_id): series
-        for series in local_series
-        if series.comicvine_id is not None and int(series.comicvine_id) in trusted_series_cv_ids
-    }
+    series_by_cv_id: dict[int, Series] = {}
     series_by_title: dict[str, list[Series]] = {}
-    for series in local_series:
-        normalized = NameMatcher.normalize(series.title)
-        if normalized in normalized_titles:
-            series_by_title.setdefault(normalized, []).append(series)
+    series_stream = await session.stream_scalars(
+        select(Series).order_by(Series.id).execution_options(yield_per=1_000)
+    )
+    try:
+        async for series in series_stream:
+            if (
+                series.comicvine_id is not None
+                and int(series.comicvine_id) in trusted_series_cv_ids
+            ):
+                series_by_cv_id[int(series.comicvine_id)] = series
+            normalized = NameMatcher.normalize(series.title)
+            if normalized in normalized_titles:
+                series_by_title.setdefault(normalized, []).append(series)
+    finally:
+        await series_stream.close()
 
     candidate_targets: list[
-        tuple[ImportedFile, ImportedSeries, str, str, str, Series, int | None]
+        tuple[ImportedFile, ImportedSeries, str, str, str, tuple[Series, ...], int | None]
     ] = []
     target_series_ids: set[int] = set()
     for (
@@ -527,12 +581,17 @@ async def _load_mixed_folder_resolutions(
         evidence_source,
     ) in source_candidates:
         target_series = series_by_cv_id.get(series_cv_id) if series_cv_id is not None else None
-        if target_series is None:
-            title_matches = series_by_title.get(NameMatcher.normalize(source_title), [])
-            if len(title_matches) != 1:
-                continue
-            target_series = title_matches[0]
-        if imported_series.series_id == target_series.id:
+        target_series_options = (
+            (target_series,)
+            if target_series is not None
+            else tuple(series_by_title.get(NameMatcher.normalize(source_title), []))
+        )
+        if not target_series_options:
+            continue
+        target_series_options = tuple(
+            series for series in target_series_options if imported_series.series_id != series.id
+        )
+        if not target_series_options:
             continue
         candidate_targets.append(
             (
@@ -541,11 +600,11 @@ async def _load_mixed_folder_resolutions(
                 source_title,
                 exact_number,
                 evidence_source,
-                target_series,
+                target_series_options,
                 issue_cv_id,
             )
         )
-        target_series_ids.add(int(target_series.id))
+        target_series_ids.update(int(series.id) for series in target_series_options)
     if not candidate_targets:
         return ()
 
@@ -556,6 +615,11 @@ async def _load_mixed_folder_resolutions(
     ]
     issues_by_cv_id = {
         int(issue.comicvine_id): issue for issue in target_issues if issue.comicvine_id is not None
+    }
+    target_series_by_id = {
+        int(series.id): series
+        for _file, _parent, _title, _number, _source, options, _issue_id in candidate_targets
+        for series in options
     }
     issues_by_number: dict[tuple[int, str], list[Issue]] = {}
     for issue in target_issues:
@@ -570,19 +634,27 @@ async def _load_mixed_folder_resolutions(
         source_title,
         exact_number,
         evidence_source,
-        target_series,
+        target_series_options,
         issue_cv_id,
     ) in candidate_targets:
+        target_series_option_ids = {int(series.id) for series in target_series_options}
         target_issue: Issue | None = (
             issues_by_cv_id.get(issue_cv_id) if issue_cv_id is not None else None
         )
-        if target_issue is not None and target_issue.series_id != target_series.id:
+        if target_issue is not None and target_issue.series_id not in target_series_option_ids:
             target_issue = None
         if target_issue is None:
-            number_matches = issues_by_number.get((int(target_series.id), exact_number), [])
+            number_matches = [
+                issue
+                for series_id in target_series_option_ids
+                for issue in issues_by_number.get((series_id, exact_number), [])
+            ]
             if len(number_matches) != 1:
                 continue
             target_issue = number_matches[0]
+        target_series = target_series_by_id.get(int(target_issue.series_id))
+        if target_series is None:
+            continue
         resolved_targets.append(
             (
                 imported_file,
