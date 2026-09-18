@@ -34,6 +34,26 @@ recovery is available in Import Follow-up and does not require an
 offline command. It works for Mylar and folder imports. This is not a full
 rescan, a database restore, or an import.
 
+## Managed File Publication
+
+Mylar and folder imports publish completed sibling staging files with an atomic
+no-overwrite rename where available (Linux `RENAME_NOREPLACE`, macOS
+`RENAME_EXCL`, or Windows exclusive rename). Copy mode therefore does not
+require hard-link support. If exclusive rename is unsupported, the existing
+link/unlink publication remains a fallback. Pullbox never falls back to an
+overwriting rename or exposes a partially copied final file. Existing targets,
+including dangling symlinks, remain protected; journaled stages and source
+restoration retain their existing recovery rules.
+
+Confirmation and execution preflight exercise publication and collision
+protection with disposable files under each selected managed destination.
+Failure returns an actionable storage message before bulk work starts. The
+probe runs off the event loop, does not change import source files, and does not
+run for reference-only in-place imports. A root probe cannot guarantee that
+every existing subdirectory has the same permissions or that a mount will stay
+available; execution failures retain the destination and underlying filesystem
+error for retry. No database migration is required.
+
 ## Mylar Inventory And Missing References
 
 Copy and keep-in-place scans retain the same Mylar file inventory, including

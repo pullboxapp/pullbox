@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from pullbox.core.exceptions import ImportDestinationValidationError
+from pullbox.services import import_file_registration_adapters
 from pullbox.services.import_file_registration_adapters import (
     build_import_library_file_adapters,
 )
@@ -29,6 +31,106 @@ def _build_adapters(
         transfer_artifact_interruptible=transfer or AsyncMock(),
         materialize_cbz_with_comicinfo_interruptible=materializer or AsyncMock(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("materialize", [False, True])
+async def test_copy_publication_does_not_require_hardlink_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, materialize: bool
+) -> None:
+    source = tmp_path / "incoming.cbz"
+    source.write_bytes(b"source comic")
+    target = tmp_path / "library" / "issue.cbz"
+    target.parent.mkdir()
+
+    def refuse_hardlink(*args: object, **kwargs: object) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", refuse_hardlink)
+
+    async def write_stage(
+        _session: object,
+        _job: object,
+        source_path: Path,
+        stage_path: Path,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        stage_path.write_bytes(source_path.read_bytes())
+        return True
+
+    adapters = _build_adapters(transfer=write_stage, materializer=write_stage)
+    if materialize:
+        await adapters.comicinfo_materializer(source, target, {}, transfer_method="copy")
+    else:
+        await adapters.artifact_transfer(source, target, "copy")
+
+    assert target.read_bytes() == b"source comic"
+    assert source.read_bytes() == b"source comic"
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_atomic_publication_catches_destination_appearing_after_collision_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    stage.write_bytes(b"new comic")
+    publish = import_file_registration_adapters.publish_file_without_overwrite
+
+    def racing_publish(source_path: Path, target_path: Path) -> None:
+        target_path.write_bytes(b"late arrival")
+        publish(source_path, target_path)
+
+    monkeypatch.setattr(
+        import_file_registration_adapters, "publish_file_without_overwrite", racing_publish
+    )
+
+    with pytest.raises(ImportDestinationValidationError, match="appeared during import"):
+        import_file_registration_adapters._publish_stage_without_overwrite(stage, target)
+
+    assert target.read_bytes() == b"late arrival"
+    assert stage.read_bytes() == b"new comic"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("materialize", [False, True])
+async def test_publication_failure_is_actionable_and_preserves_copy_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, materialize: bool
+) -> None:
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.write_bytes(b"comic")
+
+    async def write_stage(
+        _session: object,
+        _job: object,
+        source_path: Path,
+        stage_path: Path,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        stage_path.write_bytes(source_path.read_bytes())
+        return True
+
+    monkeypatch.setattr(
+        import_file_registration_adapters,
+        "publish_file_without_overwrite",
+        Mock(side_effect=PermissionError(errno.EPERM, "Operation not permitted")),
+    )
+    adapters = _build_adapters(transfer=write_stage, materializer=write_stage)
+
+    with pytest.raises(PermissionError, match="Cannot safely publish") as error:
+        if materialize:
+            await adapters.comicinfo_materializer(source, target, {}, transfer_method="copy")
+        else:
+            await adapters.artifact_transfer(source, target, "copy")
+
+    assert error.value.errno == errno.EPERM
+    assert "Operation not permitted" in str(error.value)
+    assert str(tmp_path) in str(error.value)
+    assert "container user's file permissions" in str(error.value)
+    assert source.read_bytes() == b"comic"
+    assert not target.exists()
+    assert not list(tmp_path.glob(".pullbox-import-*"))
 
 
 @pytest.mark.asyncio
