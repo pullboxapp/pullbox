@@ -53,11 +53,18 @@ def _series_metadata(cv_id: int) -> SeriesMetadata:
     )
 
 
+@pytest.mark.parametrize(
+    "review_reason",
+    [None, "volume_leaf_identity_unconfirmed", "volume_leaf_release_unconfirmed"],
+)
 async def test_override_cv_id_sets_metadata_and_reruns_matching(
     db_session: AsyncSession,
+    review_reason: str | None,
 ) -> None:
     job = await _create_job_row(db_session)
     series = await _create_series_row(db_session, job)
+    if review_reason:
+        series.diagnostics = {"kind": "source_layout_review", "reason": review_reason}
     calls: list[tuple[str, list[int] | None]] = []
 
     async def fetch_series_metadata(cv_id: int) -> SeriesMetadata:
@@ -134,6 +141,7 @@ async def test_override_cv_id_sets_metadata_and_reruns_matching(
     assert updated.cv_title == "Batman"
     assert updated.cv_publisher == "DC Comics"
     assert updated.cv_match_method == "user_override"
+    assert updated.diagnostics == {}
     assert calls == [
         ("reclassify", [series.id]),
         ("reset", [series.id]),

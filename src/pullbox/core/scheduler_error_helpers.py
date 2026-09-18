@@ -29,7 +29,7 @@ def is_unusable_persist_error(exc: BaseException) -> bool:
 
 def logical_task_id(job_id: str) -> str:
     """Normalize scheduler one-shot job IDs to their logical task IDs."""
-    suffix = "_manual"
-    if job_id.endswith(suffix):
-        return job_id[: -len(suffix)]
+    for suffix in ("_manual", "__continuation", "__exclusive_retry"):
+        if job_id.endswith(suffix):
+            return job_id[: -len(suffix)]
     return job_id

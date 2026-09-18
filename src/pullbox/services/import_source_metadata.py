@@ -19,6 +19,7 @@ from pullbox.core.source_metadata import (
     SourceMetadataExtractor,
     volume_subtitle_hint_from_filename,
 )
+from pullbox.core.story_arc_ordering import extract_story_arc_order_prefix
 from pullbox.core.type_semantics import issue_type_family
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
 from pullbox.models.issue import IssueType
@@ -287,6 +288,15 @@ def source_metadata_for_import_file(
     if not isinstance(source_diagnostics, dict):
         source_diagnostics = {}
     source_diagnostics = dict(source_diagnostics)
+    if "filename_parse" not in source_diagnostics and parsed_filename is not None:
+        source_diagnostics["filename_parse"] = {
+            "series_name": parsed_filename.series_name,
+            "issue_number": parsed_filename.issue_number,
+            "issue_number_text": parsed_filename.issue_number_text,
+            "year": parsed_filename.year,
+            "volume": parsed_filename.volume,
+            "issue_type": parsed_filename.issue_type.value,
+        }
     volume_hint = _volume_subtitle_hint(imp_file.file_name, diagnostics)
     series_name = imp_file.parsed_series or imp_series.raw_series_name
     issue_number = imp_file.parsed_issue_number
@@ -1011,7 +1021,7 @@ async def source_metadata_for_matching_series(
 def corroborated_import_title_conflict(
     metadata: SourceMetadata, target_series_title: str
 ) -> dict[str, Any] | None:
-    """Protect extended comic titles from a shorter parent-ID or number match."""
+    """Protect corroborated foreign titles from a parent-ID or number match."""
     if metadata.issue_type in _TYPE_QUALIFIED_SERIES_HINT_TYPES:
         return None
     filename = metadata.diagnostics.get("filename_parse")
@@ -1020,12 +1030,17 @@ def corroborated_import_title_conflict(
     source_title = str(filename.get("series_name") or "").strip()
     exact_types = {"exact", "alternate", "token_set"}
     target_name = NameMatcher.normalize(target_series_title)
-    # Limit this guard to corroborated title extensions. Alternate catalog names
-    # and type-qualified annual/special buckets still use the established matcher.
+    title_match = _matcher.match(source_title, target_series_title)
+    normalized_source_title = NameMatcher.normalize(source_title)
+    is_corroborated_extension = normalized_source_title.startswith(f"{target_name} ")
+    is_clearly_unrelated = not title_match.is_match
+    # Preserve established alternate-title matching while rejecting either a
+    # corroborated title extension or a title the shared matcher cannot relate
+    # to the inherited parent at all.
     if (
         not target_name
-        or not NameMatcher.normalize(source_title).startswith(f"{target_name} ")
-        or _matcher.match(source_title, target_series_title).match_type in exact_types
+        or title_match.match_type in exact_types
+        or not (is_corroborated_extension or is_clearly_unrelated)
     ):
         return None
     corroboration: dict[str, str] = {}
@@ -1040,6 +1055,14 @@ def corroborated_import_title_conflict(
         for signal, title in corroboration.items()
         if title and _matcher.match(source_title, title).match_type in exact_types
     ]
+    # A wholly unrelated title is trustworthy by itself only when the filename
+    # has an explicit reading-order prefix. Free-form names and variant suffixes
+    # are too noisy to override the parent folder without ComicInfo or archive
+    # page corroboration. This guard blocks a coincidental parent issue-number
+    # match but never reassigns the file automatically.
+    reading_order_prefix = extract_story_arc_order_prefix(metadata.original_title or "")
+    if is_clearly_unrelated and reading_order_prefix is not None and not agreeing:
+        agreeing.append("filename_parse")
     if not agreeing:
         return None
     return {
@@ -1050,8 +1073,8 @@ def corroborated_import_title_conflict(
         "target_series": target_series_title,
         "corroborating_signals": agreeing,
         "rejection_reason": (
-            f"The filename and local file metadata identify {source_title}, "
-            f"not {target_series_title}. Choose the correct series and issue for this file."
+            f"Local file evidence identifies {source_title}, not {target_series_title}. "
+            "Choose the correct series and issue for this file."
         ),
     }
 

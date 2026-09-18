@@ -1606,11 +1606,16 @@ async def _sync_wanted_sweep_schedule(
     )
 
 
+_SEARCH_LOG_PURGE_BATCH_SIZE = 500
+
+
 async def purge_search_logs() -> None:
     """Delete search log entries older than the configured retention period."""
     from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import delete, select
+
+    from pullbox.core.sqlite_lock import run_sqlite_transaction_with_retry
 
     factory = get_session_factory()
 
@@ -1619,11 +1624,31 @@ async def purge_search_logs() -> None:
             retention_days = await _load_search_log_retention_days(session)
 
             cutoff = datetime.now(UTC) - timedelta(days=retention_days)
-            old_search_log_ids = select(SearchLog.id).where(SearchLog.created_at < cutoff)
-            await prune_unstarted_direct_discoveries(session, old_search_log_ids)
-            result = await session.execute(delete(SearchLog).where(SearchLog.created_at < cutoff))
-            pruned = result.rowcount  # type: ignore[attr-defined]
             await session.commit()
+            pruned = 0
+
+            async def purge_batch() -> int:
+                ids = list(
+                    (
+                        await session.scalars(
+                            select(SearchLog.id)
+                            .where(SearchLog.created_at < cutoff)
+                            .order_by(SearchLog.id)
+                            .limit(_SEARCH_LOG_PURGE_BATCH_SIZE)
+                        )
+                    ).all()
+                )
+                if not ids:
+                    return 0
+                await prune_unstarted_direct_discoveries(session, ids)
+                await session.execute(delete(SearchLog).where(SearchLog.id.in_(ids)))
+                return len(ids)
+
+            while count := await run_sqlite_transaction_with_retry(
+                session, purge_batch, event_name="purge_search_logs", logger=logger
+            ):
+                pruned += count
+                await asyncio.sleep(0)
 
             if pruned:
                 logger.info(

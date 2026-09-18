@@ -58,6 +58,7 @@ from pullbox.services.import_job_actions import seed_action_sequence_cache
 from pullbox.services.import_placement_recovery import (
     has_completed_direct_move_placement_record,
 )
+from pullbox.services.import_recovery_source import refresh_recovery_source
 from pullbox.services.import_referenced_sources import revalidate_mylar_in_place_file_root
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.utilities.settings import restore_file_from_utility_trash
@@ -1045,6 +1046,7 @@ async def process_import_series_files(
         registration_library_root_id = None if in_place else target_library_root_id
         try:
             await raise_if_cancelled(session, job_id)
+            await refresh_recovery_source(session, current_job, item, imp_file)
             if in_place and current_job.source_type == ImportSourceType.MYLAR3:
                 registration_library_root_id = await revalidate_mylar_in_place_file_root(
                     session,
@@ -1621,6 +1623,7 @@ async def process_import_series_files(
                 continue
             if isinstance(exc, ReferencedFileValidationError):
                 diagnostics = dict(imp_file.diagnostics or {})
+                previous_block = diagnostics.get("source_revalidation")
                 diagnostics["source_revalidation"] = build_import_safety_diagnostics(
                     str(exc),
                     kind="source_revalidation",
@@ -1628,6 +1631,8 @@ async def process_import_series_files(
                     source="source_revalidation",
                     overrideable_hint=False,
                 )
+                if isinstance(previous_block, dict) and previous_block.get("code") == exc.reason:
+                    diagnostics["source_revalidation"].update(previous_block)
                 imp_file.status = ImportedFileStatus.FAILED
                 imp_file.include_in_import = False
                 imp_file.error_message = str(exc)
@@ -1638,7 +1643,7 @@ async def process_import_series_files(
                     job_id,
                     "WARNING",
                     "import_file_source_revalidation_failed",
-                    message=f"Source changed after scan; rescan before retry: {imp_file_name}",
+                    message=f"Source validation requires review: {imp_file_name}",
                     source_path=imp_file_path,
                     reason=exc.reason,
                 )

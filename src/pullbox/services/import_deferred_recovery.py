@@ -112,6 +112,7 @@ def protected_file(file: ImportedFile, item: ImportedSeries) -> bool:
                 "safety_review",
             )
         )
+        or (diagnostics.get("kind") == "metadata_conflict" and bool(provider_ids(file)))
         or _unresolved_identity_conflicts(file)
         or (
             file.conflict_group_id is not None

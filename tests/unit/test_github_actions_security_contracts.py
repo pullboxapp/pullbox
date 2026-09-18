@@ -1063,6 +1063,8 @@ def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() 
         )
         for package in ("zlib1g", "zlib1g-dev")
     } | {
+        ("CVE-2026-85091", "zlib1g", "1:1.3.dfsg+really1.3.1-1+dhi4", "deb"),
+    } | {
         (cve, "libuuid1", version, "deb")
         for cve in reviewed_cves - {"CVE-2026-85091"}
         for version in ("2.41.5-0+deb13u1+dhi2", "2.41.5-0+deb13u1+dhi3")

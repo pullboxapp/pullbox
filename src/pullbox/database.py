@@ -11,11 +11,12 @@ import asyncio
 import shutil
 import sqlite3
 import stat
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Awaitable
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from weakref import WeakSet
 
 import structlog
 from sqlalchemy import event
@@ -23,6 +24,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
+    AsyncSessionTransaction,
     async_sessionmaker,
     create_async_engine,
 )
@@ -37,6 +39,9 @@ _maintenance_gate = asyncio.Event()
 _maintenance_gate.set()
 _maintenance_lock = asyncio.Lock()
 _maintenance_reason: str | None = None
+_MAINTENANCE_DRAIN_SECONDS = 5.0
+_active_sessions: WeakSet["GateAwareAsyncSession"] = WeakSet()
+_draining_transactions: dict["GateAwareAsyncSession", AsyncSessionTransaction] = {}
 _SQLITE_BUSY_TIMEOUT_MS = 15000
 _SQLITE_BUSY_TIMEOUT_PRAGMA = "PRAGMA busy_timeout=15000"
 _SQLITE_ALLOWED_JOURNAL_MODES = frozenset({"WAL", "DELETE"})
@@ -46,10 +51,21 @@ _SQLITE_JOURNAL_MODE_PRAGMAS = {
 }
 
 
+class DatabaseMaintenanceBusyError(RuntimeError):
+    """Existing transactions could not drain; maintenance may be retried later."""
+
+
 class GateAwareAsyncSession(AsyncSession):
     """AsyncSession that pauses database I/O while maintenance is active."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        _active_sessions.add(self)
+
     async def _wait_for_ready(self) -> None:
+        transaction = _draining_transactions.get(self)
+        if transaction is not None and self.get_transaction() is transaction:
+            return
         await wait_for_database_ready()
 
     async def connection(self, *args: Any, **kwargs: Any) -> Any:
@@ -385,6 +401,24 @@ async def dispose_engine() -> None:
         logger.debug("database_engine_disposed")
 
 
+async def await_maintenance_worker[T](operation: Awaitable[T]) -> T:
+    """Keep the maintenance fence until a non-cancellable worker actually stops."""
+    worker = asyncio.ensure_future(operation)
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(BaseException):
+            worker.result()
+        raise
+
+
 @asynccontextmanager
 async def database_maintenance_window(*, reason: str) -> AsyncGenerator[None, None]:
     """Temporarily pause new DB sessions for exclusive maintenance work."""
@@ -394,10 +428,28 @@ async def database_maintenance_window(*, reason: str) -> AsyncGenerator[None, No
         _maintenance_reason = reason
         _maintenance_gate.clear()
         try:
+            _draining_transactions.update(
+                (session, transaction)
+                for session in tuple(_active_sessions)
+                if (transaction := session.get_transaction()) is not None
+            )
+            try:
+                async with asyncio.timeout(_MAINTENANCE_DRAIN_SECONDS):
+                    while any(
+                        session.get_transaction() is transaction
+                        for session, transaction in _draining_transactions.items()
+                    ):
+                        await asyncio.sleep(0.01)
+            except TimeoutError as exc:
+                raise DatabaseMaintenanceBusyError(
+                    "Database is busy; retry maintenance after current work finishes."
+                ) from exc
+            _draining_transactions.clear()
             await dispose_engine()
             logger.info("database_maintenance_started", reason=reason)
             yield
         finally:
+            _draining_transactions.clear()
             _maintenance_gate.set()
             _maintenance_reason = None
             logger.info("database_maintenance_finished", reason=reason)

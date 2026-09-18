@@ -13,13 +13,16 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
-from pullbox.providers.base import IssueSummary, SeriesMetadata
+from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
 from pullbox.services.catalog.reader import CatalogIssueSummary
 from pullbox.services.import_deferred_recovery import (
     apply_deferred_recovery,
     plan_deferred_recovery,
 )
-from pullbox.services.import_deferred_recovery_execution import prepare_deferred_recovery
+from pullbox.services.import_deferred_recovery_execution import (
+    _search_exact_title_catalog,
+    prepare_deferred_recovery,
+)
 from tests.unit.test_import_deferred_recovery import add_file, register, seed
 
 
@@ -148,6 +151,411 @@ async def test_background_recovery_fetches_each_candidate_catalog_once_and_resum
     provider.get_series_metadata.assert_awaited_once_with(700)
     assert not await prepare_deferred_recovery(db_session, job.id, metadata_service=provider)
     assert provider.get_issue_summaries_for_series.await_count == 1
+
+
+async def test_background_recovery_uses_unique_exact_local_catalog_title_and_issue(
+    db_session,
+):
+    job, item, _, _, _ = await seed(db_session)
+    item.raw_series_name = "New Avengers"
+    item.raw_year = 2004
+    item.cv_id = 11497
+    item.series_id = None
+    file = await add_file(
+        db_session,
+        job,
+        item,
+        file_path="/comics/New Avengers/New Avengers Finale 01 (2010).cbr",
+        file_name="New Avengers Finale 01 (2010).cbr",
+        parsed_series="New Avengers",
+        parsed_issue_number=1,
+        parsed_year=2010,
+        comicvine_issue_id=None,
+        diagnostics={
+            "source_issue_type": "issue",
+            "metadata_signals": {"issue_number": "release_title"},
+            "source_metadata": {
+                "filename_parse": {
+                    "series_name": "New Avengers Finale",
+                    "issue_number": 1,
+                    "issue_number_text": "1",
+                    "year": 2010,
+                    "volume": None,
+                    "issue_type": "issue",
+                },
+                "archive_entry_issue_hint": {
+                    "series_name": "New Avengers Finale",
+                    "issue_number": 1,
+                    "confidence": "strong",
+                },
+            },
+            "kind": "metadata_conflict",
+            "conflict_type": "corroborated_file_series_mismatch",
+        },
+    )
+    job.status = ImportJobStatus.IMPORTING
+    job.progress_snapshot = {"deferred_recovery": {"state": "queued"}}
+    metadata = AsyncMock()
+    metadata.search_catalog_series.return_value = [
+        SeriesSearchResult(
+            provider_id="33091",
+            title="New Avengers Finale",
+            year_start=2010,
+            publisher="Marvel",
+            issue_count=1,
+            status="Ended",
+            cover_url=None,
+            description=None,
+        )
+    ]
+    metadata.get_catalog_issue_summaries_for_series.return_value = [
+        IssueSummary(
+            provider_id="247986",
+            issue_number=1,
+            issue_number_text="1",
+            title="Finale",
+            release_date="2010-06-01",
+            cover_url=None,
+            issue_type="issue",
+        )
+    ]
+
+    assert await prepare_deferred_recovery(db_session, job.id, metadata_service=metadata)
+
+    assert file.status is ImportedFileStatus.CONFIRMED
+    assert file.matched_issue_cv_id == 247986
+    target = await db_session.get(ImportedSeries, file.import_series_id)
+    assert target.cv_id == 33091
+    assert target.cv_title == "New Avengers Finale"
+    assert file.diagnostics["deferred_recovery"]["action"] == "catalog_title_identity"
+    metadata.search_catalog_series.assert_awaited_once_with("New Avengers Finale", limit=1000)
+    metadata.get_catalog_issue_summaries_for_series.assert_awaited_once_with(33091)
+    assert not await prepare_deferred_recovery(db_session, job.id, metadata_service=metadata)
+    assert metadata.search_catalog_series.await_count == 1
+
+
+async def test_catalog_title_years_are_scoped_to_each_issue_designation() -> None:
+    metadata = AsyncMock()
+    metadata.search_catalog_series.return_value = [
+        SeriesSearchResult(
+            provider_id="123",
+            title="Example Annual",
+            year_start=2000,
+            publisher="Example",
+            issue_count=2,
+            status="Ended",
+            cover_url=None,
+            description=None,
+        )
+    ]
+    metadata.get_catalog_issue_summaries_for_series.return_value = [
+        IssueSummary(
+            provider_id="1001",
+            issue_number=1,
+            issue_number_text="1",
+            title=None,
+            release_date="2010-01-01",
+            cover_url=None,
+            issue_type="issue",
+        ),
+        IssueSummary(
+            provider_id="1002",
+            issue_number=2,
+            issue_number_text="2",
+            title=None,
+            release_date="2000-01-01",
+            cover_url=None,
+            issue_type="issue",
+        ),
+    ]
+
+    matches = await _search_exact_title_catalog(
+        metadata,
+        {
+            "query": "Example Annual",
+            "issue_numbers": ["1", "2"],
+            "years": [2000, 2010],
+            "years_by_issue": {"1": [2000], "2": [2010]},
+        },
+    )
+
+    assert matches == {}
+
+
+@pytest.mark.parametrize(
+    (
+        "parent_title",
+        "file_name",
+        "source_issue_type",
+        "catalog_title",
+        "catalog_series_id",
+        "catalog_issue_id",
+        "issue_number",
+        "year",
+    ),
+    [
+        (
+            "Fantastic Four",
+            "Fantastic Four Annual 032 (2010).cbz",
+            "annual",
+            "Fantastic Four Annual",
+            2129,
+            220032,
+            32,
+            2010,
+        ),
+        (
+            "Uncanny X-Men",
+            "Uncanny X-Men Special 001 (2009).cbz",
+            "special",
+            "Uncanny X-Men Special",
+            74730,
+            747301,
+            1,
+            2009,
+        ),
+        (
+            "Ultimate Fantastic Four",
+            "Ultimate Fantastic Four - Ultimate X-Men Annual 001 (2006).cbz",
+            "annual",
+            "Ultimate Fantastic Four - Ultimate X-Men Annual",
+            23137,
+            231371,
+            1,
+            2006,
+        ),
+    ],
+)
+async def test_background_recovery_reparses_older_rows_without_saved_filename_parse(
+    db_session,
+    parent_title,
+    file_name,
+    source_issue_type,
+    catalog_title,
+    catalog_series_id,
+    catalog_issue_id,
+    issue_number,
+    year,
+):
+    job, item, _, _, _ = await seed(db_session)
+    item.raw_series_name = parent_title
+    item.raw_year = year
+    item.cv_id = 90000
+    item.series_id = None
+    file = await add_file(
+        db_session,
+        job,
+        item,
+        file_name=file_name,
+        parsed_series=parent_title,
+        parsed_issue_number=issue_number,
+        parsed_year=year,
+        comicvine_issue_id=None,
+        diagnostics={
+            "source_issue_type": source_issue_type,
+            "metadata_signals": {"issue_number": "release_title"},
+            # Older completed imports did not persist filename_parse here.
+            "source_metadata": {},
+        },
+    )
+    job.status = ImportJobStatus.IMPORTING
+    job.progress_snapshot = {"deferred_recovery": {"state": "queued"}}
+    metadata = AsyncMock()
+    metadata.search_catalog_series.return_value = [
+        SeriesSearchResult(
+            provider_id=str(catalog_series_id),
+            title=catalog_title,
+            year_start=year,
+            publisher="Marvel",
+            issue_count=1,
+            status="Ended",
+            cover_url=None,
+            description=None,
+        )
+    ]
+    metadata.get_catalog_issue_summaries_for_series.return_value = [
+        IssueSummary(
+            provider_id=str(catalog_issue_id),
+            issue_number=issue_number,
+            issue_number_text=str(issue_number),
+            title=None,
+            release_date=f"{year}-06-01",
+            cover_url=None,
+            issue_type="issue",
+        )
+    ]
+
+    assert await prepare_deferred_recovery(db_session, job.id, metadata_service=metadata)
+
+    assert file.status is ImportedFileStatus.CONFIRMED
+    assert file.matched_issue_cv_id == catalog_issue_id
+    target = await db_session.get(ImportedSeries, file.import_series_id)
+    assert target.cv_id == catalog_series_id
+    assert target.cv_title == catalog_title
+    metadata.search_catalog_series.assert_awaited_once_with(catalog_title, limit=1000)
+
+
+async def test_background_recovery_keeps_duplicate_exact_catalog_titles_in_review(db_session):
+    job, item, _, _, _ = await seed(db_session)
+    item.raw_series_name = "X-Men"
+    item.raw_year = 2021
+    item.cv_id = 137402
+    item.series_id = None
+    file = await add_file(
+        db_session,
+        job,
+        item,
+        file_name="X-Men Annual 001 (2023).cbr",
+        parsed_series="X-Men",
+        parsed_issue_number=1,
+        parsed_year=2023,
+        comicvine_issue_id=None,
+        diagnostics={
+            "source_issue_type": "annual",
+            "metadata_signals": {"issue_number": "release_title"},
+            "source_metadata": {
+                "filename_parse": {
+                    "series_name": "X-Men",
+                    "issue_number": 1,
+                    "issue_number_text": "1",
+                    "year": 2023,
+                    "issue_type": "annual",
+                }
+            },
+        },
+    )
+    job.status = ImportJobStatus.IMPORTING
+    job.progress_snapshot = {"deferred_recovery": {"state": "queued"}}
+    metadata = AsyncMock()
+    metadata.search_catalog_series.return_value = [
+        SeriesSearchResult(
+            provider_id="146988",
+            title="X-Men Annual",
+            year_start=2023,
+            publisher="Marvel",
+            issue_count=1,
+            status="Ended",
+            cover_url=None,
+            description=None,
+        ),
+        SeriesSearchResult(
+            provider_id="146999",
+            title="X-Men Annual",
+            year_start=2023,
+            publisher="Marvel",
+            issue_count=1,
+            status="Ended",
+            cover_url=None,
+            description=None,
+        ),
+    ]
+    metadata.get_catalog_issue_summaries_for_series.side_effect = [
+        [
+            IssueSummary(
+                provider_id="10001",
+                issue_number=1,
+                issue_number_text="1",
+                title=None,
+                release_date="2023-06-01",
+                cover_url=None,
+                issue_type="issue",
+            )
+        ],
+        [
+            IssueSummary(
+                provider_id="10002",
+                issue_number=1,
+                issue_number_text="1",
+                title=None,
+                release_date="2023-08-01",
+                cover_url=None,
+                issue_type="issue",
+            )
+        ],
+    ]
+
+    assert await prepare_deferred_recovery(db_session, job.id, metadata_service=metadata)
+
+    assert file.status is ImportedFileStatus.NO_MATCH
+    assert file.import_series_id == item.id
+    assert job.status is ImportJobStatus.COMPLETED
+
+
+async def test_background_recovery_never_overrides_conflicting_saved_provider_issue(
+    db_session,
+):
+    job, item, _, _, _ = await seed(db_session)
+    item.raw_series_name = "New Avengers"
+    item.raw_year = 2013
+    item.cv_id = 55330
+    item.series_id = None
+    file = await add_file(
+        db_session,
+        job,
+        item,
+        file_name="New Avengers - Ultron Forever 001 (2015).cbr",
+        parsed_series="New Avengers",
+        parsed_issue_number=1,
+        parsed_year=2015,
+        comicvine_issue_id=376665,
+        diagnostics={
+            "source_issue_type": "issue",
+            "comicvine_series_id": 55330,
+            "metadata_signals": {
+                "comicvine_series_id": "mylar3",
+                "comicvine_issue_id": "mylar3",
+            },
+            "source_metadata": {
+                "filename_parse": {
+                    "series_name": "New Avengers - Ultron Forever",
+                    "issue_number": 1,
+                    "issue_number_text": "1",
+                    "year": 2015,
+                    "issue_type": "issue",
+                },
+                "archive_entry_issue_hint": {
+                    "series_name": "New Avengers - Ultron Forever",
+                    "issue_number": 1,
+                    "confidence": "strong",
+                },
+            },
+            "kind": "metadata_conflict",
+            "conflict_type": "corroborated_file_series_mismatch",
+        },
+    )
+    job.status = ImportJobStatus.IMPORTING
+    job.progress_snapshot = {"deferred_recovery": {"state": "queued"}}
+    metadata = AsyncMock()
+    metadata.get_series_metadata.return_value = SeriesMetadata(
+        provider_id="55330",
+        title="New Avengers",
+        sort_title="new avengers",
+        year_start=2013,
+        year_end=None,
+        status="Ended",
+        publisher="Marvel",
+        description=None,
+        cover_url=None,
+        issue_count=34,
+        comicvine_url=None,
+    )
+    metadata.get_issue_summaries_for_series.return_value = [
+        IssueSummary(
+            provider_id="376665",
+            issue_number=1,
+            issue_number_text="1",
+            title=None,
+            release_date="2013-01-01",
+            cover_url=None,
+            issue_type="issue",
+        )
+    ]
+
+    assert await prepare_deferred_recovery(db_session, job.id, metadata_service=metadata)
+
+    assert file.status is ImportedFileStatus.NO_MATCH
+    assert file.import_series_id == item.id
+    metadata.search_catalog_series.assert_not_awaited()
 
 
 async def test_catalog_checkpoint_serializes_local_catalog_cutoff(db_session):

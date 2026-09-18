@@ -8,6 +8,7 @@ metadata, once the restored database is active.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -23,6 +24,7 @@ logger = structlog.get_logger(__name__)
 
 RESTORE_RECOVERY_MARKER_FILENAME = "restore_recovery_pending.json"
 RESTORE_RECOVERY_STATUS_FILENAME = "restore_recovery_status.json"
+_SWEEP_POLL_SECONDS = 5.0
 
 _STEP_DEFINITIONS = (
     ("cover_backfill", "Backfill series cover cache"),
@@ -153,15 +155,35 @@ async def _run_cover_backfill_step() -> str:
 async def _run_issue_sync_step() -> str:
     from pullbox.tasks.metadata_task import sync_new_issues
 
-    await sync_new_issues()
+    result = await sync_new_issues()
+    if result.status == "waiting":
+        await _wait_for_metadata_sweep("sync_new_issues")
     return "ComicVine issue catalog sync completed."
 
 
 async def _run_metadata_refresh_step() -> str:
     from pullbox.tasks.metadata_task import refresh_metadata
 
-    await refresh_metadata()
+    result = await refresh_metadata()
+    if result.status == "waiting":
+        await _wait_for_metadata_sweep("refresh_metadata")
     return "Series metadata refresh completed."
+
+
+async def _wait_for_metadata_sweep(task_id: str) -> None:
+    """Observe scheduled continuation batches without holding a database transaction."""
+    from pullbox.database import get_session_factory
+    from pullbox.tasks.metadata_sweep_state import load_sweep
+
+    factory = get_session_factory()
+    while True:
+        async with factory() as session:
+            state = await load_sweep(session, task_id)
+        if not state.active:
+            return
+        # The scheduler owns remaining work and provider cooldowns. Cancellation
+        # leaves the restore marker and durable sweep checkpoint for startup.
+        await asyncio.sleep(_SWEEP_POLL_SECONDS)
 
 
 async def run_restore_recovery_if_pending(

@@ -44,6 +44,11 @@ if TYPE_CHECKING:
         ("X-Manowar", "50X", "50x", True),
         ("X-Manowar", "50O", "50o", True),
         ("X-Manowar", "50X", "50O", False),
+        ("X-Manowar", "50-X", "050-x", True),
+        ("X-Manowar", "50-O", "50-o", True),
+        ("X-Manowar", "50-X", "50-O", False),
+        ("X-Manowar", "50-X", "50", False),
+        ("X-Manowar", "50", "50-X", False),
         ("Gen13", "0.5", "0.5", True),
         ("Gen13", "-1", "-1", True),
     ],
@@ -106,6 +111,9 @@ def test_direct_search_validates_the_exact_requested_issue(
         ("13A", "13B", False),
         ("13A", "13", False),
         ("50O", "50X", False),
+        ("50-X", "050-x", True),
+        ("50-O", "50-X", False),
+        ("50-X", "50", False),
         ("0.5", "00.50", True),
         ("-1", "-01", True),
     ],
@@ -116,7 +124,7 @@ def test_artifact_coverage_does_not_alias_lettered_issues(
     assert _coverage_numbers_match(wanted, offered) is expected
 
 
-@pytest.mark.parametrize("number", ["13A", "13B", "13C", "50X", "50O", "0.5", "-1"])
+@pytest.mark.parametrize("number", ["13A", "13B", "13C", "50X", "50O", "50-X", "50-O", "0.5", "-1"])
 async def test_folder_discovery_preserves_exact_issue_designation(
     tmp_path: Path, number: str
 ) -> None:
@@ -134,26 +142,31 @@ async def test_folder_discovery_preserves_exact_issue_designation(
     assert getattr(parsed, "issue_number_text", None) == number
 
 
-async def test_new_series_provider_targets_do_not_collapse_suffix_siblings() -> None:
+@pytest.mark.parametrize(
+    "numbers, numeric", [(["13A", "13B", "13C"], 13), (["50-X", "50-O", "50X"], 50)]
+)
+async def test_new_series_provider_targets_do_not_collapse_suffix_siblings(
+    numbers: list[str], numeric: int
+) -> None:
     provider = AsyncMock()
     provider.get_issues_for_series.return_value = [
         IssueSummary(
             provider_id=str(100 + index),
-            issue_number=13,
+            issue_number=numeric,
             issue_number_text=number,
             title=None,
             release_date=None,
             cover_url=None,
             issue_type="issue",
         )
-        for index, number in enumerate(["13A", "13B", "13C"])
+        for index, number in enumerate(numbers)
     ]
     series = ImportedSeries(raw_series_name="Gen13", cv_id=123, cv_issue_count=3)
     files = [
         ImportedFile(
-            file_name=f"Gen13 #{number}.cbz", parsed_issue_number=13, issue_number_raw=number
+            file_name=f"Gen13 #{number}.cbz", parsed_issue_number=numeric, issue_number_raw=number
         )
-        for number in ["13A", "13B", "13C", "13"]
+        for number in [*numbers, str(numeric)]
     ]
     targets = await load_file_match_target_index(
         AsyncMock(), series, duplicate_series=False, metadata_provider=provider, files=files

@@ -23,6 +23,7 @@ from pullbox.core.library_layout import (
     resolve_source_layout_spec,
 )
 from pullbox.core.source_metadata import SourceMetadataExtractor
+from pullbox.core.source_volume_layout import assess_volume_leaf, volume_leaf_from_path
 
 _GENERIC_OR_TYPE_CONTAINERS = frozenset(
     {
@@ -334,6 +335,35 @@ class ImportLayoutAnalyzer:
         return self._auto_analyze_path(relative_path)
 
     def _auto_analyze_path(self, relative_path: str) -> _AnalyzedPath:
+        leaf = volume_leaf_from_path(relative_path)
+        if leaf is not None:
+            literal, confirmed, _review = assess_volume_leaf(
+                leaf, PurePosixPath(relative_path).name
+            )
+            if not literal:
+                if not confirmed:
+                    return self._needs_review_path(
+                        relative_path, "volume_leaf_identity_unconfirmed"
+                    )
+                metadata = self._metadata_extractor.from_release_title(
+                    PurePosixPath(relative_path).name
+                )
+                return _AnalyzedPath(
+                    cluster_key="auto:volume_leaf",
+                    classification=LayoutClassification.NORMAL_LIBRARY,
+                    confidence="high",
+                    match=SourceLayoutMatch(
+                        relative_path=relative_path,
+                        series=leaf.series,
+                        publisher=leaf.publisher,
+                        year=leaf.year,
+                        issue_number=metadata.issue_number_text,
+                    ),
+                    proposed_series_path_template=None,
+                    proposed_issue_filename_template=None,
+                    evidence=["volume_leaf", "filename_parent_agreement"],
+                    warnings=[],
+                )
         parts = PurePosixPath(relative_path).parts
         depth = len(parts) - 1
         if depth == 1:

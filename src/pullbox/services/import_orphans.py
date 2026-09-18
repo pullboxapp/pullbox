@@ -99,6 +99,9 @@ _UNRESOLVED_TARGET_ERROR = "Could not resolve to a library issue"
 
 def requires_orphan_issue_decision(file: ImportedFile) -> bool:
     """Return whether Follow-up should ask for an issue assignment or skip."""
+    if file.status is ImportedFileStatus.FAILED:
+        block = dict(file.diagnostics or {}).get("source_revalidation")
+        return isinstance(block, dict) and block.get("code") == "source_identity_changed"
     return file.status in {
         ImportedFileStatus.PENDING,
         ImportedFileStatus.MATCHED,

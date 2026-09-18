@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -34,6 +35,29 @@ class _StubRuntimeService:
 
 
 class TestSystemBackupRoutes:
+    @pytest.mark.parametrize("operation", ["create", "restore"])
+    async def test_manual_maintenance_releases_request_transaction(self, monkeypatch, operation):
+        from pullbox.api.v1 import system
+
+        session = AsyncMock()
+        runtime = _StubRuntimeService()
+        original_create = runtime.create_backup
+
+        async def check_released(*args, **kwargs):
+            session.commit.assert_awaited_once()
+            session.close.assert_awaited_once()
+            return await original_create(backup_type="manual") if operation == "create" else False
+
+        runtime.create_backup = check_released
+        runtime.restore_backup = check_released
+        monkeypatch.setattr(system, "_get_backup_runtime_service", AsyncMock(return_value=runtime))
+        if operation == "restore":
+            with pytest.raises(NotFoundError):
+                await system.restore_backup("backup.zip", object(), session)
+        else:
+            response = await system.create_backup(object(), session)
+            assert response.backup.backup_type == "manual"
+
     @pytest.mark.asyncio
     async def test_get_backup_runtime_service_uses_runtime_paths(
         self,
@@ -67,7 +91,7 @@ class TestSystemBackupRoutes:
 
         monkeypatch.setattr(system, "_get_backup_runtime_service", _fake_get_runtime_service)
 
-        response = await system.create_backup(object(), object())
+        response = await system.create_backup(object(), AsyncMock())
 
         assert runtime.create_calls == ["manual"]
         assert response.message == "Backup created: pullbox_backup_20260502_120000.zip"
@@ -97,7 +121,7 @@ class TestSystemBackupRoutes:
         response = await system.restore_backup(
             "pullbox_backup_20260502_120000.zip",
             object(),
-            object(),
+            AsyncMock(),
         )
 
         assert runtime.restore_calls == ["pullbox_backup_20260502_120000.zip"]
@@ -122,7 +146,7 @@ class TestSystemBackupRoutes:
         monkeypatch.setattr(system, "_get_backup_runtime_service", _fake_get_runtime_service)
 
         with pytest.raises(NotFoundError):
-            await system.restore_backup("pullbox_backup_20260502_120000.zip", object(), object())
+            await system.restore_backup("pullbox_backup_20260502_120000.zip", object(), AsyncMock())
 
     @pytest.mark.asyncio
     async def test_restore_backup_route_rejects_unsafe_filename_before_service_lookup(

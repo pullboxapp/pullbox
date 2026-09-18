@@ -327,8 +327,13 @@ def classify_import_safety_failure(
     return ImportSafetyClassification(
         category=category,
         code=stable_code,
-        sanitized_reason=_SANITIZED_REASONS[category],
-        retryable=category in _RETRYABLE_CATEGORIES,
+        sanitized_reason=(
+            "The file's series or issue identity disagrees with the saved import match. "
+            "Review the file and its match in Follow-up before retrying."
+            if stable_code == "source_identity_changed"
+            else _SANITIZED_REASONS[category]
+        ),
+        retryable=category in _RETRYABLE_CATEGORIES and stable_code != "source_identity_changed",
         overrideable=overrideable,
     )
 

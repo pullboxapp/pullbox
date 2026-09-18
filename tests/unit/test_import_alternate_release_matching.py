@@ -96,6 +96,162 @@ async def test_evaluate_alternate_release_candidates_selects_exact_type_qualifie
 
 
 @pytest.mark.asyncio
+async def test_duplicate_exact_catalog_titles_require_review() -> None:
+    """Two equally exact local-catalog volumes require review instead of a guessed winner."""
+    provider = AsyncMock()
+    provider.is_local_catalog = True
+    provider.search_series_globally.return_value = (
+        [
+            _make_search_result(
+                provider_id="150001",
+                title="X-Men Annual",
+                year_start=2023,
+                publisher="Marvel",
+            ),
+            _make_search_result(
+                provider_id="150002",
+                title="X-Men Annual",
+                year_start=2023,
+                publisher="Marvel",
+            ),
+        ],
+        2,
+    )
+    source_metadata = SourceMetadata(
+        original_title="X-Men Annual 001 (2023).cbz",
+        series_name="X-Men",
+        issue_number=1.0,
+        year=2023,
+        issue_type=IssueType.ANNUAL,
+        diagnostics={
+            "alternate_release_candidates": [
+                {
+                    "series_name": "X-Men Annual",
+                    "year": 2023,
+                    "file_name": "X-Men Annual 001 (2023).cbz",
+                    "signal": MetadataSignal.RELEASE_TITLE.value,
+                    "issue_type": IssueType.ANNUAL.value,
+                    "issue_type_qualified": True,
+                }
+            ]
+        },
+    )
+
+    evaluation = await evaluate_alternate_release_candidates(
+        provider=provider,
+        source_metadata=source_metadata,
+        raw_name="X-Men",
+        raw_year=2023,
+        semantic_engine=SemanticMatchEngine(policy=ImportPolicy()),
+        match_threshold=0.70,
+        existing_top_candidates=[],
+    )
+
+    assert evaluation is not None
+    assert evaluation.match is None
+    assert evaluation.diagnostics["kind"] == "series_conflict"
+    assert evaluation.diagnostics["reason"] == "ambiguous_candidates"
+    assert {
+        evaluation.diagnostics["selected_candidate"]["cv_id"],
+        evaluation.diagnostics["competing_candidate"]["cv_id"],
+    } == {150001, 150002}
+    provider.search_series_globally.assert_awaited_once_with(
+        "X-Men Annual",
+        max_results=1000,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("alternate_title", "catalog_title", "provider_id", "year", "issue_type"),
+    [
+        ("Uncanny X-Men Special", "Uncanny X-Men Special", "74730", 2014, IssueType.SPECIAL),
+        (
+            "New Avengers - Ultron Forever",
+            "New Avengers: Ultron Forever",
+            "81602",
+            2015,
+            IssueType.ISSUE,
+        ),
+        ("New Avengers Finale", "New Avengers Finale", "33091", 2010, IssueType.ISSUE),
+        (
+            "Ultimate Fantastic Four-Ultimate X-Men Annual",
+            "Ultimate Fantastic Four/Ultimate X-Men Annual",
+            "23137",
+            2008,
+            IssueType.ANNUAL,
+        ),
+    ],
+)
+async def test_evaluate_alternate_release_candidates_recalls_unique_exact_catalog_series(
+    alternate_title: str,
+    catalog_title: str,
+    provider_id: str,
+    year: int,
+    issue_type: IssueType,
+) -> None:
+    """The known omitted exact volumes remain reachable through bounded catalog search."""
+    provider = AsyncMock()
+    provider.is_local_catalog = True
+    provider.search_series_globally.return_value = (
+        [
+            _make_search_result(
+                provider_id=provider_id,
+                title=catalog_title,
+                year_start=year,
+                publisher="Marvel",
+            )
+        ],
+        1,
+    )
+    type_qualified = issue_type in {IssueType.ANNUAL, IssueType.SPECIAL}
+    source_metadata = SourceMetadata(
+        original_title=f"{alternate_title} 001 ({year}).cbz",
+        series_name="Parent series",
+        issue_number=1.0,
+        year=year,
+        issue_type=issue_type,
+        diagnostics={
+            "alternate_release_candidates": [
+                {
+                    "series_name": alternate_title,
+                    "year": year,
+                    "file_name": f"{alternate_title} 001 ({year}).cbz",
+                    "signal": MetadataSignal.RELEASE_TITLE.value,
+                    **(
+                        {
+                            "issue_type": issue_type.value,
+                            "issue_type_qualified": True,
+                        }
+                        if type_qualified
+                        else {}
+                    ),
+                }
+            ]
+        },
+    )
+
+    evaluation = await evaluate_alternate_release_candidates(
+        provider=provider,
+        source_metadata=source_metadata,
+        raw_name="Parent series",
+        raw_year=year,
+        semantic_engine=SemanticMatchEngine(policy=ImportPolicy()),
+        match_threshold=0.70,
+        existing_top_candidates=[],
+    )
+
+    assert evaluation is not None
+    assert evaluation.match is not None
+    assert evaluation.match["cv_id"] == int(provider_id)
+    assert evaluation.match["cv_match_method"] == "alternate_release_candidate"
+    provider.search_series_globally.assert_awaited_once_with(
+        alternate_title,
+        max_results=1000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_evaluate_alternate_signal_conflict_returns_review_diagnostics() -> None:
     """The extracted helper keeps ComicInfo-vs-release-title conflict behavior."""
     provider = AsyncMock()

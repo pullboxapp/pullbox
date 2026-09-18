@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from pullbox.database import database_maintenance_window
+from pullbox.database import await_maintenance_worker, database_maintenance_window
 from pullbox.services.backup_service import BackupInfo, BackupService
 
 if TYPE_CHECKING:
@@ -26,12 +26,16 @@ class BackupRuntimeService:
     async def create_backup(self, *, backup_type: str) -> BackupInfo:
         """Create a backup while the database is in a maintenance window."""
         async with database_maintenance_window(reason="backup"):
-            return await asyncio.to_thread(self._service.create_backup, backup_type=backup_type)
+            return await await_maintenance_worker(
+                asyncio.to_thread(self._service.create_backup, backup_type=backup_type)
+            )
 
     async def restore_backup(self, filename: str) -> bool:
         """Restore a backup while the database is paused for maintenance."""
         async with database_maintenance_window(reason="restore_backup"):
-            return await asyncio.to_thread(self._service.restore_backup, filename)
+            return await await_maintenance_worker(
+                asyncio.to_thread(self._service.restore_backup, filename)
+            )
 
     async def cleanup_old_backups(self, *, retention_days: int) -> int:
         """Run retention cleanup off the event loop."""

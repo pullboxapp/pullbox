@@ -1845,6 +1845,31 @@ class TestImportShellRouteContracts:
         assert "1 file does not fit the selected source layout" in response.text
         assert "will not be matched automatically" in response.text
 
+    async def test_import_review_partial_explains_uncertain_volume_without_custom_layout(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        message = "The volume folder does not identify a unique series release."
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 11)
+            assert series is not None
+            series.diagnostics = {
+                "kind": "source_layout_review",
+                "reason": "volume_leaf_release_unconfirmed",
+                "rejection_reason": message,
+            }
+            await session.commit()
+
+        response = await authenticated_client.get(f"/import/{job_id}/review-partial")
+
+        assert response.status_code == 200
+        assert message in response.text
+        assert "not fit the selected source layout" not in response.text
+
     async def test_import_review_partial_explains_incompatible_mylar_path(
         self,
         authenticated_client,

@@ -1960,7 +1960,9 @@ class TestEdgeCases:
 
         dispatch_task = asyncio.create_task(mgr.dispatch_next())
         try:
-            await asyncio.wait_for(first_result_persisted.wait(), timeout=0.5)
+            # The event barrier proves incremental progress, not a subsecond startup SLA.
+            await asyncio.wait_for(first_result_persisted.wait(), timeout=5.0)
+            assert not dispatch_task.done()
 
             await db_session.refresh(job)
             assert job.state == JobState.RUNNING

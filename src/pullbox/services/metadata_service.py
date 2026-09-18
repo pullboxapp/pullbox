@@ -42,7 +42,7 @@ from pullbox.services.cover_cache_service import purge_series_cover_cache
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from pullbox.providers.base import IssueMetadata, IssueSummary
+    from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesSearchResult
     from pullbox.providers.metadata.comicvine import ComicVineProvider
     from pullbox.services.catalog.reader import CatalogReader
 
@@ -54,7 +54,15 @@ def _provider_error_from_comicvine(exc: ComicVineError) -> ProviderError:
     return ProviderError(
         "comicvine",
         str(exc),
-        details={"status_code": exc.status_code, "retryable": exc.retryable},
+        details={
+            "status_code": exc.status_code,
+            "retryable": exc.retryable,
+            **(
+                {"retry_after_seconds": exc.retry_after_seconds}
+                if exc.retry_after_seconds is not None
+                else {}
+            ),
+        },
     )
 
 
@@ -299,6 +307,26 @@ class MetadataService:
             return dict(zip(comicvine_ids, metadata, strict=True))
         except ComicVineError as exc:
             raise _provider_error_from_comicvine(exc) from exc
+
+    async def search_catalog_series(
+        self,
+        query: str,
+        *,
+        limit: int = 1_000,
+    ) -> list[SeriesSearchResult]:
+        """Search only the installed local catalog for recovery candidates."""
+        if self._catalog is None or not self._catalog.available:
+            return []
+        return await self._catalog.search(query, limit=min(max(1, limit), 1_000))
+
+    async def get_catalog_issue_summaries_for_series(
+        self,
+        comicvine_id: int,
+    ) -> list[IssueSummary]:
+        """Read issue identities only from the installed local catalog."""
+        if self._catalog is None or not self._catalog.available:
+            return []
+        return await self._catalog.issues(comicvine_id)
 
     async def get_cached_series_metadata(
         self,
@@ -972,6 +1000,7 @@ class MetadataService:
         series_id: int,
         *,
         force: bool = False,
+        commit_before_provider_wait: bool = False,
     ) -> Series:
         """Refresh metadata for a series if stale (past refresh interval).
 
@@ -998,6 +1027,7 @@ class MetadataService:
 
         if not series.comicvine_id:
             raise ProviderError("comicvine", "Series has no ComicVine ID")
+        comicvine_id = series.comicvine_id
 
         if force:
             refresh_series = getattr(type(self._provider), "refresh_series", None)
@@ -1011,7 +1041,15 @@ class MetadataService:
                 raise _provider_error_from_comicvine(exc) from exc
 
         # noinspection PyTypeChecker
-        series = await self.fetch_series(session, series.comicvine_id)
+        if commit_before_provider_wait:
+            series = await self.fetch_series(session, comicvine_id, download_cover=False)
+        else:
+            series = await self.fetch_series(session, comicvine_id)
+        if commit_before_provider_wait:
+            await session.commit()
+            if series.cover_url:
+                await self.download_series_cover(series, series.cover_url)
+                await session.commit()
         await self.fetch_issues_for_series(session, series.id)
         await self.infer_series_status(session, series)
         synced_at = datetime.now(UTC)
@@ -1020,6 +1058,10 @@ class MetadataService:
         series.issue_catalog_last_checked_at = synced_at
         series.issue_catalog_error = None
         return series
+
+    async def close(self) -> None:
+        """Release provider connections after bounded background batches."""
+        await self._provider.close()
 
     async def download_cover(self, url: str, destination: Path) -> None:
         """Download and save a cover image."""

@@ -4,7 +4,7 @@ Implements the Indexer protocol for Newznab-compatible Usenet indexers.
 Provides the shared base logic (XML parsing, capabilities, search) that
 the Torznab indexer also builds on.
 
-Newznab API spec: https://newznab.readthedocs.io/en/latest/misc/api/
+Newznab API spec: https://newznab.readthedocs.io/en/latest/misc/api.html
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from defusedxml.common import DefusedXmlException
 
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.provider_cooldown import ProviderCooldown, provider_cooldown, retry_after_seconds
 from pullbox.providers.base import (
     IndexerCapabilities,
     ProviderHealthResult,
@@ -42,6 +43,17 @@ _NS = {"newznab": _NEWZNAB_NS, "torznab": _TORZNAB_NS}
 
 class NewznabError(Exception):
     """Raised when a Newznab API request fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: str | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 class NewznabIndexer:
@@ -94,17 +106,37 @@ class NewznabIndexer:
         """Simple rate limiter: enforce minimum interval between requests."""
         import asyncio
 
+        cooldown = self._cooldown()
         now = time.monotonic()
-        elapsed = now - self._last_request_time
+        elapsed = now - max(self._last_request_time, cooldown.last_request_time)
         if elapsed < self._min_interval:
             await asyncio.sleep(self._min_interval - elapsed)
         self._last_request_time = time.monotonic()
+        cooldown.last_request_time = self._last_request_time
 
     # -- internal request plumbing ------------------------------------------
 
     async def _request(self, params: dict[str, Any]) -> str:
         """Make a rate-limited GET request, returning raw XML text."""
+        cooldown = self._cooldown()
+        self._check_cooldown(cooldown)
+        async with cooldown.request_lock:
+            self._check_cooldown(cooldown)
+            return await self._request_serialized(params, cooldown)
+
+    def _cooldown(self) -> ProviderCooldown:
+        return provider_cooldown("newznab", f"{self._base_url}\0{self._api_key}")
+
+    def _check_cooldown(self, cooldown: ProviderCooldown) -> None:
+        if cooldown.remaining_seconds:
+            raise NewznabError(
+                f"{self._name}: provider cooling down; retry in {cooldown.remaining_seconds}s",
+                retry_after_seconds=cooldown.remaining_seconds,
+            )
+
+    async def _request_serialized(self, params: dict[str, Any], cooldown: ProviderCooldown) -> str:
         await self._wait_for_rate_limit()
+        self._check_cooldown(cooldown)
 
         request_params: dict[str, Any] = (
             {"apikey": self._api_key, **params} if self._api_key else dict(params)
@@ -118,19 +150,43 @@ class NewznabIndexer:
             response = await self._client.get(url, params=request_params)
             response.raise_for_status()
         except httpx.TimeoutException:
+            cooldown.defer(60)
             log.error("newznab_timeout")
-            raise NewznabError(f"Request timed out: {self._name}") from None
+            raise NewznabError(
+                f"Request timed out: {self._name}", retry_after_seconds=cooldown.remaining_seconds
+            ) from None
         except httpx.HTTPStatusError as exc:
             log.error("newznab_http_error", status=exc.response.status_code)
-            raise NewznabError(f"HTTP {exc.response.status_code}") from None
+            status = exc.response.status_code
+            if status == 429 or status >= 500:
+                cooldown.defer(
+                    retry_after_seconds(
+                        exc.response.headers.get("Retry-After"),
+                        default=900 if status == 429 else 60,
+                    )
+                )
+            raise NewznabError(
+                f"HTTP {status}",
+                status_code=str(status),
+                retry_after_seconds=cooldown.remaining_seconds or None,
+            ) from None
         except httpx.HTTPError as exc:
+            cooldown.defer(60)
             log.error("newznab_request_failed", error=str(exc))
             raise NewznabError(f"Request failed: {exc}") from None
 
         # Check for Newznab XML error responses
         text = response.text
         if "<error " in text:
-            _check_xml_error(text, self._name)
+            try:
+                _check_xml_error(text, self._name)
+            except NewznabError as exc:
+                if exc.status_code in {"500", "501"}:
+                    cooldown.defer(
+                        retry_after_seconds(response.headers.get("Retry-After"), default=900)
+                    )
+                    exc.retry_after_seconds = cooldown.remaining_seconds
+                raise
 
         return text
 
@@ -254,7 +310,7 @@ def _check_xml_error(xml_text: str, indexer_name: str) -> None:
         if error_el is not None:
             code = error_el.get("code", "?")
             description = error_el.get("description", "Unknown error")
-            raise NewznabError(f"{indexer_name}: error {code} — {description}")
+            raise NewznabError(f"{indexer_name}: error {code} — {description}", status_code=code)
     except (ElementTree.ParseError, DefusedXmlException):
         pass
 

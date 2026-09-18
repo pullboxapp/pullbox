@@ -599,3 +599,42 @@ class TestSearchLogDetails:
             remaining = (await session.execute(select(SearchLog))).scalars().all()
             assert len(remaining) == 1
             assert remaining[0].id == recent_log.id
+
+
+async def test_scheduled_log_purge_commits_small_batches(db_factory, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import AsyncMock
+
+    from pullbox.tasks import search_task
+
+    async with db_factory() as session:
+        issue = await _seed_issue(session)
+        for _ in range(5):
+            session.add(
+                SearchLog(
+                    issue_id=issue.id,
+                    series_title="Batman",
+                    issue_number=1,
+                    search_type=SearchType.AUTOMATED,
+                    created_at=datetime.now(UTC) - timedelta(days=30),
+                )
+            )
+        await session.commit()
+
+    commits = []
+
+    class TrackingSession(AsyncSession):
+        async def commit(self):
+            await super().commit()
+            commits.append(True)
+
+    factory = async_sessionmaker(
+        db_factory.kw["bind"], class_=TrackingSession, expire_on_commit=False
+    )
+    monkeypatch.setattr(search_task, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(search_task, "_load_search_log_retention_days", AsyncMock(return_value=7))
+    monkeypatch.setattr(search_task, "_SEARCH_LOG_PURGE_BATCH_SIZE", 2, raising=False)
+    await search_task.purge_search_logs()
+    assert len(commits) >= 3, "Log retention must release the writer between bounded batches"
+    async with db_factory() as session:
+        assert list((await session.scalars(select(SearchLog))).all()) == []

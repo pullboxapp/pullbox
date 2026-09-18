@@ -33,10 +33,12 @@ def _create_mylar_db(
 
 
 @pytest.mark.parametrize("recorded", [False, True])
-async def test_mylar_discovery_keeps_lettered_issue_numbers(tmp_path: Path, recorded: bool) -> None:
+@pytest.mark.parametrize("numbers", [["13A", "13B", "13C"], ["50-O", "50-X"]])
+async def test_mylar_discovery_keeps_lettered_issue_numbers(
+    tmp_path: Path, recorded: bool, numbers: list[str]
+) -> None:
     db = tmp_path / "mylar.db"
     folder = tmp_path / "comics" / "Gen13"
-    numbers = ["13A", "13B", "13C"]
     for number in numbers:
         create_minimal_cbz(folder / f"Gen13 #{number} (1996).cbz")
     _create_mylar_db(
@@ -47,7 +49,7 @@ async def test_mylar_discovery_keeps_lettered_issue_numbers(tmp_path: Path, reco
                 "ComicName": "Gen13",
                 "ComicYear": "1996",
                 "ComicLocation": str(folder),
-                "Total": 3,
+                "Total": len(numbers),
             }
         ],
         issues=[

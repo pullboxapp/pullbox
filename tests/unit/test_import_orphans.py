@@ -109,6 +109,23 @@ async def _create_series_with_issue(
     await session.flush()
 
 
+@pytest.mark.parametrize(
+    "code",
+    ["source_identity_changed", "source_changed", "dangerous_archive", "archive_inspection_failed"],
+)
+def test_failed_identity_conflict_can_be_resolved_in_follow_up(code):
+    from pullbox.services.import_orphans import requires_orphan_issue_decision
+
+    file = ImportedFile(
+        status=ImportedFileStatus.FAILED,
+        diagnostics={
+            "source_revalidation": {"code": code},
+        },
+    )
+
+    assert requires_orphan_issue_decision(file) is (code == "source_identity_changed")
+
+
 def test_apply_orphan_recovery_decisions_assigns_issue() -> None:
     from pullbox.services.import_orphans import apply_orphan_recovery_decisions
 

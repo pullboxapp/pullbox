@@ -542,6 +542,12 @@ ignore:
       name: zlib1g
       version: 1:1.3.dfsg+really1.3.1-1+dhi3
       type: deb
+  # Re-reviewed 2026-09-17 for the DHI package refresh; same exposure and deadline.
+  - vulnerability: CVE-2026-85091
+    package:
+      name: zlib1g
+      version: 1:1.3.dfsg+really1.3.1-1+dhi4
+      type: deb
   - vulnerability: CVE-2026-85091
     package:
       name: zlib1g-dev

@@ -44,6 +44,27 @@ def test_preview_reports_reclaimable_free_pages(tmp_path: Path) -> None:
     assert preview.integrity_result == "ok"
 
 
+@pytest.mark.asyncio
+async def test_busy_nightly_maintenance_is_retryable(tmp_path, monkeypatch):
+    from contextlib import suppress
+
+    from pullbox.database import DatabaseMaintenanceBusyError
+
+    runtime = DatabaseOptimizationRuntimeService(tmp_path / "pullbox.db")
+
+    def busy():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(runtime.service, "maintain", busy)
+    retryable = False
+    with suppress(sqlite3.OperationalError):
+        try:
+            await runtime.maintain()
+        except DatabaseMaintenanceBusyError:
+            retryable = True
+    assert retryable, "A busy database must defer nightly maintenance, not permanently fail it"
+
+
 def test_optimize_checkpoints_and_vacuums_free_pages(tmp_path: Path) -> None:
     db_path = tmp_path / "pullbox.db"
     _create_fragmented_database(db_path)

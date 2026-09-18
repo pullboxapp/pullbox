@@ -62,6 +62,66 @@ The shared checks cover fresh Mylar discovery and saved-review reconciliation.
 They do not modify Mylar, rename source files, or change completed-import
 recovery and ownership rules. No metadata-provider requests are introduced.
 
+Before copy/conflict grouping, matching reconciles automatic provisional issue
+targets against exact identities discovered in the same import-series row.
+This runs after all file pages, so an untagged CBR and a later tagged CBZ cannot
+escape copy review merely because their identities were learned at different
+times. Only an unambiguous target with the same exact issue designation and
+issue type is reused; annuals, lettered issues, conflicting metadata, manual
+decisions, skips, and safety blocks are not overridden. Reads are paged, source
+signatures and files are unchanged, and no provider requests are added. The
+shared finalization applies to Mylar and folder imports in either handling mode.
+
+Provisional targets use each file's inspected issue type, not the type of the
+first same-number file in a matching page. This preserves numbered collected
+volumes when deferred ComicInfo changes an initial ordinary-issue classification
+and keeps regular issues separate from same-number annuals.
+
+An unrecorded annual can join an already identified annual series in the same
+source folder when its filename and ComicInfo agree on the annual title and
+exact issue designation, its publication year matches, and exactly one trusted
+series is eligible. Conflicting IDs, dates, competing series identities, safety
+blocks, and manual decisions remain untouched. This only changes the import
+review grouping: it never moves source files, borrows a missing reference's
+issue ID, or dismisses that reference. Normal issue matching and duplicate review
+still run afterward. The rule applies to Mylar and folder imports, for both
+copy and keep-in-place modes, without metadata-provider requests.
+
+Exact issue designations retain letter suffixes and their hyphens, including
+`13A`, `50-X`, and `50-O`. ComicVine metadata, local catalog reads, Mylar and
+folder discovery, and release validation share this identity policy. A dashed
+letter suffix is not a numeric range or a plain issue number; sibling letters
+must not collapse into the same target. Refreshing live metadata can correct
+an older zero-number fallback using its existing ComicVine issue ID without
+discarding ownership. No schema migration or source-file rename is required.
+
+## Source Volume Folders And Mylar Provenance
+
+Automatic folder discovery recognizes `Series/v2017`, `Publisher/Series/v2017`,
+`Series/v2`, and `Publisher/Series/v2`. The parent supplies a series-name hint;
+`v2017` supplies a series-year hint, while `v2` is an ordinal volume, never an
+issue number or a year. Filename identity with an issue designation or agreeing
+local sidecar/ComicInfo evidence must corroborate the parent. Layout recognition
+is not a confirmed ComicVine match. An ordinal folder without an explicit
+series-year or series ID remains in the existing series-review workflow.
+
+Step 1 remains filename-only and does not open archives or call providers.
+The scan reuses its existing local metadata reads for corroboration. Weak or
+contradictory evidence stays reviewable per file, while proven per-file identities
+continue through existing mixed-folder recovery. A legitimate series named `V2`
+is not replaced by its parent. Custom source layouts remain authoritative, and
+parent sidecars are not inherited across releases. No source folder or file is
+renamed, moved, or rewritten by this recognition, and it never selects a future
+managed-library layout. Existing copy/in-place policies remain independent.
+
+Mylar scans log `mylar3_source_provenance`, including optional
+`mylar_info.DatabaseVersion`, series count, Story Arc/reading-list presence,
+reading-list count, and supported configuration key names. Missing or malformed
+version data becomes `unknown`; future numeric versions remain diagnostic data,
+not admission gates. `config.ini` remains optional and no configuration values
+or credentials are logged. Both paged and full snapshot readers remain read-only.
+This introduces no database migration, monitoring change, or new import card.
+
 ## Import Follow-up
 
 The Follow-up tab groups actionable work by import job rather than rendering
@@ -97,8 +157,10 @@ ineligible.
 - **Skip unusable files** excludes empty, unsupported, and page-less files,
   including those confirmed unusable by a later source recheck.
 - **Allow oversized files once** retries only decompression-size blocks marked
-  overrideable. It does not change the global archive safety policy or approve
-  dangerous archive content.
+  overrideable, including failed files whose latest source recheck recorded an
+  overrideable size limit rather than a scan-time safety block. The original
+  recheck evidence is retained alongside the one-job exception. It does not
+  change the global archive safety policy or approve dangerous archive content.
 - **Retry source inspection** rechecks files that were unreadable, changed, or
   temporarily could not be inspected, then resumes only work that now passes.
 - **Recognize already-owned issues** clears conflicts whose issue already has a
@@ -118,9 +180,14 @@ ineligible.
   only files whose saved series and issue identities agree. Existing catalog
   ownership, issue numbers, per-file conflicts, manual decisions, skips, and
   safety blocks are checked before an actor-bound preview is issued. Ambiguous
-  duplicate candidates and a series containing an unpreviewed ready file are
-  excluded. The confirmed scope runs through normal background Step 4 source
-  validation and import rules. Successful files and source paths are untouched;
+  duplicate candidates remain excluded, including another ready file claiming
+  the same issue or a manually chosen keeper. Explicit file exclusions and
+  safety-review decisions remain protected. Eligible files are isolated into
+  new recovery groups with links to their original groups; an unresolved
+  sibling no longer blocks otherwise proven files. The actor-bound preview
+  authorizes only those groups, not other ready files or Story Arcs in the job.
+  The confirmed scope runs through normal background Step 4 source validation
+  and the original copy or keep-in-place rules. Successful files and source paths are untouched;
   unresolved files remain in Follow-up. This is not a blanket repair of stale
   IDs or a replacement for manual review when trusted evidence disagrees.
 - **Recheck deferred files** checks the remaining unmatched files in a resumable
@@ -131,6 +198,28 @@ ineligible.
   registered at the same path and exact issue are recognized without importing
   them again. A different file for an owned issue remains a review decision;
   it is never automatically substituted for the owned copy.
+
+The same recheck can repair already-imported, referenced comics in mixed folders,
+even when their correct series or issue is not in Pullbox yet. It groups exact
+title lookups against the local catalog and requires a unique issue number, type,
+and agreeing per-file publication year (within one year for dated files).
+Filename-only evidence without a publication year remains review-only. Trusted
+embedded IDs must agree. Manual choices, safety decisions, managed artifacts,
+duplicate candidates, and targets with another owned file are not overwritten.
+Before changing an assignment, the worker rechecks the source path, size, and
+timestamp inside an enabled reference-capable root. This also works with a
+read-only root; no source bytes, filenames, or directories are changed.
+
+Missing metadata targets are registered as partial catalogs, without creating a
+series folder or running file import/conversion. The existing LibraryFile row is
+retained and assigned to the verified issue; old and new ownership counters and
+import Story Arc links are refreshed. Reading history remains unchanged.
+Empty provisional issues left under the wrong series are kept for audit but
+marked skipped rather than becoming new wanted downloads.
+Each repair records its previous assignment and commits with its recovery
+checkpoint. Resume preserves completed repairs, and repeated runs do not create
+another file registration. This is logical library repair, not authorization to
+reorganize the user's filesystem.
 
 The deferred pass uses complete local catalogs first. Exact issue identity may
 correct stale Mylar ownership only when the file's title, issue number, type,
@@ -151,7 +240,7 @@ are stored. Live provider progress does not rewrite the full durable recovery
 snapshot; each completed catalog produces one durable checkpoint, so a worker
 restart resumes after the last completed catalog without replaying it.
 
-Recovered files run through normal Step 4 safety, current-source validation,
+Previously unimported recovered files run through normal Step 4 safety, current-source validation,
 ownership checks, and the original copy or keep-in-place settings. Only newly
 prepared recovery groups execute, not unrelated ready files or Story Arcs.
 Cancellation stops this pass without rolling back the original import or
@@ -174,11 +263,35 @@ status-only correction does not launch another import.
 A completed source recheck reports a file ready only after both archive safety
 and saved target identity checks pass. Missing, empty, or otherwise blocked
 sources are counted as blocked even when the archive-level inspection itself
-completed successfully.
+completed successfully. A `source_identity_changed` result means the current
+series or issue identity disagrees with the reviewed match, not that the file
+was necessarily modified on disk. Its message directs the user to Follow-up;
+it is neither automatically retryable nor overrideable.
 Completed-import source rechecks inspect one bounded page before writing its
 refreshed evidence, then commit that page before reading more archives. This
 keeps slow archive I/O outside SQLite's single-writer window, bounds memory, and
 leaves completed pages durable if a later source needs another attempt.
+
+An identity-conflicted failed file remains assignable in Follow-up; archive
+safety failures do not become assignable through that exception. A manual
+issue assignment may supersede a disagreement between `series.json` and
+`cvinfo` only when freshly inspected ComicInfo proves the assigned issue, its
+series identity does not contradict the reviewed series, and issue-number
+checks pass. The original folder conflict is retained as resolved evidence;
+other metadata conflicts retain their specific IDs in the failure diagnostics.
+Step 4 also verifies that the assigned issue belongs to the chosen local series.
+
+Known-series, deferred, mixed-folder, and manually assigned recovery can
+revalidate a device-number-only change after a container remount. The path,
+inode, size, timestamp, and signature version must still agree. An archive
+inspection under the approved source roots and an exact embedded issue-ID
+check are required before refreshing the saved signature. The pre-inspection
+and post-inspection identities must agree, and normal registration revalidates
+the root and refreshed signature again. Existing approved size or single-page
+exceptions remain scoped to that file; dangerous archive checks still run.
+Ordinary signature validation, source files, Mylar metadata, and already-owned
+library files are unchanged. These recovery rules apply to Mylar and folder
+imports, in both copy and keep-in-place modes.
 
 Recovery queries must not expand an entire library into SQL bind parameters.
 Mixed-folder lookups join existing references and discard exact same-title

@@ -37,6 +37,14 @@ def _normalize_whole_number(value: object) -> object:
     return value
 
 
+def _normalize_queue_eta(value: object) -> object:
+    """AirDC++ derives ETA from counters that can briefly exceed the size."""
+    value = _normalize_whole_number(value)
+    if type(value) is int and -(2**63) <= value < 0:
+        return None
+    return value
+
+
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 Port = Annotated[StrictInt, BeforeValidator(_normalize_port), Field(ge=0, le=65535)]
@@ -56,6 +64,7 @@ WholePositiveInt = Annotated[
     BeforeValidator(_normalize_whole_number),
     Field(gt=0, le=2**63 - 1),
 ]
+QueueEta = Annotated[WholeNonNegativeInt | None, BeforeValidator(_normalize_queue_eta)]
 
 
 class AirDcppWireModel(BaseModel):
@@ -163,15 +172,9 @@ class AirDcppQueueBundle(AirDcppWireModel):
     time_added: WholeNonNegativeInt
     time_finished: WholeNonNegativeInt
     speed: WholeNonNegativeInt
-    seconds_left: WholeNonNegativeInt
+    seconds_left: QueueEta
     sources: AirDcppQueueSourceInfo
     status: AirDcppQueueStatus
-
-    @model_validator(mode="after")
-    def validate_progress(self) -> AirDcppQueueBundle:
-        if self.downloaded_bytes > self.size:
-            raise ValueError("downloaded bytes cannot exceed bundle size")
-        return self
 
 
 class AirDcppQueueBundleAddInfo(AirDcppWireModel):
@@ -208,15 +211,13 @@ class AirDcppQueueFile(AirDcppWireModel):
     time_added: WholeNonNegativeInt
     time_finished: WholeNonNegativeInt
     speed: WholeNonNegativeInt
-    seconds_left: WholeNonNegativeInt
+    seconds_left: QueueEta
     sources: AirDcppQueueSourceInfo
     status: AirDcppQueueStatus
     tth: Annotated[StrictStr, Field(pattern=r"^[A-Z2-7]{39}$")]
 
     @model_validator(mode="after")
     def validate_progress(self) -> AirDcppQueueFile:
-        if self.downloaded_bytes > self.size:
-            raise ValueError("downloaded bytes cannot exceed file size")
         if self.type.id != "file":
             raise ValueError("AirDC++ queue recovery supports file items only")
         return self

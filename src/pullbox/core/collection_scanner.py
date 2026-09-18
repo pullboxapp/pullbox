@@ -51,6 +51,7 @@ from pullbox.core.library_layout import (
 from pullbox.core.naming_type_detection import detect_issue_type
 from pullbox.core.release_parser import normalize_issue_number
 from pullbox.core.source_metadata import MetadataSignal, SourceMetadata, SourceMetadataExtractor
+from pullbox.core.source_volume_layout import assess_volume_leaf, volume_leaf_from_path
 from pullbox.models.issue import IssueType
 
 logger = structlog.get_logger(__name__)
@@ -1308,6 +1309,54 @@ class CollectionScanner:
             if conflicts:
                 metadata_diagnostics["source_layout_conflicts"] = conflicts
 
+            if root is not None and (
+                self._source_layout.mode == ImportLayoutMode.AUTO
+                or (layout_match is None and self._source_layout.fallback_to_auto)
+            ):
+                try:
+                    leaf = volume_leaf_from_path(fpath.relative_to(root).as_posix())
+                except ValueError:
+                    leaf = None
+                if leaf is not None:
+                    comicinfo = metadata_diagnostics.get("comicinfo")
+                    local_names = [
+                        sidecar_data.get("series_name") if sidecar_data else None,
+                        comicinfo.get("series") if isinstance(comicinfo, dict) else None,
+                    ]
+                    comicinfo_volume = (
+                        comicinfo.get("volume") if isinstance(comicinfo, dict) else None
+                    )
+                    metadata_series_year = (
+                        int(comicinfo_volume)
+                        if isinstance(comicinfo_volume, str)
+                        and re.fullmatch(r"[0-9]{4}", comicinfo_volume)
+                        else sidecar_data.get("year")
+                        if sidecar_data
+                        else None
+                    )
+                    literal, confirmed, review = assess_volume_leaf(
+                        leaf,
+                        file_name,
+                        metadata_names=tuple(
+                            name for name in local_names if isinstance(name, str) and name
+                        ),
+                        proven_file_identity=(
+                            metadata.signals.get("comicvine_series_id") == MetadataSignal.COMICINFO
+                            or metadata.comicvine_issue_id is not None
+                        ),
+                        identity_conflict=bool(metadata_diagnostics.get("identity_conflicts")),
+                        metadata_series_year=metadata_series_year,
+                    )
+                    if not literal:
+                        metadata_diagnostics["volume_leaf"] = {
+                            **leaf.evidence(confirmed=confirmed, review_required=review),
+                            "metadata_series_year": metadata_series_year,
+                        }
+                        if confirmed:
+                            parsed_series = leaf.series
+                            if parsed_publisher is None:
+                                parsed_publisher = leaf.publisher
+
             issue_number_raw: str | None = None
             if layout_issue_number_raw is not None:
                 issue_number_raw = layout_issue_number_raw
@@ -1504,6 +1553,18 @@ class CollectionScanner:
             tuple[str, int | None, str | None],
             tuple[str, int | None, str | None],
         ] = {}
+        volume_hint = next(
+            (
+                file.metadata_diagnostics["volume_leaf"]
+                for file in discovered_files
+                if isinstance(file.metadata_diagnostics.get("volume_leaf"), dict)
+            ),
+            None,
+        )
+        if isinstance(volume_hint, dict):
+            folder_name = str(volume_hint["series"])
+            folder_year = cast("int | None", volume_hint.get("series_year_hint"))
+            folder_publisher = cast("str | None", volume_hint.get("publisher"))
         folder_identity = _normalize_series_identity(folder_name)
         folder_is_series_boundary = root is None or source_dir != root
 
@@ -1599,7 +1660,12 @@ class CollectionScanner:
                 discovered_file.parsed_series = folder_name
                 if discovered_file.parsed_year is None:
                     discovered_file.parsed_year = folder_year
-                identity = (folder_identity, discovered_file.parsed_year or folder_year)
+                identity = (
+                    folder_identity,
+                    folder_year
+                    if volume_hint is not None
+                    else discovered_file.parsed_year or folder_year,
+                )
 
             identity_key = (identity[0], identity[1], type_discriminator)
 
@@ -1623,7 +1689,9 @@ class CollectionScanner:
                 identity_key,
                 (
                     label_name,
-                    discovered_file.parsed_year or folder_year,
+                    folder_year
+                    if volume_hint is not None and collapse_to_folder
+                    else discovered_file.parsed_year or folder_year,
                     discovered_file.parsed_publisher or folder_publisher,
                 ),
             )
@@ -1683,6 +1751,41 @@ class CollectionScanner:
                     comicinfo_source = discovered_file.file_path
                     break
             source_issue_type = _source_issue_type_for_group(files)
+            volume_evidence = [
+                evidence
+                for file in files
+                if isinstance(evidence := file.metadata_diagnostics.get("volume_leaf"), dict)
+            ]
+            volume_confirmed = len(volume_evidence) == len(files) and all(
+                evidence.get("confirmed") for evidence in volume_evidence
+            )
+            if volume_hint is not None and volume_confirmed:
+                metadata_years = {
+                    year
+                    for evidence in volume_evidence
+                    if isinstance(year := evidence.get("metadata_series_year"), int)
+                }
+                raw_year = folder_year or (
+                    next(iter(metadata_years)) if len(metadata_years) == 1 else None
+                )
+
+            volume_diagnostics = {}
+            if isinstance(volume_hint, dict):
+                volume_diagnostics = {
+                    "volume_leaf": {
+                        **volume_hint,
+                        "confirmed": volume_confirmed,
+                        "review_required": any(
+                            evidence.get("review_required") for evidence in volume_evidence
+                        ),
+                        "series_confirmation_required": bool(
+                            volume_hint.get("volume_hint") is not None
+                            and raw_year is None
+                            and comicinfo_cv_id is None
+                            and folder_cv_id is None
+                        ),
+                    }
+                }
             for discovered_file in files:
                 if series_status is None and discovered_file.series_status:
                     series_status = discovered_file.series_status
@@ -1709,6 +1812,7 @@ class CollectionScanner:
                         ),
                         "series_status": series_status,
                         "issue_count_hint": issue_count_hint,
+                        **volume_diagnostics,
                         **(
                             {
                                 "folder_identity": {

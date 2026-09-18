@@ -12,6 +12,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import sys
@@ -36,7 +37,205 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-metadata-search
 _MOD = "pullbox.tasks.metadata_task"
 
 
+@pytest.mark.parametrize("task_id", ["sync_new_issues", "refresh_metadata"])
+async def test_missing_key_stops_active_metadata_continuation(db_factory, task_id):
+    from pullbox.tasks import metadata_task
+    from pullbox.tasks.metadata_sweep_state import MetadataSweep, load_sweep, save_sweep
+
+    async with db_factory() as session:
+        await save_sweep(
+            session, task_id, MetadataSweep(cursor=1, upper_bound=3, retry_at=100, active=True)
+        )
+        await session.commit()
+    scheduler = _make_scheduler()
+    svc = _make_metadata_svc([])
+    with (
+        _sync_patches(db_factory, svc, scheduler),
+        patch(f"{_MOD}.get_comicvine_api_key", new_callable=AsyncMock, return_value=None),
+    ):
+        await getattr(metadata_task, task_id)()
+    async with db_factory() as session:
+        state = await load_sweep(session, task_id)
+    assert state.active is False, "A missing key must not leave a minute-by-minute continuation"
+    assert state.retry_at == 0
+    scheduler.clear_task_continuation.assert_called_once_with(task_id)
+    scheduler.schedule_task_continuation.assert_not_called()
+    svc.fetch_series.assert_not_awaited()
+
+
+@pytest.mark.parametrize("task_id", ["sync_new_issues", "refresh_metadata"])
+@pytest.mark.parametrize("restart", [False, True])
+async def test_restore_waits_for_remaining_metadata_batches(
+    restore_db_factory, tmp_path, monkeypatch, task_id, restart
+):
+    from pullbox.services import restore_recovery_service as service
+    from pullbox.tasks import metadata_task
+    from pullbox.tasks.metadata_sweep_state import load_sweep
+
+    db_factory = restore_db_factory
+    for identifier in (91001, 91002, 91003):
+        await _create_series(db_factory, comicvine_id=identifier)
+    monkeypatch.setattr(metadata_task, "_METADATA_BATCH_SIZE", 2)
+    monkeypatch.setattr(
+        service, "_run_cover_backfill_step", AsyncMock(return_value="Covers checked")
+    )
+    other_step = (
+        "_run_metadata_refresh_step" if task_id == "sync_new_issues" else "_run_issue_sync_step"
+    )
+    monkeypatch.setattr(service, other_step, AsyncMock(return_value="Other step checked"))
+    monkeypatch.setattr("pullbox.database.get_session_factory", lambda: db_factory)
+    # The observer must await the scheduler's next batch, not run a second sweep itself.
+    monkeypatch.setattr(service, "_SWEEP_POLL_SECONDS", 0.01, raising=False)
+    svc = _make_metadata_svc([])
+    service.mark_restore_recovery_pending("restore.zip", data_dir=tmp_path)
+    restore_task = None
+    try:
+        with _sync_patches(db_factory, svc, _make_scheduler()):
+            restore_task = asyncio.create_task(
+                service.run_restore_recovery_if_pending(data_dir=tmp_path)
+            )
+            async with asyncio.timeout(3):
+                while True:
+                    async with db_factory() as session:
+                        state = await load_sweep(session, task_id)
+                    if state.active and state.cursor == 2:
+                        break
+                    await asyncio.sleep(0.01)
+            await asyncio.sleep(0.03)
+            assert not restore_task.done(), "Restore must not finish with a pending metadata batch"
+            assert service.has_pending_restore_recovery(data_dir=tmp_path)
+            assert service.get_restore_recovery_status(data_dir=tmp_path)["status"] == "running"
+            if restart:
+                restore_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await restore_task
+                assert service.has_pending_restore_recovery(data_dir=tmp_path)
+                restore_task = asyncio.create_task(
+                    service.run_restore_recovery_if_pending(data_dir=tmp_path)
+                )
+            else:
+                await getattr(metadata_task, task_id)()
+            result = await asyncio.wait_for(restore_task, 3)
+        assert result["status"] == "completed"
+        assert not service.has_pending_restore_recovery(data_dir=tmp_path)
+        calls = svc.fetch_series if task_id == "sync_new_issues" else svc.refresh_series
+        assert calls.await_count == 3
+    finally:
+        if restore_task is not None and not restore_task.done():
+            restore_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await restore_task
+
+
+async def test_interrupted_sync_restarts_at_first_uncommitted_series(db_factory):
+    from pullbox.tasks import metadata_task
+
+    ids = [await _create_series(db_factory, comicvine_id=i) for i in (91001, 91002, 91003)]
+    blocked = asyncio.Event()
+    svc = _make_metadata_svc([])
+
+    async def fetch(session, series_id):
+        if series_id == ids[1]:
+            blocked.set()
+            await asyncio.Event().wait()
+        return []
+
+    svc.fetch_issues_for_series.side_effect = fetch
+    with _sync_patches(db_factory, svc, _make_scheduler()):
+        task = asyncio.create_task(metadata_task.sync_new_issues())
+        await asyncio.wait_for(blocked.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        svc.fetch_issues_for_series.side_effect = None
+        svc.fetch_issues_for_series.return_value = []
+        await metadata_task.sync_new_issues()
+    assert [call.args[1] for call in svc.fetch_series.await_args_list] == [
+        91001,
+        91002,
+        91002,
+        91003,
+    ]
+
+
+async def test_sync_resumes_bounded_batches_from_durable_cursor(db_factory, monkeypatch):
+    from pullbox.tasks import metadata_task
+
+    for identifier in (91001, 91002, 91003):
+        await _create_series(db_factory, comicvine_id=identifier)
+    svc = _make_metadata_svc([])
+    scheduler = _make_scheduler()
+    monkeypatch.setattr(metadata_task, "_METADATA_BATCH_SIZE", 2, raising=False)
+    with _sync_patches(db_factory, svc, scheduler):
+        result = await metadata_task.sync_new_issues()
+        assert svc.fetch_series.await_count == 2, "A run must yield after a bounded batch"
+        assert result.status == "waiting"
+        await metadata_task.sync_new_issues()
+    assert [call.args[1] for call in svc.fetch_series.await_args_list] == [91001, 91002, 91003]
+    scheduler.schedule_task_continuation.assert_called()
+
+
+async def test_sync_pauses_whole_sweep_after_provider_throttle(db_factory):
+    from pullbox.core.exceptions import ProviderError
+    from pullbox.tasks import metadata_task
+
+    for identifier in (91001, 91002, 91003):
+        await _create_series(db_factory, comicvine_id=identifier)
+    svc = _make_metadata_svc([])
+    svc.fetch_series.side_effect = ProviderError(
+        "comicvine", "HTTP 420", details={"status_code": 420, "retryable": True}
+    )
+    with _sync_patches(db_factory, svc, _make_scheduler()):
+        result = await metadata_task.sync_new_issues()
+        assert svc.fetch_series.await_count == 1, (
+            "One throttle must pause the provider, not fail every series"
+        )
+        assert result.status == "waiting"
+        await metadata_task.sync_new_issues()
+        assert svc.fetch_series.await_count == 1, "Persisted cooldown must survive a fresh batch"
+
+
+async def test_sync_commits_metadata_before_waiting_for_issue_provider(db_factory):
+    from pullbox.tasks import metadata_task
+
+    sid = await _create_series(db_factory, comicvine_id=91001)
+    svc = _make_metadata_svc([])
+    tracking = _TrackingFactory(db_factory)
+    commits_after_metadata = []
+
+    async def write_series(session, identifier, **kwargs):
+        series = await session.get(Series, sid)
+        series.description = "Refreshed metadata"
+        await session.flush()
+        commits_after_metadata.append(tracking.commit_calls)
+
+    async def check_issue_fetch(session, series_id):
+        assert tracking.commit_calls > commits_after_metadata[-1], (
+            "Provider wait still holds metadata's write transaction"
+        )
+        return []
+
+    svc.fetch_series.side_effect = write_series
+    svc.fetch_issues_for_series.side_effect = check_issue_fetch
+    with _sync_patches(tracking, svc, _make_scheduler()):
+        await metadata_task.sync_new_issues()
+    assert svc.fetch_series.await_args.kwargs.get("download_cover") is False
+    async with db_factory() as session:
+        series = await session.get(Series, sid)
+        assert series.issue_catalog_last_checked_at is not None
+
+
 # ── Fixtures ───────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def restore_db_factory(tmp_path):
+    # Cancellation may discard a connection; persisted restore state must survive it.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'restore.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
 
 
 @pytest.fixture
@@ -102,6 +301,7 @@ def _sync_patches(
             return_value=metadata_svc,
         ),
         patch(f"{_MOD}.get_scheduler", return_value=scheduler),
+        patch("pullbox.tasks.metadata_sweep_state.get_scheduler", return_value=scheduler),
     ):
         mock_settings.return_value = MagicMock()
         yield mock_settings

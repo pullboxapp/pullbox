@@ -11,6 +11,7 @@ Two scheduled tasks:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -20,22 +21,28 @@ import structlog
 from sqlalchemy import func, or_, select
 
 from pullbox.config import PullboxSettings, get_settings
+from pullbox.core.exceptions import ProviderError
 from pullbox.core.log_deduper import log_deduped_warning
+from pullbox.core.sqlite_lock import is_sqlite_locked_error
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.core.comicvine_key import get_comicvine_api_key
-from pullbox.core.scheduler import get_scheduler
+from pullbox.core.scheduler import TaskExecutionResult, get_scheduler
 from pullbox.database import get_session_factory
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
-from pullbox.providers.metadata.comicvine import ComicVineProvider
+from pullbox.providers.metadata.comicvine import ComicVineError, ComicVineProvider
 from pullbox.services.metadata_service import MetadataService
+from pullbox.tasks.metadata_sweep_state import load_sweep, save_sweep, schedule_sweep, start_sweep
 
 logger = structlog.get_logger(__name__)
 
 _RECENT_ISSUE_SYNC_LIMIT = 100
+_METADATA_BATCH_SIZE = 25
+_METADATA_BATCH_SECONDS = 120.0
+_METADATA_SERIES_SECONDS = 900.0
 _STANDARD_ISSUE_CHECK_INTERVAL = timedelta(hours=24)
 _ENDED_MONITORED_ISSUE_CHECK_INTERVAL = timedelta(days=14)
 _ENDED_UNMONITORED_ISSUE_CHECK_INTERVAL = timedelta(days=30)
@@ -217,241 +224,244 @@ async def _sync_issue_catalog_for_series(
     return created, mode
 
 
-async def sync_new_issues() -> None:
-    """Fetch issue lists from ComicVine for all ComicVine-backed series.
+async def _sync_one_series(
+    metadata_svc: MetadataService,
+    session: AsyncSession,
+    series: Series,
+    *,
+    refresh_days: int,
+    local_issue_count: int,
+) -> tuple[list[Issue], str, bool, bool]:
+    before = _take_snapshot(series)
+    log = logger.bind(series_id=series.id, title=series.title)
+    status_changed = metadata_changed = False
+    if series.comicvine_id and _metadata_refresh_due(series, refresh_days):
+        await metadata_svc.fetch_series(session, series.comicvine_id, download_cover=False)
+        # Provider waits must never retain the publisher/series writer lock.
+        await session.commit()
+        await session.refresh(series)
+        status_changed, metadata_changed = _detect_changes(series, before, log)
+        if series.cover_url:
+            await metadata_svc.download_series_cover(series, series.cover_url)
+            await session.commit()
 
-    Also refreshes stale series metadata and detects status/field changes.
-    """
+    if not _issue_catalog_check_due(series):
+        return [], "skipped", status_changed, metadata_changed
+    created, mode = await _sync_issue_catalog_for_series(
+        metadata_svc,
+        session,
+        series,
+        full_refresh_days=refresh_days,
+        local_issue_count=local_issue_count,
+    )
+    return created, mode, status_changed, metadata_changed
+
+
+def _provider_pause_seconds(exc: Exception) -> float | None:
+    if is_sqlite_locked_error(exc):
+        return 60
+    if isinstance(exc, TimeoutError):
+        return 300
+    details = exc.details or {} if isinstance(exc, ProviderError) else {}
+    status = exc.status_code if isinstance(exc, ComicVineError) else details.get("status_code")
+    retryable = exc.retryable if isinstance(exc, ComicVineError) else details.get("retryable")
+    if status in {100, 107, 401, 403, 420, 429}:
+        retry = (
+            exc.retry_after_seconds
+            if isinstance(exc, ComicVineError)
+            else details.get("retry_after_seconds")
+        )
+        return float(retry) if retry else 3600
+    return 300 if retryable else None
+
+
+async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
     settings = get_settings()
     factory = get_session_factory()
-
+    series_to_search: list[int] = []
+    started = time.monotonic()
     async with factory() as session:
         api_key = await get_comicvine_api_key(session)
         if not api_key:
+            state = await load_sweep(session, task_id)
+            if state.active:
+                state.active = False
+                state.retry_at = 0
+                await save_sweep(session, task_id, state)
+                await session.commit()
+            schedule_sweep(task_id, state)
             log_deduped_warning(
                 logger,
-                "sync_new_issues_missing_comicvine_key",
-                key="sync_new_issues_missing_comicvine_key",
-                action_required="Configure a ComicVine API key to enable issue sync.",
+                f"{task_id}_missing_comicvine_key",
+                key=f"{task_id}_missing_comicvine_key",
+                action_required="Configure a ComicVine API key to enable metadata sync.",
             )
-            return
+            return TaskExecutionResult(status="completed")
 
-        metadata_svc = await _create_metadata_service(api_key, settings, session)
-        metadata_refresh_days = _metadata_refresh_days(settings)
-        try:
-            # Process ALL series — sync_new_issues is monitoring-flag-independent.
-            # Load stable IDs up front so we can commit per-series without relying
-            # on long-lived ORM instances that would otherwise keep one write
-            # transaction open for the entire run.
-            result = await session.execute(select(Series.id).where(Series.comicvine_id.isnot(None)))
-            series_ids = list(result.scalars().all())
+        state = await start_sweep(session, task_id)
+        schedule_sweep(task_id, state)
+        if state.retry_at > datetime.now(UTC).timestamp():
+            schedule_sweep(task_id, state)
+            return TaskExecutionResult(status="waiting")
 
-            if not series_ids:
-                logger.debug("sync_new_issues_skip", reason="no series")
-                return
-
-            local_counts_result = await session.execute(
-                select(Issue.series_id, func.count(Issue.id))
-                .where(Issue.series_id.in_(series_ids))
-                .group_by(Issue.series_id)
-            )
-            local_issue_counts = {
-                int(series_id): int(count)
-                for series_id, count in local_counts_result.all()
-                if series_id is not None
-            }
-
-            new_issues = 0
-            status_changes = 0
-            metadata_updates = 0
-            failed = 0
-            full_issue_syncs = 0
-            recent_issue_syncs = 0
-            skipped_issue_syncs = 0
-            series_to_search: list[int] = []
-
-            for series_id in series_ids:
-                series = await session.get(Series, series_id)
-                if series is None:
-                    continue
-
-                log = logger.bind(series_id=series.id, title=series.title)
-                try:
-                    # Snapshot current metadata before refresh
-                    before = _take_snapshot(series)
-
-                    # Refresh series metadata only when stale. Issue-list sync
-                    # below still runs every pass so new issue discovery is
-                    # unchanged.
-                    if series.comicvine_id and _metadata_refresh_due(
-                        series,
-                        metadata_refresh_days,
-                    ):
-                        await metadata_svc.fetch_series(session, series.comicvine_id)
-                        # Re-fetch the series to see updated fields
-                        await session.refresh(series)
-
-                        sc, mc = _detect_changes(series, before, log)
-                        if sc:
-                            status_changes += 1
-                        if mc:
-                            metadata_updates += 1
-
-                    # Fetch new issues. Complete catalogs use a one-page recent
-                    # sync between periodic full refreshes; incomplete/stale
-                    # catalogs still fetch the full list.
-                    if not _issue_catalog_check_due(series):
-                        skipped_issue_syncs += 1
-                        log.debug(
-                            "sync_new_issues_issue_check_skipped",
-                            issue_catalog_last_checked_at=(
-                                series.issue_catalog_last_checked_at.isoformat()
-                                if series.issue_catalog_last_checked_at
-                                else None
-                            ),
-                            issue_check_interval_seconds=(
-                                _issue_check_interval_for_series(series).total_seconds()
-                            ),
-                        )
-                        await session.commit()
-                        continue
-
-                    created, issue_sync_mode = await _sync_issue_catalog_for_series(
-                        metadata_svc,
-                        session,
-                        series,
-                        full_refresh_days=metadata_refresh_days,
-                        local_issue_count=local_issue_counts.get(series.id, 0),
-                    )
-                    if issue_sync_mode == "full":
-                        full_issue_syncs += 1
-                    else:
-                        recent_issue_syncs += 1
-                    new_issues += len(created)
-
-                    # New issues on monitored series → WANTED, unmonitored → SKIPPED (default)
-                    if created and series.monitored:
-                        new_wanted_ids: list[int] = []
-                        for issue in created:
-                            if issue.status == IssueStatus.SKIPPED:
-                                issue.status = IssueStatus.WANTED
-                                new_wanted_ids.append(issue.id)
-
-                        if new_wanted_ids:
-                            series_to_search.append(series.id)
-                            log.debug(
-                                "new_issues_marked_wanted",
-                                new_wanted=len(new_wanted_ids),
-                            )
-
-                    # Release SQLite's writer lock after each series so other
-                    # background tasks, including scheduler stat persistence,
-                    # are not blocked behind one long metadata sync.
-                    await session.commit()
-
-                except Exception:
-                    await session.rollback()
-                    failed += 1
-                    log.exception("sync_new_issues_series_failed")
-            logger.info(
-                "sync_new_issues_complete",
-                new_issues=new_issues,
-                status_changes=status_changes,
-                metadata_updates=metadata_updates,
-                series_checked=len(series_ids),
-                full_issue_syncs=full_issue_syncs,
-                recent_issue_syncs=recent_issue_syncs,
-                skipped_issue_syncs=skipped_issue_syncs,
-                failed=failed,
-            )
-
-            # Schedule one-shot searches for series with new wanted issues
-            if series_to_search:
-                from pullbox.tasks.search_task import search_series_issues
-
-                scheduler = get_scheduler()
-                for sid in series_to_search:
-                    job_id = f"search_new_{sid}_{int(time.time())}"
-                    scheduler._scheduler.add_job(
-                        search_series_issues,
-                        trigger="date",
-                        args=[sid],
-                        id=job_id,
-                        misfire_grace_time=300,
-                    )
-                logger.info(
-                    "scheduled_search_for_new_issues",
-                    series_count=len(series_to_search),
-                    series_ids=series_to_search,
-                )
-        except Exception:
-            await session.rollback()
-            raise
-
-
-async def refresh_metadata() -> None:
-    """Re-fetch metadata for series that are stale or have never been refreshed."""
-    settings = get_settings()
-    factory = get_session_factory()
-
-    async with factory() as session:
-        api_key = await get_comicvine_api_key(session)
-        if not api_key:
-            log_deduped_warning(
-                logger,
-                "refresh_metadata_missing_comicvine_key",
-                key="refresh_metadata_missing_comicvine_key",
-                action_required="Configure a ComicVine API key to enable metadata refresh.",
-            )
-            return
-
-        metadata_svc = await _create_metadata_service(api_key, settings, session)
-        try:
-            cutoff = datetime.now(UTC) - timedelta(days=settings.metadata_refresh_days)
-
-            result = await session.execute(
-                select(Series.id).where(
+        refresh_days = _metadata_refresh_days(settings)
+        predicates = [
+            Series.comicvine_id.isnot(None),
+            Series.id > state.cursor,
+            Series.id <= state.upper_bound,
+        ]
+        if task_id == "refresh_metadata":
+            predicates.extend(
+                [
                     Series.monitored.is_(True),
                     or_(
                         Series.metadata_last_refreshed.is_(None),
-                        Series.metadata_last_refreshed < cutoff,
+                        Series.metadata_last_refreshed
+                        < datetime.now(UTC) - timedelta(days=refresh_days),
                     ),
-                )
+                ]
             )
-            stale_ids = list(result.scalars().all())
+        ids = list(
+            (
+                await session.scalars(
+                    select(Series.id)
+                    .where(*predicates)
+                    .order_by(Series.id)
+                    .limit(_METADATA_BATCH_SIZE + 1)
+                )
+            ).all()
+        )
+        if not ids:
+            state.active = False
+            state.retry_at = 0
+            await save_sweep(session, task_id, state)
+            await session.commit()
+            schedule_sweep(task_id, state)
+            return TaskExecutionResult(status="completed")
 
-            if not stale_ids:
-                logger.debug("refresh_metadata_skip", reason="no stale series")
-                return
-
-            refreshed = 0
-            failed = 0
-            for series_id in stale_ids:
+        counts = {
+            int(series_id): int(count)
+            for series_id, count in (
+                await session.execute(
+                    select(Issue.series_id, func.count(Issue.id))
+                    .where(Issue.series_id.in_(ids[:_METADATA_BATCH_SIZE]))
+                    .group_by(Issue.series_id)
+                )
+            ).all()
+        }
+        metadata_svc = await _create_metadata_service(api_key, settings, session)
+        await session.commit()
+        processed = failed = new_issues = 0
+        paused = False
+        try:
+            for series_id in ids[:_METADATA_BATCH_SIZE]:
+                if processed and time.monotonic() - started >= _METADATA_BATCH_SECONDS:
+                    break
                 series = await session.get(Series, series_id)
                 if series is None:
-                    continue
-                series_title = series.title
-                try:
-                    await metadata_svc.refresh_series(session, series.id)
-                    refreshed += 1
-                    # Release SQLite's writer lock after each series refresh so
-                    # this nightly job doesn't monopolize the DB for the entire batch.
+                    state.cursor = series_id
+                    await save_sweep(session, task_id, state)
                     await session.commit()
-                except Exception:
+                    processed += 1
+                    continue
+                try:
+                    previous_cursor = state.cursor
+                    search_after_commit = False
+                    async with asyncio.timeout(_METADATA_SERIES_SECONDS):
+                        if task_id == "refresh_metadata":
+                            await metadata_svc.refresh_series(
+                                session,
+                                series_id,
+                                commit_before_provider_wait=True,
+                            )
+                        else:
+                            created, _mode, _sc, _mc = await _sync_one_series(
+                                metadata_svc,
+                                session,
+                                series,
+                                refresh_days=refresh_days,
+                                local_issue_count=counts.get(series_id, 0),
+                            )
+                            new_issues += len(created)
+                            if created and series.monitored:
+                                wanted = False
+                                for issue in created:
+                                    if issue.status == IssueStatus.SKIPPED:
+                                        issue.status = IssueStatus.WANTED
+                                        wanted = True
+                                if wanted:
+                                    search_after_commit = True
+                    state.cursor = series_id
+                    state.retry_at = 0
+                    await save_sweep(session, task_id, state)
+                    await session.commit()
+                    if search_after_commit:
+                        series_to_search.append(series_id)
+                    processed += 1
+                except Exception as exc:
                     await session.rollback()
+                    state.cursor = previous_cursor
+                    # Rollback expires ORM objects; use the stable ID, not their fields.
+                    pause_seconds = _provider_pause_seconds(exc)
+                    if pause_seconds is not None:
+                        state.retry_at = (
+                            datetime.now(UTC) + timedelta(seconds=pause_seconds)
+                        ).timestamp()
+                        await save_sweep(session, task_id, state)
+                        await session.commit()
+                        paused = True
+                        logger.warning(
+                            "metadata_sweep_paused",
+                            task_id=task_id,
+                            series_id=series_id,
+                            retry_seconds=pause_seconds,
+                            failure_type=type(exc).__name__,
+                        )
+                        break
                     failed += 1
-                    logger.exception(
-                        "refresh_metadata_series_failed",
-                        series_id=series_id,
-                        title=series_title,
-                    )
+                    processed += 1
+                    state.cursor = series_id
+                    await save_sweep(session, task_id, state)
+                    await session.commit()
+                    logger.exception(f"{task_id}_series_failed", series_id=series_id)
 
-            logger.info(
-                "refresh_metadata_complete",
-                refreshed=refreshed,
-                failed=failed,
-                total=len(stale_ids),
+            state.active = paused or processed < len(ids)
+            await save_sweep(session, task_id, state)
+            await session.commit()
+        finally:
+            close = getattr(metadata_svc, "close", None)
+            if close is not None:
+                await close()
+
+    if series_to_search:
+        from pullbox.tasks.search_task import search_series_issues
+
+        for sid in series_to_search:
+            get_scheduler()._scheduler.add_job(
+                search_series_issues,
+                trigger="date",
+                args=[sid],
+                id=f"search_new_{sid}_{int(time.time())}",
+                misfire_grace_time=300,
             )
-        except Exception:
-            await session.rollback()
-            raise
+    schedule_sweep(task_id, state)
+    logger.info(
+        f"{task_id}_batch_complete",
+        series_checked=processed,
+        new_issues=new_issues,
+        failed=failed,
+        cursor=state.cursor,
+        upper_bound=state.upper_bound,
+        waiting=state.active,
+    )
+    return TaskExecutionResult(status="waiting" if state.active else "completed")
+
+
+async def sync_new_issues() -> TaskExecutionResult:
+    """Resume a bounded all-series issue sweep without monopolizing the scheduler."""
+    return await _run_metadata_sweep("sync_new_issues")
+
+
+async def refresh_metadata() -> TaskExecutionResult:
+    """Resume a bounded sweep of stale monitored-series metadata."""
+    return await _run_metadata_sweep("refresh_metadata")

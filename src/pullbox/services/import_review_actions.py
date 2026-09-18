@@ -20,7 +20,10 @@ from pullbox.models.import_job import (
 )
 from pullbox.services.import_duplicates import duplicate_merge_is_actionable, is_duplicate_series
 from pullbox.services.import_file_selection import set_review_file_selection
-from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
+from pullbox.services.import_safety_diagnostics import (
+    ImportSafetyCategory,
+    normalize_import_safety_diagnostics,
+)
 from pullbox.services.import_story_arc_resolution import (
     refresh_story_arc_entries_for_import_files,
 )
@@ -59,6 +62,14 @@ def apply_safety_allow_once_to_file(
     """Apply the canonical one-job safety exception payload to one staged file."""
     diagnostics = dict(imp_file.diagnostics or {})
     previous_block = diagnostics.pop("safety_block", None)
+    if previous_block is None and retry_import and imp_file.status is ImportedFileStatus.FAILED:
+        revalidation = diagnostics.get("source_revalidation")
+        if (
+            isinstance(revalidation, Mapping)
+            and revalidation.get("category") == ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT
+            and revalidation.get("overrideable") is True
+        ):
+            previous_block = revalidation
     if not isinstance(previous_block, Mapping):
         raise ValidationError("This safety block cannot be overridden.")
     normalized_previous_block = normalize_import_safety_diagnostics(previous_block)

@@ -30,6 +30,16 @@ _SOURCE_LAYOUT_REVIEW_MESSAGE = (
 _MYLAR_FOLDER_SCOPE_REVIEW_MESSAGE = (
     "This unrecorded file appears to belong to another series in the selected Mylar folder."
 )
+_VOLUME_LEAF_REVIEW_REASON = "volume_leaf_identity_unconfirmed"
+_VOLUME_LEAF_REVIEW_MESSAGE = (
+    "The volume folder does not provide enough agreeing evidence for this file. "
+    "Confirm its series using the filename or embedded metadata before importing."
+)
+
+
+def _requires_volume_leaf_review(metadata_diagnostics: dict[str, object]) -> bool:
+    evidence = metadata_diagnostics.get("volume_leaf")
+    return isinstance(evidence, dict) and evidence.get("review_required") is True
 
 
 def _requires_source_layout_review(metadata_diagnostics: dict[str, object]) -> bool:
@@ -62,20 +72,45 @@ async def materialize_discovered_scan_results(
         )
         layout_review_count = sum(
             _requires_source_layout_review(dict(discovered_file.metadata_diagnostics))
+            or _requires_volume_leaf_review(dict(discovered_file.metadata_diagnostics))
             for discovered_file in discovered.files
         )
         all_files_require_layout_review = bool(discovered.files) and layout_review_count == len(
             discovered.files
         )
         series_diagnostics = dict(discovered.diagnostics)
-        if layout_review_count:
-            series_diagnostics["source_layout_review_files"] = layout_review_count
-        if all_files_require_layout_review:
+        volume_leaf = series_diagnostics.get("volume_leaf")
+        release_review = (
+            isinstance(volume_leaf, dict)
+            and volume_leaf.get("series_confirmation_required") is True
+        )
+        if release_review:
             series_diagnostics.update(
                 {
                     "kind": "source_layout_review",
-                    "reason": _SOURCE_LAYOUT_REVIEW_REASON,
-                    "rejection_reason": _SOURCE_LAYOUT_REVIEW_MESSAGE,
+                    "reason": "volume_leaf_release_unconfirmed",
+                    "rejection_reason": (
+                        "The volume folder does not identify a unique series release. "
+                        "Confirm the series match before importing."
+                    ),
+                }
+            )
+        if layout_review_count:
+            series_diagnostics["source_layout_review_files"] = layout_review_count
+        if all_files_require_layout_review:
+            volume_review = any(
+                _requires_volume_leaf_review(dict(file.metadata_diagnostics))
+                for file in discovered.files
+            )
+            series_diagnostics.update(
+                {
+                    "kind": "source_layout_review",
+                    "reason": _VOLUME_LEAF_REVIEW_REASON
+                    if volume_review
+                    else _SOURCE_LAYOUT_REVIEW_REASON,
+                    "rejection_reason": _VOLUME_LEAF_REVIEW_MESSAGE
+                    if volume_review
+                    else _SOURCE_LAYOUT_REVIEW_MESSAGE,
                 }
             )
         item = ImportedSeries(
@@ -89,7 +124,7 @@ async def materialize_discovered_scan_results(
             has_files=discovered.has_files,
             status=(
                 ImportSeriesStatus.NO_MATCH
-                if all_files_require_layout_review or mylar_path_incompatible
+                if all_files_require_layout_review or mylar_path_incompatible or release_review
                 else ImportSeriesStatus.PENDING
             ),
             diagnostics=series_diagnostics,
@@ -118,10 +153,11 @@ async def materialize_discovered_scan_results(
             metadata_diagnostics = dict(df.metadata_diagnostics)
             safety_block = metadata_diagnostics.pop("file_safety", None)
             source_layout_review = _requires_source_layout_review(metadata_diagnostics)
+            volume_leaf_review = _requires_volume_leaf_review(metadata_diagnostics)
             mylar_folder_scope_review = _requires_mylar_folder_scope_review(metadata_diagnostics)
             if isinstance(safety_block, dict):
                 file_status = ImportedFileStatus.SAFETY_BLOCKED
-            elif source_layout_review or mylar_folder_scope_review:
+            elif source_layout_review or mylar_folder_scope_review or volume_leaf_review:
                 file_status = ImportedFileStatus.NO_MATCH
             else:
                 file_status = ImportedFileStatus.PENDING
@@ -148,6 +184,15 @@ async def materialize_discovered_scan_results(
                         "kind": "source_layout_review",
                         "reason": "selected_layout_no_match",
                         "rejection_reason": _SOURCE_LAYOUT_REVIEW_MESSAGE,
+                    }
+                )
+            elif volume_leaf_review:
+                diagnostics.update(
+                    {
+                        "kind": "source_scope_review",
+                        "reason": _VOLUME_LEAF_REVIEW_REASON,
+                        "rejection_reason": _VOLUME_LEAF_REVIEW_MESSAGE,
+                        "preserve_series_match": True,
                     }
                 )
             elif mylar_folder_scope_review:

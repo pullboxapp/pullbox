@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -316,6 +317,105 @@ async def test_allow_oversized_files_requeues_only_overrideable_rows(
     assert approved.status is ImportedFileStatus.CONFIRMED
     assert approved.include_in_import is True
     assert not_approved.status is ImportedFileStatus.SAFETY_BLOCKED
+
+
+@pytest.mark.parametrize("source_type", list(ImportSourceType))
+async def test_allow_oversized_files_includes_failed_source_rechecks(
+    db_session: AsyncSession, source_type: ImportSourceType
+) -> None:
+    job, imported_series = await _seed_job(db_session)
+    job.source_type = source_type
+    failed = _blocked_file(
+        job,
+        imported_series,
+        name="large-rechecked.cbz",
+        category=ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT,
+        overrideable=True,
+    )
+    evidence = {
+        **failed.diagnostics["safety_block"],
+        "kind": "source_revalidation",
+        "source": "completed_import_recheck",
+        "code": "archive_decompressed_size_limit",
+        "retryable": False,
+    }
+    failed.status = ImportedFileStatus.FAILED
+    failed.diagnostics = {"source_revalidation": evidence}
+    db_session.add(failed)
+    await db_session.commit()
+    original_path = failed.file_path
+    action = CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES
+
+    summary = await summarize_completed_import_cleanup_scope(db_session, job.id, action)
+    assert summary.affected_file_count == 1
+    preview = await preview_completed_import_cleanup(db_session, job.id, action, actor_id=42)
+
+    assert preview.affected_file_count == 1
+    assert failed.status is ImportedFileStatus.FAILED
+    assert failed.diagnostics == {"source_revalidation": evidence}
+    page = await list_completed_import_cleanup_files(db_session, job.id, action)
+    assert [item.id for item in page.items] == [failed.id]
+    result = await apply_completed_import_cleanup(
+        db_session,
+        job.id,
+        action,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+    assert result.requires_import_retry is True
+    assert result.affected_file_count == 1
+    assert failed.status is ImportedFileStatus.CONFIRMED
+    assert failed.include_in_import is True
+    assert failed.file_path == original_path
+    assert failed.diagnostics["safety_exception"]["allowed_once"] is True
+    assert failed.diagnostics["safety_exception"]["previous_block"]["overrideable"] is True
+    assert failed.diagnostics["source_revalidation"] == evidence
+
+
+@pytest.mark.parametrize(
+    "protection", ["dangerous", "identity", "not_overrideable", "active_block", "skipped"]
+)
+async def test_failed_size_approval_does_not_admit_other_blocked_files(
+    db_session: AsyncSession, protection: str
+) -> None:
+    job, imported_series = await _seed_job(db_session)
+    failed = _blocked_file(
+        job,
+        imported_series,
+        name="protected.cbz",
+        category=ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT,
+        overrideable=True,
+    )
+    evidence = dict(failed.diagnostics["safety_block"])
+    failed.status = ImportedFileStatus.FAILED
+    failed.diagnostics = {"source_revalidation": evidence}
+    if protection == "dangerous":
+        evidence["category"] = ImportSafetyCategory.DANGEROUS_PATH_OR_PAYLOAD.value
+        evidence["code"] = "dangerous_archive_path"
+    elif protection == "identity":
+        evidence["category"] = ImportSafetyCategory.SOURCE_CHANGED.value
+        evidence["code"] = "source_identity_changed"
+    elif protection == "not_overrideable":
+        evidence["overrideable"] = False
+    elif protection == "active_block":
+        failed.diagnostics["safety_block"] = build_import_safety_diagnostics(
+            "dangerous_archive_path",
+            code="dangerous_archive_path",
+        )
+    else:
+        failed.status = ImportedFileStatus.SKIPPED
+    db_session.add(failed)
+    await db_session.commit()
+    before = deepcopy(failed.diagnostics)
+
+    summary = await summarize_completed_import_cleanup_scope(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.ALLOW_OVERSIZED_FILES,
+    )
+
+    assert summary.affected_file_count == 0
+    assert failed.diagnostics == before
 
 
 @pytest.mark.asyncio
@@ -986,6 +1086,15 @@ async def test_mixed_folder_cleanup_leaves_ambiguous_series_and_files_untouched(
         monitored=True,
     )
     db_session.add(duplicate_title)
+    await db_session.flush()
+    db_session.add(
+        Issue(
+            series_id=duplicate_title.id,
+            issue_number=1002,
+            issue_number_text="1002",
+            comicvine_id=8001002,
+        )
+    )
     await db_session.commit()
 
     with pytest.raises(ValidationError, match="No files are eligible"):
@@ -1000,26 +1109,57 @@ async def test_mixed_folder_cleanup_leaves_ambiguous_series_and_files_untouched(
 
 
 @pytest.mark.asyncio
-async def test_mixed_folder_cleanup_does_not_trust_filename_only_identity(
+async def test_mixed_folder_cleanup_uses_unique_filename_title_and_issue_identity(
     db_session: AsyncSession,
 ) -> None:
     (
         job,
-        _source_series,
-        _target_import_series,
+        source_series,
+        target_import_series,
         mixed_file,
-        _issue,
-    ) = await _seed_mixed_folder_candidate(db_session, source_signal="release_title")
-
-    with pytest.raises(ValidationError, match="No files are eligible"):
-        await preview_completed_import_cleanup(
-            db_session,
-            job.id,
-            CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
-            actor_id=42,
+        issue,
+    ) = await _seed_mixed_folder_candidate(
+        db_session,
+        target_title="Thunderbolts",
+        target_year=2006,
+        source_signal="release_title",
+    )
+    source_series.files_no_match = 1
+    mixed_file.file_path = "/comics/Fritzi Ritz (1953)/042 - Thunderbolts 105 (converted).cbz"
+    mixed_file.file_name = "042 - Thunderbolts 105 (converted).cbz"
+    mixed_file.parsed_issue_number = 105
+    mixed_file.issue_number_raw = "105"
+    issue.issue_number = 105
+    issue.issue_number_text = "105"
+    db_session.add(
+        Series(
+            title="Thunderbolts",
+            sort_title="thunderbolts",
+            year_start=2016,
+            monitored=True,
         )
+    )
+    await db_session.commit()
+
+    preview = await preview_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
+        actor_id=42,
+    )
+    result = await apply_completed_import_cleanup(
+        db_session,
+        job.id,
+        CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES,
+        actor_id=42,
+        preview_token=preview.preview_token,
+    )
+
     await db_session.refresh(mixed_file)
-    assert mixed_file.status is ImportedFileStatus.NO_MATCH
+    assert result.requires_import_retry is True
+    assert mixed_file.import_series_id == target_import_series.id
+    assert mixed_file.matched_issue_id == issue.id
+    assert mixed_file.status is ImportedFileStatus.CONFIRMED
 
 
 @pytest.mark.asyncio

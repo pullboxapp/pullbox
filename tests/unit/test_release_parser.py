@@ -40,6 +40,30 @@ class TestParseReleaseTitle:
         assert r.issue_number == 1_000_000.0
         assert r.year == 1998
 
+    @pytest.mark.parametrize(
+        ("filename", "expected_series", "expected_issue", "expected_year"),
+        [
+            ("batman.104. (2021).cbz", "batman", 104.0, 2021),
+            ("robin.1000000.(1998).cbz", "robin", 1_000_000.0, 1998),
+            ("Series 0.5.cbz", "Series", 0.5, None),
+            ("Series -1.cbz", "Series", -1.0, None),
+        ],
+    )
+    def test_local_filename_issue_designations_are_preserved(
+        self,
+        filename: str,
+        expected_series: str,
+        expected_issue: float,
+        expected_year: int | None,
+    ) -> None:
+        result = parse_release_title(filename, expected_series=(expected_series,))
+
+        assert result is not None
+        assert result.series_name == expected_series
+        assert result.issue_number == expected_issue
+        assert result.issue_number_text == str(expected_issue).removesuffix(".0")
+        assert result.year == expected_year
+
     def test_html_entity_in_name(self) -> None:
         r = parse_release_title(
             "Spider-Man &amp; Wolverine 003 [2025] [4 covers] [Digital] [dekabro-Empire]"

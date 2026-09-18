@@ -60,7 +60,15 @@ def test_source_metadata_for_import_file_restores_persisted_signals() -> None:
     assert metadata.issue_number == 4.0
     assert metadata.issue_type == IssueType.ISSUE
     assert metadata.signals == {"series_name": MetadataSignal.COMICINFO}
-    assert metadata.diagnostics == {"has_comicinfo": True}
+    assert metadata.diagnostics["has_comicinfo"] is True
+    assert metadata.diagnostics["filename_parse"] == {
+        "series_name": "Chicken Devil",
+        "issue_number": 4.0,
+        "issue_number_text": "4",
+        "year": 2022,
+        "volume": None,
+        "issue_type": IssueType.ISSUE.value,
+    }
 
 
 def test_source_metadata_for_import_file_uses_persisted_filename_issue_fallback() -> None:
