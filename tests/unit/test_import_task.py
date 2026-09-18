@@ -758,8 +758,9 @@ class TestRunImportExecuteTask:
         assert job.progress_snapshot["message"] == "Import cancelled by user."
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("database_busy", [False, True])
     async def test_execute_task_keeps_truthful_paused_snapshot(
-        self, db_session: AsyncSession
+        self, db_session: AsyncSession, database_busy: bool
     ) -> None:
         """Paused imports keep their exact import checkpoint instead of being terminalized."""
         job = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
@@ -778,6 +779,8 @@ class TestRunImportExecuteTask:
 
         mock_service = AsyncMock()
         mock_service.run_import.side_effect = JobPausedError("paused")
+        if database_busy:
+            mock_service.run_import.side_effect.__cause__ = _sqlite_database_locked_error()
 
         @asynccontextmanager
         async def mock_session_ctx():
@@ -794,11 +797,16 @@ class TestRunImportExecuteTask:
             await run_import_execute_task(job.id)
 
         await db_session.refresh(job)
-        assert job.status == ImportJobStatus.PAUSED
-        assert job.progress_snapshot["status"] == ImportJobStatus.PAUSED.value
+        expected = ImportJobStatus.STALLED if database_busy else ImportJobStatus.PAUSED
+        assert job.status == expected
+        assert job.progress_snapshot["status"] == expected.value
         assert job.progress_snapshot["phase"] == "importing"
         assert job.progress_snapshot["progress"] == 64
-        assert job.progress_snapshot["message"] == "Import is paused."
+        assert job.progress_snapshot["message"] == (
+            "Import stalled because the database was busy. Resume when ready."
+            if database_busy
+            else "Import is paused."
+        )
         assert job.progress_snapshot["current_file_name"] == "Fearscape Vol 02.pdf"
         assert job.progress_snapshot["current_file_stage"] == "rendering"
         assert job.progress_snapshot["control_state"]["can_resume"] is True
@@ -833,8 +841,9 @@ class TestRunImportExecuteTask:
         assert job.error_message is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("wrapped", [False, True])
     async def test_runner_marks_database_lock_as_stalled(
-        self, async_engine: object, db_session: AsyncSession
+        self, async_engine: object, db_session: AsyncSession, wrapped: bool
     ) -> None:
         """Transient SQLite lock failures leave imports resumable instead of failed."""
         job = await _create_job(db_session, status=ImportJobStatus.IMPORTING)
@@ -853,6 +862,10 @@ class TestRunImportExecuteTask:
         runner = ImportRunner(factory)
         mock_service = AsyncMock()
         mock_service.run_import.side_effect = _sqlite_database_locked_error()
+        if wrapped:
+            busy = JobPausedError("Database busy; confirmed matches are preserved.")
+            busy.__cause__ = _sqlite_database_locked_error()
+            mock_service.run_import.side_effect = busy
 
         with (
             patch("pullbox.tasks.import_task._build_import_service", return_value=mock_service),

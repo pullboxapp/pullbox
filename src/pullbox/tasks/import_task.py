@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import select as sa_select
+from sqlalchemy.exc import OperationalError
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
 from pullbox.core.sqlite_lock import (
@@ -778,9 +779,14 @@ class ImportRunner:
                 else:
                     logger.info("import_runner_noop", job_id=job_id, status=job.status.value)
                     return
-            except JobPausedError:
+            except JobPausedError as exc:
                 await session.rollback()
-                await self._mark_paused(session, job_id)
+                if isinstance(exc.__cause__, OperationalError) and is_sqlite_locked_error(
+                    exc.__cause__
+                ):
+                    await self._mark_stalled(job_id)
+                else:
+                    await self._mark_paused(session, job_id)
             except JobCancelledError:
                 await session.rollback()
                 await self._finalize_cancel(session, job_id)
@@ -898,11 +904,16 @@ async def _run_single_job_once(
                 service.schedule_story_arc_sync()
             if _should_schedule_comicinfo_enrichment(run_import_result):
                 service.schedule_comicinfo_enrichment(session_factory, job_id=job_id)
-        except JobPausedError:
+        except JobPausedError as exc:
             await session.rollback()
             job = await session.get(ImportJob, job_id)
             if job is not None and job.status != ImportJobStatus.CANCELLED:
-                sync_paused_job_state(job)
+                if isinstance(exc.__cause__, OperationalError) and is_sqlite_locked_error(
+                    exc.__cause__
+                ):
+                    sync_stalled_job_state(job)
+                else:
+                    sync_paused_job_state(job)
                 await session.commit()
         except JobCancelledError:
             await session.rollback()
@@ -957,7 +968,10 @@ async def _run_single_job_once(
                 terminal_status = terminal_event_override.status
             else:
                 job = await session.get(ImportJob, job_id)
-                if job is not None and job.status == ImportJobStatus.PAUSED:
+                if job is not None and job.status in {
+                    ImportJobStatus.PAUSED,
+                    ImportJobStatus.STALLED,
+                }:
                     terminal_status = await _publish_current_snapshot_event_for_job(
                         session,
                         job_id,

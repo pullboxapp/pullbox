@@ -18,7 +18,11 @@ therefore do not hold SQLite's writer lock, and results do not accumulate in an
 unbounded in-memory collection.
 Deferred catalog recovery publishes live provider progress without rewriting
 the full recovery snapshot, then writes one JSON-safe checkpoint after each
-completed catalog.
+completed catalog. Once preparation has durably stored its decisions on file
+rows, consumed catalog and title-lookup caches are removed from the progress
+snapshot. Recovery scope, summary counts, and restart state remain. Older
+prepared/completed snapshots are compacted on their next progress checkpoint;
+unfinished catalog preparation retains its caches for resume.
 
 `PULLBOX_IMPORT_SCAN_WORKER_COUNT=0` selects automatic inspection concurrency,
 up to four workers. CPU affinity, cgroup v2 CPU quotas and parent limits,
@@ -34,12 +38,21 @@ Automatic mode deliberately does not saturate high-core machines: local ZIP
 header parsing did not improve with more than 2-4 workers. Docker Desktop's
 VM resources are the relevant limits, not the Mac's advertised RAM.
 
-Step 4 keeps `PULLBOX_IMPORT_FILE_WORKER_COUNT=2` and its existing temporary-space
+Managed Step 4 keeps `PULLBOX_IMPORT_FILE_WORKER_COUNT=2` and its existing temporary-space
 preflight, target-collision serialization, per-worker sessions, and rollback
 journal. It now bounds submitted tasks as well as active workers, rather than
 creating one waiting task per file. Exiting or canceling either worker pool
 drains active work before the job can transition; no orphan filesystem work
 may continue after cancellation is reported complete.
+
+SQLite in-place registration uses one file worker, with an isolated transaction
+per file. It retries only transient SQLite lock failures, rolling back and
+rechecking control requests and source identity in a fresh session. Exhausted
+retries leave the import resumable as database-busy, not a failed match. Source
+archives, skips, safety blocks, and confirmed targets are not loosened. Progress
+inside the file transaction is live-only; the terminal file checkpoint is
+persisted after commit, avoiding a competing progress writer. Archive scanning
+and managed copy/conversion keep their existing bounded parallelism.
 
 ## Progress and Evidence
 

@@ -602,10 +602,19 @@ async def test_catalog_checkpoint_serializes_local_catalog_cutoff(db_session):
         )
     ]
 
-    assert await prepare_deferred_recovery(db_session, job.id, metadata_service=provider)
+    cutoffs = []
 
-    stored = job.progress_snapshot["deferred_recovery"]["matches"]["7001"][0]["summary"]
-    assert stored["source_cutoff_at"] == "2026-09-13T05:00:00+00:00"
+    async def checkpoint(_event):
+        matches = job.progress_snapshot.get("deferred_recovery", {}).get("matches", {})
+        if "7001" in matches:
+            cutoffs.append(matches["7001"][0]["summary"]["source_cutoff_at"])
+
+    assert await prepare_deferred_recovery(
+        db_session, job.id, metadata_service=provider, progress_callback=checkpoint
+    )
+
+    assert cutoffs and set(cutoffs) == {"2026-09-13T05:00:00+00:00"}
+    assert "matches" not in job.progress_snapshot["deferred_recovery"]
     await db_session.commit()
 
 

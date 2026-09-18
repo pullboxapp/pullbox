@@ -36,6 +36,7 @@ from pullbox.services.import_deferred_recovery import (
     provider_ids,
     refresh_recovered_groups,
 )
+from pullbox.services.import_recovery_checkpoint import compact_recovery_state
 from pullbox.services.import_reference_recovery import (
     reference_candidates,
     repair_catalog_references,
@@ -61,7 +62,10 @@ def recovery_state(job: ImportJob) -> dict[str, Any]:
 
 
 def save_recovery_state(job: ImportJob, state: dict[str, Any]) -> None:
-    job.progress_snapshot = {**dict(job.progress_snapshot or {}), "deferred_recovery": state}
+    job.progress_snapshot = {
+        **dict(job.progress_snapshot or {}),
+        "deferred_recovery": compact_recovery_state(state),
+    }
 
 
 def _catalog_summary_payload(summary: IssueSummary) -> dict[str, Any]:
