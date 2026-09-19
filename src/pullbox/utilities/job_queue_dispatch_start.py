@@ -50,7 +50,9 @@ class DispatchStartResult:
 async def load_next_dispatch_candidate(session: AsyncSession) -> UtilityJob | None:
     """Return the next queued job only when no job is already running."""
     running = await session.execute(
-        select(UtilityJob).where(UtilityJob.state == JobState.RUNNING).limit(1)
+        select(UtilityJob)
+        .where(UtilityJob.state.in_([JobState.RUNNING, JobState.PAUSING, JobState.CANCELLING]))
+        .limit(1)
     )
     if running.scalar_one_or_none() is not None:
         return None

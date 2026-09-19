@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from pullbox.utilities.job_queue_state import transition_job_state
 from pullbox.utilities.models import ItemState, JobState, UtilityJob, UtilityJobItem
@@ -63,18 +63,26 @@ async def mark_batch_items_in_progress(
     *,
     item_ids: Iterable[str],
     started_at: str,
-) -> None:
+) -> set[str]:
     """Mark a batch of pending job items as leased to workers."""
-    await session.execute(
+    result = await session.execute(
         update(UtilityJobItem)
-        .where(UtilityJobItem.id.in_(list(item_ids)))
+        .where(
+            UtilityJobItem.id.in_(list(item_ids)),
+            UtilityJobItem.state == ItemState.PENDING,
+            UtilityJobItem.job_id.in_(
+                select(UtilityJob.id).where(UtilityJob.state == JobState.RUNNING)
+            ),
+        )
         .values(
             state=ItemState.IN_PROGRESS,
             started_at=started_at,
             completed_at=None,
             worker_id=None,
         )
+        .returning(UtilityJobItem.id)
     )
+    return set(result.scalars())
 
 
 async def lease_dispatch_batch(
@@ -87,10 +95,10 @@ async def lease_dispatch_batch(
 ) -> list[UtilityJobItem]:
     """Mark and return the next pending item slice leased to workers."""
     batch_items = pending_items[batch_start : batch_start + batch_size]
-    await mark_batch_items_in_progress(
+    leased_ids = await mark_batch_items_in_progress(
         session,
         item_ids=[item.id for item in batch_items],
         started_at=started_at,
     )
     await session.commit()
-    return batch_items
+    return [item for item in batch_items if item.id in leased_ids]

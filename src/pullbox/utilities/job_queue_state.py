@@ -15,7 +15,7 @@ VALID_TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.CANCELLING,
         JobState.FAILED,
     },
-    JobState.PAUSING: {JobState.PAUSED, JobState.FAILED},
+    JobState.PAUSING: {JobState.PAUSED, JobState.CANCELLING, JobState.FAILED},
     JobState.PAUSED: {JobState.RUNNING, JobState.CANCELLING},
     JobState.CANCELLING: {JobState.CANCELLED, JobState.FAILED},
     JobState.CANCELLED: {JobState.ROLLING_BACK},
@@ -39,6 +39,7 @@ CANCELLABLE_STATES = frozenset(
         JobState.QUEUED,
         JobState.RUNNING,
         JobState.PAUSED,
+        JobState.PAUSING,
     }
 )
 

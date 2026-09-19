@@ -687,8 +687,13 @@ class FileConverterExecutor(JobExecutor):
         item_id = item_data.get("id", "unknown")
         file_path = item_data.get("file_path", "")
         source = Path(file_path)
+        disposable_output: Path | None = None
 
         try:
+            from pullbox.utilities.cancellation import check_cancelled
+            from pullbox.utilities.executors.utility_archive_work import convert_utility_file
+
+            check_cancelled()
             referenced_paths = (job_context or {}).get("referenced_paths", [])
             resolved_source = source.expanduser().resolve(strict=False)
             if isinstance(referenced_paths, list) and any(
@@ -722,17 +727,22 @@ class FileConverterExecutor(JobExecutor):
             is_repack = source_format == target_format or target_path == source
             if is_repack:
                 temp_target = source.with_name(f"{source.stem}._repack_.{target_format}")
-                result_path = _convert_sync(
+                if temp_target.exists():
+                    raise FileExistsError(f"Temporary target already exists: {temp_target}")
+                disposable_output = temp_target
+                result_path = convert_utility_file(
                     source, target_format, temp_target, pdf_quality=pdf_quality
                 )
             elif target_path.exists():
                 raise FileExistsError(f"Target already exists: {target_path}")
             else:
-                result_path = _convert_sync(
+                disposable_output = target_path
+                result_path = convert_utility_file(
                     source, target_format, target_path, pdf_quality=pdf_quality
                 )
 
             # Move original to trash
+            check_cancelled()
             original_trash_path: str | None = None
             trash_dir = resolve_trash_directory(job_config.get("trash_folder"))
             if trash_dir:
@@ -776,6 +786,17 @@ class FileConverterExecutor(JobExecutor):
             )
         except Exception as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
+            from pullbox.core.exceptions import JobCancelledError
+
+            if isinstance(exc, JobCancelledError):
+                if disposable_output is not None:
+                    disposable_output.unlink(missing_ok=True)
+                return ProcessedItem(
+                    item_id=item_id,
+                    result=ItemResult.CANCELLED,
+                    duration_ms=duration_ms,
+                    log_entries=[("INFO", "Conversion cancelled; original retained.", {})],
+                )
             return ProcessedItem(
                 item_id=item_id,
                 result=ItemResult.FAILED,

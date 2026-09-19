@@ -8,17 +8,21 @@ worker crashes gracefully.
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from pullbox.core.exceptions import JobCancelledError
 from pullbox.utilities.base_executor import (
     ExecutionMode,
     ItemResult,
     JobExecutor,
     ProcessedItem,
 )
+from pullbox.utilities.cancellation import check_cancelled, worker_cancellation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -32,10 +36,13 @@ def _execute_in_worker(
     job_config: dict[str, Any],
     job_context: dict[str, Any] | None,
     worker_id: int,
+    cancellation_marker: str | None = None,
 ) -> ProcessedItem:
     """Run process_item in a worker process. Must be a module-level function for pickling."""
     try:
-        result = executor.run_process_item(item_data, job_config, job_context)
+        with worker_cancellation(cancellation_marker):
+            check_cancelled()
+            result = executor.run_process_item(item_data, job_config, job_context)
         if result is None:
             return ProcessedItem(
                 item_id=item_data.get("id", "unknown"),
@@ -45,6 +52,13 @@ def _execute_in_worker(
             )
         result.worker_id = worker_id
         return result
+    except JobCancelledError:
+        return ProcessedItem(
+            item_id=item_data.get("id", "unknown"),
+            result=ItemResult.CANCELLED,
+            worker_id=worker_id,
+            log_entries=[("INFO", "Stopped before the next safe operation; source retained.", {})],
+        )
     except Exception as exc:
         return ProcessedItem(
             item_id=item_data.get("id", "unknown"),
@@ -81,6 +95,9 @@ class WorkerPool:
         else:  # pragma: no cover - defensive fallback
             raise ValueError(f"Unsupported execution mode: {execution_mode}")
         self._shutdown = False
+        # A private filesystem signal is picklable on spawn/fork and shared with threads.
+        self._control_dir = tempfile.TemporaryDirectory(prefix="pullbox-utility-control-")
+        self._cancellation_marker = Path(self._control_dir.name) / "cancel"
 
     def _ensure_active(self) -> None:
         """Raise if the pool is no longer available."""
@@ -147,6 +164,7 @@ class WorkerPool:
                 job_config,
                 job_context,
                 worker_id,
+                str(self._cancellation_marker),
             )
             pending.append(asyncio.create_task(self._run_batch_future(idx, item_data, future)))
 
@@ -199,3 +217,9 @@ class WorkerPool:
             self._pool.shutdown(wait=True)
             self._shutdown = True
             self._pool = None
+            self._control_dir.cleanup()
+
+    def request_cancel(self) -> None:
+        """Ask workers to stop before the next safe operation."""
+        if not self._shutdown:
+            self._cancellation_marker.touch(exist_ok=True)

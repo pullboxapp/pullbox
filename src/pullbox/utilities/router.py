@@ -449,7 +449,8 @@ async def cancel_job(
         await mgr.cancel_job(session, job_id, rollback=rollback)
     except ValueError as exc:
         raise ValidationError(str(exc)) from None
-    return {"status": "cancelling" if rollback else "cancelled", "job_id": job_id}
+    job = await session.get(UtilityJob, job_id)
+    return {"status": str(job.state).lower() if job is not None else "cancelled", "job_id": job_id}
 
 
 @router.post("/jobs/{job_id}/rollback", status_code=200)

@@ -355,7 +355,7 @@ async def test_job_control_routes_success_and_validation(
         "job_id": "job-1",
     }
     assert await utilities_router.cancel_job("job-2", _user(), db_session, rollback=True) == {
-        "status": "cancelling",
+        "status": "cancelled",
         "job_id": "job-2",
     }
     assert await utilities_router.rollback_job("job-1", _user(), db_session) == {
