@@ -31,6 +31,7 @@ def item_result_to_state(result: object) -> ItemState:
         ItemResult.COMPLETED: ItemState.COMPLETED,
         ItemResult.FAILED: ItemState.FAILED,
         ItemResult.SKIPPED: ItemState.SKIPPED,
+        ItemResult.CANCELLED: ItemState.PENDING,
     }
     return result_states.get(result, ItemState.FAILED)
 

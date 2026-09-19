@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
 
 from pullbox.services.utility_operation_progress import project_utility_operation_progress
 from pullbox.utilities.job_queue_batch_processing import process_dispatch_batches
+from pullbox.utilities.job_queue_cancellation import drain_task
 from pullbox.utilities.job_queue_config import (
     get_utility_log_level,
     get_utility_worker_count,
@@ -338,6 +339,8 @@ class JobQueueManager:
                 )
                 batch_size = worker_runtime.batch_size
                 worker_pool = worker_runtime.worker_pool
+                interrupted = False
+                dispatch_error: Exception | None = None
                 try:
                     await process_dispatch_batches(
                         session_factory=self._session_factory,
@@ -356,28 +359,41 @@ class JobQueueManager:
                         logger=logger,
                         timestamp_factory=lambda: datetime.now(UTC).isoformat(),
                     )
+                except asyncio.CancelledError:
+                    interrupted = True
+                except Exception as exc:
+                    dispatch_error = exc
                 finally:
-                    worker_pool.shutdown()
+                    await drain_task(asyncio.create_task(asyncio.to_thread(worker_pool.shutdown)))
 
                 async with self._session_factory() as session:
-                    finalization = await finalize_dispatch_job(
-                        session,
-                        job_id=job_id,
-                        job_type=job_type,
-                        executor=executor,
-                        summary=summary,
-                        config=config,
-                        job_context=job_context,
-                        get_utility_log_level=get_utility_log_level,
-                        persist_log=self._persist_utility_log,
-                        transition_job=self.transition,
-                    )
+                    if dispatch_error is not None:
+                        await self._record_dispatch_failure(session, job_id, dispatch_error)
+                        continue
+                    try:
+                        finalization = await finalize_dispatch_job(
+                            session,
+                            job_id=job_id,
+                            job_type=job_type,
+                            executor=executor,
+                            summary=summary,
+                            config=config,
+                            job_context=job_context,
+                            get_utility_log_level=get_utility_log_level,
+                            persist_log=self._persist_utility_log,
+                            transition_job=self.transition,
+                            project_progress=project_utility_operation_progress,
+                        )
+                    except Exception as exc:
+                        await session.rollback()
+                        await self._record_dispatch_failure(session, job_id, exc)
+                        if interrupted:
+                            raise asyncio.CancelledError from exc
+                        continue
                     if finalization.log_event is not None:
                         logger.info(finalization.log_event, **finalization.log_context)
-                    finalized_job = await session.get(UtilityJob, job_id)
-                    if finalized_job is not None:
-                        await project_utility_operation_progress(session, finalized_job)
-                        await session.commit()
+                if interrupted:
+                    raise asyncio.CancelledError
 
     # ── Startup Recovery ───────────────────────────────────────
 
@@ -385,26 +401,72 @@ class JobQueueManager:
         """Recover jobs interrupted by a server crash.
 
         - RUNNING/PAUSING jobs → PAUSED
-        - IN_PROGRESS items → PENDING
+        - CANCELLING jobs -> CANCELLED, without replaying unfinished items
+        - IN_PROGRESS items of interrupted jobs -> PENDING
 
         Returns:
             Number of jobs recovered.
         """
         result = await session.execute(
-            select(UtilityJob).where(UtilityJob.state.in_([JobState.RUNNING, JobState.PAUSING]))
+            select(UtilityJob).where(
+                UtilityJob.state.in_([JobState.RUNNING, JobState.PAUSING, JobState.CANCELLING])
+            )
         )
         interrupted = list(result.scalars().all())
 
         for job in interrupted:
-            job.state = JobState.PAUSED
-            job.paused_at = datetime.now(UTC).isoformat()
+            old_state = job.state
+            if old_state == JobState.CANCELLING:
+                uncertain_items = (
+                    await session.scalars(
+                        select(UtilityJobItem).where(
+                            UtilityJobItem.job_id == job.id,
+                            UtilityJobItem.state == ItemState.IN_PROGRESS,
+                        )
+                    )
+                ).all()
+                for item in uncertain_items:
+                    self._persist_utility_log(
+                        session,
+                        configured_level="INFO",
+                        job_id=job.id,
+                        item_id=item.id,
+                        file_path=item.file_path,
+                        level="WARNING",
+                        message=(
+                            "Work on this file was interrupted before its result was saved. "
+                            "Inspect the source, output, and trash before retrying; "
+                            "this cancellation will not replay the file."
+                        ),
+                        extra={"previous_state": str(item.state), "started_at": item.started_at},
+                    )
+                job.warning_count = (job.warning_count or 0) + len(uncertain_items)
+                self.transition(job, JobState.CANCELLED)
+                self._persist_utility_log(
+                    session,
+                    configured_level="INFO",
+                    job_id=job.id,
+                    level="WARNING",
+                    message=(
+                        "Finished an interrupted cancellation after restart. "
+                        "Completed work and rollback records were retained; "
+                        "unfinished items will not be restarted. Check any file "
+                        "that was in progress when the server stopped."
+                    ),
+                )
+            else:
+                job.state = JobState.PAUSED
+                job.paused_at = datetime.now(UTC).isoformat()
             await project_utility_operation_progress(session, job)
-            logger.info("job_recovered", job_id=job.id, old_state="RUNNING/PAUSING")
+            logger.info("job_recovered", job_id=job.id, old_state=old_state, state=job.state)
 
         # Reset any IN_PROGRESS items to PENDING
         await session.execute(
             update(UtilityJobItem)
-            .where(UtilityJobItem.state == ItemState.IN_PROGRESS)
+            .where(
+                UtilityJobItem.state == ItemState.IN_PROGRESS,
+                UtilityJobItem.job_id.in_([job.id for job in interrupted]),
+            )
             .values(
                 state=ItemState.PENDING,
                 started_at=None,
@@ -419,6 +481,32 @@ class JobQueueManager:
             logger.info("startup_recovery_complete", jobs_recovered=len(interrupted))
 
         return len(interrupted)
+
+    async def _record_dispatch_failure(
+        self,
+        session: AsyncSession,
+        job_id: str,
+        exc: Exception,
+    ) -> None:
+        """Close a stopped dispatcher without losing already committed item outcomes."""
+        job = await session.get(UtilityJob, job_id)
+        if job is None:
+            return
+        if job.state == JobState.CANCELLING:
+            self.transition(job, JobState.CANCELLED)
+        elif job.state in {JobState.RUNNING, JobState.PAUSING}:
+            self.transition(job, JobState.FAILED)
+        job.error_message = f"Job finalization failed: {exc}"
+        self._persist_utility_log(
+            session,
+            configured_level="INFO",
+            job_id=job_id,
+            level="ERROR",
+            message=job.error_message,
+        )
+        await project_utility_operation_progress(session, job)
+        await session.commit()
+        logger.error("job_finalization_failed", job_id=job_id, error=str(exc))
 
     async def recover_and_dispatch(self) -> int:
         """Recover interrupted jobs, then restart serial dispatch for queued work."""
@@ -488,13 +576,28 @@ class JobQueueManager:
             raise ValueError(f"Job not found: {job_id}")
 
         current = JobState(job.state)
+        if current in {JobState.CANCELLING, JobState.CANCELLED}:
+            # Retrying the same request must neither restart work nor duplicate rollback.
+            if rollback:
+                existing = await session.scalar(
+                    select(UtilityJob.id)
+                    .where(
+                        UtilityJob.parent_job_id == job_id,
+                        UtilityJob.job_type == JobType.ROLLBACK,
+                    )
+                    .limit(1)
+                )
+                if existing is None:
+                    await self._create_rollback_job(session, job)
+            await project_utility_operation_progress(session, job)
+            return
         if current not in _CANCELLABLE_STATES:
             raise ValueError(
                 f"Cannot cancel job in state {current.value}. "
                 f"Cancellable states: {', '.join(s.value for s in _CANCELLABLE_STATES)}"
             )
 
-        if current == JobState.RUNNING:
+        if current in {JobState.RUNNING, JobState.PAUSING}:
             # Running jobs go through CANCELLING first
             self.transition(job, JobState.CANCELLING)
         else:

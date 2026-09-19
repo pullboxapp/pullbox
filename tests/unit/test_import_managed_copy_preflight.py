@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +51,63 @@ def test_managed_copy_capacity_reserve_uses_fixed_minimum_then_ten_percent() -> 
     assert managed_copy_capacity_reserve(0) == 1024**3
     assert managed_copy_capacity_reserve(5 * 1024**3) == 1024**3
     assert managed_copy_capacity_reserve(20 * 1024**3) == 2 * 1024**3
+
+
+@pytest.mark.parametrize("source_type", [ImportSourceType.MYLAR3, ImportSourceType.FILESYSTEM])
+@pytest.mark.parametrize("stage", ["confirmation", "execution"])
+async def test_copy_preflight_rejects_storage_without_safe_publication(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_type: ImportSourceType,
+    stage: import_managed_copy_preflight.ManagedCopyPreflightStage,
+) -> None:
+    root = LibraryRoot(name="Managed", path=str(tmp_path), enabled=True)
+    db_session.add(root)
+    await db_session.flush()
+    job = ImportJob(
+        source_path="/imports",
+        source_type=source_type,
+        target_library_root_id=root.id,
+        file_handling_mode=ImportFileHandlingMode.MANAGED_COPY,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    def refuse_hardlink(*args: object, **kwargs: object) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(os, "link", refuse_hardlink)
+
+    with pytest.raises(ManagedCopyPreflightError, match="safely publish") as error:
+        await validate_managed_copy_preflight(db_session, job, stage=stage)
+
+    assert error.value.reason.value == "target_publication_unavailable"
+    assert str(tmp_path) in error.value.message
+    assert "container" in error.value.message
+    assert not list(tmp_path.glob(".pullbox-*"))
+
+
+@pytest.mark.parametrize("source_type", [ImportSourceType.MYLAR3, ImportSourceType.FILESYSTEM])
+async def test_in_place_preflight_never_probes_source_for_writes(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    source_type: ImportSourceType,
+) -> None:
+    job = ImportJob(
+        source_path="/read-only-library",
+        source_type=source_type,
+        file_handling_mode=ImportFileHandlingMode.IN_PLACE,
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    def unexpected_probe(*args: object, **kwargs: object) -> None:
+        pytest.fail("In-place import must not write to the source")
+
+    monkeypatch.setattr(import_managed_copy_preflight, "probe_file_publication", unexpected_probe)
+    assert await validate_managed_copy_preflight(db_session, job, stage="execution") is None
 
 
 async def test_selected_source_bytes_counts_new_and_selected_duplicate_files(

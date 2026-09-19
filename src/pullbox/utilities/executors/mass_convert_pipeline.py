@@ -16,7 +16,6 @@ import json
 import os
 import tempfile
 import time
-import zipfile
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
@@ -26,6 +25,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
+from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.file_safety import classify_resource_safety_exception
 from pullbox.core.filesystem_scan import iter_supported_files
 from pullbox.core.issue_numbers import format_issue_number
@@ -41,6 +41,12 @@ from pullbox.utilities.base_executor import (
     JobRunSummary,
     ProcessedItem,
     RuntimeLogEntry,
+)
+from pullbox.utilities.cancellation import check_cancelled
+from pullbox.utilities.executors.utility_archive_work import (
+    convert_utility_file,
+    embed_utility_metadata,
+    verify_utility_archive,
 )
 from pullbox.utilities.settings import (
     move_file_to_utility_trash,
@@ -384,6 +390,7 @@ class MassConvertPipelineExecutor(JobExecutor):
         created_paths: list[Path] = []
 
         try:
+            check_cancelled()
             if item_data.get(
                 "storage_mode"
             ) == LibraryFileStorageMode.REFERENCED.value or _path_is_referenced(
@@ -414,10 +421,6 @@ class MassConvertPipelineExecutor(JobExecutor):
 
             # ── Step 1: Convert to CBZ ─────────────────────────
             if 1 in steps:
-                from pullbox.utilities.executors.file_converter import (
-                    _convert_sync,
-                )
-
                 log_entries.append(
                     (
                         "DEBUG",
@@ -434,9 +437,11 @@ class MassConvertPipelineExecutor(JobExecutor):
 
                 if source.suffix.lower() == ".cbz":
                     temp_target = source.with_name(f"{source.stem}._mass_convert_.cbz")
-                    _convert_sync(source, "cbz", temp_target)
-                    current_path = temp_target
+                    if temp_target.exists():
+                        raise FileExistsError(f"Temporary target already exists: {temp_target}")
                     created_paths.append(temp_target)
+                    convert_utility_file(source, "cbz", temp_target)
+                    current_path = temp_target
                     log_entries.append(
                         (
                             "INFO",
@@ -449,9 +454,9 @@ class MassConvertPipelineExecutor(JobExecutor):
                         )
                     )
                 else:
-                    _convert_sync(source, "cbz", target_path)
-                    current_path = target_path
                     created_paths.append(target_path)
+                    convert_utility_file(source, "cbz", target_path)
+                    current_path = target_path
                     log_entries.append(
                         (
                             "INFO",
@@ -465,6 +470,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     )
 
             # ── Step 2: Embed ComicInfo.xml ────────────────────
+            check_cancelled()
             if 2 in steps and current_path.suffix.lower() == ".cbz":
                 metadata = item_data.get("metadata", {})
                 metadata_source = str(
@@ -500,9 +506,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                             },
                         )
                     )
-                    from pullbox.utilities.comicinfo import embed_comicinfo_in_cbz
-
-                    embed_comicinfo_in_cbz(current_path, metadata)
+                    embed_utility_metadata(current_path, metadata)
                     log_entries.append(
                         (
                             "INFO",
@@ -530,6 +534,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     )
 
             # ── Step 4: Verify integrity ───────────────────────
+            check_cancelled()
             if 4 in steps and current_path.suffix.lower() == ".cbz":
                 log_entries.append(
                     (
@@ -542,11 +547,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                         },
                     )
                 )
-                with zipfile.ZipFile(current_path, "r") as zf:
-                    bad = zf.testzip()
-                    if bad is not None:
-                        raise ValueError(f"Integrity check failed: corrupt entry '{bad}'")
-                    file_count = len(zf.namelist())
+                file_count = verify_utility_archive(current_path)
                 log_entries.append(
                     (
                         "INFO",
@@ -560,6 +561,8 @@ class MassConvertPipelineExecutor(JobExecutor):
                 )
 
             # ── Move original to trash ─────────────────────────
+            # Once source replacement starts, finish and return its rollback journal.
+            check_cancelled()
             original_trash_path: str | None = None
             trash_dir = _resolve_effective_trash_directory(job_config.get("trash_folder"))
             trash_dest = move_file_to_utility_trash(
@@ -615,6 +618,16 @@ class MassConvertPipelineExecutor(JobExecutor):
                         )
                     )
             duration_ms = int((time.monotonic() - start) * 1000)
+            if isinstance(exc, JobCancelledError):
+                return ProcessedItem(
+                    item_id=item_id,
+                    result=ItemResult.CANCELLED,
+                    duration_ms=duration_ms,
+                    log_entries=[
+                        *log_entries,
+                        ("INFO", "Conversion cancelled; original retained.", {}),
+                    ],
+                )
             if resource_block is not None:
                 safety_payload = resource_block.to_diagnostics()
                 log_entries.append(

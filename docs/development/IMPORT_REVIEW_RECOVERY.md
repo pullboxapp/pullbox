@@ -34,6 +34,26 @@ recovery is available in Import Follow-up and does not require an
 offline command. It works for Mylar and folder imports. This is not a full
 rescan, a database restore, or an import.
 
+## Managed File Publication
+
+Mylar and folder imports publish completed sibling staging files with an atomic
+no-overwrite rename where available (Linux `RENAME_NOREPLACE`, macOS
+`RENAME_EXCL`, or Windows exclusive rename). Copy mode therefore does not
+require hard-link support. If exclusive rename is unsupported, the existing
+link/unlink publication remains a fallback. Pullbox never falls back to an
+overwriting rename or exposes a partially copied final file. Existing targets,
+including dangling symlinks, remain protected; journaled stages and source
+restoration retain their existing recovery rules.
+
+Confirmation and execution preflight exercise publication and collision
+protection with disposable files under each selected managed destination.
+Failure returns an actionable storage message before bulk work starts. The
+probe runs off the event loop, does not change import source files, and does not
+run for reference-only in-place imports. A root probe cannot guarantee that
+every existing subdirectory has the same permissions or that a mount will stay
+available; execution failures retain the destination and underlying filesystem
+error for retry. No database migration is required.
+
 ## Mylar Inventory And Missing References
 
 Copy and keep-in-place scans retain the same Mylar file inventory, including
@@ -220,6 +240,23 @@ Each repair records its previous assignment and commits with its recovery
 checkpoint. Resume preserves completed repairs, and repeated runs do not create
 another file registration. This is logical library repair, not authorization to
 reorganize the user's filesystem.
+
+Recovery reads the original per-file ComicInfo title and issue designation even
+when older imports saved the parent folder's name as the parsed title. Explicit
+reading-order prefixes and `(converted)` annotations are removed for candidate
+lookups only; filenames remain unchanged. Deferred and referenced files share
+the same per-file catalog checks, including publication dates and issue types.
+A date accepted for one file never authorizes another file in the same batch.
+Conflicting embedded identities, manual decisions, unsafe sources and duplicate
+copies remain protected. Unresolved catalog candidates retain their proposed
+series, issue and reason in `mixed_folder_recovery` diagnostics.
+
+An issue mistakenly registered under the parent series can itself be reassigned
+only when its embedded ComicVine issue ID agrees with the unique catalog target,
+it is the current referenced issue, and no other file or imported registration
+owns it. The issue ID and reader history are preserved. The old series identity
+is retained in the cleanup audit. A provisional issue is not offered under a
+folder series when independent file evidence identifies an unrelated series.
 
 The deferred pass uses complete local catalogs first. Exact issue identity may
 correct stale Mylar ownership only when the file's title, issue number, type,

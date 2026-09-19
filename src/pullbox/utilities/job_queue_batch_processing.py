@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
+from pullbox.utilities.base_executor import ItemResult
 from pullbox.utilities.job_queue_batch_failure import (
     build_batch_dispatch_failure_item,
     persist_batch_dispatch_failure_item,
@@ -13,6 +15,7 @@ from pullbox.utilities.job_queue_batch_state import (
     lease_dispatch_batch,
     prepare_batch_checkpoint,
 )
+from pullbox.utilities.job_queue_cancellation import wait_for_dispatch_batch
 from pullbox.utilities.job_queue_item_persistence import (
     persist_post_commit_logs,
     persist_processed_item_failure,
@@ -134,6 +137,9 @@ async def process_dispatch_batch(
             summary.warnings += item_persistence.warning_delta
             seen_item_ids.add(processed.item_id)
 
+            if processed.result == ItemResult.CANCELLED:
+                continue
+
             post_commit_logs = await executor.after_item_commit(
                 payload_data,
                 processed,
@@ -230,20 +236,28 @@ async def process_dispatch_batches(
         if project_progress is not None and batch_items:
             await project_progress(job_id, batch_items[0].id)
 
-        await process_dispatch_batch(
+        batch_task = asyncio.create_task(
+            process_dispatch_batch(
+                session_factory=session_factory,
+                job_id=job_id,
+                job_type=job_type,
+                executor=executor,
+                config=config,
+                job_context=job_context,
+                summary=summary,
+                utility_log_level=utility_log_level,
+                batch_items=batch_items,
+                worker_pool=worker_pool,
+                persist_log=persist_log,
+                logger=logger,
+                timestamp_factory=timestamp_factory,
+            )
+        )
+        await wait_for_dispatch_batch(
+            batch_task,
             session_factory=session_factory,
             job_id=job_id,
-            job_type=job_type,
-            executor=executor,
-            config=config,
-            job_context=job_context,
-            summary=summary,
-            utility_log_level=utility_log_level,
-            batch_items=batch_items,
             worker_pool=worker_pool,
-            persist_log=persist_log,
-            logger=logger,
-            timestamp_factory=timestamp_factory,
         )
         if project_progress is not None:
             await project_progress(job_id, None)

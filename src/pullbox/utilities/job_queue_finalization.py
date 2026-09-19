@@ -55,6 +55,7 @@ async def finalize_dispatch_job(
     get_utility_log_level: Callable[[Any], Awaitable[str]],
     persist_log: Callable[..., None],
     transition_job: Callable[[UtilityJob, JobState], Any],
+    project_progress: Callable[[Any, UtilityJob], Awaitable[None]] | None = None,
 ) -> DispatchFinalizationResult:
     """Persist final counters, logs, executor finalization, and terminal state."""
     job = await session.get(UtilityJob, job_id)
@@ -72,6 +73,9 @@ async def finalize_dispatch_job(
     )
 
     current = JobState(job.state)
+    if current == JobState.PAUSING:
+        transition_job(job, JobState.PAUSED)
+        current = JobState.PAUSED
     if current == JobState.PAUSED:
         paused_finalization = persist_paused_dispatch_log(
             session,
@@ -80,6 +84,8 @@ async def finalize_dispatch_job(
             configured_level=utility_log_level,
             persist_log=persist_log,
         )
+        if project_progress is not None:
+            await project_progress(session, job)
         await session.commit()
         return DispatchFinalizationResult(
             status="paused",
@@ -120,6 +126,8 @@ async def finalize_dispatch_job(
         persist_log=persist_log,
     )
 
+    if project_progress is not None:
+        await project_progress(session, job)
     await session.commit()
     return DispatchFinalizationResult(
         status="completed",

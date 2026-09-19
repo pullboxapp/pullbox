@@ -583,6 +583,17 @@ effects such as:
 - File matched handling.
 - Series added handling.
 
+Utility cancellation is shared by the serial utility queue. Repeated requests
+are idempotent, and cancellation takes precedence over a pending pause. No new
+batch can be leased after cancellation commits. Busy workers observe a per-pool
+signal; conversion and metadata stages on disposable outputs use interruptible
+archive subprocesses. Source replacement and its result journal finish before
+the queue releases its execution slot. Other non-interruptible item operations
+finish at their safe item boundary rather than being killed mid-mutation.
+Terminal job state and activity progress are committed together. Startup recovery
+finishes abandoned `CANCELLING` jobs as `CANCELLED`, preserving completed results
+and rollback records without replaying unfinished files.
+
 Composition helpers make event-bus intent explicit:
 
 - `build_domain_event_bus()` returns the shared application event bus.

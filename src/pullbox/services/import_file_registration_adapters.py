@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from pullbox.core.exceptions import ImportDestinationValidationError
+from pullbox.core.file_publication import (
+    publication_failure_message,
+    publish_file_without_overwrite,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -246,17 +250,19 @@ def _publish_stage_without_overwrite(stage_path: Path, target_path: Path) -> Non
                 f"Managed import destination appeared during import and was preserved: {collision}",
             )
         try:
-            if stage_path.is_symlink():
-                os.symlink(os.readlink(stage_path), target_path)
-            else:
-                os.link(stage_path, target_path, follow_symlinks=False)
+            publish_file_without_overwrite(stage_path, target_path)
         except FileExistsError as exc:
             raise ImportDestinationValidationError(
                 "destination_appeared",
                 "Managed import destination appeared during import and was preserved: "
                 f"{target_path}",
             ) from exc
-        stage_path.unlink()
+        except OSError as exc:
+            raise OSError(
+                exc.errno,
+                publication_failure_message(target_path.parent, exc),
+                str(target_path),
+            ) from exc
 
 
 def _casefold_destination_collision(target_path: Path) -> Path | None:

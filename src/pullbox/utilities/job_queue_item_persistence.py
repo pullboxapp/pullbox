@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pullbox.utilities.base_executor import ApplyResult, ItemResult
 from pullbox.utilities.job_queue_processed_result import (
     apply_processed_item_snapshot,
     build_processed_item_counter_delta,
@@ -18,7 +19,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from pullbox.utilities.base_executor import (
-        ApplyResult,
         JobExecutor,
         JobRunSummary,
         ProcessedItem,
@@ -90,6 +90,24 @@ async def persist_processed_item_result(
     item = await session.get(UtilityJobItem, item_id)
     if item is None:
         return None
+
+    if processed.result == ItemResult.CANCELLED:
+        # An interrupted disposable stage is not a failed or skipped comic.
+        # Retain original discovery/rollback evidence and do not apply executor side effects.
+        item.state = ItemState.PENDING
+        item.started_at = None
+        item.completed_at = None
+        item.worker_id = None
+        persist_processed_item_log_entries(
+            session,
+            processed=processed,
+            persist_log=persist_log,
+            configured_level=configured_level,
+            job_id=job_id,
+            item_id=item_id,
+            file_path=file_path,
+        )
+        return ProcessedItemPersistenceResult(ApplyResult(), 0, 0, 0, 0)
 
     apply_processed_item_snapshot(
         item,

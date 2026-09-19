@@ -17,6 +17,7 @@ from sqlalchemy import update as sa_update
 
 from pullbox.config import get_settings
 from pullbox.core.exceptions import ConfigurationError, ValidationError
+from pullbox.core.file_publication import probe_file_publication, publication_failure_message
 from pullbox.core.library_root_resolution import resolve_library_root
 from pullbox.models.import_job import (
     ImportControlRequest,
@@ -51,6 +52,7 @@ class ManagedCopyPreflightFailure(enum.StrEnum):
     TARGET_DISABLED = "target_disabled"
     TARGET_REFERENCE_ONLY = "target_reference_only"
     TARGET_UNAVAILABLE = "target_unavailable"
+    TARGET_PUBLICATION_UNAVAILABLE = "target_publication_unavailable"
     CAPACITY_UNKNOWN = "capacity_unknown"
     CAPACITY_INSUFFICIENT = "capacity_insufficient"
 
@@ -630,12 +632,20 @@ def _require_managed_root_roles(root: LibraryRoot) -> LibraryRoot:
 
 async def _validate_live_managed_root(root: LibraryRoot) -> dict[str, object]:
     try:
-        return await validate_managed_library_root(root)
+        capabilities = await validate_managed_library_root(root)
     except ValidationError as exc:
         raise ManagedCopyPreflightError(
             ManagedCopyPreflightFailure.TARGET_UNAVAILABLE,
             exc.message,
         ) from exc
+    try:
+        await asyncio.to_thread(probe_file_publication, Path(root.path))
+    except OSError as exc:
+        raise ManagedCopyPreflightError(
+            ManagedCopyPreflightFailure.TARGET_PUBLICATION_UNAVAILABLE,
+            publication_failure_message(Path(root.path), exc),
+        ) from exc
+    return capabilities
 
 
 def _free_bytes_from_capabilities(capabilities: dict[str, object]) -> int | None:

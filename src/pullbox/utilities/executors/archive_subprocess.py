@@ -56,10 +56,12 @@ async def convert_file_interruptible(
     pdf_quality: str = "medium",
     progress_callback: ProgressCallback | None = None,
     allow_resource_safety_exception: bool = False,
+    output_path: Path | None = None,
 ) -> Path:
     """Convert an archive in a child process that can be terminated on cancel."""
     dest_dir = destination or source.parent
-    target_path = dest_dir / f"{source.stem}.{target_format}"
+    target_path = output_path or dest_dir / f"{source.stem}.{target_format}"
+    dest_dir = target_path.parent
     progress_state_path = _create_progress_state_path(dest_dir)
     payload = {
         "source": str(source),

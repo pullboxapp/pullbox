@@ -664,6 +664,10 @@ async def persist_progress_snapshot(
     for key in _PERSISTENT_IMPORT_CONTEXT_KEYS:
         if key in existing_snapshot:
             payload[key] = existing_snapshot[key]
+    if isinstance(payload.get("deferred_recovery"), dict):
+        from pullbox.services.import_recovery_checkpoint import compact_recovery_state
+
+        payload["deferred_recovery"] = compact_recovery_state(payload["deferred_recovery"])
     if int(payload.get("progress_revision") or 0) <= 0:
         payload["progress_revision"] = next_progress_revision(job)
     else:

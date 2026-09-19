@@ -1274,6 +1274,7 @@ class TestQueueContinuationEdgeCases:
         # Wait for at least one item to start processing
         await asyncio.sleep(0.3)
         await mgr.pause_job(db_session, job.id)
+        await db_session.commit()
         await dispatch_task
 
         await db_session.refresh(job)
@@ -1550,6 +1551,7 @@ class TestEdgeCases:
         await asyncio.sleep(0.3)
 
         await mgr.pause_job(db_session, first.id)
+        await db_session.commit()
         await dispatch_task
 
         await db_session.refresh(first)
@@ -1593,6 +1595,7 @@ class TestEdgeCases:
         await asyncio.sleep(0.3)
 
         await mgr.cancel_job(db_session, first.id)
+        await db_session.commit()
         await dispatch_task
 
         await db_session.refresh(first)
@@ -1751,7 +1754,7 @@ class TestEdgeCases:
 
         await db_session.refresh(job)
         assert job.state == JobState.COMPLETED
-        assert AfterCommitPayloadExecutor.seen_after_commit_paths == [
+        assert sorted(AfterCommitPayloadExecutor.seen_after_commit_paths) == [
             "/comics/first.cbz",
             "/comics/second.cbz",
         ]

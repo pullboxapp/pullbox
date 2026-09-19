@@ -18,6 +18,7 @@ from pullbox.services.import_file_match_targets import (
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
 )
 from pullbox.services.import_file_preparation import format_comicinfo_issue_number
+from pullbox.services.import_recovery_identity import catalog_file_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -142,6 +143,14 @@ def provisional_issue_number_for_file(
 
     diagnostics = dict(imp_file.diagnostics or {})
     if diagnostics.get("kind") == "metadata_conflict" or diagnostics.get("conflict_type"):
+        return None
+    identity = catalog_file_identity(imp_file)
+    if (
+        identity is not None
+        and not NameMatcher()
+        .match(identity["query"], item.cv_title or item.raw_series_name)
+        .is_match
+    ):
         return None
 
     issue_number = archive_entry_issue_number(imp_file)

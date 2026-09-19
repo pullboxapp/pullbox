@@ -32,7 +32,8 @@ class TestItemResult:
         assert ItemResult.COMPLETED == "completed"
         assert ItemResult.FAILED == "failed"
         assert ItemResult.SKIPPED == "skipped"
-        assert len(ItemResult) == 3
+        assert ItemResult.CANCELLED == "cancelled"
+        assert len(ItemResult) == 4
 
 
 # ── ProcessedItem Pickling ─────────────────────────────────────

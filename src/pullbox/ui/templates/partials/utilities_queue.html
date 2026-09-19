@@ -100,6 +100,7 @@
                         x-cloak
                         type="button"
                         data-testid="utilities-queue-active-job-cancel"
+                        :disabled="job.state === 'CANCELLING'"
                         @click="controlJob(job.id, 'cancel')"
                         class="utilities-queue-act-btn utilities-queue-act-btn-danger"
                         data-tip="Cancel job"

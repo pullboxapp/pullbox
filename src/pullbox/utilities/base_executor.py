@@ -30,6 +30,7 @@ class ItemResult(enum.StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    CANCELLED = "cancelled"
 
 
 @dataclass

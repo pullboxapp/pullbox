@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from sqlalchemy import func as sa_func
 from sqlalchemy import select as sa_select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.exceptions import (
@@ -34,6 +35,11 @@ from pullbox.core.library_file_ownership import (
     build_file_identity_signature,
     build_managed_placement_signature,
     validate_file_identity_signature,
+)
+from pullbox.core.sqlite_lock import (
+    SQLITE_LOCK_RETRY_ATTEMPTS,
+    is_sqlite_locked_error,
+    sqlite_lock_retry_delay,
 )
 from pullbox.models.import_job import (
     ImportedFile,
@@ -817,6 +823,9 @@ async def process_import_series_files(
     item_id = item.id
     job_id = job.id
     in_place = job.file_handling_mode == ImportFileHandlingMode.IN_PLACE
+    sqlite_reference_processing = (
+        in_place and session.bind is not None and session.bind.dialect.name == "sqlite"
+    )
     move_to_library = not in_place
     transfer_method = (
         "leave_in_place" if in_place else job.effective_transfer_method or job.transfer_method
@@ -847,17 +856,26 @@ async def process_import_series_files(
         )
 
     effective_worker_count = max(int(file_worker_count or 1), 1)
+    if sqlite_reference_processing:
+        # Referencing files is write-heavy, not transfer-heavy. Competing SQLite
+        # writers add lock waits rather than throughput; isolate each file retry.
+        effective_worker_count = 1
     parallel_processing_available = (
         _file_ids_override is None
         and session_factory is not None
-        and effective_worker_count > 1
-        and len(importable_file_ids) > 1
+        and (
+            sqlite_reference_processing
+            or (effective_worker_count > 1 and len(importable_file_ids) > 1)
+        )
     )
-    if parallel_processing_available and not await _requires_serial_file_processing(
-        session,
-        job,
-        resolved_series_id=resolved_series_id,
-        importable_files=importable_files,
+    if parallel_processing_available and (
+        sqlite_reference_processing
+        or not await _requires_serial_file_processing(
+            session,
+            job,
+            resolved_series_id=resolved_series_id,
+            importable_files=importable_files,
+        )
     ):
         assert session_factory is not None
         await session.commit()
@@ -902,7 +920,9 @@ async def process_import_series_files(
                 await session.flush()
                 return action
 
-        async def process_one_file(imp_file_id: int) -> tuple[int, int]:
+        await session.commit()
+
+        async def process_one_file_attempt(imp_file_id: int) -> tuple[int, int]:
             async with session_factory() as worker_session:
                 worker_job = await worker_session.get(type(job), job_id)
                 worker_item = await worker_session.get(type(item), item_id)
@@ -938,6 +958,30 @@ async def process_import_series_files(
                     _update_item_counters=False,
                     _setup_placeholder_targets=False,
                 )
+
+        async def process_one_file(imp_file_id: int) -> tuple[int, int]:
+            for attempt in range(1, SQLITE_LOCK_RETRY_ATTEMPTS + 1):
+                try:
+                    return await process_one_file_attempt(imp_file_id)
+                except OperationalError as exc:
+                    if not sqlite_reference_processing or not is_sqlite_locked_error(exc):
+                        raise
+                    if attempt == SQLITE_LOCK_RETRY_ATTEMPTS:
+                        raise JobPausedError(
+                            "Import paused because the database is busy. Confirmed matches "
+                            "are preserved; resume the import when database activity settles."
+                        ) from exc
+                    logger.warning(
+                        "import_reference_retrying_after_sqlite_lock",
+                        job_id=job_id,
+                        imported_file_id=imp_file_id,
+                        attempt=attempt,
+                        max_attempts=SQLITE_LOCK_RETRY_ATTEMPTS,
+                    )
+                    # The attempt session is closed before waiting. A fresh
+                    # transaction rechecks control requests and source identity.
+                    await asyncio.sleep(sqlite_lock_retry_delay(attempt))
+            raise RuntimeError("Import reference retry loop ended unexpectedly")
 
         files_imported = 0
         files_failed = 0
@@ -1112,7 +1156,7 @@ async def process_import_series_files(
 
                 return report_current_file
 
-            force_live_file_progress = placeholder_progress_live_only
+            force_live_file_progress = placeholder_progress_live_only or sqlite_reference_processing
             _report_current_file = _build_current_file_reporter(
                 imp_file,
                 file_index,
@@ -1547,6 +1591,17 @@ async def process_import_series_files(
                 await asyncio.to_thread(cleanup_prepared_file, prepared)
             await session.rollback()
             placeholder_progress_live_only = False
+            if (
+                sqlite_reference_processing
+                and isinstance(exc, OperationalError)
+                and is_sqlite_locked_error(exc)
+            ):
+                if _file_ids_override is not None:
+                    raise
+                raise JobPausedError(
+                    "Import paused because the database is busy. Confirmed matches "
+                    "are preserved; resume the import when database activity settles."
+                ) from exc
             destination_preserved_for_review = False
             try:
                 destination_preserved_for_review = await asyncio.to_thread(
