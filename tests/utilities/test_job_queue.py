@@ -20,7 +20,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
 
+from pullbox.models.base import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
@@ -54,7 +56,37 @@ from pullbox.utilities.models import (
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from collections.abc import AsyncIterator
+
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+
+@pytest.fixture
+async def async_engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
+    """Use independent connections for concurrent dispatch and control readers."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'queue.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_queue_status_reader_preserves_pending_writer(session_factory) -> None:
+    """A control reader must not share or roll back the writer's transaction."""
+    statement = select(SystemConfig.value).where(SystemConfig.key == "utility_worker_count")
+    async with session_factory() as writer:
+        writer.add(SystemConfig(key="utility_worker_count", value="2", value_type="int"))
+        await writer.flush()
+        async with session_factory() as reader:
+            observed = await reader.scalar(statement)
+        await writer.commit()
+
+    async with session_factory() as reader:
+        assert await reader.scalar(statement) == "2"
+    assert observed is None
 
 
 # ── Test Executor (for batch execution tests) ──────────────────
@@ -809,6 +841,7 @@ class TestJobControls:
 
         rollback_job = await mgr.queue_rollback_job(db_session, parent.id, created_by="admin")
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(parent)
@@ -862,6 +895,7 @@ class TestJobControls:
 
         rollback_job = await mgr.queue_rollback_job(db_session, parent.id, created_by="admin")
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(parent)
@@ -957,6 +991,7 @@ class TestMassConvertQueueIntegration:
             },
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -1035,6 +1070,7 @@ class TestIntegrityQueueIntegration:
             },
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -1116,6 +1152,7 @@ class TestIntegrityQueueIntegration:
             },
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -1197,9 +1234,11 @@ class TestIntegrityQueueIntegration:
             },
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
         await db_session.refresh(job)
         rollback_job = await mgr.queue_rollback_job(db_session, job.id, created_by="admin")
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -1263,6 +1302,7 @@ class TestQueueContinuationEdgeCases:
             config={},
         )
 
+        await db_session.commit()
         dispatch_task = asyncio.create_task(mgr.dispatch_next())
         # Wait until job starts running
         for _ in range(50):
@@ -1337,6 +1377,7 @@ class TestQueueContinuationEdgeCases:
         )
         await db_session.flush()
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -1370,6 +1411,7 @@ class TestQueueContinuationEdgeCases:
             config={"count": 1},
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(first)
@@ -1541,6 +1583,7 @@ class TestEdgeCases:
             config={},
         )
 
+        await db_session.commit()
         dispatch_task = asyncio.create_task(mgr.dispatch_next())
         for _ in range(50):
             await asyncio.sleep(0.05)
@@ -1585,6 +1628,7 @@ class TestEdgeCases:
             config={},
         )
 
+        await db_session.commit()
         dispatch_task = asyncio.create_task(mgr.dispatch_next())
         for _ in range(50):
             await asyncio.sleep(0.05)
@@ -1723,7 +1767,7 @@ class TestEdgeCases:
             created_at="2026-04-05T00:02:00+00:00",
         )
         db_session.add_all([interrupted, queued])
-        await db_session.flush()
+        await db_session.commit()
 
         recovered = await mgr.recover_and_dispatch()
 
@@ -1750,6 +1794,7 @@ class TestEdgeCases:
             config={},
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -1818,6 +1863,7 @@ class TestEdgeCases:
             config={"count": 5},
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -1894,6 +1940,7 @@ class TestEdgeCases:
             config={"count": 1},
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         assert worker_counts == [4]
@@ -1961,6 +2008,7 @@ class TestEdgeCases:
             config={"count": 3},
         )
 
+        await db_session.commit()
         dispatch_task = asyncio.create_task(mgr.dispatch_next())
         try:
             # The event barrier proves incremental progress, not a subsecond startup SLA.
@@ -2036,6 +2084,7 @@ class TestEdgeCases:
             config={"count": 2},
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -2075,6 +2124,7 @@ class TestEdgeCases:
             },
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         await db_session.refresh(job)
@@ -2106,6 +2156,7 @@ class TestEdgeCases:
             config={},
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         result = await db_session.execute(
@@ -2141,6 +2192,7 @@ class TestEdgeCases:
             config={},
         )
 
+        await db_session.commit()
         await mgr.dispatch_next()
 
         result = await db_session.execute(
