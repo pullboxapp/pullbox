@@ -66,6 +66,8 @@ def paired_conversion_setting(monkeypatch):
 
 async def registered_nonzip(factory, tmp_path, source_format=FileFormat.CB7):
     file_id, issue_id, series_id, root_id, zip_path = await seed(factory, tmp_path)
+    if source_format is FileFormat.CBZ:
+        return zip_path, file_id, issue_id, series_id, root_id
     source = zip_path.with_suffix(f".{source_format.value}")
     with ZipFile(zip_path) as archive:
         members = [(member.filename, archive.read(member)) for member in archive.infolist()]

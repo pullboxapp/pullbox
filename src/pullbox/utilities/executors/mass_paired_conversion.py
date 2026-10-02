@@ -57,7 +57,7 @@ async def completed_receipt(factory: Any, item_id: str) -> ProcessedItem | None:
             raise ValidationError("Conversion recovery needs review; the original was preserved.")
         plan = decode_plan(encoded)
         actual = await inspect_conversion(plan)
-        unchanged = actual["original"] is None
+        unchanged = plan.same_path or actual["original"] is None
         for name in ("output", "backup"):
             artifact = actual[name]
             unchanged = unchanged and bool(
@@ -137,13 +137,10 @@ async def process_paired_mass(
             raise ValidationError(
                 "Paired conversion was disabled. Queue a new job after reviewing settings."
             )
-        if source.suffix.casefold() == ".cbz":
+        if source.suffix.casefold() not in {".cbz", ".cb7", ".cbr", ".pdf"}:
             return skipped(
-                "Existing CBZ files are not repacked by paired Mass Convert. "
-                "Use Write file metadata instead."
+                "Paired Mass Convert supports managed CBZ, CBR, CB7, and PDF files only."
             )
-        if source.suffix.casefold() not in {".cb7", ".cbr", ".pdf"}:
-            return skipped("Paired Mass Convert supports managed CBR, CB7, and PDF files only.")
         async with factory.begin() as session:
             item = await session.get(UtilityJobItem, item_id)
             if item is None:
@@ -194,6 +191,7 @@ async def process_paired_mass(
                     trash_relative_path=item_data.get("trash_relative_path") or source.name,
                     operation_id=UUID(item_id),
                     require_paired_metadata=True,
+                    repack_cbz=True,
                 )
 
         task = asyncio.create_task(convert())
@@ -255,7 +253,7 @@ def guard_paired_rollback(before: dict[str, Any], after: dict[str, Any]) -> None
     ):
         raise ValidationError("Conversion rollback paths disagree with their durable evidence.")
     check_directories(plan)
-    if _fingerprint(plan.original.path) is not None:
+    if not plan.same_path and _fingerprint(plan.original.path) is not None:
         raise ValidationError("The original location is occupied; rollback was not applied.")
     for artifact in (plan.output, plan.backup):
         actual = _fingerprint(artifact.path)

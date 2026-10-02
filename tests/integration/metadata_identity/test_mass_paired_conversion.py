@@ -98,6 +98,7 @@ async def execute(executor, config, context, item):
 @pytest.mark.parametrize(
     "source_format",
     [
+        FileFormat.CBZ,
         FileFormat.CB7,
         pytest.param(
             FileFormat.CBR,
@@ -143,14 +144,17 @@ async def test_mass_lane_publishes_pair_and_rolls_back_exact_source(
     assert restored.result is ItemResult.COMPLETED, restored.error_message
     async with factory.begin() as session:
         await executor.apply_rollback_result(session, rollback, restored)
-    assert source.read_bytes() == original and not output.exists()
+    assert source.read_bytes() == original
+    assert output == source or not output.exists()
     async with factory() as session:
         file = await session.get(LibraryFile, file_id)
         assert file.file_format is source_format and file.file_path == str(source)
 
 
 @pytest.mark.usefixtures("paired_conversion_setting")
-@pytest.mark.parametrize("exclusion", ["reference", "read_only", "unregistered", "cbz"])
+@pytest.mark.parametrize(
+    "exclusion", ["reference", "read_only", "unregistered", "unregistered_cbz"]
+)
 async def test_paired_mass_exclusions_leave_bytes_untouched(identity_probe_db, tmp_path, exclusion):
     _, factory, _ = identity_probe_db
     executor, config, context, item, source, file_id, _, root_id = await prepare_mass(
@@ -166,7 +170,7 @@ async def test_paired_mass_exclusions_leave_bytes_untouched(identity_probe_db, t
         elif exclusion == "unregistered":
             await session.delete(await session.get(LibraryFile, file_id))
         else:
-            # The same-path lane must not repack an existing CBZ.
+            # Renaming on disk does not grant the old registration ownership of a new path.
             item["file_path"] = str(source.with_suffix(".cbz"))
             source.rename(item["file_path"])
             source = Path(item["file_path"])
@@ -328,11 +332,14 @@ async def test_mass_restart_recovers_receipt_into_utility_rollback_journal(
 
 
 @pytest.mark.usefixtures("paired_conversion_setting")
+@pytest.mark.parametrize("source_format", [FileFormat.CBZ, FileFormat.CB7])
 async def test_import_owned_mass_file_is_skipped_without_detaching_ownership(
-    identity_probe_db, tmp_path
+    identity_probe_db, tmp_path, source_format
 ):
     _, factory, _ = identity_probe_db
-    executor, config, context, item, source, file_id, _, _ = await prepare_mass(factory, tmp_path)
+    executor, config, context, item, source, file_id, _, _ = await prepare_mass(
+        factory, tmp_path, source_format
+    )
     async with factory.begin() as session:
         file = await session.get(LibraryFile, file_id)
         issue = await session.get(Issue, file.issue_id)
@@ -356,7 +363,7 @@ async def test_import_owned_mass_file_is_skipped_without_detaching_ownership(
             import_series_id=series.id,
             file_path=str(source),
             file_name=source.name,
-            file_format="cb7",
+            file_format=source_format.value,
             file_size=source.stat().st_size,
             library_file_id=file_id,
             matched_issue_id=issue.id,

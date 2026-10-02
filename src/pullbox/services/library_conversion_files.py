@@ -66,6 +66,10 @@ class ConversionPlan(BaseModel):
     reviewed_metadata: tuple[MetadataSnapshot, MetadataSnapshot] | None = None
 
     @property
+    def same_path(self) -> bool:
+        return self.original.path == self.output.path
+
+    @property
     def paths(self) -> tuple[Path, ...]:
         return (
             self.original.path,
@@ -82,7 +86,15 @@ def decode_plan(encoded: str) -> ConversionPlan:
     plan = ConversionPlan.model_validate_json(encoded)
     if (
         any(not path.is_absolute() or ".." in path.parts for path in plan.paths)
-        or len(set(plan.paths)) != 5
+        or len(set(plan.paths)) != (4 if plan.same_path else 5)
+        or (
+            plan.same_path
+            and (
+                plan.metadata_state_digest is None
+                or plan.binding.file_id is None
+                or plan.binding.issue_id is None
+            )
+        )
         or plan.output.path != plan.original.path.with_suffix(".cbz")
         or not plan.original.path.is_relative_to(Path(plan.binding.root_path).resolve())
         or plan.output_stage.parent.parent != plan.output.path.parent
@@ -161,7 +173,13 @@ def publish(plan: ConversionPlan) -> None:
     for stage, destination in ((plan.backup_stage, plan.backup), (plan.output_stage, plan.output)):
         if stage.resolve(strict=True) != stage or _fingerprint(stage) != destination.fingerprint:
             raise ValidationError("Prepared conversion files changed.")
-        publish_file_without_overwrite(stage, destination.path)
+        if plan.same_path and destination == plan.output:
+            # Backup is durable before replacing the exact original, never an unrelated file.
+            if _fingerprint(plan.original.path) != plan.original.fingerprint:
+                raise ValidationError("The original changed during conversion.")
+            os.replace(stage, destination.path)
+        else:
+            publish_file_without_overwrite(stage, destination.path)
         sync_directory(destination.path.parent)
 
 

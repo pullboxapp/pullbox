@@ -126,6 +126,7 @@ async def convert_library_file(
     trash_relative_path: str | Path,
     operation_id: UUID | None = None,
     require_paired_metadata: bool = False,
+    repack_cbz: bool = False,
     reviewed_metadata: PreparedFileMetadata | None = None,
     check_control: ControlCheck | None = None,
     progress: ProgressCallback | None = None,
@@ -187,7 +188,8 @@ async def convert_library_file(
             block_dangerous = await is_dangerous_file_blocking_enabled(session)
         if require_paired_metadata and metadata_state is None:
             raise ValidationError("Paired conversion requires a verified library issue match.")
-        if target.exists() or target.is_symlink() or target == source:
+        same_path_repack = repack_cbz and metadata_state is not None and target == source
+        if not same_path_repack and (target.exists() or target.is_symlink() or target == source):
             raise FileExistsError
         await session.commit()
         async with prepare_conversion(

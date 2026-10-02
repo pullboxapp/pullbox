@@ -191,7 +191,7 @@ async def record_conversion(
     if await read_conversion_binding(session, plan.original.path) != plan.binding:
         raise ValidationError("The library registration changed during conversion.")
     await _require_conversion_metadata(session, plan)
-    if await session.scalar(
+    if not plan.same_path and await session.scalar(
         select(LibraryFile.id).where(LibraryFile.file_path == str(plan.output.path))
     ):
         raise ValidationError("The converted file's destination is already registered.")
@@ -286,14 +286,18 @@ async def _apply_inspected_conversion(
         )
         for name, actual in inspected.items()
     }
-    if inspected["output"] is None and proven["original"] and row.state == "intended":
+    if (
+        (plan.same_path or inspected["output"] is None)
+        and proven["original"]
+        and row.state == "intended"
+    ):
         row.state, row.active = "abandoned", False
         await session.commit()
         return "abandoned"
     if (
         not proven["output"]
         or not proven["backup"]
-        or (inspected["original"] is not None and not proven["original"])
+        or (not plan.same_path and inspected["original"] is not None and not proven["original"])
     ):
         row.state = "review"
         await session.commit()
@@ -302,10 +306,10 @@ async def _apply_inspected_conversion(
     if row.state == "intended":
         try:
             current = await read_conversion_binding(session, plan.original.path)
-            if current != plan.binding or not proven["original"]:
+            if current != plan.binding or (not plan.same_path and not proven["original"]):
                 raise ValidationError("Conversion registration changed.")
             await _require_conversion_metadata(session, plan)
-            if await session.scalar(
+            if not plan.same_path and await session.scalar(
                 select(LibraryFile.id).where(LibraryFile.file_path == str(plan.output.path))
             ):
                 raise ValidationError("Conversion destination is already registered.")
@@ -346,7 +350,10 @@ async def _apply_inspected_conversion(
         row.state = "review"
         await session.commit()
         return "review"
-    await finish_short_mutation(asyncio.create_task(remove_original(plan, inspected["original"])))
+    if not plan.same_path:
+        await finish_short_mutation(
+            asyncio.create_task(remove_original(plan, inspected["original"]))
+        )
     if plan.reviewed_metadata is not None:
         assert plan.binding.file_id is not None and plan.binding.issue_id is not None
         binding = await read_archive_metadata_binding(
