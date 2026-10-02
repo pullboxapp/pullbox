@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import joinedload
 
+from pullbox.config import get_settings
 from pullbox.core.exceptions import NotFoundError
 from pullbox.core.file_ops import register_library_file
 from pullbox.core.file_safety import get_allowed_extensions
+from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.library_policy import (
     LibraryIngestPolicy,
     load_effective_library_ingest_policy,
@@ -22,8 +25,15 @@ from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile, MatchConfidence
 from pullbox.models.series import Series
+from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
 from pullbox.services.issue_file_service import resolve_configured_utility_trash_dir
+from pullbox.services.manual_paired_metadata import (
+    materialize_manual_metadata,
+    read_manual_metadata_plan,
+)
 from pullbox.utilities.comicinfo import materialize_cbz_with_comicinfo
+from pullbox.utilities.executors.archive_metadata_staging import ArchiveMetadataStagingError
+from pullbox.utilities.executors.archive_subprocess import ControlCheck, convert_file_interruptible
 from pullbox.utilities.executors.file_converter import convert_file
 
 if TYPE_CHECKING:
@@ -75,6 +85,7 @@ async def prepare_manual_issue_import(
             joinedload(Issue.library_file),
         )
         .where(Issue.id == issue_id)
+        .execution_options(populate_existing=True)
     )
     issue = result.unique().scalar_one_or_none()
     if issue is None:
@@ -148,8 +159,50 @@ async def execute_manual_issue_import(
     preparation_progress_callback: Callable[[str, int, int, str], Any] | None = None,
     transfer_progress_callback: Callable[[int, int], Any] | None = None,
     comicinfo_progress_callback: Callable[[str, int, int, str], Any] | None = None,
+    cancellation_check: ControlCheck | None = None,
 ) -> ManualIssueImportResult:
     """Import one validated file into the library for the selected issue."""
+    paired = (
+        get_settings().metadata_paired_import_writer_enabled
+        and prepared.ingest_policy.update_embedded_comicinfo_from_match
+    )
+    factory = async_sessionmaker(session.bind, expire_on_commit=False) if paired else None
+    plan = None
+    source_signature = None
+    if factory is not None:
+        if session.new or session.dirty or session.deleted:
+            raise ManualIssueImportError(
+                status_code=409, detail="Finish pending changes before importing paired metadata."
+            )
+        prepared = await prepare_manual_issue_import(
+            session,
+            issue_id=prepared.issue_id,
+            file_path=str(prepared.source_path),
+            move_to_library=True,
+        )
+        if not prepared.ingest_policy.update_embedded_comicinfo_from_match:
+            raise ManualIssueImportError(
+                status_code=409, detail="Import settings changed; retry with the current settings."
+            )
+        try:
+            async with factory() as reader:
+                plan = await read_manual_metadata_plan(reader, prepared.issue_id)
+            if plan.policy != prepared.ingest_policy:
+                raise ValueError("Import settings changed; retry with the current settings.")
+            if plan.policy.post_processing_method not in {"copy", "move"}:
+                raise ValueError("Paired metadata requires Copy or Move, not linked files.")
+        except ArchiveMetadataBindingError as exc:
+            from pullbox.services.issue_file_metadata import file_metadata_error
+
+            raise ManualIssueImportError(status_code=409, detail=file_metadata_error(exc)) from None
+        except ValueError as exc:
+            raise ManualIssueImportError(
+                status_code=409,
+                detail="Import metadata needs review before retrying. " + str(exc),
+            ) from None
+        source_signature = await asyncio.to_thread(
+            build_file_identity_signature, prepared.source_path
+        )
 
     async def converter_with_progress(
         source: Path,
@@ -158,6 +211,20 @@ async def execute_manual_issue_import(
         *,
         allow_resource_safety_exception: bool = False,
     ) -> Path:
+        if paired:
+
+            async def conversion_progress(stage: str, current: int, total: int, unit: str) -> None:
+                if preparation_progress_callback is not None:
+                    preparation_progress_callback(stage, current, total, unit)
+
+            return await convert_file_interruptible(
+                source,
+                target_format,
+                destination,
+                cancellation_check=cancellation_check,
+                progress_callback=conversion_progress,
+                allow_resource_safety_exception=allow_resource_safety_exception,
+            )
         return await convert_file(
             source,
             target_format,
@@ -166,7 +233,9 @@ async def execute_manual_issue_import(
             allow_resource_safety_exception=allow_resource_safety_exception,
         )
 
-    converter = converter_with_progress if preparation_progress_callback is not None else None
+    converter = (
+        converter_with_progress if paired or preparation_progress_callback is not None else None
+    )
 
     async def materialize_cbz_with_progress(
         source: Path,
@@ -176,6 +245,41 @@ async def execute_manual_issue_import(
         transfer_method: str,
         progress_callback: Callable[[str, int, int, str], Any] | None = None,
     ) -> bool:
+        if factory is not None and plan is not None and source_signature is not None:
+
+            async def paired_progress(stage: str, current: int, total: int, unit: str) -> None:
+                if progress_callback is not None:
+                    progress_callback(stage, current, total, unit)
+
+            try:
+                return await materialize_manual_metadata(
+                    factory,
+                    plan,
+                    prepared.source_path,
+                    source_signature,
+                    source,
+                    target,
+                    allow_resource_safety_exception=allow_resource_safety_exception,
+                    cancellation_check=cancellation_check,
+                    progress_callback=paired_progress,
+                )
+            except (ArchiveMetadataStagingError, ValueError) as exc:
+                if isinstance(exc, ArchiveMetadataStagingError) and str(exc) != "metadata_conflict":
+                    raise ManualIssueImportError(
+                        status_code=400,
+                        detail=(
+                            "The source archive could not be prepared safely. "
+                            "The source file has not been changed. Check or replace it, then retry."
+                        ),
+                    ) from None
+                raise ManualIssueImportError(
+                    status_code=409,
+                    detail=(
+                        "Import metadata needs review. The source file has not been changed. "
+                        "Reconcile its embedded ComicInfo.xml / MetronInfo.xml with the selected "
+                        "issue, or choose a corrected source file, then retry."
+                    ),
+                ) from None
         return bool(
             await asyncio.to_thread(
                 materialize_cbz_with_comicinfo,
@@ -197,6 +301,8 @@ async def execute_manual_issue_import(
         library_root_id=preferred_managed_root_id(prepared.issue.series),
         loaded_issue=prepared.issue,
         ingest_policy=prepared.ingest_policy,
+        transfer_method="copy" if paired else None,
+        comicinfo_payload={} if paired else None,
         allow_resource_safety_exception=allow_resource_safety_exception,
         transfer_progress_callback=transfer_progress_callback,
         converter=converter,
@@ -207,9 +313,13 @@ async def execute_manual_issue_import(
         if existing_library_file is not None
         else None,
     )
+    if paired:
+        library_file.has_comicinfo = True
 
     return ManualIssueImportResult(
         issue_id=prepared.issue_id,
         library_file=library_file,
-        ingest_policy=prepared.ingest_policy,
+        ingest_policy=replace(prepared.ingest_policy, post_processing_method="copy")
+        if paired
+        else prepared.ingest_policy,
     )

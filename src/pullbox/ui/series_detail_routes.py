@@ -379,6 +379,20 @@ async def issue_detail(
 
     credits = await read_issue_credits(session, [issue.id])
 
+    paired_import_metadata_enabled = False
+    if getattr(get_settings(), "metadata_paired_import_writer_enabled", False):
+        from pullbox.core.library_policy import (
+            load_effective_library_ingest_policy,
+            load_library_ingest_policy,
+        )
+
+        policy = (
+            await load_effective_library_ingest_policy(session, issue.series.library_root_id)
+            if issue.series.library_root_id is not None
+            else await load_library_ingest_policy(session)
+        )
+        paired_import_metadata_enabled = policy.update_embedded_comicinfo_from_match
+
     return _templates().TemplateResponse(
         request,
         "pages/issue_detail.html",
@@ -386,6 +400,7 @@ async def issue_detail(
             request,
             user,
             issue=issue,
+            paired_import_metadata_enabled=paired_import_metadata_enabled,
             issue_metadata_credits=credits.get(issue.id, ()),
             issue_story_arc_origin=story_arc_origin,
             issue_detail_back_url=issue_detail_back_url,

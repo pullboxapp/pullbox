@@ -144,14 +144,7 @@ async def read_archive_metadata_binding(
         metadata = await read_series_refresh_state(
             session, series_id, issue_ids=(file.issue_id,), allow_partial_catalog=True
         )
-        for entity in (metadata.series, metadata.issues[0]):
-            _require_verified(entity)
-        if not {ref.namespace for ref in metadata.issues[0].identities} <= {
-            ref.namespace for ref in metadata.series.identities
-        }:
-            raise ArchiveMetadataBindingError("parent_identity_missing")
-        # Validate baseline ownership even before reading untrusted archive input.
-        assemble_archive_metadata_state(metadata, None, now=datetime.now(UTC))
+        require_verified_archive_metadata(metadata)
     except (ValueError, NotFoundError) as exc:
         if isinstance(exc, ArchiveMetadataBindingError):
             raise
@@ -179,6 +172,19 @@ def _require_verified(entity: RefreshEntityState) -> None:
         entity.comicvine_id is not None and comicvine is None
     ):
         raise ArchiveMetadataBindingError("identity_requires_review")
+
+
+def require_verified_archive_metadata(metadata: SeriesRefreshState) -> None:
+    """Apply the same identity/baseline guard before an unregistered import is staged."""
+    if len(metadata.issues) != 1:
+        raise ArchiveMetadataBindingError("invalid_target")
+    for entity in (metadata.series, metadata.issues[0]):
+        _require_verified(entity)
+    if not {ref.namespace for ref in metadata.issues[0].identities} <= {
+        ref.namespace for ref in metadata.series.identities
+    }:
+        raise ArchiveMetadataBindingError("parent_identity_missing")
+    assemble_archive_metadata_state(metadata, None, now=datetime.now(UTC))
 
 
 async def revalidate_archive_metadata_binding(

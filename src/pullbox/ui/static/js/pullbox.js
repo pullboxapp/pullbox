@@ -19304,7 +19304,13 @@ function issueDetailPage(config) {
         transferring: "Transferring to library",
         rewriting: "Writing ComicInfo.xml",
         finalizing: "Finalizing imported file",
+        verifying: "Verifying paired metadata and pages",
+        staging: "Preparing library copy",
+        ready: "Publishing library copy",
       };
+      if (cfg.pairedImportMetadata && this.importCurrentFileStage === "transferring") {
+        return "Preparing paired metadata and pages";
+      }
       return labels[this.importCurrentFileStage] || "Processing file";
     },
 
@@ -19467,6 +19473,10 @@ function issueDetailPage(config) {
 
     cancelIssueImport: async function () {
       if (this.cancellingImport || this.importState === "completed") return;
+      if (this.importState === "failed" || this.importState === "safety_blocked" || this.importState === "cancelled") {
+        this.closeImportModal();
+        return;
+      }
 
       this.cancellingImport = true;
       this.stopImportPolling();

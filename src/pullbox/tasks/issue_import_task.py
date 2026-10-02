@@ -233,6 +233,10 @@ async def _run_issue_import(issue_id: int, request_payload: dict[str, Any]) -> N
                 await _queue_issue_import_progress(cancelled)
                 return
 
+            async def check_import_control() -> None:
+                if issue_id in _issue_import_cancel_requests:
+                    raise asyncio.CancelledError
+
             result = await execute_manual_issue_import(
                 session,
                 prepared,
@@ -250,6 +254,7 @@ async def _run_issue_import(issue_id: int, request_payload: dict[str, Any]) -> N
                     total=total,
                     unit=unit,
                 ),
+                cancellation_check=check_import_control,
             )
             cancel_requested_after_file_work = issue_id in _issue_import_cancel_requests
             _issue_import_cancel_requests.discard(issue_id)

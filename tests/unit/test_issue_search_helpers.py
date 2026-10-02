@@ -912,8 +912,12 @@ async def test_import_file_and_progress_route_branches(
         )
         monkeypatch.setattr(
             issues_api,
-            "register_library_file",
-            AsyncMock(return_value=library_file),
+            "execute_manual_issue_import",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    library_file=library_file, ingest_policy=prepared.ingest_policy
+                )
+            ),
         )
         imported = await issues_api.import_file_for_issue(issue_id, request, object(), session)
         assert imported.library_file_id == 55
