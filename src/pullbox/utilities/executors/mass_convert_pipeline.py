@@ -25,6 +25,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
+from pullbox.core.comicvine_links import comicvine_issue_url
 from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.file_safety import classify_resource_safety_exception
 from pullbox.core.filesystem_scan import iter_supported_files
@@ -43,6 +44,7 @@ from pullbox.utilities.base_executor import (
     RuntimeLogEntry,
 )
 from pullbox.utilities.cancellation import check_cancelled
+from pullbox.utilities.comicinfo_creators import load_comicinfo_creator_fields
 from pullbox.utilities.executors.utility_archive_work import (
     convert_utility_file,
     embed_utility_metadata,
@@ -104,9 +106,35 @@ def _build_comicinfo_metadata(library_file: LibraryFile) -> dict[str, Any]:
             metadata["Year"] = issue.release_date.year
             metadata["Month"] = issue.release_date.month
             metadata["Day"] = issue.release_date.day
+        web = comicvine_issue_url(issue.comicvine_id, issue.comicvine_url)
+        if web:
+            metadata["Web"] = web
     if publisher is not None and publisher.name:
         metadata["Publisher"] = publisher.name
+    notes = _comicvine_notes(series, issue)
+    if notes:
+        metadata["Notes"] = notes
 
+    return metadata
+
+
+def _comicvine_notes(series: Series | None, issue: Issue | None) -> str | None:
+    """Return the ComicVine ID note the import path writes for the same issue."""
+    if series is None or not series.comicvine_id:
+        return None
+    if issue is not None and issue.comicvine_id:
+        return f"[cv_vol_id:{series.comicvine_id}] [cv_issue_id:{issue.comicvine_id}]"
+    return f"[cv_vol_id:{series.comicvine_id}]"
+
+
+async def _build_tracked_comicinfo_metadata(
+    session: Any,
+    library_file: LibraryFile,
+) -> dict[str, Any]:
+    """Build embed metadata for a tracked file, including its creator credits."""
+    metadata = _build_comicinfo_metadata(library_file)
+    if metadata and library_file.issue_id is not None:
+        metadata.update(await load_comicinfo_creator_fields(session, library_file.issue_id))
     return metadata
 
 
@@ -242,7 +270,7 @@ class MassConvertPipelineExecutor(JobExecutor):
             if tracked is not None:
                 item["library_file_id"] = tracked.id
                 item["storage_mode"] = tracked.storage_mode.value
-                metadata = _build_comicinfo_metadata(tracked)
+                metadata = await _build_tracked_comicinfo_metadata(session, tracked)
                 if metadata:
                     item["metadata"] = metadata
                     item["metadata_source"] = "library"
@@ -330,7 +358,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                         else None,
                     ),
                 }
-                metadata = _build_comicinfo_metadata(library_file)
+                metadata = await _build_tracked_comicinfo_metadata(session, library_file)
                 if metadata:
                     item["metadata"] = metadata
                     item["metadata_source"] = "library"

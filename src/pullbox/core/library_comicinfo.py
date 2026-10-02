@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.archive import inspect_archive_page_count
+from pullbox.core.comicvine_links import comicvine_issue_url
 from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.publisher import Publisher
@@ -112,7 +113,7 @@ async def build_comicinfo_payload_for_issue(
         ),
         "Count": series.issue_count if series.issue_count and series.issue_count > 0 else None,
         "Volume": series.year_start,
-        "Web": issue.comicvine_url,
+        "Web": comicvine_issue_url(issue.comicvine_id, issue.comicvine_url),
         "Notes": notes,
     }
     payload.update(await load_comicinfo_creator_fields(session, issue.id))

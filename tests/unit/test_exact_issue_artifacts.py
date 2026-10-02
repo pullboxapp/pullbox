@@ -72,6 +72,33 @@ async def test_comicinfo_preserves_exact_identity(
     assert payload["Number"] == exact_issue.effective_issue_number_text
 
 
+@pytest.mark.parametrize("builder", [build_comicinfo_payload_for_issue, build_import_comicinfo])
+async def test_comicinfo_links_catalog_issue_by_comicvine_id(
+    db_session: AsyncSession,
+    builder: Callable[[AsyncSession, Issue], Awaitable[dict[str, Any]]],
+) -> None:
+    # Catalog-sourced issues carry a ComicVine ID but no fetched page link.
+    series = Series(
+        title="Blade", sort_title="blade", year_start=2023, comicvine_id=152317, issue_count=10
+    )
+    db_session.add(series)
+    await db_session.flush()
+    issue = Issue(
+        series_id=series.id,
+        issue_number=1.0,
+        comicvine_id=1002169,
+        comicvine_url=None,
+        metadata_source="pullbox_catalog",
+    )
+    db_session.add(issue)
+    await db_session.flush()
+
+    payload = await builder(db_session, issue)
+
+    assert payload["Web"] == "https://comicvine.gamespot.com/issue/4000-1002169/"
+    assert payload["Notes"] == "[cv_vol_id:152317] [cv_issue_id:1002169]"
+
+
 async def test_reader_record_preserves_exact_identity(
     db_session: AsyncSession, exact_issue: Issue, tmp_path: Path
 ) -> None:

@@ -17,6 +17,7 @@ from pathlib import Path
 import py7zr
 import pytest
 
+from pullbox.models.creator import Creator, IssueCreator
 from pullbox.models.issue import Issue
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.publisher import Publisher
@@ -289,6 +290,69 @@ class TestGenerateItems:
         assert items[0]["metadata"]["Series"] == "Batman"
         assert items[0]["metadata"]["Year"] == 2016
         assert items[0]["metadata"]["Title"] == "Issue Title"
+
+    @pytest.mark.asyncio
+    async def test_library_scope_metadata_carries_comicvine_identity_and_creators(
+        self,
+        db_session,
+        tmp_path: Path,
+    ) -> None:
+        library_root = tmp_path / "library"
+        tracked_file = _create_test_cbz(library_root / "Batman (2016)" / "Batman 001.cbz")
+        library_file = await _create_tracked_library_file(
+            db_session,
+            tracked_file,
+            library_root_path=library_root,
+        )
+        library_file.issue.comicvine_id = 555001
+        library_file.issue.series.comicvine_id = 91273
+        writer = Creator(name="Tom King", comicvine_id=1)
+        cover = Creator(name="David Finch", comicvine_id=2)
+        db_session.add_all([writer, cover])
+        await db_session.flush()
+        db_session.add_all(
+            [
+                IssueCreator(issue_id=library_file.issue.id, creator_id=writer.id, role="writer"),
+                IssueCreator(issue_id=library_file.issue.id, creator_id=cover.id, role="cover"),
+            ]
+        )
+        await db_session.flush()
+
+        executor = MassConvertPipelineExecutor()
+        executor._session = db_session  # type: ignore[attr-defined]
+        items = await executor.generate_items({"steps": [1, 2], "scope": "library"})
+
+        metadata = items[0]["metadata"]
+        assert metadata["Web"] == "https://comicvine.gamespot.com/issue/4000-555001/"
+        assert metadata["Notes"] == "[cv_vol_id:91273] [cv_issue_id:555001]"
+        assert metadata["Writer"] == "Tom King"
+        assert metadata["CoverArtist"] == "David Finch"
+
+    @pytest.mark.asyncio
+    async def test_manual_scope_metadata_for_tracked_file_matches_library_scope(
+        self,
+        db_session,
+        tmp_path: Path,
+    ) -> None:
+        library_root = tmp_path / "library"
+        tracked_file = _create_test_cbz(library_root / "Batman (2016)" / "Batman 001.cbz")
+        library_file = await _create_tracked_library_file(
+            db_session,
+            tracked_file,
+            library_root_path=library_root,
+        )
+        library_file.issue.comicvine_id = 555001
+        library_file.issue.comicvine_url = "https://comicvine.gamespot.com/batman-1/4000-555001/"
+        await db_session.flush()
+
+        executor = MassConvertPipelineExecutor()
+        executor._session = db_session  # type: ignore[attr-defined]
+        items = await executor.generate_items(
+            {"steps": [1, 2], "scope": "manual", "file_paths": [str(tracked_file)]}
+        )
+
+        assert items[0]["metadata"]["Web"] == "https://comicvine.gamespot.com/batman-1/4000-555001/"
+        assert "Notes" not in items[0]["metadata"]
 
     @pytest.mark.asyncio
     async def test_folder_scope_scans_recursively_and_skips_trash_folder(

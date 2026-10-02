@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from pullbox.core.archive import inspect_archive_page_count as inspect_archive_page_count
 from pullbox.core.archive_format import archive_format
+from pullbox.core.comicvine_links import comicvine_issue_url
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.file_safety import is_resource_safety_exception_allowed
 from pullbox.core.issue_numbers import format_issue_number
@@ -185,7 +186,7 @@ async def build_comicinfo_payload_for_issue(
         else None,
         "Count": series.issue_count if series.issue_count and series.issue_count > 0 else None,
         "Volume": series.year_start,
-        "Web": issue.comicvine_url,
+        "Web": comicvine_issue_url(issue.comicvine_id, issue.comicvine_url),
         "Notes": notes,
     }
     payload.update(await load_comicinfo_creator_fields(session, issue.id))
