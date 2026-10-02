@@ -26,6 +26,7 @@ from pullbox.models.import_job import (
 from pullbox.models.issue import IssueStatus
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.services import issue_file_metadata
+from pullbox.services.direct_artifact_post_processing import run_direct_artifact_post_processing
 from pullbox.tasks import (
     download_post_processing_metadata,
     download_post_processing_queue,
@@ -105,6 +106,59 @@ async def drain(factory):
         await download_task._run_post_processing(session, download, cleanup_source=False)
 
     await download_post_processing_queue.process_completed(run, session_factory=factory)
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize("scenario", ["normal", "size-approved", "size-blocked", "unsafe"])
+async def test_paired_download_activation_preserves_direct_artifact_handoff(
+    identity_probe_db, tmp_path, scenario
+):
+    _, factory, _ = identity_probe_db
+    download_id, issue_id, source = await completed_download(factory, tmp_path)
+    page = b"page bytes"
+    if scenario != "normal":
+        page *= 220000
+        with ZipFile(source, "w") as archive:
+            archive.writestr("page.jpg", page)
+            if scenario == "unsafe":
+                archive.writestr("../escape.jpg", b"unsafe path")
+        async with factory.begin() as session:
+            session.add(SystemConfig(key="archive_size_limit_mb", value="1", value_type="int"))
+    original = source.read_bytes()
+
+    async def handoff():
+        async with factory.begin() as session:
+            return await run_direct_artifact_post_processing(
+                session,
+                acquisition_id=1,
+                download_history_id=download_id,
+                issue_id=issue_id,
+                source_path=source,
+                replace_existing_file=False,
+                allow_resource_safety_exception=scenario in {"size-approved", "unsafe"},
+            )
+
+    if scenario in {"size-blocked", "unsafe"}:
+        reason = "exceeds limit" if scenario == "size-blocked" else "path traversal"
+        with pytest.raises(RuntimeError, match=reason):
+            await handoff()
+        async with factory() as session:
+            assert await session.scalar(select(LibraryFile)) is None
+        assert source.read_bytes() == original
+        return
+
+    result = await handoff()
+    async with factory() as session:
+        file = await session.get(LibraryFile, result.library_file_id)
+        assert file.issue_id == issue_id
+        assert Path(file.file_path) == result.final_path
+        assert (await session.get(Issue, issue_id)).status is IssueStatus.OWNED
+        if scenario == "size-approved":
+            assert (await session.get(SystemConfig, "archive_size_limit_mb")).value == "1"
+    with ZipFile(result.final_path) as archive:
+        assert archive.read("page.jpg") == page
+        assert "ComicInfo.xml" in archive.namelist()
+    assert source.read_bytes() == original
 
 
 @pytest.mark.usefixtures("paired_download_setting")

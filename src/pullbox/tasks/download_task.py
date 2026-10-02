@@ -23,7 +23,7 @@ from pullbox.composition.events import build_domain_event_bus
 from pullbox.composition.providers import register_download_clients
 from pullbox.core.sqlite_lock import run_sqlite_transaction_with_retry
 from pullbox.database import get_session_factory
-from pullbox.models.download import DownloadClientType
+from pullbox.models.download import DownloadClientType, DownloadHistory
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
 from pullbox.providers.base import ProviderRegistry
@@ -104,8 +104,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncSession
-
-    from pullbox.models.download import DownloadHistory
 
 logger = structlog.get_logger(__name__)
 
@@ -479,8 +477,11 @@ async def _run_post_processing(
         from pullbox.core.library_policy import load_library_ingest_policy
 
         ingest_policy = await load_library_ingest_policy(session)
+        # The paired writer owns persisted queue claims, not the direct
+        # acquisition adapter's separate lifecycle and transaction.
         paired_metadata = (
-            get_settings().metadata_paired_download_writer_enabled
+            isinstance(download, DownloadHistory)
+            and get_settings().metadata_paired_download_writer_enabled
             and ingest_policy.update_embedded_comicinfo_from_match
         )
         if paired_metadata and download.final_path is not None:
