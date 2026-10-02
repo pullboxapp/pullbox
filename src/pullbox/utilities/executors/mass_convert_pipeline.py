@@ -67,10 +67,6 @@ _PIPELINE_STEP_ORDER = (1, 2, 4)
 
 
 def _guard_existing_metadata_pair(path: Path) -> None:
-    from pullbox.config import get_settings
-
-    if not get_settings().metadata_paired_conversion_writer_enabled:
-        return
     with ZipFile(path) as archive:
         contains_metroninfo = any(
             not entry.is_dir()

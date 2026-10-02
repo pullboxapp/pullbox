@@ -65,7 +65,7 @@ async def test_mass_comicinfo_step_preserves_existing_pair_until_coordinated(
         item = next(item for item in context["items"] if item["library_file_id"] == file_id)
         item["id"] = "preserve-existing-pair"
         processed = executor.process_item(item, config, context)
-        if paired_enabled and metron_member is not None and 2 in steps:
+        if metron_member is not None and 2 in steps:
             assert processed.result is ItemResult.FAILED, "CI-only rewrite published competing XML"
             assert "MetronInfo.xml" in processed.error_message
             assert source.read_bytes() == original
