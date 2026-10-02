@@ -58,6 +58,7 @@ async def write_native_file_metadata(
     choices: FileMetadataChoices | None,
     check_control: ControlCheck,
     progress: ProgressCallback,
+    limit: int,
 ) -> str:
     from pullbox.services.issue_file_metadata import prepare_file_metadata
 
@@ -69,7 +70,9 @@ async def write_native_file_metadata(
         )
         recovered = row is not None
         if row is None:
-            prepared = await prepare_file_metadata(session, issue_id, choices=choices)
+            prepared = await prepare_file_metadata(
+                session, issue_id, choices=choices, approved_resource_limit=limit
+            )
             if not prepared.preview.ready:
                 raise ArchivePublicationError("unresolved_conflicts")
             if prepared.preview.review_key != review_key:

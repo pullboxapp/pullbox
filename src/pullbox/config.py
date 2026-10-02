@@ -109,6 +109,7 @@ class PullboxSettings(BaseSettings):
     metadata_paired_import_writer_enabled: bool = False
     metadata_paired_conversion_writer_enabled: bool = False
     metadata_paired_download_writer_enabled: bool = False
+    metadata_paired_direct_writer_enabled: bool = False
     comicvine_rate_limit: int = 200  # Requests per hour
 
     # ── Import Debug ───────────────────────────────────────────────────

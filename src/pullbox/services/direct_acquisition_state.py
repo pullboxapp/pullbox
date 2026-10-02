@@ -83,6 +83,7 @@ ACQUISITION_TRANSITIONS: dict[DirectAcquisitionState, frozenset[DirectAcquisitio
         {
             DirectAcquisitionState.COMPLETED,
             DirectAcquisitionState.INTERVENTION,
+            DirectAcquisitionState.CANCELLED,
             DirectAcquisitionState.FAILED,
         }
     ),
@@ -147,6 +148,7 @@ ARTIFACT_TRANSITIONS: dict[DirectArtifactState, frozenset[DirectArtifactState]] 
         {
             DirectArtifactState.COMPLETED,
             DirectArtifactState.INTERVENTION,
+            DirectArtifactState.CANCELLED,
             DirectArtifactState.FAILED,
         }
     ),

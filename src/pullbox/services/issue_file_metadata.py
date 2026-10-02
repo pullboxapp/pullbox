@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
@@ -141,10 +141,15 @@ class PreparedFileMetadata:
     issue: MetadataSnapshot
     primary: ExternalIdentityRef | None
     preview: FileMetadataPreview
+    approved_resource_limit: int | None = None
 
 
 async def prepare_file_metadata(
-    session: AsyncSession, issue_id: int, *, choices: FileMetadataChoices | None = None
+    session: AsyncSession,
+    issue_id: int,
+    *,
+    choices: FileMetadataChoices | None = None,
+    approved_resource_limit: int | None = None,
 ) -> PreparedFileMetadata:
     """Release the clean read transaction before archive I/O; never fetch providers."""
     if session.new or session.dirty or session.deleted:
@@ -163,8 +168,18 @@ async def prepare_file_metadata(
     from pullbox.core.file_safety import get_archive_size_limit_bytes
 
     limit = await get_archive_size_limit_bytes(session)
+    from pullbox.services.direct_metadata_approval import read_direct_metadata_approval
+
+    direct_approval = await read_direct_metadata_approval(session, ids[0])
+    if approved_resource_limit is not None:
+        limit = max(limit, approved_resource_limit)
     await session.commit()
     target = await inspect_archive_metadata_target(binding, allow_conversion_source=True)
+    if direct_approval is not None:
+        approved_budget = await direct_approval.budget(target.path)
+        if approved_budget is not None:
+            approved_resource_limit = max(approved_resource_limit or 0, approved_budget)
+            limit = max(limit, approved_resource_limit)
     try:
         kind = target.path.suffix.lstrip(".").casefold()
         files = (
@@ -178,6 +193,7 @@ async def prepare_file_metadata(
             )
         )
         prepared = await asyncio.to_thread(_prepare, target, files, choices or {})
+        prepared = replace(prepared, approved_resource_limit=approved_resource_limit)
     except (ArchiveError, BadZipFile) as exc:
         raise ArchiveMetadataBindingError("archive_unreadable") from exc
     await asyncio.to_thread(target.check_unchanged)
@@ -366,6 +382,7 @@ async def write_file_metadata(
             choices=choices,
             check_control=check_control,
             progress=progress,
+            limit=limit,
         )
     recovered = await recover_file_metadata(factory, operation)
     if recovered is PublicationState.FINALIZED:
@@ -382,6 +399,7 @@ async def write_file_metadata(
     if prepared.preview.unchanged:
         return "unchanged"
     target, series, issue = prepared.target, prepared.series, prepared.issue
+    limit = max(limit, prepared.approved_resource_limit or 0)
     try:
         async with stage_cbz_metadata_interruptible(
             target.path,

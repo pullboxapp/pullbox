@@ -18,6 +18,7 @@ from pullbox.core.file_safety import (
     is_dangerous_file_blocking_enabled,
     run_safety_checks,
 )
+from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.models.direct_acquisition import DirectArtifactFailureClass
 from pullbox.services.direct_artifact_pack import is_separable_issue_pack
 from pullbox.utilities.executors.integrity_checker import check_file_integrity
@@ -152,6 +153,15 @@ async def validate_direct_artifact(
     block_dangerous = await is_dangerous_file_blocking_enabled(session)
     max_archive_size = await get_archive_size_limit_bytes(session)
     try:
+        source_signature = await asyncio.to_thread(build_file_identity_signature, path)
+    except OSError as exc:
+        raise DirectArtifactValidationError(
+            code="artifact_quarantine_unreadable",
+            message="Pullbox could not read the quarantined artifact.",
+            retryable=True,
+            intervention=False,
+        ) from exc
+    try:
         await asyncio.to_thread(
             run_safety_checks,
             path,
@@ -161,13 +171,23 @@ async def validate_direct_artifact(
     except FileSafetyError as exc:
         safety_block = classify_resource_safety_exception(exc)
         if safety_block is not None:
+            if await asyncio.to_thread(build_file_identity_signature, path) != source_signature:
+                raise DirectArtifactValidationError(
+                    code="artifact_changed_during_inspection",
+                    message=(
+                        "The downloaded artifact changed during inspection. Retry the download."
+                    ),
+                ) from exc
             raise DirectArtifactValidationError(
                 code="artifact_resource_safety_review",
                 message=(
                     "The downloaded artifact exceeds configured resource safety limits "
                     "and requires an explicit allow-once review."
                 ),
-                safety_block=safety_block.to_diagnostics(),
+                safety_block={
+                    **safety_block.to_diagnostics(),
+                    "source_signature": source_signature,
+                },
             ) from exc
         raise DirectArtifactValidationError(
             code="artifact_safety_rejected",

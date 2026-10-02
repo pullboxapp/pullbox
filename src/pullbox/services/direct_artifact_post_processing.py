@@ -88,6 +88,7 @@ async def run_direct_artifact_post_processing(
     replace_existing_file: bool,
     allow_resource_safety_exception: bool = False,
     post_processor: _PostProcessor | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> DirectPostProcessingResult:
     """Process one quarantined comic without client path mapping or cleanup."""
     if acquisition_id < 1 or download_history_id < 1 or issue_id < 1:
@@ -102,14 +103,54 @@ async def run_direct_artifact_post_processing(
         download_url=f"direct://attempt/{acquisition_id}",
         state=DownloadState.COMPLETED,
     )
-    processor = post_processor or cast("_PostProcessor", _run_post_processing)
-    await processor(
-        session,
-        record,
-        resolve_local_path=_resolve_direct_source,
-        cleanup_source=False,
-        allow_resource_safety_exception=allow_resource_safety_exception,
+    from pullbox.config import get_settings
+    from pullbox.core.library_policy import load_library_ingest_policy
+
+    paired = (
+        post_processor is None
+        and get_settings().metadata_paired_direct_writer_enabled
+        and (await load_library_ingest_policy(session)).update_embedded_comicinfo_from_match
     )
+    if not paired and post_processor is None:
+        from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
+        from pullbox.services.direct_paired_metadata import DirectMetadataReviewError
+
+        attempt = await session.get(DirectAcquisitionAttempt, acquisition_id)
+        if attempt is not None and (attempt.plan_snapshot or {}).get("paired_metadata_copy"):
+            raise DirectMetadataReviewError(
+                "This download still needs paired metadata review. Re-enable direct paired "
+                "writing and embedded metadata updates, then retry. Its managed copy is unchanged."
+            )
+    if paired:
+        from pullbox.services.direct_paired_metadata import prepare_direct_handoff
+
+        handoff = await prepare_direct_handoff(
+            session,
+            acquisition_id=acquisition_id,
+            download_id=download_history_id,
+            issue_id=issue_id,
+            source_path=source_path,
+            allow_resource_safety_exception=allow_resource_safety_exception,
+            cancel_event=cancel_event,
+        )
+        record.final_path = handoff.final_path
+        await _run_post_processing(
+            session,
+            cast("Any", record),
+            resolve_local_path=_resolve_direct_source,
+            cleanup_source=False,
+            allow_resource_safety_exception=allow_resource_safety_exception,
+            metadata_finisher=handoff.finish,
+        )
+    else:
+        processor = post_processor or cast("_PostProcessor", _run_post_processing)
+        await processor(
+            session,
+            record,
+            resolve_local_path=_resolve_direct_source,
+            cleanup_source=False,
+            allow_resource_safety_exception=allow_resource_safety_exception,
+        )
     await session.flush()
     result = await session.execute(select(LibraryFile).where(LibraryFile.issue_id == issue_id))
     library_file = result.scalar_one_or_none()

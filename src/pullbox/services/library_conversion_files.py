@@ -173,6 +173,7 @@ async def prepare_conversion(
     *,
     metadata_state: SeriesRefreshState | None = None,
     max_uncompressed_bytes: int | None = None,
+    metadata_policy_limit: int | None = None,
     block_dangerous: bool = True,
     reviewed: tuple[MetadataSnapshot, MetadataSnapshot] | None = None,
     primary_identity: ExternalIdentityRef | None = None,
@@ -190,8 +191,11 @@ async def prepare_conversion(
         require_writable_conversion_source(source)
         if max_uncompressed_bytes is None:
             raise ValidationError("Paired conversion requires a configured archive size limit.")
+        # Recovery checks global policy; a reviewed per-file budget must not redefine it.
         metadata_digest = conversion_metadata_digest(
-            metadata_state, max_uncompressed_bytes, block_dangerous
+            metadata_state,
+            metadata_policy_limit if metadata_policy_limit is not None else max_uncompressed_bytes,
+            block_dangerous,
         )
     backup.parent.mkdir(parents=True, exist_ok=True)
     dirs = directories(source, backup)

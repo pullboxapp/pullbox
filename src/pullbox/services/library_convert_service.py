@@ -149,6 +149,7 @@ async def convert_library_file(
         binding = await read_conversion_binding(session, source)
         metadata_state = None
         limit = None
+        policy_limit = None
         block_dangerous = True
         if (
             (
@@ -177,6 +178,12 @@ async def convert_library_file(
                     raise ArchiveMetadataBindingError("approval_changed")
                 await asyncio.to_thread(reviewed_metadata.target.check_unchanged)
             limit = await get_archive_size_limit_bytes(session)
+            policy_limit = limit
+            if (
+                reviewed_metadata is not None
+                and reviewed_metadata.approved_resource_limit is not None
+            ):
+                limit = max(limit, reviewed_metadata.approved_resource_limit)
             block_dangerous = await is_dangerous_file_blocking_enabled(session)
         if require_paired_metadata and metadata_state is None:
             raise ValidationError("Paired conversion requires a verified library issue match.")
@@ -189,6 +196,7 @@ async def convert_library_file(
             binding,
             metadata_state=metadata_state,
             max_uncompressed_bytes=limit,
+            metadata_policy_limit=policy_limit,
             block_dangerous=block_dangerous,
             reviewed=(reviewed_metadata.series, reviewed_metadata.issue)
             if reviewed_metadata

@@ -16,6 +16,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from pullbox.core.exceptions import JobCancelledError
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
     DirectAcquisitionState,
@@ -79,6 +80,7 @@ from pullbox.services.direct_artifact_quarantine import (
 from pullbox.services.direct_configuration_service import load_host_credential_material
 from pullbox.services.direct_download_history_adapter import sync_direct_download_history
 from pullbox.services.direct_host_reachability import record_direct_host_operational_result
+from pullbox.services.direct_paired_metadata import DirectMetadataReviewError
 from pullbox.services.direct_provider_capabilities import uses_internal_generic_https
 from pullbox.services.intervention_service import InterventionService
 from pullbox.services.post_processing_operation_progress import (
@@ -274,6 +276,7 @@ class DirectAcquisitionExecutor:
                     workspace,
                     final_path,
                     progress,
+                    cancel_event=cancel_event,
                 )
             if attempt.state is DirectAcquisitionState.POST_PROCESSING:
                 if final_path is None:
@@ -285,6 +288,7 @@ class DirectAcquisitionExecutor:
                     workspace,
                     final_path,
                     progress,
+                    cancel_event=cancel_event,
                 )
             if attempt.state is DirectAcquisitionState.VALIDATING:
                 if final_path is None:
@@ -296,6 +300,7 @@ class DirectAcquisitionExecutor:
                     workspace,
                     final_path,
                     progress,
+                    cancel_event=cancel_event,
                 )
 
             await progress.write(
@@ -383,10 +388,11 @@ class DirectAcquisitionExecutor:
                 workspace,
                 final_path,
                 progress,
+                cancel_event=cancel_event,
             )
         except (ArtifactTransferPausedError, MegaBridgePausedError) as exc:
             return await self._pause(session, attempt, artifact, workspace, progress, exc)
-        except (ArtifactTransferCancelledError, MegaBridgeCancelledError):
+        except (ArtifactTransferCancelledError, MegaBridgeCancelledError, JobCancelledError):
             self._quarantine.cleanup(workspace)
             artifact.quarantine_path = None
             artifact.bytes_transferred = 0
@@ -583,6 +589,8 @@ class DirectAcquisitionExecutor:
         workspace: DirectQuarantineWorkspace,
         final_path: Path,
         progress: _ProgressWriter,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> DirectExecutionResult:
         await self._validator(session, final_path)
         transition_acquisition(attempt, DirectAcquisitionState.POST_PROCESSING, at=self._now())
@@ -594,6 +602,7 @@ class DirectAcquisitionExecutor:
             workspace,
             final_path,
             progress,
+            cancel_event=cancel_event,
         )
 
     async def _post_process(
@@ -604,6 +613,8 @@ class DirectAcquisitionExecutor:
         workspace: DirectQuarantineWorkspace,
         final_path: Path,
         progress: _ProgressWriter,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> DirectExecutionResult:
         acquisition_id = attempt.id
         artifact_id = artifact.id
@@ -626,6 +637,11 @@ class DirectAcquisitionExecutor:
                     allow_resource_safety_exception=_resource_safety_override_allowed(attempt),
                 )
             else:
+                control_args = (
+                    {"cancel_event": cancel_event}
+                    if self._post_processor is run_direct_artifact_post_processing
+                    else {}
+                )
                 processed = await self._post_processor(
                     session,
                     acquisition_id=attempt.id,
@@ -634,7 +650,10 @@ class DirectAcquisitionExecutor:
                     source_path=final_path,
                     replace_existing_file=attempt.replace_existing_file,
                     allow_resource_safety_exception=_resource_safety_override_allowed(attempt),
+                    **control_args,
                 )
+        except (ArtifactTransferCancelledError, JobCancelledError):
+            raise
         except DirectArtifactPackError as exc:
             await session.rollback()
             attempt, artifact = await _load_attempt(session, acquisition_id, artifact_id)
@@ -650,16 +669,24 @@ class DirectAcquisitionExecutor:
             self._quarantine.cleanup(workspace)
             await progress.write(stage="failed", force=True)
             return _result(attempt, artifact)
-        except Exception:
+        except Exception as exc:
             await session.rollback()
             attempt, artifact = await _load_attempt(session, acquisition_id, artifact_id)
             progress = _ProgressWriter(session, attempt, artifact, now=self._now)
             attempt.failure_class = DirectArtifactFailureClass.POST_PROCESS
-            attempt.failure_code = "direct_post_processing_failed"
-            attempt.error_message = "Direct artifact post-processing failed."
+            attempt.failure_code = (
+                "direct_metadata_review_required"
+                if isinstance(exc, DirectMetadataReviewError)
+                else "direct_post_processing_failed"
+            )
+            attempt.error_message = (
+                str(exc)
+                if isinstance(exc, DirectMetadataReviewError)
+                else "Direct artifact post-processing failed."
+            )
             artifact.failure_class = DirectArtifactFailureClass.POST_PROCESS
-            artifact.failure_code = "direct_post_processing_failed"
-            artifact.error_message = "Direct artifact post-processing failed."
+            artifact.failure_code = attempt.failure_code
+            artifact.error_message = attempt.error_message
             transition_artifact(artifact, DirectArtifactState.INTERVENTION, at=self._now())
             transition_acquisition(attempt, DirectAcquisitionState.INTERVENTION, at=self._now())
             await InterventionService().create_direct_attempt_intervention(session, attempt)

@@ -101,6 +101,7 @@ from pullbox.tasks.post_processing_progress import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -424,6 +425,10 @@ async def _run_post_processing(
     resolve_local_path: ResolveLocalPath | None = None,
     cleanup_source: bool = True,
     allow_resource_safety_exception: bool = False,
+    metadata_finisher: Callable[
+        [AsyncSession, DownloadHistory, PostProcessingRuntime], Awaitable[Path]
+    ]
+    | None = None,
 ) -> None:
     """Transfer the downloaded file to the library and update all records.
 
@@ -480,12 +485,15 @@ async def _run_post_processing(
         # The paired writer owns persisted queue claims, not the direct
         # acquisition adapter's separate lifecycle and transaction.
         paired_metadata = (
-            isinstance(download, DownloadHistory)
-            and get_settings().metadata_paired_download_writer_enabled
-            and ingest_policy.update_embedded_comicinfo_from_match
-        )
+            metadata_finisher is not None
+            or (
+                isinstance(download, DownloadHistory)
+                and get_settings().metadata_paired_download_writer_enabled
+            )
+        ) and ingest_policy.update_embedded_comicinfo_from_match
+        finish_metadata = metadata_finisher or finish_download_metadata
         if paired_metadata and download.final_path is not None:
-            dest_path = await finish_download_metadata(session, download, runtime)
+            dest_path = await finish_metadata(session, download, runtime)
             download.final_path = str(dest_path)
             trace.final_path = str(dest_path)
             trace.finalize_current_phase()
@@ -683,7 +691,7 @@ async def _run_post_processing(
 
         if paired_metadata:
             download.final_path = str(dest_path)
-            dest_path = await finish_download_metadata(session, download, runtime)
+            dest_path = await finish_metadata(session, download, runtime)
 
         # 5b. Clean up empty source directory for usenet downloads (SABnzbd/NZBGet).
         # Torrent clients manage their own files (seeding), so we never touch those.
