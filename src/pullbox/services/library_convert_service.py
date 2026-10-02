@@ -12,8 +12,18 @@ from uuid import uuid4
 import structlog
 from sqlalchemy import select
 
+from pullbox.config import get_settings
 from pullbox.core.exceptions import ValidationError
+from pullbox.core.file_safety import (
+    get_archive_size_limit_bytes,
+    is_dangerous_file_blocking_enabled,
+)
 from pullbox.models.library import FileFormat, LibraryFile
+from pullbox.services.archive_metadata_binding import (
+    ArchiveMetadataBindingError,
+    read_archive_metadata_binding,
+    require_unowned_metadata_file,
+)
 from pullbox.services.library_conversion_files import prepare_conversion
 from pullbox.services.library_conversion_recovery import (
     publish_conversion,
@@ -26,6 +36,7 @@ from pullbox.services.library_mutation_coordination import (
     lock_file_mutation_admission,
     require_no_archive_publication,
 )
+from pullbox.utilities.executors.archive_metadata_staging import ArchiveMetadataStagingError
 from pullbox.utilities.settings import build_trash_destination
 
 if TYPE_CHECKING:
@@ -70,6 +81,27 @@ async def _sync_converted_file_record(
 
 
 def _conversion_error_message(exc: Exception) -> str:
+    if isinstance(exc, ArchiveMetadataBindingError):
+        if exc.code == "import_rollback_protected":
+            return (
+                "This file still belongs to an import's rollback journal. "
+                "Paired conversion is not available for it yet; the file has not been changed."
+            )
+        return (
+            "This comic's metadata match needs review before conversion. "
+            "Review the issue match, then retry."
+        )
+    if isinstance(exc, ArchiveMetadataStagingError):
+        if str(exc) == "metadata_conflict":
+            return (
+                "The comic's embedded metadata disagrees with its library metadata. "
+                "Review the file metadata before converting."
+            )
+        if str(exc) == "unsafe_archive":
+            return (
+                "The source could not pass archive safety checks. "
+                "Replace or repair it before converting."
+            )
     if isinstance(exc, FileNotFoundError):
         return "Selected library item no longer exists on disk."
     if isinstance(exc, FileExistsError):
@@ -103,10 +135,35 @@ async def convert_library_file(
             session, source, target, backup, include_descendants=False
         )
         binding = await read_conversion_binding(session, source)
+        metadata_state = None
+        limit = None
+        block_dangerous = True
+        if (
+            get_settings().metadata_paired_conversion_writer_enabled
+            and binding.file_id is not None
+            and binding.issue_id is not None
+        ):
+            await require_unowned_metadata_file(session, binding.file_id)
+            captured = await read_archive_metadata_binding(
+                session,
+                binding.file_id,
+                expected_issue_id=binding.issue_id,
+                allow_conversion_source=True,
+            )
+            metadata_state = captured.metadata
+            limit = await get_archive_size_limit_bytes(session)
+            block_dangerous = await is_dangerous_file_blocking_enabled(session)
         if target.exists() or target.is_symlink() or target == source:
             raise FileExistsError
         await session.commit()
-        async with prepare_conversion(source, backup, binding) as plan:
+        async with prepare_conversion(
+            source,
+            backup,
+            binding,
+            metadata_state=metadata_state,
+            max_uncompressed_bytes=limit,
+            block_dangerous=block_dangerous,
+        ) as plan:
             await record_conversion(session, plan, operation_id)
             await finish_short_mutation(asyncio.create_task(session.commit()))
             await publish_conversion(session, operation_id)

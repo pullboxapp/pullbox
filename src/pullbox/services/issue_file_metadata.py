@@ -22,7 +22,6 @@ from pullbox.core.archive_metadata import (
 )
 from pullbox.models import LibraryFile
 from pullbox.models.archive_metadata_publication import PublicationState
-from pullbox.models.import_job import ImportedFile, ImportJob, ImportJobStatus
 from pullbox.schemas.issue_file_metadata import (
     FileMetadataChange,
     FileMetadataChoices,
@@ -35,6 +34,7 @@ from pullbox.services.archive_metadata_binding import (
     assemble_bound_archive_metadata,
     inspect_archive_metadata_target,
     read_archive_metadata_binding,
+    require_unowned_metadata_file,
 )
 from pullbox.services.archive_metadata_finalization import finalize_archive_publication
 from pullbox.services.archive_metadata_publication import (
@@ -165,17 +165,7 @@ async def prepare_file_metadata(
 
 
 async def _require_no_import_owner(session: AsyncSession, file_id: int) -> None:
-    protected = await session.scalar(
-        select(ImportedFile.id)
-        .join(ImportJob)
-        .where(
-            ImportedFile.library_file_id == file_id,
-            ImportJob.status != ImportJobStatus.ROLLED_BACK,
-        )
-        .limit(1)
-    )
-    if protected:
-        raise ArchiveMetadataBindingError("import_rollback_protected")
+    await require_unowned_metadata_file(session, file_id)
 
 
 def _fields(payload: bytes | None) -> dict[str, str]:

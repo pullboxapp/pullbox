@@ -107,6 +107,7 @@ class PullboxSettings(BaseSettings):
     metadata_gcd_api_v2_enabled: bool = False
     # Keep paired archive publication opt-in until its import workflow is qualified.
     metadata_paired_import_writer_enabled: bool = False
+    metadata_paired_conversion_writer_enabled: bool = False
     comicvine_rate_limit: int = 200  # Requests per hour
 
     # ── Import Debug ───────────────────────────────────────────────────

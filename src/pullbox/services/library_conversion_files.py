@@ -1,6 +1,8 @@
 """Private conversion preparation and immutable evidence for short publication."""
 
 import asyncio
+import hashlib
+import json
 import os
 import stat
 import tempfile
@@ -11,12 +13,17 @@ from pathlib import Path
 from threading import Event
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.core.file_publication import publish_file_without_overwrite
-from pullbox.services.archive_metadata_binding import FileFingerprint
+from pullbox.services.archive_metadata_binding import (
+    FileFingerprint,
+    assemble_archive_metadata_state,
+)
 from pullbox.services.archive_metadata_publication import _digest, _file_work, _fingerprint
+from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
+from pullbox.utilities.executors.archive_metadata_staging import stage_cbz_metadata_interruptible
 from pullbox.utilities.executors.archive_subprocess import (
     convert_file_interruptible,
     transfer_file_interruptible,
@@ -51,6 +58,7 @@ class ConversionPlan(BaseModel):
     output_stage: Path
     backup_stage: Path
     directories: tuple[tuple[Path, int, int, int], ...]
+    metadata_state_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @property
     def paths(self) -> tuple[Path, ...]:
@@ -81,6 +89,14 @@ def decode_plan(encoded: str) -> ConversionPlan:
     ):
         raise ValidationError("Conversion recovery evidence is invalid.")
     return plan
+
+
+def conversion_metadata_digest(state: SeriesRefreshState, limit: int, block_dangerous: bool) -> str:
+    payload = TypeAdapter(SeriesRefreshState).dump_python(state, mode="json")
+    for entity in (payload["series"], *payload["issues"]):
+        entity["overrides"] = sorted(entity["overrides"])
+    evidence = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(evidence + f"/{limit}/{block_dangerous}".encode("ascii")).hexdigest()
 
 
 def _regular(path: Path) -> FileFingerprint:
@@ -133,11 +149,24 @@ def publish(plan: ConversionPlan) -> None:
 
 @asynccontextmanager
 async def prepare_conversion(
-    source: Path, backup: Path, binding: ConversionBinding
+    source: Path,
+    backup: Path,
+    binding: ConversionBinding,
+    *,
+    metadata_state: SeriesRefreshState | None = None,
+    max_uncompressed_bytes: int | None = None,
+    block_dangerous: bool = True,
 ) -> AsyncIterator[ConversionPlan]:
     """No public destination or source mutation; workers are reaped before cleanup."""
     source = source.absolute()
     before = _regular(source)
+    metadata_digest = None
+    if metadata_state is not None:
+        if max_uncompressed_bytes is None:
+            raise ValidationError("Paired conversion requires a configured archive size limit.")
+        metadata_digest = conversion_metadata_digest(
+            metadata_state, max_uncompressed_bytes, block_dangerous
+        )
     backup.parent.mkdir(parents=True, exist_ok=True)
     dirs = directories(source, backup)
     with (
@@ -146,7 +175,24 @@ async def prepare_conversion(
     ):
         output_stage = Path(output_dir) / "output.cbz"
         backup_stage = Path(backup_dir) / "original"
-        await convert_file_interruptible(source, "cbz", output_path=output_stage)
+        if metadata_state is None:
+            await convert_file_interruptible(source, "cbz", output_path=output_stage)
+        else:
+            assert max_uncompressed_bytes is not None
+            series, issue = assemble_archive_metadata_state(
+                metadata_state, None, now=datetime.now(UTC)
+            )
+            async with stage_cbz_metadata_interruptible(
+                source,
+                Path(output_dir),
+                series,
+                issue,
+                max_uncompressed_bytes=max_uncompressed_bytes,
+                block_dangerous=block_dangerous,
+                metadata_state=metadata_state,
+            ) as staged:
+                staged.check_unchanged()
+                await asyncio.to_thread(publish_file_without_overwrite, staged.path, output_stage)
         await transfer_file_interruptible(source, backup_stage, "copy")
 
         def inspect(stop: Event) -> ConversionPlan:
@@ -174,6 +220,7 @@ async def prepare_conversion(
                 output_stage=output_stage,
                 backup_stage=backup_stage,
                 directories=dirs,
+                metadata_state_digest=metadata_digest,
             )
             check_directories(plan)
             return decode_plan(plan.model_dump_json())

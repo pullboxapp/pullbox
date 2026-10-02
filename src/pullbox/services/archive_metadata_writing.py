@@ -6,6 +6,7 @@ import tempfile
 import zipfile
 from collections.abc import Callable
 from copy import copy
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -22,7 +23,13 @@ from pullbox.core.metadata_archive_source import MetadataArchiveSource, open_met
 from pullbox.core.metadata_identity import ExternalIdentityRef
 from pullbox.core.metadata_pdf_source import PdfQuality
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
+from pullbox.services.archive_metadata_binding import (
+    assemble_archive_metadata_state,
+    select_archive_primary_identity,
+)
+from pullbox.services.archive_metadata_reconciliation import reconcile_archive_metadata
 from pullbox.services.archive_metadata_rendering import render_archive_metadata
+from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
 
 ArchiveMetadataProgress = Callable[[str, int, int, str], None]
 _CHUNK_BYTES = 1024 * 1024
@@ -47,6 +54,7 @@ def write_cbz_metadata(
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
     pdf_quality: PdfQuality = "medium",
+    metadata_state: SeriesRefreshState | None = None,
 ) -> bool:
     """Write a verified pair in one CBZ construction, off the event loop.
 
@@ -106,6 +114,20 @@ def write_cbz_metadata(
         ) as source:
             entries = source.entries
             files = read_open_metadata_members(entries, source.open)
+            if metadata_state is not None:
+                if (
+                    len(metadata_state.issues) != 1
+                    or metadata_state.series.identities != series.identities
+                    or metadata_state.issues[0].identities != issue.identities
+                ):
+                    raise ValueError("Conversion metadata disagrees with its verified binding")
+                archive = reconcile_archive_metadata(files)
+                series, issue = assemble_archive_metadata_state(
+                    metadata_state, archive, now=datetime.now(UTC)
+                )
+                primary_identity = select_archive_primary_identity(metadata_state, archive)
+                previous_series = metadata_state.series.baseline
+                previous_issue = metadata_state.issues[0].baseline
             pair = render_archive_metadata(
                 series,
                 issue,

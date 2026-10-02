@@ -20,6 +20,7 @@ from pullbox.core.metadata_pdf_source import PdfQuality
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.archive_metadata_writing import write_cbz_metadata
+from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
 from pullbox.utilities.executors.archive_subprocess import (
     ControlCheck,
     ProgressCallback,
@@ -47,6 +48,7 @@ class _StagingRequest(BaseModel):
     previous_issue: MetadataSnapshot | None = None
     replace_managed: bool = Field(default=False, strict=True)
     pdf_quality: PdfQuality = "medium"
+    metadata_state: SeriesRefreshState | None = None
 
 
 class _StagingResult(BaseModel):
@@ -90,6 +92,7 @@ async def stage_cbz_metadata_interruptible(
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
     pdf_quality: PdfQuality = "medium",
+    metadata_state: SeriesRefreshState | None = None,
 ) -> AsyncIterator[StagedArchiveMetadata]:
     """Stage a verified pair, then yield to the independently authorized owner.
 
@@ -115,6 +118,7 @@ async def stage_cbz_metadata_interruptible(
         previous_issue=previous_issue,
         replace_managed=replace_managed,
         pdf_quality=pdf_quality,
+        metadata_state=metadata_state,
     )
     encoded = request.model_dump_json().encode("utf-8")
     if len(encoded) > _MAX_REQUEST_BYTES:
@@ -250,6 +254,7 @@ def worker_stage_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             previous_issue=request.previous_issue,
             replace_managed=request.replace_managed,
             pdf_quality=request.pdf_quality,
+            metadata_state=request.metadata_state,
         )
         _check_fingerprint(request.source_path, request.source_fingerprint)
     except ArchiveMetadataRenderError:
