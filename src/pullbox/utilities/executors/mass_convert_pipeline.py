@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
 
 import structlog
 from sqlalchemy import select
@@ -63,6 +64,25 @@ _SUPPORTED_LIBRARY_FORMATS = (
     FileFormat.PDF,
 )
 _PIPELINE_STEP_ORDER = (1, 2, 4)
+
+
+def _guard_existing_metadata_pair(path: Path) -> None:
+    from pullbox.config import get_settings
+
+    if not get_settings().metadata_paired_conversion_writer_enabled:
+        return
+    with ZipFile(path) as archive:
+        contains_metroninfo = any(
+            not entry.is_dir()
+            and entry.filename.replace("\\", "/").rsplit("/", 1)[-1].casefold() == "metroninfo.xml"
+            for entry in archive.infolist()
+        )
+    if contains_metroninfo:
+        raise ValueError(
+            "This file contains MetronInfo.xml. Mass Convert cannot update both metadata "
+            "documents together yet. Use Write file metadata on the series page, or disable "
+            "the ComicInfo step before retrying. The original file has not been changed."
+        )
 
 
 def _is_relative_to(path: Path, other: Path) -> bool:
@@ -487,6 +507,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     )
                 )
                 if metadata:
+                    _guard_existing_metadata_pair(current_path)
                     log_entries.append(
                         (
                             "DEBUG",
