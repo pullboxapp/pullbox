@@ -62,6 +62,7 @@ async def _create_tracked_library_file(
     library_root_path: Path,
     series_title: str = "Batman",
     issue_number: float = 1.0,
+    issue_number_text: str | None = None,
     year_start: int = 2016,
 ) -> LibraryFile:
     publisher = Publisher(name="DC")
@@ -78,6 +79,7 @@ async def _create_tracked_library_file(
     issue = Issue(
         series=series,
         issue_number=issue_number,
+        issue_number_text=issue_number_text,
         title="Issue Title",
         description="A sample issue",
         page_count=24,
@@ -327,6 +329,63 @@ class TestGenerateItems:
 
 class TestProcessItem:
     """Verify per-item pipeline execution."""
+
+    @pytest.mark.parametrize("scope", ["manual", "folder", "library"])
+    @pytest.mark.parametrize(
+        "number,designation,expected",
+        [
+            (1, None, "1"),
+            (0.5, None, "0.5"),
+            (-1, None, "-1"),
+            (13, "13A", "13A"),
+            (13, "13B", "13B"),
+            (50, "50-X", "50-X"),
+            (50, "50-O", "50-O"),
+        ],
+    )
+    async def test_registered_designation_survives_conversion_and_rollback(
+        self, db_session, tmp_path: Path, scope, number, designation, expected
+    ) -> None:
+        root = tmp_path / "library"
+        source = _create_test_cb7(root / "Example" / "Example.cb7")
+        original = source.read_bytes()
+        tracked = await _create_tracked_library_file(
+            db_session,
+            source,
+            library_root_path=root,
+            issue_number=number,
+            issue_number_text=designation,
+        )
+        executor = MassConvertPipelineExecutor(db_session)
+        config = {
+            "scope": scope,
+            "steps": [1, 2, 4],
+            "file_paths": [str(source)],
+            "scan_folder": str(root),
+            "trash_folder": str(tmp_path / "trash"),
+        }
+        context = await executor.build_job_context(db_session, config)
+        item = next(item for item in context["items"] if item["library_file_id"] == tracked.id)
+        item["id"] = "designation"
+        processed = executor.process_item(item, config, context)
+
+        assert processed.result is ItemResult.COMPLETED, processed.error_message
+        with zipfile.ZipFile(processed.after_state["path"]) as archive:
+            metadata = ET.fromstring(archive.read("ComicInfo.xml"))
+            assert metadata.findtext("Number") == expected
+            assert archive.read("page_000.jpg") == b"\xff\xd8" + b"X" * 500
+        assert Path(processed.after_state["original_path"]).read_bytes() == original
+        restored = executor.rollback_item(
+            {
+                "id": item["id"],
+                "before_state": processed.before_state,
+                "after_state": processed.after_state,
+            },
+            config,
+        )
+        assert restored.result is ItemResult.COMPLETED, restored.error_message
+        assert source.read_bytes() == original
+        assert not Path(processed.after_state["path"]).exists()
 
     def test_convert_and_verify_pipeline(self, tmp_path: Path) -> None:
         """Steps [1, 4]: convert CB7→CBZ then verify integrity."""
