@@ -18,10 +18,12 @@ from pullbox.core.archive import ArchiveError
 from pullbox.core.archive_metadata import (
     MAX_METADATA_BYTES,
     ArchiveMetadataFiles,
+    MetadataFile,
     read_archive_metadata,
 )
 from pullbox.models import LibraryFile
 from pullbox.models.archive_metadata_publication import PublicationState
+from pullbox.models.library_conversion import LibraryConversion
 from pullbox.schemas.issue_file_metadata import (
     FileMetadataChange,
     FileMetadataChoices,
@@ -103,7 +105,12 @@ def file_metadata_error(exc: BaseException) -> str:
     }:
         return "Review and verify the issue and series provider links before writing this file."
     if code == "unsupported_format":
-        return "File metadata writing currently supports managed CBZ files only."
+        return "File metadata writing supports managed CBZ, CBR, CB7, and PDF files."
+    if code == "trash_not_configured":
+        return (
+            "Configure a library trash directory in Utilities settings "
+            "before converting this comic."
+        )
     if code in {"target_missing", "source_unavailable"}:
         return (
             "The registered comic file is unavailable. Restore or reconcile it, then preview again."
@@ -149,13 +156,26 @@ async def prepare_file_metadata(
     )
     if len(ids) != 1:
         raise ArchiveMetadataBindingError("target_missing")
-    binding = await read_archive_metadata_binding(session, ids[0], expected_issue_id=issue_id)
+    binding = await read_archive_metadata_binding(
+        session, ids[0], expected_issue_id=issue_id, allow_conversion_source=True
+    )
     await _require_no_import_owner(session, ids[0])
+    from pullbox.core.file_safety import get_archive_size_limit_bytes
+
+    limit = await get_archive_size_limit_bytes(session)
     await session.commit()
-    target = await inspect_archive_metadata_target(binding)
+    target = await inspect_archive_metadata_target(binding, allow_conversion_source=True)
     try:
-        files = await asyncio.to_thread(
-            read_archive_metadata, target.path, "cbz", max_solid_scan_bytes=MAX_METADATA_BYTES
+        kind = target.path.suffix.lstrip(".").casefold()
+        files = (
+            ArchiveMetadataFiles(MetadataFile("ComicInfo.xml"), MetadataFile("MetronInfo.xml"))
+            if kind == "pdf"
+            else await asyncio.to_thread(
+                read_archive_metadata,
+                target.path,
+                "cbz" if kind == "zip" else kind,
+                max_solid_scan_bytes=MAX_METADATA_BYTES if kind in {"cbz", "zip"} else limit,
+            )
         )
         prepared = await asyncio.to_thread(_prepare, target, files, choices or {})
     except (ArchiveError, BadZipFile) as exc:
@@ -193,6 +213,7 @@ def _prepare(
     target: ArchiveMetadataTarget, files: ArchiveMetadataFiles, choices: FileMetadataChoices
 ) -> PreparedFileMetadata:
     binding = target.binding
+    converts = target.path.suffix.casefold() in {".cbr", ".cb7", ".pdf"}
     archive = reconcile_archive_metadata(files)
     series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
     primary = archive_primary_identity(binding, archive)
@@ -236,6 +257,7 @@ def _prepare(
                 unchanged=False,
                 ready=False,
                 conflicts=conflicts,
+                converts_to_cbz=converts,
             ),
         )
     assert rendered is not None
@@ -264,8 +286,10 @@ def _prepare(
                 ),
             )
     review_key = hashlib.sha256(evidence + rendered.comicinfo + rendered.metroninfo).hexdigest()
-    with ZipFile(target.path) as archive_file:
-        canonical_names = {"ComicInfo.xml", "MetronInfo.xml"} <= set(archive_file.namelist())
+    canonical_names = False
+    if not converts:
+        with ZipFile(target.path) as archive_file:
+            canonical_names = {"ComicInfo.xml", "MetronInfo.xml"} <= set(archive_file.namelist())
     unchanged = canonical_names and all(old == new for _, old, new in pairs)
     return PreparedFileMetadata(
         target,
@@ -278,6 +302,7 @@ def _prepare(
             changes=changes[:200],
             review_key=review_key,
             unchanged=unchanged,
+            converts_to_cbz=converts,
             conflicts=conflicts,
         ),
     )
@@ -320,6 +345,28 @@ async def write_file_metadata(
     choices: FileMetadataChoices | None = None,
 ) -> str:
     """Approval is checked again before staging and under the publication lock."""
+    from uuid import uuid5
+
+    from pullbox.services.native_file_metadata import write_native_file_metadata
+
+    async with factory() as reader:
+        native_conversion = await reader.scalar(
+            select(LibraryConversion.id).where(
+                LibraryConversion.operation_id == str(uuid5(operation, "native-metadata"))
+            )
+        )
+        file = await reader.scalar(select(LibraryFile).where(LibraryFile.issue_id == issue_id))
+        native = file is not None and file.file_path.casefold().endswith((".cbr", ".cb7", ".pdf"))
+    if native or native_conversion is not None:
+        return await write_native_file_metadata(
+            factory,
+            issue_id,
+            review_key,
+            operation,
+            choices=choices,
+            check_control=check_control,
+            progress=progress,
+        )
     recovered = await recover_file_metadata(factory, operation)
     if recovered is PublicationState.FINALIZED:
         return "recovered"

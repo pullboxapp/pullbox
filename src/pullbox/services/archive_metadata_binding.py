@@ -234,13 +234,17 @@ class ArchiveMetadataTarget:
 
     def check_unchanged(self) -> None:
         """Synchronous stat boundary; offload on async paths and check before publish."""
-        if _inspect_target(self.binding) != self:
+        if _inspect_target(self.binding, allow_conversion_source=True) != self:
             raise ArchiveMetadataBindingError("source_changed")
 
 
-async def inspect_archive_metadata_target(binding: ArchiveMetadataBinding) -> ArchiveMetadataTarget:
+async def inspect_archive_metadata_target(
+    binding: ArchiveMetadataBinding, *, allow_conversion_source: bool = False
+) -> ArchiveMetadataTarget:
     """Inspect outside the DB session; never open archives or perform write probes."""
-    return await asyncio.to_thread(_inspect_target, binding)
+    return await asyncio.to_thread(
+        _inspect_target, binding, allow_conversion_source=allow_conversion_source
+    )
 
 
 async def revalidate_archive_metadata_target(
@@ -256,7 +260,9 @@ async def revalidate_archive_metadata_target(
         raise ArchiveMetadataBindingError("reference_only") from None
 
 
-def _inspect_target(binding: ArchiveMetadataBinding) -> ArchiveMetadataTarget:
+def _inspect_target(
+    binding: ArchiveMetadataBinding, *, allow_conversion_source: bool = False
+) -> ArchiveMetadataTarget:
     try:
         raw_root, raw_file = Path(binding.root_path), Path(binding.file_path)
         if any(
@@ -268,7 +274,9 @@ def _inspect_target(binding: ArchiveMetadataBinding) -> ArchiveMetadataTarget:
             raise ArchiveMetadataBindingError("unsafe_path")
         if not raw_file.is_relative_to(raw_root) or raw_file == raw_root:
             raise ArchiveMetadataBindingError("outside_root")
-        if raw_file.suffix.casefold() not in {".cbz", ".zip"}:
+        if raw_file.suffix.casefold() not in {".cbz", ".zip"} and not (
+            allow_conversion_source and raw_file.suffix.casefold() in {".cbr", ".cb7", ".pdf"}
+        ):
             raise ArchiveMetadataBindingError("unsupported_format")
         root = raw_root.resolve(strict=True)
         path = root / raw_file.relative_to(raw_root)

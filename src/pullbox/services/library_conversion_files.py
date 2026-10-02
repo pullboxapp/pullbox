@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.core.file_publication import publish_file_without_overwrite
+from pullbox.core.metadata_identity import ExternalIdentityRef
+from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_binding import (
     FileFingerprint,
     assemble_archive_metadata_state,
@@ -25,6 +27,8 @@ from pullbox.services.archive_metadata_publication import _digest, _file_work, _
 from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
 from pullbox.utilities.executors.archive_metadata_staging import stage_cbz_metadata_interruptible
 from pullbox.utilities.executors.archive_subprocess import (
+    ControlCheck,
+    ProgressCallback,
     convert_file_interruptible,
     transfer_file_interruptible,
 )
@@ -59,6 +63,7 @@ class ConversionPlan(BaseModel):
     backup_stage: Path
     directories: tuple[tuple[Path, int, int, int], ...]
     metadata_state_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    reviewed_metadata: tuple[MetadataSnapshot, MetadataSnapshot] | None = None
 
     @property
     def paths(self) -> tuple[Path, ...]:
@@ -86,6 +91,7 @@ def decode_plan(encoded: str) -> ConversionPlan:
             not stage.parent.name.startswith(".pullbox-conversion-")
             for stage in (plan.output_stage, plan.backup_stage)
         )
+        or (plan.reviewed_metadata is not None and plan.metadata_state_digest is None)
     ):
         raise ValidationError("Conversion recovery evidence is invalid.")
     return plan
@@ -168,10 +174,17 @@ async def prepare_conversion(
     metadata_state: SeriesRefreshState | None = None,
     max_uncompressed_bytes: int | None = None,
     block_dangerous: bool = True,
+    reviewed: tuple[MetadataSnapshot, MetadataSnapshot] | None = None,
+    primary_identity: ExternalIdentityRef | None = None,
+    expected_source: FileFingerprint | None = None,
+    check_control: ControlCheck | None = None,
+    progress: ProgressCallback | None = None,
 ) -> AsyncIterator[ConversionPlan]:
     """No public destination or source mutation; workers are reaped before cleanup."""
     source = source.absolute()
     before = _regular(source)
+    if expected_source is not None and before != expected_source:
+        raise ValidationError("The approved comic changed before conversion.")
     metadata_digest = None
     if metadata_state is not None:
         require_writable_conversion_source(source)
@@ -192,7 +205,7 @@ async def prepare_conversion(
             await convert_file_interruptible(source, "cbz", output_path=output_stage)
         else:
             assert max_uncompressed_bytes is not None
-            series, issue = assemble_archive_metadata_state(
+            series, issue = reviewed or assemble_archive_metadata_state(
                 metadata_state, None, now=datetime.now(UTC)
             )
             async with stage_cbz_metadata_interruptible(
@@ -202,11 +215,18 @@ async def prepare_conversion(
                 issue,
                 max_uncompressed_bytes=max_uncompressed_bytes,
                 block_dangerous=block_dangerous,
-                metadata_state=metadata_state,
+                metadata_state=metadata_state if reviewed is None else None,
+                primary_identity=primary_identity,
+                previous_series=metadata_state.series.baseline,
+                previous_issue=metadata_state.issues[0].baseline,
+                cancellation_check=check_control,
+                progress_callback=progress,
             ) as staged:
                 staged.check_unchanged()
                 await asyncio.to_thread(publish_file_without_overwrite, staged.path, output_stage)
-        await transfer_file_interruptible(source, backup_stage, "copy")
+        await transfer_file_interruptible(
+            source, backup_stage, "copy", cancellation_check=check_control
+        )
 
         def inspect(stop: Event) -> ConversionPlan:
             if _regular(source) != before:
@@ -234,6 +254,7 @@ async def prepare_conversion(
                 backup_stage=backup_stage,
                 directories=dirs,
                 metadata_state_digest=metadata_digest,
+                reviewed_metadata=reviewed,
             )
             check_directories(plan)
             return decode_plan(plan.model_dump_json())

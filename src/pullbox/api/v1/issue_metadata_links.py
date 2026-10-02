@@ -146,10 +146,13 @@ async def file_write(
             raise ArchivePublicationError("approval_changed")
         await ensure_no_active_import_file_mutation(session)
         manager = _get_manager()
+        action = (
+            "Convert and write metadata" if prepared.preview.converts_to_cbz else "Write metadata"
+        )
         job = await manager.create_job(
             session,
             JobType.FILE_METADATA,
-            f"Write metadata: {prepared.preview.file_name}",
+            f"{action}: {prepared.preview.file_name}",
             {"issue_id": issue_id, "review_key": body.review_key, "choices": body.choices},
             created_by=user.username,
         )

@@ -13,7 +13,7 @@ import structlog
 from sqlalchemy import select
 
 from pullbox.config import get_settings
-from pullbox.core.exceptions import ValidationError
+from pullbox.core.exceptions import JobCancelledError, ValidationError
 from pullbox.core.file_safety import (
     get_archive_size_limit_bytes,
     is_dangerous_file_blocking_enabled,
@@ -41,6 +41,9 @@ from pullbox.utilities.settings import build_trash_destination
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from pullbox.services.issue_file_metadata import PreparedFileMetadata
+    from pullbox.utilities.executors.archive_subprocess import ControlCheck, ProgressCallback
 
 logger = structlog.get_logger(__name__)
 
@@ -123,6 +126,9 @@ async def convert_library_file(
     trash_relative_path: str | Path,
     operation_id: UUID | None = None,
     require_paired_metadata: bool = False,
+    reviewed_metadata: PreparedFileMetadata | None = None,
+    check_control: ControlCheck | None = None,
+    progress: ProgressCallback | None = None,
 ) -> LibraryConvertOutcome:
     """Own the conversion session lifecycle, retaining recoverable public artifacts."""
     if session.new or session.dirty or session.deleted or session.in_nested_transaction():
@@ -145,7 +151,11 @@ async def convert_library_file(
         limit = None
         block_dangerous = True
         if (
-            (require_paired_metadata or get_settings().metadata_paired_conversion_writer_enabled)
+            (
+                require_paired_metadata
+                or reviewed_metadata is not None
+                or get_settings().metadata_paired_conversion_writer_enabled
+            )
             and binding.file_id is not None
             and binding.issue_id is not None
         ):
@@ -157,6 +167,15 @@ async def convert_library_file(
                 allow_conversion_source=True,
             )
             metadata_state = captured.metadata
+            if reviewed_metadata is not None:
+                if (
+                    not reviewed_metadata.preview.ready
+                    or not reviewed_metadata.preview.converts_to_cbz
+                    or reviewed_metadata.target.path != source
+                    or reviewed_metadata.target.binding != captured
+                ):
+                    raise ArchiveMetadataBindingError("approval_changed")
+                await asyncio.to_thread(reviewed_metadata.target.check_unchanged)
             limit = await get_archive_size_limit_bytes(session)
             block_dangerous = await is_dangerous_file_blocking_enabled(session)
         if require_paired_metadata and metadata_state is None:
@@ -171,9 +190,20 @@ async def convert_library_file(
             metadata_state=metadata_state,
             max_uncompressed_bytes=limit,
             block_dangerous=block_dangerous,
+            reviewed=(reviewed_metadata.series, reviewed_metadata.issue)
+            if reviewed_metadata
+            else None,
+            primary_identity=reviewed_metadata.primary if reviewed_metadata else None,
+            expected_source=reviewed_metadata.target.fingerprint if reviewed_metadata else None,
+            check_control=check_control,
+            progress=progress,
         ) as plan:
+            if check_control is not None:
+                await check_control()
             await record_conversion(session, plan, operation_id)
             await finish_short_mutation(asyncio.create_task(session.commit()))
+            if check_control is not None:
+                await check_control()
             await publish_conversion(session, operation_id)
             await finish_short_mutation(asyncio.create_task(session.commit()))
             state = await recover_conversion(session, operation_id)
@@ -184,7 +214,7 @@ async def convert_library_file(
         return LibraryConvertOutcome("file", str(source), str(target), str(backup))
     except BaseException as exc:
         await session.rollback()
-        if isinstance(exc, ValidationError) or not isinstance(exc, Exception):
+        if isinstance(exc, (ValidationError, JobCancelledError)) or not isinstance(exc, Exception):
             raise
         logger.warning(
             "library_conversion_interrupted", operation_id=str(operation_id), exc_info=True

@@ -23,6 +23,7 @@ from pullbox.services.archive_metadata_binding import (
     read_archive_metadata_binding,
     require_unowned_metadata_file,
 )
+from pullbox.services.archive_metadata_finalization import apply_bound_archive_metadata
 from pullbox.services.archive_metadata_publication import _fingerprint
 from pullbox.services.library_conversion_files import (
     ConversionBinding,
@@ -346,6 +347,12 @@ async def _apply_inspected_conversion(
         await session.commit()
         return "review"
     await finish_short_mutation(asyncio.create_task(remove_original(plan, inspected["original"])))
+    if plan.reviewed_metadata is not None:
+        assert plan.binding.file_id is not None and plan.binding.issue_id is not None
+        binding = await read_archive_metadata_binding(
+            session, plan.binding.file_id, expected_issue_id=plan.binding.issue_id
+        )
+        await apply_bound_archive_metadata(session, binding, *plan.reviewed_metadata)
     row.state, row.active = "complete", False
     await session.commit()
     return "complete"

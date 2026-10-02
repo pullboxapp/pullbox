@@ -7,7 +7,8 @@
       <section class="modal-panel max-w-2xl max-h-[90vh]" role="dialog" aria-modal="true" aria-labelledby="file-metadata-title" tabindex="-1" x-ref="dialog">
         <header class="modal-header"><h2 id="file-metadata-title" class="modal-title">Write file metadata</h2></header>
         <div class="modal-body space-y-4 p-5" :aria-busy="busy">
-          <p class="text-sm text-pb-text-sec">ComicInfo.xml and MetronInfo.xml will use the same reconciled metadata. Comic pages and your edits are preserved. This does not rename or move the file.</p>
+          <p class="text-sm text-pb-text-sec" x-show="!preview || !preview.converts_to_cbz">ComicInfo.xml and MetronInfo.xml will use the same reconciled metadata. Comic pages and your edits are preserved. This does not rename or move the file.</p>
+          <p class="text-sm text-pb-text-sec" x-show="preview && preview.converts_to_cbz" x-cloak>This managed file will be converted to CBZ with both reconciled XML files. Reading order and your metadata choices are preserved. Its original is saved in your configured library trash directory. Download originals are not changed. After completion, retry the failed download in Post-processing.</p>
           <p class="text-sm text-pb-error" role="alert" x-show="error || (job && job.error)" x-text="error || (job && job.error)"></p>
           <p class="text-sm text-pb-text-sec" role="status" x-show="busy && !job">Preparing metadata preview...</p>
           <div x-show="preview && !job" class="space-y-3">
@@ -53,7 +54,7 @@
           <button type="button" class="btn-ghost" @click="cancel()" x-show="active()" :disabled="busy || (job && job.state === 'CANCELLING')">Cancel write</button>
           <button type="button" class="btn-primary" @click="loadPreview()" x-show="!active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy">Preview again</button>
           <button type="button" class="btn-ghost" @click="loadPreview(false)" x-show="preview && !job && ((preview.conflicts || []).length || choicesDirty)" :disabled="busy || !choicesDirty">Update preview</button>
-          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job && !preview.unchanged" :disabled="busy || !canWrite()">Write both metadata files</button>
+          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job && !preview.unchanged" :disabled="busy || !canWrite()" x-text="preview && preview.converts_to_cbz ? 'Convert to CBZ and write metadata' : 'Write both metadata files'">Write both metadata files</button>
         </footer>
       </section>
     </div>
