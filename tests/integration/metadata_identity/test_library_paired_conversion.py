@@ -1,6 +1,7 @@
 """Library conversion builds a reconciled metadata pair without a second repack."""
 
 import asyncio
+import io
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from zipfile import ZipFile
 
 import pytest
 from defusedxml import ElementTree
+from PIL import Image
 from py7zr import SevenZipFile
 from sqlalchemy import select, update
 
@@ -47,6 +49,7 @@ from pullbox.services.archive_metadata_binding import (
 from pullbox.services.archive_metadata_writing import write_cbz_metadata
 from pullbox.services.library_conversion_files import conversion_metadata_digest
 from tests.integration.metadata_identity.test_archive_metadata_binding import seed
+from tests.unit.test_pdf_metadata_writing import native_pdf, pdf_source
 
 
 @pytest.fixture
@@ -78,9 +81,23 @@ async def registered_cb7(factory, tmp_path):
 
 
 @pytest.mark.usefixtures("paired_conversion_setting")
-async def test_real_library_conversion_writes_both_documents(identity_probe_db, tmp_path):
+@pytest.mark.parametrize("namespace", [IdentityNamespace.METRON, IdentityNamespace.GCD])
+async def test_real_library_conversion_writes_both_documents(
+    identity_probe_db, tmp_path, namespace
+):
     _, factory, _ = identity_probe_db
-    source, file_id, *_ = await registered_cb7(factory, tmp_path)
+    source, file_id, issue_id, series_id, _ = await registered_cb7(factory, tmp_path)
+    async with factory.begin() as session:
+        await session.execute(
+            update(SeriesExternalIdentity)
+            .where(SeriesExternalIdentity.series_id == series_id)
+            .values(identity_namespace=namespace)
+        )
+        await session.execute(
+            update(IssueExternalIdentity)
+            .where(IssueExternalIdentity.issue_id == issue_id)
+            .values(identity_namespace=namespace)
+        )
     original = source.read_bytes()
     async with factory() as session:
         result = await library_convert_service.convert_library_file(
@@ -94,6 +111,9 @@ async def test_real_library_conversion_writes_both_documents(identity_probe_db, 
         mi_bytes = archive.read("MetronInfo.xml")
         validate_metroninfo_xml(mi_bytes)
         mi = ElementTree.fromstring(mi_bytes)
+        assert {
+            item.evidence.identity.namespace for item in parse_metroninfo(mi_bytes).identities
+        } == {namespace}
         assert ci.findtext("Number") == mi.findtext("Number") == "50-X"
         assert ci.findtext("Summary") == mi.findtext("Summary") == "My local summary"
         assert archive.read("page.jpg") == b"page bytes"
@@ -102,6 +122,54 @@ async def test_real_library_conversion_writes_both_documents(identity_probe_db, 
         assert file.file_path == result.target_path
         assert file.file_format is FileFormat.CBZ
         assert file.has_comicinfo
+        journal = await session.scalar(select(LibraryConversion))
+        assert journal.state == "complete" and not journal.active
+
+
+@native_pdf
+@pytest.mark.usefixtures("paired_conversion_setting")
+async def test_real_pdf_library_conversion_preserves_reading_order_and_original(
+    identity_probe_db, tmp_path
+):
+    _, factory, _ = identity_probe_db
+    file_id, issue_id, _, _, zip_path = await seed(factory, tmp_path)
+    source = pdf_source(zip_path.with_suffix(".pdf"))
+    zip_path.unlink()
+    original = source.read_bytes()
+    async with factory.begin() as session:
+        file = await session.get(LibraryFile, file_id)
+        file.file_path = str(source)
+        file.file_name = source.name
+        file.file_format = FileFormat.PDF
+        file.file_size = source.stat().st_size
+        file.file_modified_at = datetime.fromtimestamp(source.stat().st_mtime, UTC)
+        issue = await session.get(Issue, issue_id)
+        issue.description = "A verified summary"
+        issue.page_count = 3
+    async with factory() as session:
+        result = await library_convert_service.convert_library_file(
+            session, source=source, trash_dir=tmp_path / "trash", trash_relative_path=source.name
+        )
+
+    assert not source.exists()
+    assert Path(result.original_trash_path).read_bytes() == original
+    with ZipFile(result.target_path) as archive:
+        ci = ElementTree.fromstring(archive.read("ComicInfo.xml"))
+        mi_bytes = archive.read("MetronInfo.xml")
+        validate_metroninfo_xml(mi_bytes)
+        mi = ElementTree.fromstring(mi_bytes)
+        assert ci.findtext("Number") == mi.findtext("Number") == "50-X"
+        assert ci.findtext("Summary") == mi.findtext("Summary") == "A verified summary"
+        assert ci.findtext("PageCount") == mi.findtext("PageCount") == "3"
+        pages = [name for name in archive.namelist() if name.endswith(".jpg")]
+        assert pages == ["page_0000.jpg", "page_0001.jpg", "page_0002.jpg"]
+        for name, channel in zip(pages, (0, 1, 2), strict=True):
+            with Image.open(io.BytesIO(archive.read(name))) as page:
+                pixel = page.convert("RGB").getpixel((100, 100))
+                assert pixel[channel] > max(pixel[(channel + 1) % 3], pixel[(channel + 2) % 3])
+    async with factory() as session:
+        file = await session.get(LibraryFile, file_id)
+        assert file.file_format is FileFormat.CBZ and file.has_comicinfo
         journal = await session.scalar(select(LibraryConversion))
         assert journal.state == "complete" and not journal.active
 

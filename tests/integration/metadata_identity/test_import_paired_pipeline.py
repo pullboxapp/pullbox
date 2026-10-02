@@ -1,6 +1,7 @@
 """Managed Mylar and folder imports reach the paired writer from a real scan."""
 
 import asyncio
+import io
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -8,6 +9,8 @@ from zipfile import ZipFile
 
 import pytest
 from defusedxml import ElementTree
+from PIL import Image
+from py7zr import SevenZipFile
 from sqlalchemy import delete, select, update
 
 from pullbox.core.events import EventBus
@@ -47,6 +50,7 @@ from tests.integration.test_import_file_lifecycle import (
     _issue_summary,
     _mock_cv_provider,
 )
+from tests.unit.test_pdf_metadata_writing import native_pdf, pdf_source
 
 pytestmark = pytest.mark.usefixtures("paired_import_writer_setting")
 
@@ -150,8 +154,9 @@ async def test_duplicate_selection_deduplicates_ids_without_comparing_json(ident
     ]
     + [pytest.param(ImportSourceType.FILESYSTEM, False, True, id="failed-catalog")],
 )
+@pytest.mark.parametrize("source_format", ["cbz", "cb7", pytest.param("pdf", marks=native_pdf)])
 async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
-    identity_probe_db, tmp_path, monkeypatch, source_type, in_place, catalog_failure
+    identity_probe_db, tmp_path, monkeypatch, source_type, in_place, catalog_failure, source_format
 ):
     _, factory, _ = identity_probe_db
     source_root = tmp_path / "source"
@@ -160,15 +165,25 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
     (source_folder / "series.json").write_text('{"comicid": 123}')
     originals = {}
     for number in (1, 2):
-        path = source_folder / f"Example {number:03d} (2024).cbz"
-        with ZipFile(path, "w") as archive:
-            archive.writestr("001.jpg", b"first page")
-            archive.writestr("002.jpg", b"second page")
-            archive.writestr(
-                "ComicInfo.xml",
+        path = source_folder / f"Example {number:03d} (2024).{source_format}"
+        members = {
+            "001.jpg": b"first page",
+            "002.jpg": b"second page",
+            "ComicInfo.xml": (
                 f"<ComicInfo><Series>Example</Series><Number>{number}</Number>"
-                f"<Title>My local title {number}</Title></ComicInfo>",
-            )
+                f"<Title>My local title {number}</Title></ComicInfo>"
+            ).encode(),
+        }
+        if source_format == "pdf":
+            pdf_source(path)
+        elif source_format == "cbz":
+            with ZipFile(path, "w") as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+        else:
+            with SevenZipFile(path, "w") as archive:
+                for name, payload in members.items():
+                    archive.writestr(payload, name)
         originals[path] = path.read_bytes()
     source = source_root
     if source_type is ImportSourceType.MYLAR3:
@@ -214,6 +229,11 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
                     enabled=True,
                     allow_referenced_registrations=True,
                     allow_managed_writes=False,
+                ),
+                SystemConfig(
+                    key="convert_to_preferred_format_on_import",
+                    value="true",
+                    value_type="bool",
                 ),
                 SystemConfig(
                     key="update_embedded_comicinfo_from_match_on_import",
@@ -305,8 +325,10 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
         assert await session.scalar(select(SeriesExternalIdentity)) is not None
         if in_place:
             assert all(file.storage_mode is LibraryFileStorageMode.REFERENCED for file in libraries)
+            assert all(file.file_format.value == source_format for file in libraries)
             assert all("comicinfo_enrichment" not in file.diagnostics for file in files)
         else:
+            assert all(file.file_format.value == "cbz" for file in libraries)
             assert all(
                 file.diagnostics["comicinfo_enrichment"]["status"] == "pending" for file in files
             )
@@ -356,13 +378,26 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
                     mi = ElementTree.fromstring(mi_bytes)
                     assert ci.findtext("Number") == mi.findtext("Number")
                     assert ci.findtext("Title") == mi.findtext("Stories/Story")
-                    assert ci.findtext("Title").startswith("My local title")
+                    if source_format == "pdf":
+                        assert ci.findtext("Title") == "Provider title"
+                    else:
+                        assert ci.findtext("Title").startswith("My local title")
                     assert (
                         ci.findtext("Summary")
                         == mi.findtext("Summary")
                         == "The missing provider summary"
                     )
-                    assert archive.read("001.jpg") == b"first page"
+                    if source_format == "pdf":
+                        pages = [name for name in archive.namelist() if name.endswith(".jpg")]
+                        assert len(pages) == 3
+                        for name, channel in zip(pages, (0, 1, 2), strict=True):
+                            with Image.open(io.BytesIO(archive.read(name))) as page:
+                                pixel = page.convert("RGB").getpixel((100, 100))
+                                assert pixel[channel] > max(
+                                    pixel[(channel + 1) % 3], pixel[(channel + 2) % 3]
+                                )
+                    else:
+                        assert archive.read("001.jpg") == b"first page"
             actions = list(
                 await session.scalars(
                     select(ImportJobAction).where(
