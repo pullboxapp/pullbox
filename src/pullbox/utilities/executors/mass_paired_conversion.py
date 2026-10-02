@@ -29,6 +29,7 @@ from pullbox.services.library_conversion_files import (
     decode_plan,
     inspect_conversion,
     matches,
+    require_writable_conversion_source,
 )
 from pullbox.services.library_conversion_recovery import read_conversion_binding, recover_conversion
 from pullbox.services.library_convert_service import convert_library_file
@@ -166,6 +167,12 @@ async def process_paired_mass(
                 return skipped(
                     "This library root does not allow managed conversion; "
                     "the source was left unchanged."
+                )
+            try:
+                require_writable_conversion_source(source)
+            except ValidationError:
+                return skipped(
+                    "Read-only source files cannot be converted; the source was left unchanged."
                 )
             before = json.loads(item.before_state or "{}")
             before.update(

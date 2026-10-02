@@ -435,3 +435,39 @@ async def test_mass_legacy_context_stays_picklable_when_paired_step_is_off(
         assert pickle.loads(pickle.dumps(context)) == context
     finally:
         get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("paired_conversion_setting")
+@pytest.mark.parametrize("entrypoint", ["mass", "library"])
+@pytest.mark.parametrize("readonly", ["file", "parent"])
+async def test_paired_conversion_preserves_os_readonly_sources(
+    identity_probe_db, tmp_path, entrypoint, readonly
+):
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.library_convert_service import convert_library_file
+
+    _, factory, _ = identity_probe_db
+    executor, config, context, item, source, _, _, _ = await prepare_mass(factory, tmp_path)
+    protected = source if readonly == "file" else source.parent
+    original_mode = protected.stat().st_mode & 0o777
+    protected.chmod(0o444 if readonly == "file" else 0o555)
+    before = source.read_bytes(), source.stat()
+    try:
+        if entrypoint == "mass":
+            result = await execute(executor, config, context, item)
+            assert result.result is ItemResult.SKIPPED, "Paired Mass Convert moved a read-only file"
+            assert "Read-only" in result.warning_message
+        else:
+            async with factory() as session:
+                with pytest.raises(ValidationError, match="Read-only"):
+                    await convert_library_file(
+                        session,
+                        source=source,
+                        trash_dir=tmp_path / "trash",
+                        trash_relative_path=source.name,
+                    )
+        assert (source.read_bytes(), source.stat()) == before
+        assert not source.with_suffix(".cbz").exists()
+    finally:
+        if protected.exists():
+            protected.chmod(original_mode)

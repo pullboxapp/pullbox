@@ -106,6 +106,18 @@ def _regular(path: Path) -> FileFingerprint:
     return evidence
 
 
+def require_writable_conversion_source(source: Path) -> None:
+    if (
+        not source.lstat().st_mode & 0o222
+        or not source.parent.stat().st_mode & 0o222
+        or not os.access(source, os.R_OK | os.W_OK)
+        or not os.access(source.parent, os.W_OK | os.X_OK)
+    ):
+        raise ValidationError(
+            "Read-only files cannot be converted; the original was left unchanged."
+        )
+
+
 def directories(*paths: Path) -> tuple[tuple[Path, int, int, int], ...]:
     result = []
     for path in sorted(set(parent for value in paths for parent in value.parents)):
@@ -162,6 +174,7 @@ async def prepare_conversion(
     before = _regular(source)
     metadata_digest = None
     if metadata_state is not None:
+        require_writable_conversion_source(source)
         if max_uncompressed_bytes is None:
             raise ValidationError("Paired conversion requires a configured archive size limit.")
         metadata_digest = conversion_metadata_digest(
