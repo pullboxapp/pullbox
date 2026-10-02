@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -50,6 +51,7 @@ from tests.integration.test_import_file_lifecycle import (
     _issue_summary,
     _mock_cv_provider,
 )
+from tests.unit.test_nonzip_metadata_writing import nonzip_archive
 from tests.unit.test_pdf_metadata_writing import native_pdf, pdf_source
 
 pytestmark = pytest.mark.usefixtures("paired_import_writer_setting")
@@ -154,7 +156,21 @@ async def test_duplicate_selection_deduplicates_ids_without_comparing_json(ident
     ]
     + [pytest.param(ImportSourceType.FILESYSTEM, False, True, id="failed-catalog")],
 )
-@pytest.mark.parametrize("source_format", ["cbz", "cb7", pytest.param("pdf", marks=native_pdf)])
+@pytest.mark.parametrize(
+    "source_format",
+    [
+        "cbz",
+        "cb7",
+        pytest.param(
+            "cbr",
+            marks=pytest.mark.skipif(
+                not shutil.which("unrar"),
+                reason="Native UnRAR contract; required in Docker runtime qualification",
+            ),
+        ),
+        pytest.param("pdf", marks=native_pdf),
+    ],
+)
 async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
     identity_probe_db, tmp_path, monkeypatch, source_type, in_place, catalog_failure, source_format
 ):
@@ -176,6 +192,8 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
         }
         if source_format == "pdf":
             pdf_source(path)
+        elif source_format == "cbr":
+            nonzip_archive(path, list(members.items()))
         elif source_format == "cbz":
             with ZipFile(path, "w") as archive:
                 for name, payload in members.items():

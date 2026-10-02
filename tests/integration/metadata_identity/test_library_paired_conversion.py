@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import shutil
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -49,6 +50,7 @@ from pullbox.services.archive_metadata_binding import (
 from pullbox.services.archive_metadata_writing import write_cbz_metadata
 from pullbox.services.library_conversion_files import conversion_metadata_digest
 from tests.integration.metadata_identity.test_archive_metadata_binding import seed
+from tests.unit.test_nonzip_metadata_writing import nonzip_archive
 from tests.unit.test_pdf_metadata_writing import native_pdf, pdf_source
 
 
@@ -62,31 +64,49 @@ def paired_conversion_setting(monkeypatch):
         get_settings.cache_clear()
 
 
-async def registered_cb7(factory, tmp_path):
+async def registered_nonzip(factory, tmp_path, source_format=FileFormat.CB7):
     file_id, issue_id, series_id, root_id, zip_path = await seed(factory, tmp_path)
-    source = zip_path.with_suffix(".cb7")
-    with ZipFile(zip_path) as archive, SevenZipFile(source, "w") as output:
-        for member in archive.infolist():
-            payload = archive.read(member)
-            output.writestr(payload, member.filename)
+    source = zip_path.with_suffix(f".{source_format.value}")
+    with ZipFile(zip_path) as archive:
+        members = [(member.filename, archive.read(member)) for member in archive.infolist()]
+    nonzip_archive(source, members)
     zip_path.unlink()
     async with factory.begin() as session:
         file = await session.get(LibraryFile, file_id)
         file.file_path = str(source)
         file.file_name = source.name
-        file.file_format = FileFormat.CB7
+        file.file_format = source_format
         file.file_size = source.stat().st_size
         file.file_modified_at = datetime.fromtimestamp(source.stat().st_mtime, UTC)
     return source, file_id, issue_id, series_id, root_id
 
 
+async def registered_cb7(factory, tmp_path):
+    return await registered_nonzip(factory, tmp_path)
+
+
 @pytest.mark.usefixtures("paired_conversion_setting")
 @pytest.mark.parametrize("namespace", [IdentityNamespace.METRON, IdentityNamespace.GCD])
+@pytest.mark.parametrize(
+    "source_format",
+    [
+        FileFormat.CB7,
+        pytest.param(
+            FileFormat.CBR,
+            marks=pytest.mark.skipif(
+                not shutil.which("unrar"),
+                reason="Native UnRAR contract; required in Docker runtime qualification",
+            ),
+        ),
+    ],
+)
 async def test_real_library_conversion_writes_both_documents(
-    identity_probe_db, tmp_path, namespace
+    identity_probe_db, tmp_path, namespace, source_format
 ):
     _, factory, _ = identity_probe_db
-    source, file_id, issue_id, series_id, _ = await registered_cb7(factory, tmp_path)
+    source, file_id, issue_id, series_id, _ = await registered_nonzip(
+        factory, tmp_path, source_format
+    )
     async with factory.begin() as session:
         await session.execute(
             update(SeriesExternalIdentity)
