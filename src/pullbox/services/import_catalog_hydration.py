@@ -11,6 +11,7 @@ import structlog
 from sqlalchemy import func, or_, update
 from sqlalchemy import select as sa_select
 
+from pullbox.config import get_settings
 from pullbox.core.exceptions import ProviderError
 from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.series import IssueCatalogState, Series
@@ -162,6 +163,37 @@ async def run_pending_catalog_hydration(
     limit: int | None = None,
 ) -> int:
     """Resume full catalog hydration rows abandoned by restart or task loss."""
+    paired = get_settings().metadata_paired_import_writer_enabled
+    owner_ids = await catalog_hydration_import_job_ids(session_factory) if paired else []
+    recovered = await _run_pending_catalog_hydration(
+        session_factory, series_service=series_service, limit=limit
+    )
+    if owner_ids:
+        from pullbox.composition.services import build_import_service
+
+        try:
+            async with session_factory() as session:
+                import_service = await build_import_service(session)
+            # The catalog transaction and priority gate have closed. Successful
+            # catalogs unblock writing; permanent failures become actionable.
+            for job_id in owner_ids:
+                import_service.schedule_comicinfo_enrichment(session_factory, job_id=job_id)
+        except Exception as exc:
+            logger.warning(
+                "import_paired_metadata_resume_failed",
+                owner_count=len(owner_ids),
+                error_type=type(exc).__name__,
+            )
+    return recovered
+
+
+async def _run_pending_catalog_hydration(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    series_service: Any,
+    limit: int | None = None,
+) -> int:
+    """Hydrate outside archive-writing coordination and release the catalog gate."""
     hydration_methods = _catalog_hydration_methods(series_service)
     if hydration_methods is None:
         return 0
