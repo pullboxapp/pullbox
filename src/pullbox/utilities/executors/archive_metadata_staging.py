@@ -20,6 +20,7 @@ from pullbox.core.metadata_pdf_source import PdfQuality
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.archive_metadata_writing import write_cbz_metadata
+from pullbox.services.metadata_assembly import MetadataAssemblyError
 from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
 from pullbox.utilities.executors.archive_subprocess import (
     ControlCheck,
@@ -257,7 +258,7 @@ def worker_stage_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             metadata_state=request.metadata_state,
         )
         _check_fingerprint(request.source_path, request.source_fingerprint)
-    except ArchiveMetadataRenderError:
+    except (ArchiveMetadataRenderError, MetadataAssemblyError):
         raise ArchiveMetadataStagingError("metadata_conflict") from None
     except (FileSafetyError, zipfile.BadZipFile):
         raise ArchiveMetadataStagingError("unsafe_archive") from None

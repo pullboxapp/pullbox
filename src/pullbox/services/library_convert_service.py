@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import structlog
 from sqlalchemy import select
@@ -121,12 +121,14 @@ async def convert_library_file(
     source: Path,
     trash_dir: Path,
     trash_relative_path: str | Path,
+    operation_id: UUID | None = None,
+    require_paired_metadata: bool = False,
 ) -> LibraryConvertOutcome:
     """Own the conversion session lifecycle, retaining recoverable public artifacts."""
     if session.new or session.dirty or session.deleted or session.in_nested_transaction():
         raise ValidationError("Conversion requires a clean session.")
     source = source.absolute()
-    operation_id = uuid4()
+    operation_id = operation_id or uuid4()
     target = source.with_suffix(".cbz")
     relative = Path(trash_relative_path)
     if relative.is_absolute() or ".." in relative.parts:
@@ -143,7 +145,7 @@ async def convert_library_file(
         limit = None
         block_dangerous = True
         if (
-            get_settings().metadata_paired_conversion_writer_enabled
+            (require_paired_metadata or get_settings().metadata_paired_conversion_writer_enabled)
             and binding.file_id is not None
             and binding.issue_id is not None
         ):
@@ -157,6 +159,8 @@ async def convert_library_file(
             metadata_state = captured.metadata
             limit = await get_archive_size_limit_bytes(session)
             block_dangerous = await is_dangerous_file_blocking_enabled(session)
+        if require_paired_metadata and metadata_state is None:
+            raise ValidationError("Paired conversion requires a verified library issue match.")
         if target.exists() or target.is_symlink() or target == source:
             raise FileExistsError
         await session.commit()

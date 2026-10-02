@@ -24,6 +24,7 @@ from zipfile import ZipFile
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.exceptions import JobCancelledError
@@ -43,6 +44,11 @@ from pullbox.utilities.base_executor import (
     RuntimeLogEntry,
 )
 from pullbox.utilities.cancellation import check_cancelled
+from pullbox.utilities.executors.mass_paired_conversion import (
+    guard_paired_rollback,
+    paired_mass_enabled,
+    process_paired_mass,
+)
 from pullbox.utilities.executors.utility_archive_work import (
     convert_utility_file,
     embed_utility_metadata,
@@ -265,6 +271,11 @@ class MassConvertPipelineExecutor(JobExecutor):
         job_config: dict[str, Any],
     ) -> dict[str, Any]:
         scope = str(job_config.get("scope", "manual")).strip().lower()
+        runtime_context = (
+            {"factory": async_sessionmaker(session.bind, expire_on_commit=False)}
+            if paired_mass_enabled(job_config)
+            else {}
+        )
         referenced_paths = list(
             (
                 await session.execute(
@@ -346,7 +357,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     item["metadata"] = metadata
                     item["metadata_source"] = "library"
                 items.append(item)
-            return {"items": items, "referenced_paths": referenced_paths}
+            return {"items": items, "referenced_paths": referenced_paths, **runtime_context}
 
         deduped_paths = list(dict.fromkeys(candidate_paths))
         try:
@@ -371,7 +382,23 @@ class MassConvertPipelineExecutor(JobExecutor):
                 Path(item["file_path"]),
                 relative_to,
             )
-        return {"items": items, "referenced_paths": referenced_paths}
+        return {"items": items, "referenced_paths": referenced_paths, **runtime_context}
+
+    def get_execution_mode(
+        self, job_config: dict[str, Any], job_context: dict[str, Any] | None = None
+    ) -> ExecutionMode:
+        return ExecutionMode.ASYNC if "factory" in (job_context or {}) else self.execution_mode
+
+    async def process_item_async(
+        self,
+        item_data: dict[str, Any],
+        job_config: dict[str, Any],
+        job_context: dict[str, Any] | None = None,
+    ) -> ProcessedItem:
+        start = time.monotonic()
+        processed = await process_paired_mass(item_data, job_config, job_context or {})
+        processed.duration_ms = int((time.monotonic() - start) * 1000)
+        return processed
 
     async def generate_items(
         self,
@@ -695,6 +722,7 @@ class MassConvertPipelineExecutor(JobExecutor):
             if isinstance(before_state, str):
                 before_state = json.loads(before_state)
             original_path = Path(before_state.get("path", ""))
+            guard_paired_rollback(before_state, after_state)
             had_converted_output = converted_path.exists()
             restore_file_from_utility_trash(
                 trash_path,
@@ -793,7 +821,10 @@ class MassConvertPipelineExecutor(JobExecutor):
         if isinstance(before_state, str):
             before_state = json.loads(before_state or "{}")
         original_path = str(before_state.get("path", "") or "")
-        converted_path = str(item_data.get("file_path", "") or "")
+        after_state = item_data.get("after_state", {})
+        if isinstance(after_state, str):
+            after_state = json.loads(after_state or "{}")
+        converted_path = str(after_state.get("path") or item_data.get("file_path", "") or "")
         if not original_path or not converted_path:
             return ApplyResult()
 
