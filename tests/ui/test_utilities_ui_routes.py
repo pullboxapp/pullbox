@@ -396,6 +396,34 @@ class TestUtilitiesRouteContracts:
         assert f"trashFolder: {json.dumps(expected_trash)}" in response.text
         assert f"trashFolderBrowsePath: {json.dumps(expected_trash)}" in response.text
 
+    @pytest.mark.parametrize("paired_enabled", [False, True])
+    async def test_mass_convert_describes_the_active_metadata_writer(
+        self,
+        authenticated_client,
+        monkeypatch,
+        paired_enabled,
+    ) -> None:  # type: ignore[no-untyped-def]
+        settings = get_settings().model_copy(
+            update={"metadata_paired_conversion_writer_enabled": paired_enabled}
+        )
+        monkeypatch.setattr("pullbox.ui.utilities_routes.get_settings", lambda: settings)
+
+        response = await authenticated_client.get("/utilities/mass-convert")
+
+        assert response.status_code == 200
+        assert ("Embed paired metadata" in response.text) is paired_enabled
+        assert ("Embed ComicInfo.xml" in response.text) is not paired_enabled
+        assert ("Convert to CBZ with reconciled metadata" in response.text) is paired_enabled
+        assert ("ComicInfo.xml and MetronInfo.xml" in response.text) is paired_enabled
+        assert (
+            "Existing managed CBZ files stay at the same path" in response.text
+        ) is paired_enabled
+        assert (
+            'aria-describedby="utilities-mass-convert-metadata-help"' in response.text
+        ) is paired_enabled
+        assert 'x-model="steps.metadata"' in response.text
+        assert 'data-testid="utilities-mass-convert-footer-dock"' in response.text
+
     async def test_utilities_mass_convert_renders_stable_shell(
         self,
         authenticated_client,
