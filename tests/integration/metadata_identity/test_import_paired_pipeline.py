@@ -172,7 +172,15 @@ async def test_duplicate_selection_deduplicates_ids_without_comparing_json(ident
     ],
 )
 async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
-    identity_probe_db, tmp_path, monkeypatch, source_type, in_place, catalog_failure, source_format
+    identity_probe_db,
+    tmp_path,
+    monkeypatch,
+    source_type,
+    in_place,
+    catalog_failure,
+    source_format,
+    size_approval=False,
+    changed_source=False,
 ):
     _, factory, _ = identity_probe_db
     source_root = tmp_path / "source"
@@ -183,7 +191,7 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
     for number in (1, 2):
         path = source_folder / f"Example {number:03d} (2024).{source_format}"
         members = {
-            "001.jpg": b"first page",
+            "001.jpg": b"first page" * (220000 if size_approval else 1),
             "002.jpg": b"second page",
             "ComicInfo.xml": (
                 f"<ComicInfo><Series>Example</Series><Number>{number}</Number>"
@@ -231,6 +239,8 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
     destination = tmp_path / "library"
     destination.mkdir()
     async with factory.begin() as session:
+        if size_approval:
+            session.add(SystemConfig(key="archive_size_limit_mb", value="1", value_type="int"))
         root = LibraryRoot(
             name="Managed destination",
             path=str(destination),
@@ -323,14 +333,46 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
     async with factory() as session:
         job = await session.get(ImportJob, job_id)
         assert job.status is ImportJobStatus.REVIEW
+        if size_approval:
+            files = list(await session.scalars(select(ImportedFile)))
+            assert len(files) == 2
+            assert all(file.status is ImportedFileStatus.SAFETY_BLOCKED for file in files)
+            for file in files:
+                assert file.diagnostics["safety_block"]["code"] == "archive_decompressed_size_limit"
+                await service.allow_safety_blocked_file_once(session, job_id, file.id)
+            for series_id in {file.import_series_id for file in files}:
+                await service.rematch_imported_series_files(session, job_id, series_id)
+            assert all(file.status is ImportedFileStatus.MATCHED for file in files)
+            assert all(file.diagnostics["safety_exception"]["allowed_once"] for file in files)
         assert job.total_files_found == job.total_files_matched == 2
         items = list(await session.scalars(select(ImportedSeries)))
         await service.confirm_import(
             session, job_id, ConfirmImportRequest(series_ids=[item.id for item in items])
         )
         await session.commit()
+        if changed_source:
+            for path, data in originals.items():
+                originals[path] = data + b"changed after approval"
+                path.write_bytes(originals[path])
         result = await service.run_import(session, job_id)
         await session.commit()
+        if changed_source:
+            files = list(
+                await session.scalars(
+                    select(ImportedFile).execution_options(populate_existing=True)
+                )
+            )
+            assert all(file.status is ImportedFileStatus.FAILED for file in files)
+            assert all(
+                file.diagnostics["source_revalidation"]["code"] == "source_changed"
+                for file in files
+            )
+            assert await session.scalar(select(LibraryFile)) is None
+            assert await session.scalar(select(ArchiveMetadataPublication)) is None
+            assert not list(destination.rglob("*.cbz"))
+            assert all(path.read_bytes() == data for path, data in originals.items())
+            assert (await session.get(SystemConfig, "archive_size_limit_mb")).value == "1"
+            return
         assert result.schedule_comicinfo_enrichment
     async with factory() as session:
         job = await session.get(ImportJob, job_id)
@@ -415,7 +457,9 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
                                     pixel[(channel + 1) % 3], pixel[(channel + 2) % 3]
                                 )
                     else:
-                        assert archive.read("001.jpg") == b"first page"
+                        assert archive.read("001.jpg") == b"first page" * (
+                            220000 if size_approval else 1
+                        )
             actions = list(
                 await session.scalars(
                     select(ImportJobAction).where(
@@ -438,3 +482,33 @@ async def test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
         assert await session.scalar(select(LibraryFile)) is None
         assert await session.scalar(select(Series)) is None
         assert await session.scalar(select(Issue)) is None
+        if size_approval:
+            assert (await session.get(SystemConfig, "archive_size_limit_mb")).value == "1"
+
+
+@pytest.mark.parametrize("source_type", list(ImportSourceType))
+@pytest.mark.parametrize(
+    "source_format",
+    [
+        "cbz",
+        "cb7",
+        pytest.param(
+            "cbr", marks=pytest.mark.skipif(not shutil.which("unrar"), reason="Native UnRAR")
+        ),
+    ],
+)
+@pytest.mark.parametrize("changed_source", [False, True])
+async def test_reviewed_large_import_writes_paired_metadata_and_preserves_rollback(
+    identity_probe_db, tmp_path, monkeypatch, source_type, source_format, changed_source
+):
+    await test_scan_confirm_import_enrichment_and_rollback_preserve_sources(
+        identity_probe_db,
+        tmp_path,
+        monkeypatch,
+        source_type,
+        False,
+        False,
+        source_format,
+        size_approval=True,
+        changed_source=changed_source,
+    )
