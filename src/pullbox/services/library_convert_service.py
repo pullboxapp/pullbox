@@ -61,6 +61,7 @@ async def _sync_converted_file_record(
     before_path: str,
     after_path: str,
     metadata_embedded: bool = False,
+    restore_has_comicinfo: bool | None = None,
 ) -> None:
     result = await session.execute(select(LibraryFile).where(LibraryFile.file_path == before_path))
     library_file = result.scalar_one_or_none()
@@ -68,11 +69,14 @@ async def _sync_converted_file_record(
         return
 
     updated_path = Path(after_path)
+    updated_format = FileFormat(updated_path.suffix.lstrip(".").casefold())
     library_file.file_path = after_path
     library_file.file_name = updated_path.name
-    library_file.file_format = FileFormat.CBZ
+    library_file.file_format = updated_format
     library_file.file_hash = None
-    if metadata_embedded:
+    if restore_has_comicinfo is not None:
+        library_file.has_comicinfo = restore_has_comicinfo
+    elif metadata_embedded:
         library_file.has_comicinfo = True
     if updated_path.exists():
         stat = updated_path.stat()

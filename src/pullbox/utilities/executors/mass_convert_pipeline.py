@@ -235,6 +235,7 @@ class MassConvertPipelineExecutor(JobExecutor):
             if tracked is not None:
                 item["library_file_id"] = tracked.id
                 item["storage_mode"] = tracked.storage_mode.value
+                item["has_comicinfo"] = tracked.has_comicinfo
                 metadata = _build_comicinfo_metadata(tracked)
                 if metadata:
                     item["metadata"] = metadata
@@ -316,6 +317,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     "operation": "pipeline",
                     "library_file_id": library_file.id,
                     "storage_mode": library_file.storage_mode.value,
+                    "has_comicinfo": library_file.has_comicinfo,
                     "trash_relative_path": _relative_trash_path(
                         path,
                         Path(library_file.library_root.path)
@@ -580,13 +582,17 @@ class MassConvertPipelineExecutor(JobExecutor):
                 current_path = target_path
 
             duration_ms = int((time.monotonic() - start) * 1000)
+            before_state: dict[str, Any] = {
+                "path": str(source),
+                "format": source.suffix.lstrip("."),
+            }
+            original_has_comicinfo = item_data.get("has_comicinfo")
+            if isinstance(original_has_comicinfo, bool):
+                before_state["has_comicinfo"] = original_has_comicinfo
             return ProcessedItem(
                 item_id=item_id,
                 result=ItemResult.COMPLETED,
-                before_state={
-                    "path": str(source),
-                    "format": source.suffix.lstrip("."),
-                },
+                before_state=before_state,
                 after_state={
                     "path": str(current_path),
                     "format": "cbz",
@@ -774,11 +780,15 @@ class MassConvertPipelineExecutor(JobExecutor):
         if not original_path or not converted_path:
             return ApplyResult()
 
+        original_has_comicinfo = before_state.get("has_comicinfo")
         await _sync_converted_file_record(
             session,
             before_path=converted_path,
             after_path=original_path,
             metadata_embedded=False,
+            restore_has_comicinfo=(
+                original_has_comicinfo if isinstance(original_has_comicinfo, bool) else None
+            ),
         )
         return ApplyResult(
             extra_logs=[
