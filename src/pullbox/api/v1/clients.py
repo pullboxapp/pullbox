@@ -243,16 +243,6 @@ async def add_client(
     session: DbSession,
 ) -> ClientResponse:
     """Add a new download client configuration."""
-    if body.client_type is not DownloadClientType.AIRDCPP:
-        existing = await session.execute(
-            select(DownloadClientConfig).where(DownloadClientConfig.client_type == body.client_type)
-        )
-        if existing.scalar_one_or_none():
-            raise ValidationError(
-                f"A {body.client_type.value} client is already configured. "
-                "Only one instance per client type is allowed."
-            )
-
     if body.client_type is DownloadClientType.AIRDCPP:
         if not get_settings().airdcpp_enabled:
             raise ValidationError("AirDC++ integration is disabled by the feature flag.")

@@ -336,69 +336,59 @@
         <p class="text-sm text-pb-text-sec mb-4">What type of download client are you adding?</p>
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
           <button @click="form.client_type = 'sabnzbd'"
-                  :disabled="existingTypes.includes('sabnzbd')"
-                  :class="existingTypes.includes('sabnzbd') ? 'opacity-40 cursor-not-allowed' : '{{ client_picker_hover_map['sabnzbd'] }}'"
-                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all">
+                  data-testid="settings-clients-picker-sabnzbd"
+                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all {{ client_picker_hover_map['sabnzbd'] }}">
             <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg {{ client_accent_map['sabnzbd'] }}">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
               </svg>
             </div>
             <p class="text-sm font-semibold text-pb-text">SABnzbd</p>
-            <p class="text-[11px] mt-0.5" :class="existingTypes.includes('sabnzbd') ? 'text-pb-text-dim' : 'text-pb-text-dim'"
-               x-text="existingTypes.includes('sabnzbd') ? 'Already configured' : 'Usenet download client'"></p>
+            <p class="text-[11px] mt-0.5 text-pb-text-dim">Usenet download client</p>
           </button>
           <button @click="form.client_type = 'nzbget'"
-                  :disabled="existingTypes.includes('nzbget')"
-                  :class="existingTypes.includes('nzbget') ? 'opacity-40 cursor-not-allowed' : '{{ client_picker_hover_map['nzbget'] }}'"
-                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all">
+                  data-testid="settings-clients-picker-nzbget"
+                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all {{ client_picker_hover_map['nzbget'] }}">
             <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg {{ client_accent_map['nzbget'] }}">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
               </svg>
             </div>
             <p class="text-sm font-semibold text-pb-text">NZBGet</p>
-            <p class="text-[11px] mt-0.5" :class="existingTypes.includes('nzbget') ? 'text-pb-text-dim' : 'text-pb-text-dim'"
-               x-text="existingTypes.includes('nzbget') ? 'Already configured' : 'Usenet download client'"></p>
+            <p class="text-[11px] mt-0.5 text-pb-text-dim">Usenet download client</p>
           </button>
           <button @click="form.client_type = 'qbittorrent'"
-                  :disabled="existingTypes.includes('qbittorrent')"
-                  :class="existingTypes.includes('qbittorrent') ? 'opacity-40 cursor-not-allowed' : '{{ client_picker_hover_map['qbittorrent'] }}'"
-                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all">
+                  data-testid="settings-clients-picker-qbittorrent"
+                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all {{ client_picker_hover_map['qbittorrent'] }}">
             <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg {{ client_accent_map['qbittorrent'] }}">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 7.5h-.75A2.25 2.25 0 004.5 9.75v7.5a2.25 2.25 0 002.25 2.25h7.5a2.25 2.25 0 002.25-2.25v-7.5a2.25 2.25 0 00-2.25-2.25h-.75m-6 3.75l3 3m0 0l3-3m-3 3V1.5"/>
               </svg>
             </div>
             <p class="text-sm font-semibold text-pb-text">qBittorrent</p>
-            <p class="text-[11px] mt-0.5" :class="existingTypes.includes('qbittorrent') ? 'text-pb-text-dim' : 'text-pb-text-dim'"
-               x-text="existingTypes.includes('qbittorrent') ? 'Already configured' : 'BitTorrent download client'"></p>
+            <p class="text-[11px] mt-0.5 text-pb-text-dim">BitTorrent download client</p>
           </button>
           <button @click="form.client_type = 'transmission'"
-                  :disabled="existingTypes.includes('transmission')"
-                  :class="existingTypes.includes('transmission') ? 'opacity-40 cursor-not-allowed' : '{{ client_picker_hover_map['transmission'] }}'"
-                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all">
+                  data-testid="settings-clients-picker-transmission"
+                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all {{ client_picker_hover_map['transmission'] }}">
             <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg {{ client_accent_map['transmission'] }}">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 7.5h-.75A2.25 2.25 0 004.5 9.75v7.5a2.25 2.25 0 002.25 2.25h7.5a2.25 2.25 0 002.25-2.25v-7.5a2.25 2.25 0 00-2.25-2.25h-.75m-6 3.75l3 3m0 0l3-3m-3 3V1.5"/>
               </svg>
             </div>
             <p class="text-sm font-semibold text-pb-text">Transmission</p>
-            <p class="text-[11px] mt-0.5" :class="existingTypes.includes('transmission') ? 'text-pb-text-dim' : 'text-pb-text-dim'"
-               x-text="existingTypes.includes('transmission') ? 'Already configured' : 'BitTorrent download client'"></p>
+            <p class="text-[11px] mt-0.5 text-pb-text-dim">BitTorrent download client</p>
           </button>
           <button @click="form.client_type = 'deluge'"
-                  :disabled="existingTypes.includes('deluge')"
-                  :class="existingTypes.includes('deluge') ? 'opacity-40 cursor-not-allowed' : '{{ client_picker_hover_map['deluge'] }}'"
-                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all">
+                  data-testid="settings-clients-picker-deluge"
+                  class="rounded-xl border border-pb-border-hover p-5 text-left transition-all {{ client_picker_hover_map['deluge'] }}">
             <div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg {{ client_accent_map['deluge'] }}">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 7.5h-.75A2.25 2.25 0 004.5 9.75v7.5a2.25 2.25 0 002.25 2.25h7.5a2.25 2.25 0 002.25-2.25v-7.5a2.25 2.25 0 00-2.25-2.25h-.75m-6 3.75l3 3m0 0l3-3m-3 3V1.5"/>
               </svg>
             </div>
             <p class="text-sm font-semibold text-pb-text">Deluge</p>
-            <p class="text-[11px] mt-0.5" :class="existingTypes.includes('deluge') ? 'text-pb-text-dim' : 'text-pb-text-dim'"
-               x-text="existingTypes.includes('deluge') ? 'Already configured' : 'BitTorrent download client'"></p>
+            <p class="text-[11px] mt-0.5 text-pb-text-dim">BitTorrent download client</p>
           </button>
           {% if airdcpp_enabled %}
           <button @click="form.client_type = 'airdcpp'"

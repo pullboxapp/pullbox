@@ -25,6 +25,10 @@ class IndexerCreate(BaseModel):
         False,
         description="Allow a manual Torznab indexer to use the ranked browser resolver chain",
     )
+    download_client_id: int | None = Field(
+        None,
+        description="Send every grab from this indexer to this download client",
+    )
 
     @field_validator("url")
     @classmethod
@@ -50,6 +54,10 @@ class IndexerUpdate(BaseModel):
     resolver_enabled: bool | None = Field(
         None,
         description="Allow a manual Torznab indexer to use the ranked browser resolver chain",
+    )
+    download_client_id: int | None = Field(
+        None,
+        description="Send every grab to this download client; null for the default client",
     )
 
     @field_validator("url")
@@ -82,6 +90,7 @@ class IndexerResponse(BaseModel):
     enable_automatic_search: bool = True
     enable_interactive_search: bool = True
     resolver_enabled: bool = False
+    download_client_id: int | None = None
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
     last_error: str | None = None

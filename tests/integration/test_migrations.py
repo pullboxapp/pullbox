@@ -1870,10 +1870,37 @@ class TestMigrationChain:
         finally:
             engine.dispose()
 
+    def test_indexer_download_client_pin_round_trips(self, alembic_cfg) -> None:
+        cfg, sync_url = alembic_cfg
+        command.upgrade(cfg, "i6c7d8e9f012")
+
+        engine = create_engine(sync_url)
+        try:
+            columns = {c["name"] for c in inspect(engine).get_columns("indexer_configs")}
+            assert "download_client_id" in columns
+            foreign_keys = inspect(engine).get_foreign_keys("indexer_configs")
+            assert [
+                (fk["referred_table"], fk["constrained_columns"], fk["options"].get("ondelete"))
+                for fk in foreign_keys
+            ] == [("download_client_configs", ["download_client_id"], "SET NULL")]
+        finally:
+            engine.dispose()
+
+        command.downgrade(cfg, "h5b6c7d8e901")
+
+        engine = create_engine(sync_url)
+        try:
+            columns = {c["name"] for c in inspect(engine).get_columns("indexer_configs")}
+            assert "download_client_id" not in columns
+            assert inspect(engine).get_foreign_keys("indexer_configs") == []
+        finally:
+            engine.dispose()
+
     def test_root_removal_protects_dependencies_without_losing_other_fk_actions(self, alembic_cfg):
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
-        assert script.get_heads() == ["h5b6c7d8e901"]
+        assert script.get_heads() == ["i6c7d8e9f012"]
+        assert script.get_revision("i6c7d8e9f012").down_revision == "h5b6c7d8e901"
         assert script.get_revision("h5b6c7d8e901").down_revision == "g4a5b6c7d890"
         assert script.get_revision("g4a5b6c7d890").down_revision == "f3z4a5b6c789"
         assert script.get_revision("f3z4a5b6c789").down_revision == "e2y3z4a5b678"

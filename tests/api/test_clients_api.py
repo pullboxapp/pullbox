@@ -14,7 +14,7 @@ from sqlalchemy.exc import OperationalError
 
 from pullbox.api.v1 import clients as clients_api
 from pullbox.core.encryption import decrypt_secret, encrypt_secret
-from pullbox.core.exceptions import NotFoundError, ProviderError, ValidationError
+from pullbox.core.exceptions import NotFoundError, ProviderError
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType
 from pullbox.providers.base import ProviderHealthResult
@@ -136,14 +136,17 @@ class TestClientCrud:
             assert decrypt_secret(row.api_key) == "raw-sab-key"
             assert row.category == "comics"
 
-        duplicate = await authenticated_client.post(
+        # A second client of the same type is allowed, e.g. one per tracker.
+        second = await authenticated_client.post(
             "/api/v1/clients",
             json=_client_payload(name="Second SAB", api_key="other-key"),
             headers=_csrf_header_for(authenticated_client),
         )
 
-        assert duplicate.status_code == 422
-        assert "already configured" in duplicate.text
+        assert second.status_code == 201
+        assert second.json()["id"] != created["id"]
+        listed = await authenticated_client.get("/api/v1/clients")
+        assert sorted(item["name"] for item in listed.json()) == ["SAB", "Second SAB"]
 
     async def test_update_preserves_blank_password_and_clears_blank_api_key(
         self,
@@ -461,12 +464,12 @@ class TestClientRouteFunctions:
             assert stored.password != "raw-password"
             assert decrypt_secret(stored.password) == "raw-password"
 
-            with pytest.raises(ValidationError):
-                await clients_api.add_client(
-                    _create_model(name="Second qBit", client_type="qbittorrent"),
-                    object(),  # type: ignore[arg-type]
-                    session,
-                )
+            second = await clients_api.add_client(
+                _create_model(name="Second qBit", client_type="qbittorrent"),
+                object(),  # type: ignore[arg-type]
+                session,
+            )
+            assert second.id != created.id
 
             updated = await clients_api.update_client(
                 created.id,
