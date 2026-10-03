@@ -29,7 +29,15 @@ from pullbox.core.file_safety import has_archive_member_path_traversal
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
 from pullbox.core.rar_backend import RarBackendUnavailableError, configure_rarfile_backend
 from pullbox.models.library import LibraryFile, LibraryFileStorageMode
-from pullbox.utilities.base_executor import ExecutionMode, ItemResult, JobExecutor, ProcessedItem
+from pullbox.utilities.base_executor import (
+    ApplyResult,
+    ExecutionMode,
+    ItemResult,
+    JobExecutor,
+    JobRunSummary,
+    ProcessedItem,
+    RuntimeLogEntry,
+)
 from pullbox.utilities.settings import (
     move_file_to_utility_trash,
     resolve_trash_directory,
@@ -592,6 +600,41 @@ def build_convert_preview(
     )
 
 
+async def _sync_library_record(*, before_path: str, after_path: str, session: Any) -> ApplyResult:
+    """Point a tracked library record at the converted file and refresh its attributes.
+
+    A same-path repack (CBZ -> CBZ) keeps the name but changes the contents, so the
+    record is still refreshed: size, modified time and the cached hash.
+    """
+    if not before_path or not after_path:
+        return ApplyResult()
+
+    # Imported here: library_convert_service imports convert_file from this module.
+    from pullbox.services.library_convert_service import _sync_converted_file_record
+
+    tracked = (
+        await session.execute(select(LibraryFile.id).where(LibraryFile.file_path == before_path))
+    ).scalar_one_or_none()
+    if tracked is None:
+        return ApplyResult()
+
+    await _sync_converted_file_record(session, before_path=before_path, after_path=after_path)
+    if before_path == after_path:
+        message = f"Refreshed library record: {Path(after_path).name}"
+    else:
+        message = f"Updated library record: {Path(before_path).name} -> {Path(after_path).name}"
+    return ApplyResult(
+        extra_logs=[
+            RuntimeLogEntry(
+                level="INFO",
+                message=message,
+                file_path=after_path,
+                extra={"previous_path": before_path, "updated_path": after_path},
+            )
+        ]
+    )
+
+
 # ── FileConverterExecutor ──────────────────────────────────────
 
 
@@ -807,6 +850,53 @@ class FileConverterExecutor(JobExecutor):
                     ("ERROR", f"Conversion failed for {file_path}: {exc}", {}),
                 ],
             )
+
+    async def apply_item_result(
+        self,
+        session: Any,
+        item: Any,
+        item_data: dict[str, Any],
+        processed: ProcessedItem,
+        job_config: dict[str, Any],
+        job_context: dict[str, Any] | None,
+        summary: JobRunSummary,
+    ) -> ApplyResult:
+        """Point the tracked library record at the converted file.
+
+        The original is moved to trash, so a record left on the old path would
+        reference a file that no longer exists and the converted file would be
+        untracked.
+        """
+        if processed.result != ItemResult.COMPLETED or not processed.after_state:
+            return ApplyResult()
+
+        before_path = str(item_data.get("file_path", "") or "")
+        after_path = str(processed.after_state.get("path", "") or "")
+        return await _sync_library_record(
+            before_path=before_path, after_path=after_path, session=session
+        )
+
+    @staticmethod
+    async def apply_rollback_result(
+        session: Any,
+        item_data: dict[str, Any],
+        processed: ProcessedItem,
+    ) -> ApplyResult:
+        """Point the tracked library record back at the restored original."""
+        if processed.result != ItemResult.COMPLETED:
+            return ApplyResult()
+
+        before_state = item_data.get("before_state", {})
+        if isinstance(before_state, str):
+            before_state = json.loads(before_state or "{}")
+        after_state = item_data.get("after_state", {})
+        if isinstance(after_state, str):
+            after_state = json.loads(after_state or "{}")
+        return await _sync_library_record(
+            before_path=str(after_state.get("path", "") or ""),
+            after_path=str(before_state.get("path", "") or ""),
+            session=session,
+        )
 
     def rollback_item(
         self,

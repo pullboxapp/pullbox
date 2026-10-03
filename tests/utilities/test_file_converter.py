@@ -883,3 +883,207 @@ class TestPDFQualityPresets:
             {"target_format": "cbz", "source_format": "pdf", "pdf_quality": "high"}
         )
         assert errors == []
+
+
+# ── Library Record Sync ────────────────────────────────────────
+
+
+async def _track_library_file(db_session, file_path: Path) -> int:
+    from datetime import UTC, datetime
+
+    from pullbox.models.issue import Issue
+    from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+    from pullbox.models.series import Series
+
+    library_root = LibraryRoot(name="Library", path=str(file_path.parent.parent), enabled=True)
+    series = Series(title="Batman", sort_title="batman", year_start=2016, library_root=library_root)
+    issue = Issue(series=series, issue_number=1.0)
+    library_file = LibraryFile(
+        file_path=str(file_path),
+        file_name=file_path.name,
+        file_size=file_path.stat().st_size,
+        file_format=FileFormat(file_path.suffix.lstrip(".")),
+        file_modified_at=datetime.now(UTC),
+        match_confidence=MatchConfidence.HIGH,
+        issue=issue,
+        library_root=library_root,
+    )
+    db_session.add(library_file)
+    await db_session.flush()
+    return int(library_file.id)
+
+
+def _processed_conversion(source: Path, target: Path):
+    from pullbox.utilities.base_executor import ProcessedItem
+
+    return ProcessedItem(
+        item_id="item-1",
+        result=ItemResult.COMPLETED,
+        before_state={"path": str(source), "format": "cbr"},
+        after_state={"path": str(target), "format": "cbz", "original_path": "/trash/x.cbr"},
+    )
+
+
+class TestLibraryRecordSync:
+    """A converted file must stay tracked under its new name."""
+
+    @pytest.mark.asyncio
+    async def test_completed_conversion_moves_the_library_record(
+        self, db_session, tmp_path: Path
+    ) -> None:
+        from pullbox.models.library import FileFormat, LibraryFile
+        from pullbox.utilities.base_executor import JobRunSummary
+
+        source = tmp_path / "Batman (2016)" / "Batman 001.cbr"
+        _create_test_cbz(source)
+        library_file_id = await _track_library_file(db_session, source)
+        target = _create_test_cbz(source.with_suffix(".cbz"), page_count=5)
+        source.unlink()
+
+        applied = await FileConverterExecutor().apply_item_result(
+            db_session,
+            item=None,
+            item_data={"id": "item-1", "file_path": str(source)},
+            processed=_processed_conversion(source, target),
+            job_config={"target_format": "cbz"},
+            job_context=None,
+            summary=JobRunSummary(),
+        )
+
+        record = await db_session.get(LibraryFile, library_file_id)
+        assert record.file_path == str(target)
+        assert record.file_name == "Batman 001.cbz"
+        assert record.file_format == FileFormat.CBZ
+        assert record.file_size == target.stat().st_size
+        assert [entry.message for entry in applied.extra_logs] == [
+            "Updated library record: Batman 001.cbr -> Batman 001.cbz"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_same_path_repack_refreshes_the_library_record(
+        self, db_session, tmp_path: Path
+    ) -> None:
+        from pullbox.models.library import FileFormat, LibraryFile
+        from pullbox.utilities.base_executor import JobRunSummary
+
+        archive = tmp_path / "Batman (2016)" / "Batman 001.cbz"
+        _create_test_cbz(archive, page_count=2)
+        library_file_id = await _track_library_file(db_session, archive)
+        record = await db_session.get(LibraryFile, library_file_id)
+        record.file_hash = "hash-of-the-old-archive"
+        old_size = record.file_size
+        # A CBZ -> CBZ repack rewrites the archive in place.
+        _create_test_cbz(archive, page_count=9)
+        assert archive.stat().st_size != old_size
+
+        applied = await FileConverterExecutor().apply_item_result(
+            db_session,
+            item=None,
+            item_data={"id": "item-1", "file_path": str(archive)},
+            processed=_processed_conversion(archive, archive),
+            job_config={"target_format": "cbz"},
+            job_context=None,
+            summary=JobRunSummary(),
+        )
+
+        record = await db_session.get(LibraryFile, library_file_id)
+        assert record.file_path == str(archive)
+        assert record.file_format == FileFormat.CBZ
+        assert record.file_size == archive.stat().st_size
+        assert record.file_hash is None
+        assert [entry.message for entry in applied.extra_logs] == [
+            "Refreshed library record: Batman 001.cbz"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_same_path_repack_rollback_refreshes_the_library_record(
+        self, db_session, tmp_path: Path
+    ) -> None:
+        from pullbox.models.library import LibraryFile
+        from pullbox.utilities.base_executor import ProcessedItem
+
+        archive = tmp_path / "Batman (2016)" / "Batman 001.cbz"
+        _create_test_cbz(archive, page_count=9)
+        library_file_id = await _track_library_file(db_session, archive)
+        record = await db_session.get(LibraryFile, library_file_id)
+        record.file_hash = "hash-of-the-repacked-archive"
+        repacked_size = record.file_size
+        # Rollback restores the original archive to the same path.
+        _create_test_cbz(archive, page_count=2)
+        assert archive.stat().st_size != repacked_size
+
+        await FileConverterExecutor.apply_rollback_result(
+            db_session,
+            {
+                "id": "item-1",
+                "before_state": {"path": str(archive), "format": "cbz"},
+                "after_state": {"path": str(archive), "format": "cbz"},
+            },
+            ProcessedItem(item_id="item-1", result=ItemResult.COMPLETED),
+        )
+
+        record = await db_session.get(LibraryFile, library_file_id)
+        assert record.file_path == str(archive)
+        assert record.file_size == archive.stat().st_size
+        assert record.file_hash is None
+
+    @pytest.mark.asyncio
+    async def test_untracked_or_failed_conversions_change_nothing(
+        self, db_session, tmp_path: Path
+    ) -> None:
+        from pullbox.utilities.base_executor import JobRunSummary, ProcessedItem
+
+        source = tmp_path / "loose" / "Saga 001.cbr"
+        target = _create_test_cbz(source.with_suffix(".cbz"))
+        executor = FileConverterExecutor()
+
+        untracked = await executor.apply_item_result(
+            db_session,
+            item=None,
+            item_data={"id": "item-1", "file_path": str(source)},
+            processed=_processed_conversion(source, target),
+            job_config={"target_format": "cbz"},
+            job_context=None,
+            summary=JobRunSummary(),
+        )
+        failed = await executor.apply_item_result(
+            db_session,
+            item=None,
+            item_data={"id": "item-2", "file_path": str(source)},
+            processed=ProcessedItem(item_id="item-2", result=ItemResult.FAILED),
+            job_config={"target_format": "cbz"},
+            job_context=None,
+            summary=JobRunSummary(),
+        )
+
+        assert untracked.extra_logs == []
+        assert failed.extra_logs == []
+
+    @pytest.mark.asyncio
+    async def test_rollback_points_the_record_back_at_the_original(
+        self, db_session, tmp_path: Path
+    ) -> None:
+        from pullbox.models.library import FileFormat, LibraryFile
+        from pullbox.utilities.base_executor import ProcessedItem
+
+        converted = tmp_path / "Batman (2016)" / "Batman 001.cbz"
+        _create_test_cbz(converted)
+        library_file_id = await _track_library_file(db_session, converted)
+        original = converted.with_suffix(".cbr")
+        _create_test_cbz(original, page_count=4)
+        converted.unlink()
+
+        await FileConverterExecutor.apply_rollback_result(
+            db_session,
+            {
+                "id": "item-1",
+                "before_state": {"path": str(original), "format": "cbr"},
+                "after_state": {"path": str(converted), "format": "cbz"},
+            },
+            ProcessedItem(item_id="item-1", result=ItemResult.COMPLETED),
+        )
+
+        record = await db_session.get(LibraryFile, library_file_id)
+        assert record.file_path == str(original)
+        assert record.file_name == "Batman 001.cbr"
+        assert record.file_format == FileFormat.CBR

@@ -59,7 +59,12 @@ async def _sync_converted_file_record(
     updated_path = Path(after_path)
     library_file.file_path = after_path
     library_file.file_name = updated_path.name
-    library_file.file_format = FileFormat.CBZ
+    # Conversions always produce CBZ, but a rollback points the record back at
+    # the original file, which keeps its own format.
+    try:
+        library_file.file_format = FileFormat(updated_path.suffix.lower().lstrip("."))
+    except ValueError:
+        library_file.file_format = FileFormat.CBZ
     library_file.file_hash = None
     if metadata_embedded:
         library_file.has_comicinfo = True
