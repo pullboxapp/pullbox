@@ -72,6 +72,7 @@
           {{ sort_header(testid_prefix ~ "-release-table", "pulls", "Pulls", type="number", extra_classes="c whats-new-pulls-col", width="w-[96px]") }}
           {{ sort_header(testid_prefix ~ "-release-table", "rating", "Rating", type="number", extra_classes="c", width="w-[96px]") }}
           {{ sort_header(testid_prefix ~ "-release-table", "price", "Price", type="number", extra_classes="r", width="w-[96px]") }}
+          {% if whats_new_actions_enabled %}<th class="r">Library</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -125,6 +126,19 @@
             <td class="r table-mono-dim">
               {% if release.price %}{{ "$%.2f"|format(release.price) }}{% else %}&mdash;{% endif %}
             </td>
+            {% if whats_new_actions_enabled %}
+            <td class="r" data-discovery-series="{{ release.discovery_series_id or '' }}">
+              {% if release.local_series %}
+                <a data-testid="whats-new-local-series" class="btn-ghost btn-sm" href="/series/{{ release.local_series.id }}">Added</a>
+                <span class="badge badge-muted">{{ 'Tracked' if release.local_series.monitored else 'Paused' }}</span>
+              {% elif release.discovery_release_id %}
+                <button type="button" class="btn-ghost btn-sm whitespace-nowrap" data-testid="whats-new-find-add"
+                        @click="findRelease({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, $el)">Find &amp; Add</button>
+              {% else %}
+                <span class="text-pb-text-dim">Release details unavailable</span>
+              {% endif %}
+            </td>
+            {% endif %}
           </tr>
         {% endfor %}
       </tbody>

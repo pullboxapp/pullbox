@@ -6,16 +6,26 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import date
 from functools import cmp_to_key
 from math import ceil
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.responses import Response  # noqa: TC002
 
-from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser  # noqa: TC001
+from pullbox.config import get_settings
+from pullbox.core.metadata_identity import MetadataSource
+from pullbox.services.whats_new_actions import (
+    WhatsNewSelectionError,
+    load_release_selection,
+    local_release_series,
+    positive_id,
+    release_series_id,
+)
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
+from pullbox.ui.series_routes import _request_search_cache, load_add_series_search_context
 
 if TYPE_CHECKING:
     from pullbox.models.whats_new import WhatsNewReleaseCache
@@ -36,6 +46,35 @@ WindowQuery = Annotated[str, Query(alias="window")]
 ReleaseWeekQuery = Annotated[str, Query(alias="release_week")]
 PageQuery = Annotated[int, Query(ge=1)]
 PerPageQuery = Annotated[int, Query(ge=1, le=100)]
+
+
+@router.get("/whats-new/find-series/{cache_id}/{release_id}", include_in_schema=False)
+async def find_release_series(
+    request: Request,
+    cache_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
+    release_id: Annotated[int, Path(gt=0, le=2**63 - 1)],
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    q: Annotated[str, Query(max_length=512)] = "",
+    source: Annotated[MetadataSource | Literal["all"], Query()] = "all",
+    page: PageQuery = 1,
+) -> dict[str, object]:
+    """Explicitly search through Add Series' cache, priority, sorting and owner checks."""
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        await load_release_selection(session, cache_id, release_id)
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return await load_add_series_search_context(
+        session,
+        q,
+        "relevance",
+        page,
+        source=source if isinstance(source, MetadataSource) else None,
+        cache=_request_search_cache(request),
+    )
+
 
 _DEFAULT_SORT = "release"
 _VALID_WINDOWS = {"current", "upcoming"}
@@ -137,6 +176,9 @@ async def whats_new_page(
         per_page=per_page,
     )
     active_model = current_week_model if active_window == "current" else upcoming_model
+    actions_enabled = get_settings().metadata_whats_new_actions_enabled
+    if actions_enabled:
+        await _decorate_release_actions(session, [current_week_model, upcoming_model])
     ctx = _ctx(
         request,
         user,
@@ -156,6 +198,7 @@ async def whats_new_page(
         upcoming_week_options=upcoming_week_options,
         selected_upcoming_week=selected_upcoming_week,
         upcoming_week_nav=upcoming_week_nav,
+        whats_new_actions_enabled=actions_enabled,
     )
     if request.headers.get("HX-Request") == "true":
         return _templates().TemplateResponse(
@@ -173,6 +216,7 @@ def _view_model(
     if row is None:
         return None
     return {
+        "cache_id": row.id,
         "payload": _payload_view(row.payload),
         "store_date": row.store_date,
         "publisher": row.publisher,
@@ -183,6 +227,34 @@ def _view_model(
             "last_successful_refresh_at": row.last_successful_refresh_at,
         },
     }
+
+
+async def _decorate_release_actions(
+    session: DbSession, models: list[dict[str, object] | None]
+) -> None:
+    """One bounded ownership lookup for the visible release rows; no provider I/O."""
+    releases: list[dict[str, Any]] = []
+    for model in models:
+        if model is None or not isinstance(model.get("payload"), dict):
+            continue
+        payload = model["payload"]
+        assert isinstance(payload, dict)
+        for release in payload.get("issues", []):
+            release["discovery_cache_id"] = model["cache_id"]
+            release["discovery_release_id"] = positive_id(release.get("locg_issue_id"))
+            try:
+                release["discovery_series_id"] = release_series_id(release)
+            except WhatsNewSelectionError:
+                release["discovery_release_id"] = None
+                release["discovery_series_id"] = None
+            releases.append(release)
+    owners = await local_release_series(
+        session, (r["discovery_series_id"] for r in releases if r["discovery_series_id"])
+    )
+    for release in releases:
+        series = owners.get(release["discovery_series_id"])
+        if series is not None:
+            release["local_series"] = {"id": series.id, "monitored": series.monitored}
 
 
 def _payload_view(payload: dict[str, Any]) -> dict[str, Any]:

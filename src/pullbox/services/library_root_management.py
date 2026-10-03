@@ -70,6 +70,26 @@ class _RootProbe:
     blocking_reasons: tuple[str, ...]
 
 
+async def available_add_series_roots(session: AsyncSession) -> list[dict[str, Any]]:
+    """Use the configured managed default, never an arbitrary first-root fallback."""
+    roots = [
+        root
+        for root in await list_library_roots(session)
+        if root["enabled"]
+        and root["allow_managed_writes"]
+        and root["available"]
+        and root["writable"]
+    ]
+    roots.sort(
+        key=lambda root: (
+            not bool(root["is_default_managed_destination"]),
+            str(root["name"]).casefold(),
+            int(root["id"]),
+        )
+    )
+    return roots if roots and roots[0]["is_default_managed_destination"] else []
+
+
 async def list_library_roots(session: AsyncSession) -> list[dict[str, Any]]:
     """Return configured roots with non-persisted live capability snapshots."""
     roots = list((await session.scalars(select(LibraryRoot).order_by(LibraryRoot.id.asc()))).all())

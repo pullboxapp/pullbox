@@ -105,6 +105,7 @@ class PullboxSettings(BaseSettings):
     # ── ComicVine ──────────────────────────────────────────────────────
     comicvine_api_key: str = ""
     metadata_gcd_api_v2_enabled: bool = False
+    metadata_whats_new_actions_enabled: bool = False
     # Keep paired archive publication opt-in until its import workflow is qualified.
     metadata_paired_import_writer_enabled: bool = False
     metadata_paired_conversion_writer_enabled: bool = False

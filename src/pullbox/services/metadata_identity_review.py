@@ -513,6 +513,42 @@ async def apply_identity_review(
         ) from exc
 
 
+async def confirm_locg_series_selection(
+    session: AsyncSession, request: IdentityEventRequest
+) -> IdentityAttachmentReceipt:
+    """Record a cache-revalidated interactive discovery choice in its Add transaction.
+
+    The caller owns interactive authentication, CSRF and release freshness. LOCG
+    is passive discovery evidence here, not an automatic metadata provider.
+    """
+    identity = request.evidence.claim.identity
+    if (
+        identity.namespace is not IdentityNamespace.LOCG
+        or identity.entity_kind is not MetadataEntityKind.SERIES
+        or request.action is not Action.CONFIRM
+        or request.actor is not IdentityEventActor.USER
+        or request.evidence.claim.evidence_kind is not IdentityEvidenceKind.USER_SELECTION
+    ):
+        raise ValueError("Discovery links require an explicit LOCG series selection")
+    await _begin_write(session)
+    try:
+        async with session.begin_nested():
+            if not await session.scalar(
+                select(User.id).where(User.id == request.actor_user_id, User.is_active.is_(True))
+            ):
+                raise IdentityReviewRequiredError("An active operator is required")
+            await _lock_parent_graph(session, [request])
+            replay = await _replay(session, request)
+            if replay:
+                return replay
+            await _confirm(session, request)
+            return await _append(session, request, State.VERIFIED)
+    except IntegrityError as exc:
+        raise IdentityAttachmentConflictError(
+            "Identity ownership changed; reload before retrying"
+        ) from exc
+
+
 async def _confirm(session: AsyncSession, request: IdentityEventRequest) -> None:
     identity = request.evidence.claim.identity
     kind, namespace = identity.entity_kind, identity.namespace

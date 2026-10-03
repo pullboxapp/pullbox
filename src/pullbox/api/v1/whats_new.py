@@ -5,15 +5,18 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING, Annotated, Any, Never
 
-from fastapi import APIRouter, BackgroundTasks, Query, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Path, Query, status
 
-from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser  # noqa: TC001
+from pullbox.config import get_settings
 from pullbox.core.exceptions import PullboxError
 from pullbox.schemas.whats_new import (
     WhatsNewCacheMetadata,
     WhatsNewCurrentWeekResponse,
     WhatsNewUpcomingResponse,
 )
+from pullbox.services.library_root_management import available_add_series_roots
+from pullbox.services.whats_new_actions import WhatsNewSelectionError, load_release_selection
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from pullbox.services.whats_new_refresh_queue import (
     RefreshQueueStatus,
@@ -28,6 +31,31 @@ router = APIRouter(prefix="/whats-new", tags=["whats-new"], include_in_schema=Fa
 refresh_coordinator = WhatsNewRefreshCoordinator(runner=run_whats_new_refresh)
 
 StoreDateQuery = Annotated[date | None, Query(alias="date")]
+
+
+@router.get("/resolve/{cache_id}/{release_id}")
+async def resolve_release_context(
+    cache_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
+    release_id: Annotated[int, Path(gt=0, le=2**63 - 1)],
+    session: DbSession,
+    _user: InteractiveOperatorUser,
+) -> dict[str, object]:
+    """Read saved discovery context without fetching providers or matching by title."""
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        context = await load_release_selection(session, cache_id, release_id)
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "selection": context.selection.model_dump(),
+        "title": context.title,
+        "publisher": context.publisher,
+        "year": context.year,
+        "can_link": context.locg_series_id is not None,
+        "locg_series_id": context.locg_series_id,
+        "roots": await available_add_series_roots(session),
+    }
 
 
 @router.get("")

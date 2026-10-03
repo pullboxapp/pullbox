@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from datetime import date, datetime  # noqa: TC003 - Pydantic resolves these at runtime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class WhatsNewSeriesSelection(BaseModel):
+    """Bind a user selection to server-cached release evidence, not browser IDs."""
+
+    model_config = ConfigDict(extra="forbid")
+    cache_id: int = Field(gt=0, le=2**31 - 1, strict=True)
+    release_id: int = Field(gt=0, le=2**63 - 1, strict=True)
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class WhatsNewCommunityCounts(BaseModel):
