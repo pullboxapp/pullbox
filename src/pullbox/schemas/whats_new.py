@@ -48,6 +48,12 @@ class WhatsNewSeriesSelection(BaseModel):
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class WhatsNewIssueSelection(WhatsNewSeriesSelection):
+    """An expected local issue, revalidated against the entire cached release group."""
+
+    issue_id: int = Field(gt=0, le=2**31 - 1, strict=True)
+
+
 class WhatsNewCommunityCounts(BaseModel):
     """Community activity counters from the upstream summary contract."""
 

@@ -26,7 +26,8 @@ from pullbox.services.whats_new_actions import (
     release_series_id,
 )
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
-from pullbox.services.whats_new_issue_state import local_release_issues
+from pullbox.services.whats_new_grab import cache_fingerprint, has_grab_capability
+from pullbox.services.whats_new_issue_state import ReleaseIssueStatus, local_release_issues
 from pullbox.ui.series_routes import _request_search_cache, load_add_series_search_context
 
 if TYPE_CHECKING:
@@ -219,6 +220,7 @@ def _view_model(
         return None
     return {
         "cache_id": row.id,
+        "discovery_fingerprint": cache_fingerprint(row.payload),
         "payload": _payload_view(row.payload),
         "store_date": row.store_date,
         "publisher": row.publisher,
@@ -243,6 +245,7 @@ async def _decorate_release_actions(
         assert isinstance(payload, dict)
         for release in payload.get("issues", []):
             release["discovery_cache_id"] = model["cache_id"]
+            release["discovery_fingerprint"] = model["discovery_fingerprint"]
             release["discovery_release_id"] = positive_id(release.get("locg_issue_id"))
             try:
                 release["discovery_series_id"] = release_series_id(release)
@@ -254,6 +257,11 @@ async def _decorate_release_actions(
         session, (r["discovery_series_id"] for r in releases if r["discovery_series_id"])
     )
     issue_states = await local_release_issues(session, releases, owners)
+    can_grab = (
+        await has_grab_capability(session)
+        if any(state and state.state is ReleaseIssueStatus.MISSING for state in issue_states)
+        else False
+    )
     watches = {
         watch.source_series_id: watch
         for watch in await active_watches(
@@ -262,6 +270,13 @@ async def _decorate_release_actions(
     }
     for release, issue_state in zip(releases, issue_states, strict=True):
         release["local_issue"] = issue_state
+        if can_grab and issue_state and issue_state.state is ReleaseIssueStatus.MISSING:
+            release["grab_selection"] = {
+                "cache_id": release["discovery_cache_id"],
+                "release_id": int(release["discovery_release_id"]),
+                "fingerprint": release["discovery_fingerprint"],
+                "issue_id": issue_state.issue_id,
+            }
         series = owners.get(release["discovery_series_id"])
         if series is not None:
             release["local_series"] = {"id": series.id, "monitored": series.monitored}

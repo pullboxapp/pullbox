@@ -41,13 +41,14 @@
                 x-data='window.issueSearchResultActions({
                   issueId: {{ issue.id }},
                   seriesId: {{ issue.series_id }},
-                  csrfToken: {{ csrf_token|tojson }}
+                  csrfToken: {{ csrf_token|tojson }},
+                  releaseSelection: {{ release_selection|default(none)|tojson }}
                 })'
               >
                 <button
                   data-dc-route-token="{{ row.route_token }}"
                   @click="grabRelease($el)"
-                  :disabled="grabbing"
+                  :disabled="grabbing || grabBusy"
                   :class="grabbing ? 'opacity-50 cursor-wait' : 'cursor-pointer'"
                   class="chip-btn chip-btn-sm chip-btn-info"
                 >

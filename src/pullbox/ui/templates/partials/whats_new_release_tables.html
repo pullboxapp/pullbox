@@ -126,7 +126,7 @@
               {% if release.price %}{{ "$%.2f"|format(release.price) }}{% else %}&mdash;{% endif %}
             </td>
             {% if whats_new_actions_enabled %}
-            <td class="r" data-discovery-series="{{ release.discovery_series_id or '' }}">
+            <td class="r" data-discovery-series="{{ release.discovery_series_id or '' }}" data-discovery-issue="{{ release.local_issue.issue_id if release.local_issue else '' }}">
               {% if release.local_series %}
                 <a data-testid="whats-new-local-series" class="btn-ghost btn-sm" href="/series/{{ release.local_series.id }}">Added</a>
                 <span class="badge badge-muted">{{ 'Tracked' if release.local_series.monitored else 'Paused' }}</span>
@@ -135,6 +135,10 @@
                   <span data-testid="whats-new-issue-state" class="badge {{ 'badge-success' if release.local_issue.state == 'owned' else 'badge-muted' }}">{{ release.local_issue.label }}</span>
                   {% if release.local_issue.issue_id %}
                   <a data-testid="whats-new-local-issue" class="btn-ghost btn-sm whitespace-nowrap" href="/issues/{{ release.local_issue.issue_id }}" aria-label="View {{ release.series.title }} issue {{ release.issue_number }}">View issue</a>
+                  {% endif %}
+                  {% if release.grab_selection %}
+                  <button type="button" class="btn-primary btn-sm" data-testid="whats-new-grab"
+                          @click='$dispatch("open-search", { issueId: {{ release.local_issue.issue_id }}, issueNum: {{ release.issue_number|tojson }}, seriesTitle: {{ release.series.title|tojson }}, seriesYear: {{ release.series.start_year|default(none)|tojson }}, releaseSelection: {{ release.grab_selection|tojson }}, trigger: $el })'>Grab</button>
                   {% endif %}
                 </div>
                 {% endif %}

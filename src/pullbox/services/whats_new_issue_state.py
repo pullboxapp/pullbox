@@ -8,11 +8,12 @@ from datetime import date
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, or_, select, tuple_
+from sqlalchemy import and_, case, desc, literal, or_, select, tuple_, union_all
 
 from pullbox.core.issue_numbers import normalize_issue_number_text, parse_issue_number_text
 from pullbox.core.metadata_identity import IdentityNamespace
 from pullbox.core.metadata_identity_state import IdentityVerificationState
+from pullbox.models.direct_acquisition import DirectAcquisitionAttempt, DirectAcquisitionState
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryFile
@@ -71,6 +72,17 @@ _DOWNLOAD_STATES = {
     DownloadState.FINALIZING: ReleaseIssueStatus.PROCESSING,
     DownloadState.POST_PROCESSING: ReleaseIssueStatus.PROCESSING,
     DownloadState.COMPLETED: ReleaseIssueStatus.PROCESSING,
+}
+_DIRECT_STATES = {
+    DirectAcquisitionState.RESOLVING: ReleaseIssueStatus.QUEUED,
+    DirectAcquisitionState.PLANNED: ReleaseIssueStatus.QUEUED,
+    DirectAcquisitionState.QUEUED: ReleaseIssueStatus.QUEUED,
+    DirectAcquisitionState.DOWNLOADING: ReleaseIssueStatus.DOWNLOADING,
+    DirectAcquisitionState.VALIDATING: ReleaseIssueStatus.PROCESSING,
+    DirectAcquisitionState.POST_PROCESSING: ReleaseIssueStatus.PROCESSING,
+    DirectAcquisitionState.RETRY_PENDING: ReleaseIssueStatus.QUEUED,
+    DirectAcquisitionState.PAUSED: ReleaseIssueStatus.PAUSED,
+    DirectAcquisitionState.INTERVENTION: ReleaseIssueStatus.NEEDS_REVIEW,
 }
 
 
@@ -187,9 +199,9 @@ async def local_release_issues(
     )
     rows = (
         await session.execute(
-            select(Issue, has_file, pending).where(
-                or_(candidate, Issue.id.in_({claim.issue_id for claim in claims}))
-            )
+            select(Issue, has_file, pending)
+            .execution_options(populate_existing=True)
+            .where(or_(candidate, Issue.id.in_({claim.issue_id for claim in claims})))
         )
     ).all()
     issues = {issue.id: issue for issue, _, _ in rows}
@@ -201,18 +213,42 @@ async def local_release_issues(
         by_number[(issue.series_id, issue.effective_issue_number_text)].append(issue)
     downloads = (
         await session.execute(
-            select(DownloadHistory.issue_id, DownloadHistory.state)
-            .where(
-                DownloadHistory.issue_id.in_(issues),
-                DownloadHistory.imported_at.is_(None),
-                DownloadHistory.state.in_(_DOWNLOAD_STATES),
-            )
-            .order_by(DownloadHistory.id.desc())
+            union_all(
+                select(
+                    DownloadHistory.issue_id,
+                    case(
+                        *[
+                            (DownloadHistory.state == key, value.value)
+                            for key, value in _DOWNLOAD_STATES.items()
+                        ]
+                    ).label("state"),
+                    literal(0).label("priority"),
+                    DownloadHistory.id.label("id"),
+                ).where(
+                    DownloadHistory.issue_id.in_(issues),
+                    DownloadHistory.imported_at.is_(None),
+                    DownloadHistory.state.in_(_DOWNLOAD_STATES),
+                ),
+                select(
+                    DirectAcquisitionAttempt.issue_id,
+                    case(
+                        *[
+                            (DirectAcquisitionAttempt.state == key, value.value)
+                            for key, value in _DIRECT_STATES.items()
+                        ]
+                    ).label("state"),
+                    literal(1).label("priority"),
+                    DirectAcquisitionAttempt.id.label("id"),
+                ).where(
+                    DirectAcquisitionAttempt.issue_id.in_(issues),
+                    DirectAcquisitionAttempt.state.in_(_DIRECT_STATES),
+                ),
+            ).order_by("priority", desc("id"))
         )
     ).all()
     active: dict[int, ReleaseIssueStatus] = {}
-    for issue_id, state in downloads:
-        active.setdefault(issue_id, _DOWNLOAD_STATES[state])
+    for issue_id, state, _priority, _id in downloads:
+        active.setdefault(issue_id, ReleaseIssueStatus(state))
     result: list[ReleaseIssueState | None] = []
     for release in releases:
         nested = release.get("series")

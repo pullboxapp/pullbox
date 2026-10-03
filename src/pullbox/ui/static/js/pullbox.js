@@ -14144,6 +14144,9 @@ function issueSearchResultActions(config) {
 
       var directAttemptId = parseInt(button.dataset.directAttempt, 10) || 0;
       var dcRouteToken = button.dataset.dcRouteToken || "";
+      var host = document.getElementById("issue-search-controller");
+      var modal = cfg.releaseSelection && host && window.Alpine ? window.Alpine.$data(host) : null;
+      if (modal && modal.grabBusy) return;
       var endpoint = "/api/v1/issues/" + cfg.issueId + "/grab";
       var payload = {
         download_url: button.dataset.url,
@@ -14160,6 +14163,12 @@ function issueSearchResultActions(config) {
       } else if (dcRouteToken) {
         endpoint = "/api/v1/issues/" + cfg.issueId + "/dc-grab";
         payload = { dc_route_token: dcRouteToken };
+      }
+      if (cfg.releaseSelection) {
+        endpoint = "/api/v1/whats-new/grab";
+        payload = { selection: cfg.releaseSelection, result: payload };
+        modal.grabBusy = true;
+        modal.searchError = "";
       }
 
       self.grabbing = true;
@@ -14180,6 +14189,7 @@ function issueSearchResultActions(config) {
               "success"
             );
             self.grabbing = false;
+            if (modal) return modal.refreshDiscoveryIssue().then(function () { modal.close(); });
             return;
           }
 
@@ -14198,10 +14208,15 @@ function issueSearchResultActions(config) {
         })
         .catch(function (error) {
           self.grabbing = false;
+          if (modal) {
+            modal.searchError = error.message || "Grab failed. Try another result.";
+            modal.refreshDiscoveryIssue().catch(function () {});
+          }
           self.dispatchToast(error.message || "Grab failed", "error");
         })
         .finally(function () {
           self.grabbing = false;
+          if (modal) modal.grabBusy = false;
         });
     },
 
@@ -20145,11 +20160,56 @@ function issueSearchModal() {
     searchSeriesTitle: "",
     searchSeriesYear: "",
     searching: false,
+    searchError: "",
+    releaseSelection: null,
+    searchTrigger: null,
+    grabBusy: false,
+    searchSequence: 0,
     swapListener: null,
     dcSearching: false,
     dcVisualMessage: "",
     dcLiveMessage: "",
     dcAbortController: null,
+
+    selectionQuery: function () {
+      return this.releaseSelection ? "?release_selection=" + encodeURIComponent(JSON.stringify(this.releaseSelection)) : "";
+    },
+
+    refreshDiscoveryIssue: async function () {
+      if (!this.releaseSelection) return;
+      var response = await fetch("/api/v1/whats-new/issue-state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": readCsrfTokenFromBody() },
+        body: JSON.stringify(this.releaseSelection),
+      });
+      var body = await _readJsonBody(response);
+      if (!response.ok) throw new Error(_extractApiErrorMessage(response, body, "Reload What's New to recheck this issue."));
+      document.querySelectorAll('[data-discovery-issue="' + body.issue_id + '"]').forEach(function (cell) {
+        var badge = cell.querySelector('[data-testid="whats-new-issue-state"]');
+        if (badge) {
+          badge.textContent = body.label;
+          badge.classList.toggle("badge-success", body.state === "owned");
+          badge.classList.toggle("badge-muted", body.state !== "owned");
+        }
+        var trigger = cell.querySelector('[data-testid="whats-new-grab"]');
+        if (trigger) {
+          trigger.disabled = body.state !== "missing";
+          trigger.setAttribute("aria-disabled", String(trigger.disabled));
+        }
+      });
+    },
+
+    trapSearchFocus: function (event) {
+      var dialog = this.$refs.searchDialog;
+      var nodes = Array.from(dialog.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), [tabindex="0"]')).filter(function (el) { return el.getClientRects().length; });
+      if (!nodes.length) { event.preventDefault(); dialog.focus(); return; }
+      var first = nodes[0], last = nodes[nodes.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
+    },
 
     clearDcSearch: function () {
       if (this.dcAbortController) {
@@ -20234,7 +20294,7 @@ function issueSearchModal() {
       var signal = this.dcAbortController.signal;
       var base = "/htmx/issues/" + this.searchIssueId;
       try {
-        var statusResponse = await fetch(base + "/dc-search-status", {
+        var statusResponse = await fetch(base + "/dc-search-status" + this.selectionQuery(), {
           credentials: "same-origin",
           headers: { Accept: "application/json" },
           signal: signal,
@@ -20251,7 +20311,7 @@ function issueSearchModal() {
         } else {
           this.applyDcProgress({ state: "starting" });
         }
-        var response = await fetch(base + "/dc-search-results", {
+        var response = await fetch(base + "/dc-search-results" + this.selectionQuery(), {
           credentials: "same-origin",
           headers: { Accept: "text/event-stream" },
           signal: signal,
@@ -20295,12 +20355,18 @@ function issueSearchModal() {
       }
       this.clearSwapListener();
       this.clearDcSearch();
+      this.releaseSelection = detail.releaseSelection || null;
+      this.searchTrigger = detail.trigger || document.activeElement;
+      this.searchError = "";
+      this.searchSequence += 1;
+      var sequence = this.searchSequence;
       this.searchIssueId = detail.issueId;
       this.searchIssueNum = detail.issueNum;
       this.searchSeriesTitle = detail.seriesTitle;
       this.searchSeriesYear = detail.seriesYear;
       this.searchOpen = true;
       this.searching = true;
+      this.$nextTick(() => this.$refs.searchDialog.focus());
       this.resetMeta();
       var body = document.getElementById("issue-search-modal-body");
       if (body) {
@@ -20308,7 +20374,7 @@ function issueSearchModal() {
       }
       var self = this;
       this.swapListener = function (event) {
-        if (event.detail && event.detail.target && event.detail.target.id === "issue-search-modal-body") {
+        if (self.searchOpen && sequence === self.searchSequence && event.detail && event.detail.target && event.detail.target.id === "issue-search-modal-body") {
           self.searching = false;
           self.clearSwapListener();
           self.startDcSearch();
@@ -20316,19 +20382,40 @@ function issueSearchModal() {
       };
       document.addEventListener("htmx:afterSwap", this.swapListener);
       setTimeout(function () {
-        htmx.ajax("GET", "/htmx/issues/" + self.searchIssueId + "/search-results", {
+        if (!self.searchOpen || sequence !== self.searchSequence) return;
+        performHtmxSwap("GET", "/htmx/issues/" + self.searchIssueId + "/search-results" + self.selectionQuery(), {
+          source: body,
           target: "#issue-search-modal-body",
           swap: "innerHTML",
+        }).catch(function (error) {
+          if (!self.searchOpen || sequence !== self.searchSequence) return;
+          self.searching = false;
+          self.clearSwapListener();
+          var xhr = error && error.xhr;
+          var detail;
+          try { detail = JSON.parse(xhr.responseText).detail; } catch (_) {}
+          self.searchError = typeof detail === "string" ? detail : "Search failed. Close and try again, or check your search settings.";
         });
       }, 0);
     },
 
     close: function () {
+      this.searchSequence += 1;
+      var body = document.getElementById("issue-search-modal-body");
+      if (body && window.htmx) htmx.trigger(body, "htmx:abort");
       this.searchOpen = false;
       this.searching = false;
       this.clearSwapListener();
       this.clearDcSearch();
       this.resetMeta();
+      var trigger = this.searchTrigger;
+      if (trigger && trigger.isConnected) {
+        if (trigger.disabled) {
+          var cell = trigger.closest("[data-discovery-issue]");
+          trigger = cell && cell.querySelector('[data-testid="whats-new-local-issue"]');
+        }
+        if (trigger) this.$nextTick(function () { trigger.focus(); });
+      }
     },
   };
 }
