@@ -30,12 +30,11 @@
     {% set next_sort = field %}
   {% endif %}
   {% set sort_sep = "&" if "?" in sort_base_url else "?" %}
-  <th class="{{ extra_classes }} {{ width }}">
+  <th class="{{ extra_classes }} {{ width }}" aria-sort="{{ ('descending' if active_sort_desc else 'ascending') if is_active else 'none' }}">
     <button
       type="button"
       data-testid="whats-new-sort-{{ field }}"
       class="downloads-sort-btn"
-      {% if is_active %}aria-sort="{{ 'descending' if active_sort_desc else 'ascending' }}"{% else %}aria-sort="none"{% endif %}
       {% if is_active %}data-sort-active="true"{% endif %}
       hx-get="{{ sort_base_url }}{{ sort_sep }}sort={{ next_sort|urlencode }}"
       hx-target="#whats-new-results-body"
@@ -131,6 +130,14 @@
               {% if release.local_series %}
                 <a data-testid="whats-new-local-series" class="btn-ghost btn-sm" href="/series/{{ release.local_series.id }}">Added</a>
                 <span class="badge badge-muted">{{ 'Tracked' if release.local_series.monitored else 'Paused' }}</span>
+                {% if release.local_issue %}
+                <div class="mt-1 flex flex-wrap items-center justify-end gap-2">
+                  <span data-testid="whats-new-issue-state" class="badge {{ 'badge-success' if release.local_issue.state == 'owned' else 'badge-muted' }}">{{ release.local_issue.label }}</span>
+                  {% if release.local_issue.issue_id %}
+                  <a data-testid="whats-new-local-issue" class="btn-ghost btn-sm whitespace-nowrap" href="/issues/{{ release.local_issue.issue_id }}" aria-label="View {{ release.series.title }} issue {{ release.issue_number }}">View issue</a>
+                  {% endif %}
+                </div>
+                {% endif %}
               {% elif release.discovery_release_id %}
                 <button type="button" class="btn-ghost btn-sm whitespace-nowrap" data-testid="whats-new-find-add"
                         @click="findRelease({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, $el)">Find &amp; Add</button>

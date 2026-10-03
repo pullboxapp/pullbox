@@ -148,6 +148,7 @@ def test_refresh_confirmation_has_actionable_release_link_and_cancel(
     watched = page.get_by_test_id("pull-list-watch-row").filter(has_text="Atlas Deluxe")
     expect(watched).to_contain_text("Needs confirmation")
     expect(watched).not_to_contain_text("Next release 2099")
+    page.get_by_test_id("pull-list-series-link").first.hover()
     assert_no_axe_violations(page, name=f"watch-confirmation-{theme}-{width}")
     watched.get_by_role("link", name="Find & Add", exact=True).click()
     expect(page.get_by_test_id("whats-new-current-release-table")).to_be_visible()

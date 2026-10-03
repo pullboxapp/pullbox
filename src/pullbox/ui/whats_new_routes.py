@@ -26,6 +26,7 @@ from pullbox.services.whats_new_actions import (
     release_series_id,
 )
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
+from pullbox.services.whats_new_issue_state import local_release_issues
 from pullbox.ui.series_routes import _request_search_cache, load_add_series_search_context
 
 if TYPE_CHECKING:
@@ -252,13 +253,15 @@ async def _decorate_release_actions(
     owners = await local_release_series(
         session, (r["discovery_series_id"] for r in releases if r["discovery_series_id"])
     )
+    issue_states = await local_release_issues(session, releases, owners)
     watches = {
         watch.source_series_id: watch
         for watch in await active_watches(
             session, (r["discovery_series_id"] for r in releases if r["discovery_series_id"])
         )
     }
-    for release in releases:
+    for release, issue_state in zip(releases, issue_states, strict=True):
+        release["local_issue"] = issue_state
         series = owners.get(release["discovery_series_id"])
         if series is not None:
             release["local_series"] = {"id": series.id, "monitored": series.monitored}
@@ -799,6 +802,7 @@ def _primary_release(group: list[dict[str, Any]]) -> dict[str, Any]:
 
     primary = next((release for release in group if _is_primary_cover(release)), group[0])
     release = dict(primary)
+    release["_discovery_releases"] = group
     existing_variant_count = _parse_int(release.get("variant_count")) or 0
     release["variant_count"] = max(existing_variant_count, len(group) - 1)
     release["variant_rows_hidden"] = len(group) - 1

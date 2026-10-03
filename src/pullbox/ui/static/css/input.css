@@ -4934,13 +4934,13 @@
     min-height: 34px;
     display: inline-flex;
     align-items: center;
-    color: var(--pb-text-inverse);
+    color: var(--pb-text-primary);
   }
   .whats-new-cache-badge-success {
-    background: #1f6f4a;
+    background: var(--pb-success-dim);
   }
   .whats-new-cache-badge-error {
-    background: #9f2f24;
+    background: var(--pb-error-dim);
   }
   .whats-new-week-nav {
     display: inline-flex;
