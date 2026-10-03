@@ -247,6 +247,8 @@ async def run_direct_artifact_pack_post_processing(
             imported = await execute_manual_issue_import(
                 session,
                 prepared,
+                # Packs retain their existing atomic batch, not the single-import writer.
+                use_paired_metadata=False,
                 allow_resource_safety_exception=allow_resource_safety_exception,
             )
             imported_results.append(imported)

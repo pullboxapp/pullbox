@@ -155,6 +155,7 @@ async def execute_manual_issue_import(
     session: AsyncSession,
     prepared: PreparedManualIssueImport,
     *,
+    use_paired_metadata: bool = True,
     allow_resource_safety_exception: bool = False,
     preparation_progress_callback: Callable[[str, int, int, str], Any] | None = None,
     transfer_progress_callback: Callable[[int, int], Any] | None = None,
@@ -163,7 +164,8 @@ async def execute_manual_issue_import(
 ) -> ManualIssueImportResult:
     """Import one validated file into the library for the selected issue."""
     paired = (
-        get_settings().metadata_paired_import_writer_enabled
+        use_paired_metadata
+        and get_settings().metadata_paired_import_writer_enabled
         and prepared.ingest_policy.update_embedded_comicinfo_from_match
     )
     factory = async_sessionmaker(session.bind, expire_on_commit=False) if paired else None
