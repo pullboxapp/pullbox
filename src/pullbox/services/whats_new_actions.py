@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -73,6 +74,7 @@ class ReleaseSelection:
     title: str
     publisher: str
     year: int | None
+    store_date: date | None
 
 
 async def load_release_selection(
@@ -87,13 +89,17 @@ async def load_release_selection(
     if row is None:
         raise WhatsNewSelectionError("These releases are no longer cached. Reload What's New.")
     payload = row.payload
-    groups = [payload.get("issues", [])]
+    groups = [(payload.get("issues", []), payload.get("store_date"))]
     weeks = payload.get("weeks")
     if isinstance(weeks, list):
-        groups.extend(week.get("issues", []) for week in weeks if isinstance(week, dict))
+        groups.extend(
+            (week.get("issues", []), week.get("store_date"))
+            for week in weeks
+            if isinstance(week, dict)
+        )
     matches = [
-        release
-        for group in groups
+        (release, group_date)
+        for group, group_date in groups
         if isinstance(group, list)
         for release in group
         if isinstance(release, dict)
@@ -102,7 +108,7 @@ async def load_release_selection(
     if not matches:
         raise WhatsNewSelectionError("This release changed or was removed. Reload What's New.")
     contexts = []
-    for release in matches:
+    for release, group_date in matches:
         series = release.get("series")
         publisher = release.get("publisher")
         if not isinstance(series, dict) or not isinstance(series.get("title"), str):
@@ -116,19 +122,32 @@ async def load_release_selection(
                 if isinstance(publisher, dict)
                 else "",
                 "year": year if type(year) is int and 1 <= year <= 9999 else None,
+                "store_date": _release_date(release.get("store_date") or group_date),
             }
         )
     if any(context != contexts[0] for context in contexts[1:]):
         raise WhatsNewSelectionError("This release has conflicting series evidence. Reload it.")
     context = contexts[0]
-    fingerprint = hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()
+    fingerprint = hashlib.sha256(
+        json.dumps(context, sort_keys=True, default=str).encode()
+    ).hexdigest()
     return ReleaseSelection(
         WhatsNewSeriesSelection(cache_id=cache_id, release_id=release_id, fingerprint=fingerprint),
         context["locg_series_id"],
         context["title"],
         context["publisher"],
         context["year"],
+        context["store_date"],
     )
+
+
+def _release_date(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 async def validate_release_selection(
@@ -164,34 +183,40 @@ async def link_confirmed_release(
         )
     ).all()
     if claims:
-        if len(claims) == 1 and (
-            claims[0].series_id == series_id
-            and claims[0].external_id == context.locg_series_id
-            and claims[0].verification_state is IdentityVerificationState.VERIFIED
+        if not (
+            len(claims) == 1
+            and (
+                claims[0].series_id == series_id
+                and claims[0].external_id == context.locg_series_id
+                and claims[0].verification_state is IdentityVerificationState.VERIFIED
+            )
         ):
-            return
-        raise WhatsNewSelectionError(
-            "This release already has a different or disputed series link."
+            raise WhatsNewSelectionError(
+                "This release already has a different or disputed series link."
+            )
+    else:
+        identity = ExternalIdentityRef(
+            IdentityNamespace.LOCG, MetadataEntityKind.SERIES, context.locg_series_id
         )
-    identity = ExternalIdentityRef(
-        IdentityNamespace.LOCG, MetadataEntityKind.SERIES, context.locg_series_id
-    )
-    await confirm_locg_series_selection(
-        session,
-        IdentityEventRequest(
-            uuid4(),
-            series_id,
-            IdentityVerificationAction.CONFIRM,
-            IdentityEventEvidence(
-                ExactIdentityEvidence(identity, IdentityEvidenceKind.USER_SELECTION),
-                context.selection.fingerprint,
-                locator=IdentityEvidenceLocator(IdentityEvidenceRecordKind.SERIES, series_id),
+        await confirm_locg_series_selection(
+            session,
+            IdentityEventRequest(
+                uuid4(),
+                series_id,
+                IdentityVerificationAction.CONFIRM,
+                IdentityEventEvidence(
+                    ExactIdentityEvidence(identity, IdentityEvidenceKind.USER_SELECTION),
+                    context.selection.fingerprint,
+                    locator=IdentityEvidenceLocator(IdentityEvidenceRecordKind.SERIES, series_id),
+                ),
+                actor=IdentityEventActor.USER,
+                actor_user_id=actor_user_id,
+                review_revision=1,
             ),
-            actor=IdentityEventActor.USER,
-            actor_user_id=actor_user_id,
-            review_revision=1,
-        ),
-    )
+        )
+    from pullbox.services.series_interest import promote_confirmed_watch
+
+    await promote_confirmed_watch(session, context.locg_series_id, series_id, actor_user_id)
 
 
 async def local_release_series(

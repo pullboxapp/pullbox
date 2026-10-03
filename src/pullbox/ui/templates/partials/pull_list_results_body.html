@@ -30,6 +30,7 @@
 {%- endmacro -%}
 
 <div id="pull-list-results-body" data-testid="pull-list-results-body">
+  {% if whats_new_actions_enabled %}{% include "partials/pull_list_watching.html" %}{% endif %}
   {% if pull_data %}
     <table data-testid="pull-list-table" class="downloads-table">
       <thead>

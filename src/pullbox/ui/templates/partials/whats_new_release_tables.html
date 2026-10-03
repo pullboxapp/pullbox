@@ -134,6 +134,14 @@
               {% elif release.discovery_release_id %}
                 <button type="button" class="btn-ghost btn-sm whitespace-nowrap" data-testid="whats-new-find-add"
                         @click="findRelease({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, $el)">Find &amp; Add</button>
+                <span data-discovery-watch="{{ release.discovery_series_id or '' }}" data-watch-cache="{{ release.discovery_cache_id }}" data-watch-release="{{ release.discovery_release_id }}" data-watchable="{{ 'true' if release.watchable else 'false' }}">
+                  {% if release.watch_id %}
+                  <span class="badge badge-muted">Watching</span>
+                  <button type="button" class="btn-ghost btn-sm whitespace-nowrap" :disabled="watchBusy" @click="cancelWatch({{ release.watch_id }}, '{{ release.discovery_series_id }}', $el)">Cancel Watch</button>
+                  {% elif release.watchable %}
+                  <button type="button" class="btn-ghost btn-sm" :disabled="watchBusy" @click="startWatch({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, '{{ release.discovery_series_id }}', $el)">Watch</button>
+                  {% endif %}
+                </span>
               {% else %}
                 <span class="text-pb-text-dim">Release details unavailable</span>
               {% endif %}

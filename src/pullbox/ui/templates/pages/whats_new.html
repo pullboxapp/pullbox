@@ -44,6 +44,10 @@
   }"
   x-init="setView(view)"
 >
+  {% if whats_new_actions_enabled %}
+  <p role="status" aria-live="polite" class="text-sm text-pb-text-sec" x-text="watchFeedback"></p>
+  {% include "partials/whats_new_watch_dialog.html" %}
+  {% endif %}
   {% set whats_new_header_left_html %}
     <div class="series-registry-title-block whats-new-title-block">
       <h2 data-testid="whats-new-title" class="series-registry-title">

@@ -1,0 +1,18 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+<div class="modal-shell !mt-0" x-show="watchRootOpen" x-cloak @keydown.escape.window="closeWatchRoot()">
+  <div class="modal-backdrop" @click="closeWatchRoot()"></div>
+  <div class="modal-panel max-w-lg" role="dialog" aria-modal="true" aria-labelledby="watch-root-title" tabindex="-1" x-ref="watchRootDialog" data-testid="watch-root-dialog" @keydown.tab="trapWatchRoot($event)">
+    <div class="modal-header"><h3 id="watch-root-title" class="modal-title">Watch series</h3></div>
+    <div class="modal-body p-5 space-y-4">
+      <p class="text-sm text-pb-text-sec">Choose the managed library for this series. Watch saves your interest without creating a folder or downloading files.</p>
+      <label class="block text-sm text-pb-text" for="watch-root-field">Library destination</label>
+      {{ dropdown_select(name="watch_root", value="", options=[], trigger_id="watch-root-field", root_testid="watch-root-field", options_expression="watchRootOptions", local_model="watchRootId", disabled_expression="watchBusy", class_name="w-full") }}
+      <p class="text-sm text-pb-warning" x-show="watchRootOptions.length <= 1">No managed destination is available. Configure Library Roots in Media Management, then retry.</p>
+      <a class="btn-ghost btn-sm" href="/settings?tab=media" x-show="watchRootOptions.length <= 1">Review Library Roots</a>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn-ghost" @click="closeWatchRoot()">Cancel</button>
+      <button type="button" class="btn-primary" :disabled="!watchRootId || watchBusy" @click="confirmWatchRoot()">Watch</button>
+    </div>
+  </div>
+</div>

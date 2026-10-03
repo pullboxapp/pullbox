@@ -70,7 +70,9 @@ class _RootProbe:
     blocking_reasons: tuple[str, ...]
 
 
-async def available_add_series_roots(session: AsyncSession) -> list[dict[str, Any]]:
+async def available_add_series_roots(
+    session: AsyncSession, *, require_default: bool = True
+) -> list[dict[str, Any]]:
     """Use the configured managed default, never an arbitrary first-root fallback."""
     roots = [
         root
@@ -87,7 +89,11 @@ async def available_add_series_roots(session: AsyncSession) -> list[dict[str, An
             int(root["id"]),
         )
     )
-    return roots if roots and roots[0]["is_default_managed_destination"] else []
+    return (
+        roots
+        if not require_default or (roots and roots[0]["is_default_managed_destination"])
+        else []
+    )
 
 
 async def list_library_roots(session: AsyncSession) -> list[dict[str, Any]]:

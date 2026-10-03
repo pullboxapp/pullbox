@@ -14,8 +14,16 @@ from pullbox.schemas.whats_new import (
     WhatsNewCacheMetadata,
     WhatsNewCurrentWeekResponse,
     WhatsNewUpcomingResponse,
+    WhatsNewWatchRequest,
 )
 from pullbox.services.library_root_management import available_add_series_roots
+from pullbox.services.series_interest import (
+    ACTIVE_STATES,
+    cancel_watch,
+    find_watch,
+    save_watch,
+    watch_response,
+)
 from pullbox.services.whats_new_actions import WhatsNewSelectionError, load_release_selection
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from pullbox.services.whats_new_refresh_queue import (
@@ -33,6 +41,32 @@ refresh_coordinator = WhatsNewRefreshCoordinator(runner=run_whats_new_refresh)
 StoreDateQuery = Annotated[date | None, Query(alias="date")]
 
 
+@router.post("/watch")
+async def create_release_watch(
+    body: WhatsNewWatchRequest, session: DbSession, user: InteractiveOperatorUser
+) -> dict[str, object]:
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        return watch_response(await save_watch(session, body, user.id))
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/watch/{interest_id}/cancel")
+async def cancel_release_watch(
+    interest_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
+    session: DbSession,
+    user: InteractiveOperatorUser,
+) -> dict[str, object]:
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        return watch_response(await cancel_watch(session, interest_id, user.id))
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.get("/resolve/{cache_id}/{release_id}")
 async def resolve_release_context(
     cache_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
@@ -47,6 +81,16 @@ async def resolve_release_context(
         context = await load_release_selection(session, cache_id, release_id)
     except WhatsNewSelectionError as exc:
         raise HTTPException(409, str(exc)) from exc
+    watch_roots = await available_add_series_roots(session, require_default=False)
+    default_id = (
+        watch_roots[0]["id"]
+        if watch_roots and watch_roots[0]["is_default_managed_destination"]
+        else None
+    )
+    roots = watch_roots if default_id else []
+    interest = await find_watch(session, context.locg_series_id) if context.locg_series_id else None
+    if interest is not None and interest.state in ACTIVE_STATES:
+        roots = [root for root in watch_roots if root["id"] == interest.target_library_root_id]
     return {
         "selection": context.selection.model_dump(),
         "title": context.title,
@@ -54,7 +98,12 @@ async def resolve_release_context(
         "year": context.year,
         "can_link": context.locg_series_id is not None,
         "locg_series_id": context.locg_series_id,
-        "roots": await available_add_series_roots(session),
+        "roots": roots,
+        "watch_roots": watch_roots,
+        "watch_default_id": default_id,
+        "can_watch": bool(
+            context.locg_series_id and context.store_date and context.store_date > date.today()
+        ),
     }
 
 

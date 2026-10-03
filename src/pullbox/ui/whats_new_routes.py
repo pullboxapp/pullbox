@@ -17,6 +17,7 @@ from starlette.responses import Response  # noqa: TC002
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser  # noqa: TC001
 from pullbox.config import get_settings
 from pullbox.core.metadata_identity import MetadataSource
+from pullbox.services.series_interest import active_watches
 from pullbox.services.whats_new_actions import (
     WhatsNewSelectionError,
     load_release_selection,
@@ -251,10 +252,25 @@ async def _decorate_release_actions(
     owners = await local_release_series(
         session, (r["discovery_series_id"] for r in releases if r["discovery_series_id"])
     )
+    watches = {
+        watch.source_series_id: watch
+        for watch in await active_watches(
+            session, (r["discovery_series_id"] for r in releases if r["discovery_series_id"])
+        )
+    }
     for release in releases:
         series = owners.get(release["discovery_series_id"])
         if series is not None:
             release["local_series"] = {"id": series.id, "monitored": series.monitored}
+        watch = watches.get(release["discovery_series_id"])
+        if watch is not None:
+            release["watch_id"] = watch.id
+        store_date = release.get("store_date")
+        release["watchable"] = bool(
+            release["discovery_series_id"]
+            and isinstance(store_date, date)
+            and store_date > date.today()
+        )
 
 
 def _payload_view(payload: dict[str, Any]) -> dict[str, Any]:

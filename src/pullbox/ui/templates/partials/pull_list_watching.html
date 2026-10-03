@@ -1,0 +1,21 @@
+<section data-testid="pull-list-watching" class="card p-4" x-data="seriesWatchActions()" x-init="watchRows = $root.querySelectorAll('[data-watch-id]').length">
+  <h3 class="text-sm font-semibold text-pb-text" tabindex="-1" x-ref="watchHeading">Watching</h3>
+  <p class="text-sm text-pb-text-sec mt-2">Saved series interests are separate from your library. Use Find &amp; Add to confirm a series and enable monitoring. Automatic adding is not active yet.</p>
+  <p role="status" aria-live="polite" class="text-sm text-pb-text-sec mt-2" x-text="watchFeedback"></p>
+  <div class="max-h-80 overflow-y-auto mt-3">
+    {% for interest in watching %}
+    <div data-testid="pull-list-watch-row" data-watch-id="{{ interest.id }}" class="flex flex-wrap items-center justify-between gap-3 border-t border-pb-border py-3">
+      <div class="min-w-0">
+        <p class="font-semibold text-sm text-pb-text break-words">{{ interest.title_snapshot }}</p>
+        <p class="text-xs text-pb-text-sec">{{ interest.publisher_snapshot }}{% if interest.year_snapshot %} · {{ interest.year_snapshot }}{% endif %}{% if interest.next_known_release_date %} · Next release {{ interest.next_known_release_date }}{% endif %}</p>
+        <span class="badge badge-muted">Watching</span>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <a class="btn-ghost btn-sm" href="/whats-new?window=upcoming&amp;q={{ interest.title_snapshot|urlencode }}">Find &amp; Add</a>
+        <button type="button" class="btn-ghost btn-sm" :disabled="watchBusy" @click="cancelWatch({{ interest.id }}, '{{ interest.source_series_id }}', $el)">Cancel Watch</button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="text-sm text-pb-text-sec" x-show="watchRows === 0">No series are currently watched.</p>
+</section>

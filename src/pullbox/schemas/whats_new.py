@@ -7,6 +7,14 @@ from datetime import date, datetime  # noqa: TC003 - Pydantic resolves these at 
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class WhatsNewWatchRequest(BaseModel):
+    """Watch uses cached context and a configured root, never client title/identity."""
+
+    model_config = ConfigDict(extra="forbid")
+    selection: WhatsNewSeriesSelection
+    library_root_id: int | None = Field(default=None, strict=True, gt=0, le=2**31 - 1)
+
+
 class WhatsNewSeriesSelection(BaseModel):
     """Bind a user selection to server-cached release evidence, not browser IDs."""
 
