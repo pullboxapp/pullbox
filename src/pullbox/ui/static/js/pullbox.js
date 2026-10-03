@@ -20387,6 +20387,8 @@ function issueSearchModal() {
           source: body,
           target: "#issue-search-modal-body",
           swap: "innerHTML",
+          // Indexer fan-out and deep fallback can outlast ordinary UI swaps.
+          timeoutMs: 180000,
         }).catch(function (error) {
           if (!self.searchOpen || sequence !== self.searchSequence) return;
           self.searching = false;

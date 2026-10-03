@@ -1,6 +1,7 @@
 """Inline Grab uses real UI/API/history with only external search/client I/O faked."""
 # ruff: noqa: F811 - reuse the owning release fixtures.
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -67,12 +68,14 @@ def grab_page(issue_state_page, monkeypatch):
 
     indexer_id, client_id = _run_async_blocking(prepare())
     calls = []
-    mode = {"fail_search": False, "rejected": False}
+    mode = {"fail_search": False, "rejected": False, "slow_search": False}
 
     async def search(session, issue_id, **_kwargs):
         calls.append(issue_id)
         if mode["fail_search"]:
             raise HTTPException(503, "Test source temporarily unavailable")
+        if mode["slow_search"]:
+            await asyncio.sleep(11)
         target = await load_issue_search_target(session, issue_id)
         return issue_api._IssueSearchBundle(
             target=target,
@@ -167,7 +170,7 @@ def test_explicit_grab_keeps_table_and_reads_actual_queue(grab_page, seeded_serv
     expect(row.get_by_test_id("whats-new-grab")).to_have_count(0)
 
 
-@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("monitor", 320)])
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("system", 320)])
 def test_picker_cancel_focus_reflow_and_accessibility(
     grab_page, seeded_server, theme, width, browser_name
 ):
@@ -176,6 +179,12 @@ def test_picker_cancel_focus_reflow_and_accessibility(
     page.emulate_media(reduced_motion="reduce")
     page.goto(f"{seeded_server}/whats-new")
     page.evaluate("theme => applyTheme(theme)", theme)
+    expected_theme = (
+        page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'")
+        if theme == "system"
+        else theme
+    )
+    expect(page.locator("html")).to_have_attribute("data-theme", expected_theme)
     row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
     trigger = row.get_by_test_id("whats-new-grab")
     trigger.click()
@@ -206,6 +215,25 @@ def test_search_failure_is_not_an_endless_spinner(grab_page, seeded_server):
     expect(dialog.get_by_role("alert")).to_be_visible()
     expect(dialog.get_by_text("Searching indexers", exact=True)).not_to_be_visible()
     client.add_nzb.assert_not_awaited()
+
+
+def test_slow_search_does_not_leave_a_false_error(grab_page, seeded_server):
+    page, issue_id, calls, client, mode = grab_page
+    mode["slow_search"] = True
+    page.goto(f"{seeded_server}/whats-new")
+    with page.expect_response(
+        lambda response: "/search-results" in response.url, timeout=20000
+    ) as search:
+        page.get_by_test_id("whats-new-grab").first.click()
+    assert search.value.status == 200
+    dialog = page.get_by_role("dialog", name="ISSUE SEARCH")
+    expect(dialog.get_by_test_id("issue-search-results-matched-row")).to_be_visible()
+    expect(dialog.get_by_role("alert")).not_to_be_visible()
+    expect(dialog.get_by_text("Searching indexers", exact=True)).not_to_be_visible()
+    assert calls == [issue_id]
+    client.add_nzb.assert_not_awaited()
+    dialog.get_by_test_id("issue-search-modal-footer-close").click()
+    expect(dialog).not_to_be_visible()
 
 
 def test_failed_grab_stays_open_and_allows_explicit_retry(grab_page, seeded_server):
