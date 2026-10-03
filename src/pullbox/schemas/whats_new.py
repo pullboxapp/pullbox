@@ -2,9 +2,33 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime  # noqa: TC003 - Pydantic resolves these at runtime
+from datetime import date, datetime
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+import structlog
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+
+logger = structlog.get_logger(__name__)
+
+
+def _optional_provider_id(value: object, info: ValidationInfo) -> int | None:
+    if value is None:
+        return None
+    if type(value) is int and 0 < value < 2**63:
+        return value
+    logger.warning("whats_new_action_context_ignored", field=info.field_name, reason="invalid_id")
+    return None
+
+
+_ProviderID = Annotated[int | None, BeforeValidator(_optional_provider_id)]
 
 
 class WhatsNewWatchRequest(BaseModel):
@@ -51,6 +75,56 @@ class WhatsNewSeriesSummary(BaseModel):
     locg_url: str | None = None
     start_year: int | None = None
     volume: str | None = None
+    gcd_series_id: _ProviderID = None
+    metron_series_id: _ProviderID = None
+    comicvine_series_id: _ProviderID = None
+    publication_state: Literal["published", "prepublication", "unknown"] = "unknown"
+    publication_as_of: date | None = None
+
+    @field_validator("publication_state", mode="before")
+    @classmethod
+    def validate_publication_state(cls, value: object) -> object:
+        if value is None:
+            return "unknown"
+        if isinstance(value, str) and value in {"published", "prepublication", "unknown"}:
+            return value
+        logger.warning(
+            "whats_new_action_context_ignored", field="publication_state", reason="unknown_state"
+        )
+        return "unknown"
+
+    @field_validator("publication_as_of", mode="before")
+    @classmethod
+    def validate_publication_date(cls, value: object) -> date | None:
+        if value is None or type(value) is date:
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = date.fromisoformat(value)
+            except ValueError:
+                logger.warning(
+                    "whats_new_action_context_ignored",
+                    field="publication_as_of",
+                    reason="invalid_date",
+                )
+                return None
+            if parsed.isoformat() == value:
+                return parsed
+        logger.warning(
+            "whats_new_action_context_ignored", field="publication_as_of", reason="invalid_date"
+        )
+        return None
+
+    @model_validator(mode="after")
+    def require_dated_publication_evidence(self) -> Self:
+        if self.publication_state != "unknown" and self.publication_as_of is None:
+            logger.warning(
+                "whats_new_action_context_ignored",
+                field="publication_state",
+                reason="missing_as_of",
+            )
+            self.publication_state = "unknown"
+        return self
 
 
 class WhatsNewIssueSummary(BaseModel):
@@ -58,6 +132,9 @@ class WhatsNewIssueSummary(BaseModel):
 
     locg_issue_id: int
     locg_series_id: int | None = None
+    gcd_issue_id: _ProviderID = None
+    metron_issue_id: _ProviderID = None
+    comicvine_issue_id: _ProviderID = None
     locg_url: str
     title: str
     display_title: str
