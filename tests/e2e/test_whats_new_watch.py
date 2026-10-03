@@ -12,8 +12,9 @@ from sqlalchemy import delete, select
 from pullbox.database import get_session_factory
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
-from pullbox.models.series_interest import SeriesInterest
+from pullbox.models.series_interest import SeriesInterest, SeriesInterestState
 from pullbox.models.whats_new import WhatsNewReleaseCache
+from pullbox.services.whats_new_refresh_queue import run_whats_new_refresh
 from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _run_async_blocking
 from tests.e2e.test_whats_new_find_add import release_page  # noqa: F401
@@ -104,6 +105,63 @@ def test_watch_reload_pull_list_cancel_and_rewatch(watch_page, seeded_server):
     expect(row).to_contain_text("Watching")
 
 
+async def publish_watched_fixture():
+    factory = get_session_factory()
+    async with factory.begin() as session:
+        cached = await session.scalar(select(WhatsNewReleaseCache))
+        releases = [
+            {**release, "store_date": date.today().isoformat()}
+            for release in cached.payload["issues"]
+        ]
+        await session.execute(delete(WhatsNewReleaseCache))
+
+    class Client:
+        async def get_current_week(self):
+            return {"store_date": date.today().isoformat(), "issues": releases}
+
+        async def get_upcoming(self):
+            return {"weeks": []}
+
+    await run_whats_new_refresh(session_factory=factory, client=Client())
+    async with factory() as session:
+        assert (
+            await session.scalar(select(SeriesInterest))
+        ).state is SeriesInterestState.NEEDS_CONFIRMATION
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("monitor", 320)])
+def test_refresh_confirmation_has_actionable_release_link_and_cancel(
+    watch_page, seeded_server, theme, width
+):
+    page = watch_page
+    page.set_viewport_size({"width": width, "height": 900})
+    page.emulate_media(reduced_motion="reduce")
+    page.goto(f"{seeded_server}/whats-new")
+    row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
+    row.get_by_role("button", name="Watch", exact=True).click()
+    expect(row.get_by_role("button", name="Cancel Watch", exact=True)).to_be_enabled()
+    _run_async_blocking(publish_watched_fixture())
+    page.reload()
+    expect(row).to_contain_text("Needs confirmation")
+    page.goto(f"{seeded_server}/pull-list")
+    page.evaluate("theme => applyTheme(theme)", theme)
+    watched = page.get_by_test_id("pull-list-watch-row").filter(has_text="Atlas Deluxe")
+    expect(watched).to_contain_text("Needs confirmation")
+    expect(watched).not_to_contain_text("Next release 2099")
+    assert_no_axe_violations(page, name=f"watch-confirmation-{theme}-{width}")
+    watched.get_by_role("link", name="Find & Add", exact=True).click()
+    expect(page.get_by_test_id("whats-new-current-release-table")).to_be_visible()
+    row.get_by_test_id("whats-new-find-add").click()
+    finder = page.get_by_test_id("whats-new-find-dialog")
+    expect(finder.get_by_label("Series title")).to_have_value("Atlas Deluxe")
+    finder.get_by_role("button", name="Cancel", exact=True).click()
+    row.get_by_role("button", name="Cancel Watch", exact=True).click()
+    expect(row).not_to_contain_text("Needs confirmation")
+    expect(row.get_by_role("button", name="Watch", exact=True)).to_have_count(0)
+    page.reload()
+    expect(row.get_by_role("button", name="Cancel Watch", exact=True)).to_have_count(0)
+
+
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("monitor", 320)])
 def test_watching_controls_reflow_accessibility_and_cancel_focus(
     watch_page, seeded_server, theme, width, browser_name
@@ -161,8 +219,9 @@ def test_watch_without_default_requires_library_choice_and_preserves_cancel_focu
     expect(row.get_by_role("button", name="Cancel Watch", exact=True)).to_be_focused()
 
 
+@pytest.mark.parametrize("available", [False, True])
 def test_real_watched_series_find_add_enables_monitoring_and_leaves_watch_list(
-    watch_page, seeded_server, monkeypatch, tmp_path, request
+    watch_page, seeded_server, monkeypatch, tmp_path, request, available
 ):
     from pullbox.api.v1 import series as series_api
     from pullbox.providers.metadata import sources
@@ -191,6 +250,10 @@ def test_real_watched_series_find_add_enables_monitoring_and_leaves_watch_list(
     row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
     row.get_by_role("button", name="Watch", exact=True).click()
     expect(row.get_by_role("button", name="Cancel Watch", exact=True)).to_be_enabled()
+    if available:
+        _run_async_blocking(publish_watched_fixture())
+        page.reload()
+        expect(row).to_contain_text("Needs confirmation")
     row.get_by_test_id("whats-new-find-add").click()
     finder = page.get_by_test_id("whats-new-find-dialog")
     query = finder.get_by_label("Series title")

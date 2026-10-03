@@ -150,6 +150,33 @@ def _release_date(value: object) -> date | None:
         return None
 
 
+def available_release_series_ids(payload: dict[str, object], *, as_of: date) -> set[str]:
+    """Observed release dates invite confirmation, not proof of provider identity."""
+    groups = [(payload.get("issues"), payload.get("store_date"))]
+    weeks = payload.get("weeks")
+    if isinstance(weeks, list):
+        groups.extend(
+            (week.get("issues"), week.get("store_date")) for week in weeks if isinstance(week, dict)
+        )
+    available = set()
+    for releases, group_date in groups:
+        if not isinstance(releases, list):
+            continue
+        for release in releases:
+            if not isinstance(release, dict) or not positive_id(release.get("locg_issue_id")):
+                continue
+            observed_date = _release_date(release.get("store_date") or group_date)
+            if observed_date is None or observed_date > as_of:
+                continue
+            try:
+                identity = release_series_id(release)
+            except WhatsNewSelectionError:
+                continue
+            if identity:
+                available.add(identity)
+    return available
+
+
 async def validate_release_selection(
     session: AsyncSession, selection: WhatsNewSeriesSelection
 ) -> ReleaseSelection:

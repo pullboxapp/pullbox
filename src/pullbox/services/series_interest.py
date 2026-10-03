@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from pullbox.core.metadata_identity import IdentityNamespace
@@ -135,6 +135,22 @@ async def active_watches(
         (
             await session.scalars(query.order_by(SeriesInterest.title_snapshot, SeriesInterest.id))
         ).all()
+    )
+
+
+async def request_watch_confirmation(session: AsyncSession, identities: Iterable[str]) -> None:
+    """Commit fresh availability with the cache, without reviving cancelled intent."""
+    ids = set(identities)
+    if not ids:
+        return
+    await session.execute(
+        update(SeriesInterest)
+        .where(
+            SeriesInterest.source_namespace == "locg",
+            SeriesInterest.source_series_id.in_(ids),
+            SeriesInterest.state == SeriesInterestState.WATCHING,
+        )
+        .values(state=SeriesInterestState.NEEDS_CONFIRMATION)
     )
 
 

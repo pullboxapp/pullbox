@@ -64,13 +64,15 @@ function seriesWatchActions() {
         selection: pending.selection, library_root_id: Number(rootId),
       });
       if (this.disposed) return;
-      if (data.state !== 'watching' || data.locg_series_id !== pending.identity || !Number.isSafeInteger(data.id)) {
+      if (!['watching', 'needs_confirmation'].includes(data.state) || data.locg_series_id !== pending.identity || !Number.isSafeInteger(data.id)) {
         throw new Error('Watch response could not be verified. Reload the list.');
       }
       this.watchRootOpen = false;
       this.patchWatchCells(data, true);
       this.pendingWatch = null;
-      this.watchFeedback = 'Watching. Use Find & Add to confirm the series; automatic adding is not active yet.';
+      this.watchFeedback = data.state === 'needs_confirmation'
+        ? 'Needs confirmation. Use Find & Add to choose the series.'
+        : 'Watching. Refresh checks release dates; use Find & Add to confirm the series.';
     },
 
     async confirmWatchRoot() {
@@ -135,7 +137,7 @@ function seriesWatchActions() {
         if (active) {
           const badge = document.createElement('span');
           badge.className = 'badge badge-muted';
-          badge.textContent = 'Watching';
+          badge.textContent = data.state === 'needs_confirmation' ? 'Needs confirmation' : 'Watching';
           nodes.push(badge, document.createTextNode(' '));
         }
         if (active || cell.dataset.watchable === 'true') {

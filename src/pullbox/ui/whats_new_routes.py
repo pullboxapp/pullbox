@@ -265,6 +265,7 @@ async def _decorate_release_actions(
         watch = watches.get(release["discovery_series_id"])
         if watch is not None:
             release["watch_id"] = watch.id
+            release["watch_state"] = watch.state.value
         store_date = release.get("store_date")
         release["watchable"] = bool(
             release["discovery_series_id"]
