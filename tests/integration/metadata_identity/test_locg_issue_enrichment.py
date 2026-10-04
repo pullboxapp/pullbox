@@ -9,10 +9,12 @@ from sqlalchemy import func, select
 
 from pullbox.core.metadata_identity import IdentityNamespace, MetadataEntityKind
 from pullbox.core.metadata_identity_state import IdentityVerificationState
-from pullbox.models import Issue, Series
+from pullbox.models import Issue, LibraryFile, Series, User
 from pullbox.models.issue import IssueStatus, IssueType
+from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_baseline import IssueMetadataBaseline
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
+from pullbox.models.reader import IssueReaderState
 from pullbox.models.whats_new import WhatsNewReleaseCache
 from pullbox.schemas.metadata_snapshot import FieldOrigin, MetadataSnapshot
 from pullbox.schemas.metadata_sources import MetadataDomain
@@ -22,7 +24,9 @@ from pullbox.services.metadata_baselines import (
     load_metadata_baseline,
     save_metadata_baselines,
 )
-from pullbox.services.metadata_series_refresh import SeriesRefreshError, refresh_series_from_sources
+from pullbox.services.metadata_issue_refresh import refresh_issue_from_sources
+from pullbox.services.metadata_series_refresh import refresh_series_from_sources
+from tests.integration.metadata_identity.test_issue_refresh import IssueAdapter, reader
 from tests.integration.metadata_identity.test_locg_series_enrichment import (
     configured_sources,  # noqa: F401
     prepare,
@@ -31,6 +35,32 @@ from tests.integration.metadata_identity.test_locg_series_enrichment import (
 from tests.integration.metadata_identity.test_series_refresh import RefreshAdapter, refresh_registry
 
 DAY = date(2026, 9, 30)
+
+
+@pytest.fixture(params=["series", "issue"])
+def refresh_command(request):
+    async def refresh(session, series_id, issue_id, data, *, wait=None, started=None):
+        adapter = (
+            RefreshAdapter(data, session=session, wait=wait)
+            if request.param == "series"
+            else IssueAdapter(data.issues[0], session=session, wait=wait)
+        )
+        if started is not None:
+            adapter.started = started
+        if request.param == "series":
+            return await refresh_series_from_sources(
+                session,
+                series_id,
+                registry=refresh_registry(adapter),
+            )
+        return await refresh_issue_from_sources(
+            session,
+            issue_id,
+            gcd_api_enabled=False,
+            registry=reader(adapter),
+        )
+
+    return refresh
 
 
 def issue_release(identifier=1001, **updates):
@@ -81,16 +111,36 @@ async def setup(factory, *, exact=True, rows=None, age=timedelta()):
 
 @pytest.mark.parametrize("exact", [True, False])
 async def test_actual_refresh_fills_only_proven_store_date_and_preserves_issue_state(
-    identity_probe_db, exact
+    identity_probe_db, exact, refresh_command, tmp_path
 ):
     _, factory, _ = identity_probe_db
     series_id, issue_id, data, _ = await setup(factory, exact=exact)
+    archive = tmp_path / "kept.cbz"
+    archive.write_bytes(b"unchanged reference archive")
+    async with factory.begin() as session:
+        root = LibraryRoot(name="Reference", path=str(tmp_path))
+        user = User(username="reader", password_hash="not-a-live-account")
+        session.add_all([root, user])
+        await session.flush()
+        session.add(
+            LibraryFile(
+                issue_id=issue_id,
+                library_root_id=root.id,
+                file_path=str(archive),
+                file_name=archive.name,
+                file_format="cbz",
+                file_size=archive.stat().st_size,
+                file_modified_at=datetime.now(UTC),
+                storage_mode="referenced",
+            )
+        )
+        session.add(
+            IssueReaderState(user_id=user.id, issue_id=issue_id, last_page_index=17, page_count=24)
+        )
     async with factory() as session:
         before_claims = list(await session.scalars(select(IssueExternalIdentity.external_id)))
         await session.rollback()
-        await refresh_series_from_sources(
-            session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
-        )
+        await refresh_command(session, series_id, issue_id, data)
         issue = await session.get(Issue, issue_id)
         assert issue.store_date == DAY, "proven cached release date never reaches issue refresh"
         assert issue.release_date == (None if exact else DAY), "store date is not a cover date"
@@ -108,13 +158,16 @@ async def test_actual_refresh_fills_only_proven_store_date_and_preserves_issue_s
         assert origin.passive_release.issue_identity in saved.snapshot.identities
         assert origin.passive_release.match_kind == ("exact_issue" if exact else "number_date")
         assert all(ref.namespace is not IdentityNamespace.LOCG for ref in saved.snapshot.identities)
+        file = await session.scalar(select(LibraryFile))
+        assert file.file_path == str(archive) and file.issue_id == issue_id
+        assert file.storage_mode == "referenced" and file.file_size == archive.stat().st_size
+        assert (await session.scalar(select(IssueReaderState))).last_page_index == 17
         await session.commit()
     async with factory() as session:
-        await refresh_series_from_sources(
-            session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
-        )
+        await refresh_command(session, series_id, issue_id, data)
         assert (await session.get(Issue, issue_id)).store_date == DAY
         await session.commit()
+    assert archive.read_bytes() == b"unchanged reference archive"
 
 
 @pytest.mark.parametrize(
@@ -136,21 +189,31 @@ async def test_actual_refresh_fills_only_proven_store_date_and_preserves_issue_s
         ],
     ],
 )
-async def test_unknown_or_disagreeing_release_group_never_fills_the_gap(identity_probe_db, rows):
+async def test_unknown_or_disagreeing_release_group_never_fills_the_gap(
+    identity_probe_db, rows, refresh_command
+):
     _, factory, _ = identity_probe_db
     series_id, issue_id, data, _ = await setup(factory, exact=False, rows=rows)
     async with factory() as session:
-        await refresh_series_from_sources(
-            session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
-        )
+        await refresh_command(session, series_id, issue_id, data)
         assert (await session.get(Issue, issue_id)).store_date is None
         await session.commit()
 
 
 @pytest.mark.parametrize(
-    "case", ["stale", "future", "no_date_proof", "annual", "user_clear", "archive", "disagreement"]
+    "case",
+    [
+        "stale",
+        "future",
+        "no_date_proof",
+        "annual",
+        "user_clear",
+        "archive",
+        "disagreement",
+        "assembled_date_changed",
+    ],
 )
-async def test_unproven_or_protected_date_stays_blank(identity_probe_db, case):
+async def test_unproven_or_protected_date_stays_blank(identity_probe_db, case, refresh_command):
     _, factory, _ = identity_probe_db
     series_id, issue_id, data, _ = await setup(
         factory,
@@ -166,6 +229,23 @@ async def test_unproven_or_protected_date_stays_blank(identity_probe_db, case):
         if case == "no_date_proof":
             issue.release_date = None
             data.issues[0].cover_date = None
+        if case == "assembled_date_changed":
+            data.issues[0].cover_date = date(2026, 10, 1)
+            row = await session.get(IssueMetadataBaseline, issue_id)
+            previous = MetadataSnapshot.model_validate_json(row.snapshot_json)
+            row.snapshot_json = previous.model_copy(
+                update={
+                    "origins": (
+                        *previous.origins,
+                        FieldOrigin(
+                            field="cover_date",
+                            domain=MetadataDomain.CORE,
+                            source=data.issues[0].source,
+                            observed_at=datetime.now(UTC),
+                        ),
+                    )
+                }
+            ).model_dump_json()
         if case in {"user_clear", "archive", "disagreement"}:
             row = await session.get(IssueMetadataBaseline, issue_id)
             previous = MetadataSnapshot.model_validate_json(row.snapshot_json)
@@ -188,21 +268,19 @@ async def test_unproven_or_protected_date_stays_blank(identity_probe_db, case):
                 }
             ).model_dump_json()
     async with factory() as session:
-        await refresh_series_from_sources(
-            session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
-        )
+        await refresh_command(session, series_id, issue_id, data)
         assert (await session.get(Issue, issue_id)).store_date is None
         await session.commit()
 
 
-async def test_provider_value_wins_and_caller_rollback_keeps_original_date(identity_probe_db):
+async def test_provider_value_wins_and_caller_rollback_keeps_original_date(
+    identity_probe_db, refresh_command
+):
     _, factory, _ = identity_probe_db
     series_id, issue_id, data, _ = await setup(factory)
     data.issues[0].store_date = date(2026, 10, 1)
     async with factory() as session:
-        await refresh_series_from_sources(
-            session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
-        )
+        await refresh_command(session, series_id, issue_id, data)
         assert (await session.get(Issue, issue_id)).store_date == date(2026, 10, 1)
         await session.rollback()
     async with factory() as session:
@@ -210,37 +288,58 @@ async def test_provider_value_wins_and_caller_rollback_keeps_original_date(ident
         assert await session.scalar(select(func.count()).select_from(Series)) == 1
 
 
-@pytest.mark.parametrize("change", ["cached_date", "issue_type"])
+@pytest.mark.parametrize(
+    "change", ["cached_date", "issue_type", "cache_expired", "duplicate_number"]
+)
 async def test_date_or_match_change_during_fetch_aborts_before_any_metadata_write(
     identity_probe_db,
     change,
+    refresh_command,
 ):
     _, factory, _ = identity_probe_db
     series_id, issue_id, data, cache_id = await setup(factory, exact=False)
+    data.issues[0].title = "Must not save stale metadata"
     wait = asyncio.Event()
+    started = asyncio.Event()
     async with factory() as session:
-        adapter = RefreshAdapter(data, wait=wait, session=session)
         task = asyncio.create_task(
-            refresh_series_from_sources(session, series_id, registry=refresh_registry(adapter))
+            refresh_command(session, series_id, issue_id, data, wait=wait, started=started)
         )
-        await asyncio.wait_for(adapter.started.wait(), 5)
+        await asyncio.wait_for(started.wait(), 5)
         async with factory.begin() as other:
             if change == "cached_date":
                 cache = await other.get(WhatsNewReleaseCache, cache_id)
                 payload = deepcopy(cache.payload)
                 payload["weeks"][0]["issues"][0]["store_date"] = "2026-10-07"
                 cache.payload = payload
-            else:
+            elif change == "issue_type":
                 (await other.get(Issue, issue_id)).issue_type = IssueType.ANNUAL
+            elif change == "cache_expired":
+                (await other.get(WhatsNewReleaseCache, cache_id)).fetched_at -= timedelta(hours=7)
+            else:
+                other.add(
+                    Issue(
+                        series_id=series_id,
+                        issue_number=1,
+                        issue_number_text=None,
+                        release_date=DAY,
+                    )
+                )
         wait.set()
-        with pytest.raises(SeriesRefreshError, match=r"release.*changed"):
+        with pytest.raises(ValueError, match="changed"):
             await task
-        await session.rollback()
+        await session.commit()
     async with factory() as session:
-        assert (await session.get(Issue, issue_id)).store_date is None
+        issue = await session.get(Issue, issue_id)
+        assert issue.store_date is None and issue.title == "Original issue title"
+        assert (
+            await load_metadata_baseline(session, MetadataEntityKind.ISSUE, issue_id)
+        ).revision == 1
 
 
-async def test_a_user_clear_relative_to_baseline_is_not_refilled(identity_probe_db):
+async def test_a_user_clear_relative_to_baseline_is_not_refilled(
+    identity_probe_db, refresh_command
+):
     _, factory, _ = identity_probe_db
     series_id, issue_id, data, _ = await setup(factory)
     async with factory.begin() as session:
@@ -250,9 +349,7 @@ async def test_a_user_clear_relative_to_baseline_is_not_refilled(identity_probe_
             update={"values": previous.values.model_copy(update={"store_date": DAY})}
         ).model_dump_json()
     async with factory() as session:
-        await refresh_series_from_sources(
-            session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
-        )
+        await refresh_command(session, series_id, issue_id, data)
         assert (await session.get(Issue, issue_id)).store_date is None
         saved = await load_metadata_baseline(session, MetadataEntityKind.ISSUE, issue_id)
         assert next(
@@ -262,13 +359,13 @@ async def test_a_user_clear_relative_to_baseline_is_not_refilled(identity_probe_
 
 
 @pytest.mark.parametrize("case", ["wrong_parent", "disputed_parent"])
-async def test_issue_provenance_requires_its_current_verified_series_link(identity_probe_db, case):
+async def test_issue_provenance_requires_its_current_verified_series_link(
+    identity_probe_db, case, refresh_command
+):
     _, factory, _ = identity_probe_db
     series_id, issue_id, data, _ = await setup(factory)
     async with factory() as session:
-        await refresh_series_from_sources(
-            session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
-        )
+        await refresh_command(session, series_id, issue_id, data)
         await session.commit()
     async with factory() as session:
         saved = await load_metadata_baseline(session, MetadataEntityKind.ISSUE, issue_id)
@@ -300,7 +397,7 @@ async def test_issue_provenance_requires_its_current_verified_series_link(identi
 
 @pytest.mark.parametrize("disagreement", [False, True])
 async def test_many_variants_use_bounded_resolver_batches_and_share_one_issue(
-    identity_probe_db, monkeypatch, disagreement
+    identity_probe_db, monkeypatch, disagreement, refresh_command
 ):
     from pullbox.services import metadata_locg_enrichment as enrichment
 
@@ -318,9 +415,7 @@ async def test_many_variants_use_bounded_resolver_batches_and_share_one_issue(
 
     monkeypatch.setattr(enrichment, "local_release_issues", resolver)
     async with factory() as session:
-        await refresh_series_from_sources(
-            session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
-        )
+        await refresh_command(session, series_id, issue_id, data)
         assert (await session.get(Issue, issue_id)).store_date == (None if disagreement else DAY)
         assert batches == [200, 5, 200, 5]
         assert await session.scalar(select(func.count()).select_from(Issue)) == 1
