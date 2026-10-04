@@ -5,7 +5,12 @@ from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
+from pullbox.core.metadata_identity import (
+    ExternalIdentityRef,
+    IdentityNamespace,
+    MetadataEntityKind,
+    MetadataSource,
+)
 from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_sources import MetadataDomain
 
@@ -44,6 +49,35 @@ class MetadataValues(BaseModel):
     credits: MetadataCredits | None = None
 
 
+class PassiveReleaseOrigin(BaseModel):
+    """Cached calendar context, not an executable metadata source or issue identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    locg_series_id: str
+    release_ids: tuple[str, ...] = Field(min_length=1, max_length=10000)
+    fetched_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def exact_release_context(self) -> Self:
+        if (
+            ExternalIdentityRef(
+                IdentityNamespace.LOCG, MetadataEntityKind.SERIES, self.locg_series_id
+            ).external_id
+            != self.locg_series_id
+            or len(set(self.release_ids)) != len(self.release_ids)
+            or any(
+                ExternalIdentityRef(
+                    IdentityNamespace.LOCG, MetadataEntityKind.ISSUE, identifier
+                ).external_id
+                != identifier
+                for identifier in self.release_ids
+            )
+        ):
+            raise ValueError("Passive release provenance requires exact, distinct IDs")
+        return self
+
+
 class FieldOrigin(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -55,6 +89,7 @@ class FieldOrigin(BaseModel):
     user_override: bool = False
     derivation: Literal["classification", "lifecycle", "catalog", "normalization"] | None = None
     embedded_documents: tuple[EmbeddedDocument, ...] = ()
+    passive_release: PassiveReleaseOrigin | None = None
 
 
 class MetadataSnapshot(BaseModel):
@@ -97,6 +132,23 @@ class MetadataSnapshot(BaseModel):
                 or (
                     origin.derivation is not None
                     and (origin.source is not None or origin.user_override)
+                )
+                or (
+                    origin.passive_release is not None
+                    and (
+                        self.entity_kind is not MetadataEntityKind.SERIES
+                        or origin.field not in {"publisher", "year_start", "volume"}
+                        or origin.source is not None
+                        or origin.source_updated_at is not None
+                        or origin.user_override
+                        or origin.derivation is not None
+                        or origin.embedded_documents
+                        or not any(
+                            identity.namespace is IdentityNamespace.LOCG
+                            and identity.external_id == origin.passive_release.locg_series_id
+                            for identity in self.identities
+                        )
+                    )
                 )
                 or (
                     origin.source is not None
