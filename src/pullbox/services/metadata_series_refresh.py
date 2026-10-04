@@ -39,8 +39,10 @@ from pullbox.services.metadata_issue_catalog import (
     apply_issue_batch,
 )
 from pullbox.services.metadata_locg_enrichment import (
+    IssueReleaseFacts,
     LocgEnrichmentError,
     enrich_series_snapshot,
+    read_issue_release_facts,
     read_series_release_facts,
 )
 from pullbox.services.metadata_read_cache import source_read_cache
@@ -176,6 +178,7 @@ async def refresh_series_catalog_from_sources(
         release_facts = await read_series_release_facts(
             session, before.series.identities, now=datetime.now(UTC)
         )
+        issue_release_facts = await read_issue_release_facts(session, before, release_facts)
         if not before.series.identities:
             raise SeriesRefreshError(
                 "This series needs a verified metadata identity before refresh. Review its match."
@@ -275,9 +278,20 @@ async def refresh_series_catalog_from_sources(
                 raise SeriesRefreshError(
                     "Cached release facts changed or expired during refresh. Retry the refresh."
                 )
+            rechecked_issues = await read_issue_release_facts(session, current, rechecked_facts)
+            if rechecked_issues != issue_release_facts:
+                raise SeriesRefreshError(
+                    "Cached release issue matches changed during refresh. Retry the refresh."
+                )
             snapshot = enrich_series_snapshot(snapshot, rechecked_facts, now=now)
             result = await _apply(
-                session, current, bundle, snapshot, now, replace_managed=replace_managed
+                session,
+                current,
+                bundle,
+                snapshot,
+                now,
+                replace_managed=replace_managed,
+                release_facts=rechecked_issues,
             )
             if bundle.catalog_started_at is not None:
                 checkpoint = next(
@@ -432,6 +446,7 @@ async def _apply(
     now: datetime,
     *,
     replace_managed: bool,
+    release_facts: tuple[IssueReleaseFacts, ...] = (),
 ) -> SeriesCatalogRefresh:
     series = await session.get(Series, state.series.local_id)
     assert series is not None
@@ -445,6 +460,7 @@ async def _apply(
         now,
         complete=True,
         replace_managed=replace_managed,
+        release_facts=release_facts,
     )
     series.issue_count = len(state.issues) + len(created)
     snapshot = _with_derived(snapshot, "issue_count", series.issue_count, now)

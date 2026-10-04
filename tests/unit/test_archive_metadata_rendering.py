@@ -18,7 +18,12 @@ from pullbox.core.metadata_identity import (
 )
 from pullbox.core.metroninfo import parse_metroninfo
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
-from pullbox.schemas.metadata_snapshot import FieldOrigin, MetadataSnapshot, MetadataValues
+from pullbox.schemas.metadata_snapshot import (
+    FieldOrigin,
+    MetadataSnapshot,
+    MetadataValues,
+    PassiveReleaseOrigin,
+)
 from pullbox.schemas.metadata_sources import MetadataDomain
 from pullbox.services.archive_metadata_reconciliation import reconcile_archive_metadata
 from pullbox.services.archive_metadata_rendering import (
@@ -95,6 +100,41 @@ def test_paired_core_output_uses_one_snapshot_and_validates_offline():
     assert {e.identity for e in mi.evidence} == {CV_SERIES, CV_ISSUE}
     assert "[cv_issue_id:7]" in ci.findtext("Notes")
     assert "[cv_vol_id:42]" in ci.findtext("Notes")
+
+
+def test_passive_release_store_date_writes_metron_date_without_inventing_comicinfo_cover_date():
+    series, issue = snapshots(store_date=date(2026, 9, 25))
+    issue = MetadataSnapshot.model_validate(
+        {
+            **issue.model_dump(),
+            "values": {**issue.values.model_dump(), "issue_number_text": "50-X"},
+            "origins": (
+                FieldOrigin(
+                    field="store_date",
+                    domain=MetadataDomain.CORE,
+                    observed_at=datetime(2026, 9, 28, tzinfo=UTC),
+                    passive_release=PassiveReleaseOrigin(
+                        locg_series_id="77",
+                        release_ids=("1001", "1002"),
+                        fetched_at=datetime(2026, 9, 28, tzinfo=UTC),
+                        issue_identity=CV_ISSUE,
+                        issue_number_text="50-X",
+                        matched_store_date=date(2026, 9, 25),
+                        match_kind="exact_issue",
+                    ),
+                ),
+            ),
+        }
+    )
+    result = render_archive_metadata(series, issue, files())
+    parsed = parse_metroninfo(result.metroninfo)
+    assert parsed.store_date == date(2026, 9, 25)
+    assert parsed.cover_date is None
+    ci = ET.fromstring(result.comicinfo)
+    assert ci.find("Year") is None and ci.find("Month") is None and ci.find("Day") is None
+    assert {item.identity for item in parsed.evidence} == {CV_SERIES, CV_ISSUE}
+    assert b"1001" not in result.metroninfo and b"1002" not in result.metroninfo
+    validate_metroninfo_xml(result.metroninfo)
 
 
 def test_explicit_credit_clear_cannot_discard_resource_ids():

@@ -5,6 +5,7 @@ from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
     ExternalIdentityRef,
     IdentityNamespace,
@@ -57,6 +58,10 @@ class PassiveReleaseOrigin(BaseModel):
     locg_series_id: str
     release_ids: tuple[str, ...] = Field(min_length=1, max_length=10000)
     fetched_at: AwareDatetime
+    issue_identity: ExternalIdentityRef | None = None
+    issue_number_text: str | None = None
+    matched_store_date: date | None = None
+    match_kind: Literal["exact_issue", "number_date"] | None = None
 
     @model_validator(mode="after")
     def exact_release_context(self) -> Self:
@@ -75,6 +80,20 @@ class PassiveReleaseOrigin(BaseModel):
             )
         ):
             raise ValueError("Passive release provenance requires exact, distinct IDs")
+        proof = (
+            self.issue_identity,
+            self.issue_number_text,
+            self.matched_store_date,
+            self.match_kind,
+        )
+        if any(value is not None for value in proof) and (
+            any(value is None for value in proof)
+            or self.issue_identity is None
+            or self.issue_identity.entity_kind is not MetadataEntityKind.ISSUE
+            or self.issue_identity.namespace is IdentityNamespace.LOCG
+            or normalize_issue_number_text(self.issue_number_text or "") != self.issue_number_text
+        ):
+            raise ValueError("Passive issue provenance requires a complete native issue proof")
         return self
 
 
@@ -136,18 +155,12 @@ class MetadataSnapshot(BaseModel):
                 or (
                     origin.passive_release is not None
                     and (
-                        self.entity_kind is not MetadataEntityKind.SERIES
-                        or origin.field not in {"publisher", "year_start", "volume"}
+                        not self._passive_origin_matches(origin)
                         or origin.source is not None
                         or origin.source_updated_at is not None
                         or origin.user_override
                         or origin.derivation is not None
                         or origin.embedded_documents
-                        or not any(
-                            identity.namespace is IdentityNamespace.LOCG
-                            and identity.external_id == origin.passive_release.locg_series_id
-                            for identity in self.identities
-                        )
                     )
                 )
                 or (
@@ -161,3 +174,25 @@ class MetadataSnapshot(BaseModel):
                 raise ValueError("Snapshot field provenance is inconsistent")
             fields.add(origin.field)
         return self
+
+    def _passive_origin_matches(self, origin: FieldOrigin) -> bool:
+        proof = origin.passive_release
+        assert proof is not None
+        if self.entity_kind is MetadataEntityKind.SERIES:
+            return (
+                proof.issue_identity is None
+                and origin.field in {"publisher", "year_start", "volume"}
+                and any(
+                    identity.namespace is IdentityNamespace.LOCG
+                    and identity.external_id == proof.locg_series_id
+                    for identity in self.identities
+                )
+            )
+        return (
+            self.entity_kind is MetadataEntityKind.ISSUE
+            and origin.field == "store_date"
+            and proof.issue_identity is not None
+            and proof.issue_identity in self.identities
+            and proof.issue_number_text == self.values.issue_number_text
+            and proof.matched_store_date == self.values.store_date
+        )
