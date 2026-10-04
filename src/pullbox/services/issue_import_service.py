@@ -41,6 +41,8 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.services.direct_pack_paired_metadata import StagedPackMember
+
 
 class ManualIssueImportError(Exception):
     """Structured validation error for manual issue imports."""
@@ -156,6 +158,7 @@ async def execute_manual_issue_import(
     prepared: PreparedManualIssueImport,
     *,
     use_paired_metadata: bool = True,
+    staged_pack_member: StagedPackMember | None = None,
     allow_resource_safety_exception: bool = False,
     preparation_progress_callback: Callable[[str, int, int, str], Any] | None = None,
     transfer_progress_callback: Callable[[int, int], Any] | None = None,
@@ -163,14 +166,29 @@ async def execute_manual_issue_import(
     cancellation_check: ControlCheck | None = None,
 ) -> ManualIssueImportResult:
     """Import one validated file into the library for the selected issue."""
-    paired = (
+    paired = staged_pack_member is not None or (
         use_paired_metadata
         and get_settings().metadata_paired_import_writer_enabled
         and prepared.ingest_policy.update_embedded_comicinfo_from_match
     )
-    factory = async_sessionmaker(session.bind, expire_on_commit=False) if paired else None
+    factory = (
+        async_sessionmaker(session.bind, expire_on_commit=False)
+        if paired and staged_pack_member is None
+        else None
+    )
     plan = None
     source_signature = None
+    if staged_pack_member is not None:
+        prepared = await prepare_manual_issue_import(
+            session,
+            issue_id=prepared.issue_id,
+            file_path=str(prepared.source_path),
+            move_to_library=True,
+        )
+        if prepared.ingest_policy != staged_pack_member.plan.policy:
+            raise ManualIssueImportError(
+                status_code=409, detail="Import settings changed; retry with the current settings."
+            )
     if factory is not None:
         if session.new or session.dirty or session.deleted:
             raise ManualIssueImportError(
@@ -213,6 +231,8 @@ async def execute_manual_issue_import(
         *,
         allow_resource_safety_exception: bool = False,
     ) -> Path:
+        if staged_pack_member is not None:
+            return staged_pack_member.staged.path
         if paired:
 
             async def conversion_progress(stage: str, current: int, total: int, unit: str) -> None:
@@ -247,6 +267,8 @@ async def execute_manual_issue_import(
         transfer_method: str,
         progress_callback: Callable[[str, int, int, str], Any] | None = None,
     ) -> bool:
+        if staged_pack_member is not None:
+            return await staged_pack_member.materialize(source, target)
         if factory is not None and plan is not None and source_signature is not None:
 
             async def paired_progress(stage: str, current: int, total: int, unit: str) -> None:

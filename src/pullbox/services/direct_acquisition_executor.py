@@ -635,6 +635,7 @@ class DirectAcquisitionExecutor:
                     expected_issue_numbers=pack_coverage,
                     replace_existing_file=attempt.replace_existing_file,
                     allow_resource_safety_exception=_resource_safety_override_allowed(attempt),
+                    cancel_event=cancel_event,
                 )
             else:
                 control_args = (
@@ -652,7 +653,10 @@ class DirectAcquisitionExecutor:
                     allow_resource_safety_exception=_resource_safety_override_allowed(attempt),
                     **control_args,
                 )
-        except (ArtifactTransferCancelledError, JobCancelledError):
+        except (ArtifactTransferCancelledError, JobCancelledError, asyncio.CancelledError):
+            if len(pack_coverage) > 1:
+                await session.rollback()
+                await _load_attempt(session, acquisition_id, artifact_id)
             raise
         except DirectArtifactPackError as exc:
             await session.rollback()

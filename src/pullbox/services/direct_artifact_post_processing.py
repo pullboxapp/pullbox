@@ -6,6 +6,7 @@ import asyncio
 import os
 import shutil
 import tempfile
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
+from pullbox.config import get_settings
+from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.download import DownloadState
 from pullbox.models.issue import Issue, IssueStatus
@@ -180,6 +183,7 @@ async def run_direct_artifact_pack_post_processing(
     expected_issue_numbers: frozenset[str],
     replace_existing_file: bool,
     allow_resource_safety_exception: bool = False,
+    cancel_event: asyncio.Event | None = None,
 ) -> DirectPostProcessingResult:
     """Import separable same-series pack members through normal issue ingestion."""
     if acquisition_id < 1 or download_history_id < 1 or issue_id < 1:
@@ -193,6 +197,21 @@ async def run_direct_artifact_pack_post_processing(
     if initiating_issue is None:
         raise RuntimeError("The target issue for this direct-download pack no longer exists.")
 
+    from pullbox.services.direct_paired_metadata import prepare_direct_handoff
+
+    handoff = (
+        await prepare_direct_handoff(
+            session,
+            acquisition_id=acquisition_id,
+            download_id=download_history_id,
+            issue_id=issue_id,
+            source_path=source_path,
+            allow_resource_safety_exception=allow_resource_safety_exception,
+            cancel_event=cancel_event,
+        )
+        if get_settings().metadata_paired_direct_writer_enabled or allow_resource_safety_exception
+        else None
+    )
     extracted_paths = await asyncio.to_thread(
         extract_same_series_issue_files,
         source_path,
@@ -229,7 +248,10 @@ async def run_direct_artifact_pack_post_processing(
             IssueStatus.DOWNLOADING,
         }:
             continue
-        await validate_direct_artifact(session, file_path)
+        if allow_resource_safety_exception:
+            await validate_direct_artifact(session, file_path, allow_resource_safety_exception=True)
+        else:
+            await validate_direct_artifact(session, file_path)
         prepared_imports.append(
             await prepare_manual_issue_import(
                 session,
@@ -241,28 +263,55 @@ async def run_direct_artifact_pack_post_processing(
     if not prepared_imports:
         raise RuntimeError("No wanted issues in this direct-download pack can be imported.")
 
+    async def check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelledError("Direct pack import cancelled")
+
+    from pullbox.services.direct_pack_paired_metadata import stage_direct_pack_metadata
+
     imported_results: list[ManualIssueImportResult] = []
-    try:
-        for prepared in prepared_imports:
-            imported = await execute_manual_issue_import(
-                session,
-                prepared,
-                # Packs retain their existing atomic batch, not the single-import writer.
-                use_paired_metadata=False,
-                allow_resource_safety_exception=allow_resource_safety_exception,
+    async with AsyncExitStack() as stack:
+        staged_members = (
+            await stack.enter_async_context(
+                stage_direct_pack_metadata(
+                    session,
+                    prepared_imports,
+                    source_path,
+                    handoff=handoff,
+                    allow_resource_safety_exception=allow_resource_safety_exception,
+                    cancellation_check=check_cancelled,
+                )
             )
-            imported_results.append(imported)
-            await asyncio.to_thread(
-                _materialize_library_symlink,
-                Path(imported.library_file.file_path),
-                prepared.source_path,
-            )
-    except Exception:
-        # The executor rolls database state back. Remove any files copied before a later
-        # member failed so a rejected pack never leaves partial library artifacts behind.
-        for result in imported_results:
-            await asyncio.to_thread(Path(result.library_file.file_path).unlink, missing_ok=True)
-        raise
+            if get_settings().metadata_paired_direct_writer_enabled
+            else {}
+        )
+        try:
+            for prepared in prepared_imports:
+                await check_cancelled()
+                imported = await execute_manual_issue_import(
+                    session,
+                    prepared,
+                    use_paired_metadata=False,
+                    staged_pack_member=staged_members.get(prepared.issue_id),
+                    cancellation_check=check_cancelled,
+                    allow_resource_safety_exception=allow_resource_safety_exception,
+                )
+                imported_results.append(imported)
+                await asyncio.to_thread(
+                    _materialize_library_symlink,
+                    Path(imported.library_file.file_path),
+                    prepared.source_path,
+                )
+            await check_cancelled()
+        except BaseException:
+            # The executor rolls database state back. Remove any files copied before a later
+            # member failed so a rejected pack never leaves partial library artifacts behind.
+            for result in imported_results:
+                if result.issue_id not in staged_members:
+                    await asyncio.to_thread(
+                        Path(result.library_file.file_path).unlink, missing_ok=True
+                    )
+            raise
     primary_import_result = next(
         (result for result in imported_results if result.issue_id == issue_id),
         imported_results[0],

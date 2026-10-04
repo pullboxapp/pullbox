@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import stat
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,10 +47,13 @@ from pullbox.services.metadata_series_refresh_state import read_series_refresh_s
 from pullbox.utilities.executors.archive_metadata_staging import stage_cbz_metadata_interruptible
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from pullbox.core.library_policy import LibraryIngestPolicy
     from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
+    from pullbox.utilities.executors.archive_metadata_staging import StagedArchiveMetadata
     from pullbox.utilities.executors.archive_subprocess import ControlCheck, ProgressCallback
 
 
@@ -167,22 +171,12 @@ async def materialize_manual_metadata(
 ) -> bool:
     """Stage both XML files privately, revalidate, then publish without overwrite."""
     directories = await asyncio.to_thread(_directories, target, Path(plan.root_path))
-    limit = plan.limit
-    if not allow_resource_safety_exception:
-        await asyncio.to_thread(check_archive_size, source, limit)
-    if allow_resource_safety_exception:
-        members = await asyncio.to_thread(ArchiveReader(source).list_members)
-        limit = max(limit, sum(member.size for member in members) + 2 * MAX_METADATA_BYTES)
-    series, issue = assemble_archive_metadata_state(plan.metadata, None, now=datetime.now(UTC))
     async with (
-        stage_cbz_metadata_interruptible(
+        stage_manual_metadata(
+            plan,
             source,
             target.parent,
-            series,
-            issue,
-            max_uncompressed_bytes=limit,
-            block_dangerous=plan.block_dangerous,
-            metadata_state=plan.metadata,
+            allow_resource_safety_exception=allow_resource_safety_exception,
             cancellation_check=cancellation_check,
             progress_callback=progress_callback,
         ) as staged,
@@ -203,3 +197,35 @@ async def materialize_manual_metadata(
         # Keep metadata/root row locks through the short publication boundary.
         await asyncio.to_thread(publish_file_without_overwrite, staged.path, target)
     return True
+
+
+@asynccontextmanager
+async def stage_manual_metadata(
+    plan: ManualMetadataPlan,
+    source: Path,
+    staging_parent: Path,
+    *,
+    allow_resource_safety_exception: bool = False,
+    cancellation_check: ControlCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> AsyncIterator[StagedArchiveMetadata]:
+    """Reuse the verified reconciler before an existing owner registers a batch."""
+    limit = plan.limit
+    if not allow_resource_safety_exception:
+        await asyncio.to_thread(check_archive_size, source, limit)
+    if allow_resource_safety_exception:
+        members = await asyncio.to_thread(ArchiveReader(source).list_members)
+        limit = max(limit, sum(member.size for member in members) + 2 * MAX_METADATA_BYTES)
+    series, issue = assemble_archive_metadata_state(plan.metadata, None, now=datetime.now(UTC))
+    async with stage_cbz_metadata_interruptible(
+        source,
+        staging_parent,
+        series,
+        issue,
+        max_uncompressed_bytes=limit,
+        block_dangerous=plan.block_dangerous,
+        metadata_state=plan.metadata,
+        cancellation_check=cancellation_check,
+        progress_callback=progress_callback,
+    ) as staged:
+        yield staged
