@@ -21,6 +21,17 @@ def test_series_sidecar_preview_write_and_focus(authed_page, seeded_server, them
         "snapshot": {
             "values": {"title": "Batman", "publisher": "DC", "year_start": 1940, "issue_count": 3},
             "identities": [{"namespace": "comicvine", "external_id": "796"}],
+            "origins": [
+                {
+                    "field": "publisher",
+                    "source": None,
+                    "passive_release": {
+                        "locg_series_id": "77",
+                        "release_ids": ["1001", "1002"],
+                        "fetched_at": "2026-10-04T00:00:00Z",
+                    },
+                }
+            ],
         },
         "targets": [
             {"directory": "/comics/Batman", "action": "create", "reason": None},
@@ -48,6 +59,18 @@ def test_series_sidecar_preview_write_and_focus(authed_page, seeded_server, them
     expect(dialog).to_be_visible()
     expect(dialog.get_by_text("/comics/Batman", exact=True)).to_be_visible()
     expect(dialog.get_by_text("Files kept in place are not modified.", exact=True)).to_be_visible()
+    dialog.get_by_text("Compiled metadata", exact=True).click()
+    compiled = dialog.locator("pre")
+    expect(compiled).to_contain_text('"passive_release"')
+    expect(compiled).to_contain_text('"locg_series_id": "77"')
+    expect(compiled).to_contain_text('"1001"')
+    expect(compiled).to_contain_text('"1002"')
+    compiled.focus()
+    expect(dialog.get_by_role("region", name="Compiled series metadata")).to_be_focused()
+    compiled.press("End")
+    page.wait_for_function(
+        "() => document.querySelector('[aria-label=\"Compiled series metadata\"]').scrollTop > 0"
+    )
     assert calls == [], "Preview must never write files"
     assert_no_axe_violations(
         page, name=f"series-sidecar-{theme}", include=['[aria-labelledby="series-sidecar-title"]']
