@@ -18,6 +18,19 @@ from pullbox.schemas.metadata_sources import SeriesDiscoveryQuery
 from tests.api.test_gcd_local import gcd_dump
 
 
+def test_external_read_compiles_bound_in_parameters(tmp_path):
+    from sqlalchemy import select
+
+    from pullbox.providers.metadata.gcd_local_database import ISSUE, rows
+
+    path = gcd_dump(tmp_path / "gcd.db")
+    with open_readonly(path, threading.Event(), time.monotonic() + 1) as db:
+        assert [row[0] for row in rows(db, select(ISSUE.c.id).where(ISSUE.c.id.in_([10, 12])))] == [
+            10,
+            12,
+        ]
+
+
 def test_series_count_uses_series_index_not_low_selectivity_deleted_index(tmp_path):
     from sqlalchemy.dialects.sqlite import dialect
 
