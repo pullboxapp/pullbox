@@ -83,7 +83,8 @@ identities. Owning API tests exercise real authentication, encrypted policy
 saves, exact preview/Add, repeat safety, and wrong-parent refusal. Browser tests
 cover the flag, token lifecycle, concurrent priority drafts, stale revisions,
 safe failures, token-only sign-in, cancellation, transaction-free network calls,
-mounted pending controls, and expanded light/dark/tron accessibility.
+mounted pending controls, and expanded Light/Dark/System accessibility. System
+coverage checks both OS preferences, reload persistence, and preference changes.
 Tests never contact the live GCD API.
 
 For an explicitly feature-enabled development instance:

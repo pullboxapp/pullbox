@@ -311,14 +311,32 @@ def test_gcd_stale_save_requires_explicit_reload(gcd_page, seeded_server):
     assert save(page).json()["credential_configured"]
 
 
-@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
-def test_gcd_access_uses_standard_buttons_and_accessible_layout(gcd_page, theme, width):
+@pytest.mark.parametrize(
+    "theme,width,os_scheme",
+    [
+        ("light", 1280, "dark"),
+        ("dark", 390, "light"),
+        ("system", 1280, "light"),
+        ("system", 390, "dark"),
+    ],
+)
+def test_gcd_access_uses_standard_buttons_and_accessible_layout(gcd_page, theme, width, os_scheme):
+    assert theme in {"light", "dark", "system"}, "Test an actual Pullbox theme choice"
     page = gcd_page
     page.set_viewport_size({"width": width, "height": 900})
-    page.evaluate(
-        "theme => { localStorage.setItem('theme', theme); document.documentElement.setAttribute('data-theme', theme); }",
-        theme,
+    page.emulate_media(color_scheme=os_scheme)
+    page.evaluate("theme => applyTheme(theme)", theme)
+    resolved = os_scheme if theme == "system" else theme
+    expect(page.locator("html")).to_have_attribute("data-theme", resolved)
+    assert page.evaluate("localStorage.getItem('pullbox-theme')") == (
+        None if theme == "system" else theme
     )
+    page.reload()
+    expect(page.locator("html")).to_have_attribute("data-theme", resolved)
+    if theme == "system":
+        resolved = "dark" if os_scheme == "light" else "light"
+        page.emulate_media(color_scheme=resolved)
+        expect(page.locator("html")).to_have_attribute("data-theme", resolved)
     card = page.get_by_test_id("gcd-api-access")
     expect(card).to_be_visible()
     card.get_by_text("Sign in with GCD instead", exact=True).click()
@@ -329,7 +347,7 @@ def test_gcd_access_uses_standard_buttons_and_accessible_layout(gcd_page, theme,
         "button", name="Save GCD API settings", exact=True
     ).get_attribute("class")
     assert_no_axe_violations(
-        page, name=f"gcd-api-{theme}", include=['[data-testid="gcd-api-access"]']
+        page, name=f"gcd-api-{theme}-{os_scheme}", include=['[data-testid="gcd-api-access"]']
     )
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
