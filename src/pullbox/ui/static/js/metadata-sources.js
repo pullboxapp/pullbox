@@ -62,6 +62,89 @@ function gcdLocalSettings(seed, csrf) {
   };
 }
 
+function gcdApiSettings(seed, csrf) {
+  const clone = value => JSON.parse(JSON.stringify(value));
+  return {
+    base: clone(seed), enabled: Boolean(seed?.enabled), token: '', clearToken: false,
+    busy: false, error: '', message: '', conflict: false, alive: true, controller: null,
+    destroy() { this.alive = false; this.token = ''; this.controller?.abort(); },
+    get dirty() {
+      return this.enabled !== this.base.enabled || Boolean(this.token) || this.clearToken;
+    },
+    prioritiesUpdated(detail) {
+      const policy = detail?.policies?.find(item => item.source === 'gcd_api_v2');
+      if (policy && this.base.revision === detail.previousRevisions?.gcd_api_v2) {
+        this.base = clone(policy);
+      }
+    },
+    async request(url, options = {}) {
+      const controller = new AbortController();
+      this.controller = controller;
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      try {
+        const response = await fetch(url, {...options, signal: controller.signal,
+          headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}});
+        return {ok: response.ok, status: response.status, data: response.ok ? await response.json() : null};
+      } finally { clearTimeout(timeout); this.controller = null; }
+    },
+    async reload() {
+      if (this.busy) return;
+      this.busy = true;
+      try {
+        const response = await this.request('/api/v1/metadata/sources');
+        if (!this.alive) return;
+        if (!response.ok) throw new Error('load');
+        this.base = clone(response.data.find(item => item.source === 'gcd_api_v2'));
+        this.enabled = this.base.enabled;
+        this.token = ''; this.clearToken = false; this.conflict = false;
+        this.error = ''; this.message = '';
+      } catch (_) {
+        if (this.alive) this.error = 'Could not load GCD API settings. Your draft is kept; retry.';
+      } finally { this.busy = false; }
+    },
+    async save() {
+      if (this.busy || !this.dirty) return;
+      this.error = ''; this.message = '';
+      if (this.enabled && this.clearToken) {
+        this.error = 'Disable GCD API v2 before removing its saved token.'; return;
+      }
+      if (this.enabled && !this.token && !this.base.credential_configured) {
+        this.error = 'Enter a token before enabling GCD API v2.'; return;
+      }
+      if (this.token && (!/^[\x21-\x7e]+$/.test(this.token) || this.token.length > 4096 || this.token.startsWith('enc:'))) {
+        this.error = 'Enter your GCD API token without spaces or line breaks.'; return;
+      }
+      const base = clone(this.base);
+      this.busy = true;
+      try {
+        const response = await this.request('/api/v1/metadata/sources/gcd_api_v2', {
+          method: 'PUT', body: JSON.stringify({revision: base.revision, enabled: this.enabled,
+            priority: base.priority, domain_priorities: base.domain_priorities, settings: base.settings,
+            ...(this.token && !this.clearToken ? {credential: this.token} : {}), clear_credential: this.clearToken}),
+        });
+        if (!this.alive) return;
+        if (response.status === 409) {
+          this.conflict = true;
+          this.error = 'GCD API settings changed in another session. Your draft is kept. Load saved GCD API settings before retrying.';
+          return;
+        }
+        if (!response.ok) throw new Error('save');
+        this.base = clone(response.data); this.enabled = this.base.enabled;
+        this.token = ''; this.clearToken = false; this.conflict = false;
+        this.message = 'GCD API settings saved. Connection checks use this saved configuration.';
+        window.dispatchEvent(new CustomEvent('metadata-credentials-updated', {
+          detail: {source: 'gcd_api_v2', previousRevision: base.revision, policy: response.data},
+        }));
+      } catch (_) {
+        if (this.alive) {
+          this.conflict = true;
+          this.error = 'Could not save GCD API settings. Your draft is kept. Load saved settings to confirm before retrying.';
+        }
+      } finally { this.busy = false; }
+    },
+  };
+}
+
 function metadataSourceSettings(seed, csrf) {
   const clone = value => JSON.parse(JSON.stringify(value));
   const labels = {

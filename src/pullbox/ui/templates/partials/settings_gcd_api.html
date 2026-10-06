@@ -1,0 +1,45 @@
+{% set gcd_api = metadata_source_seed|default([])|selectattr('source', 'equalto', 'gcd_api_v2')|first %}
+{% if gcd_api and gcd_api.availability != 'feature_disabled' %}
+<div class="mt-6" data-testid="gcd-api-access" x-data="gcdApiEditor()"
+     @metadata-priorities-updated.window="prioritiesUpdated($event.detail)">
+{% call section_card(title="GCD API v2 access", title_style="plain", body_class="p-0") %}
+  <form @submit.prevent="save()">
+    <div class="settings-rows settings-rows-align-end">
+      {% call settings_row(label="Enable GCD API v2", label_for="gcd-api-enabled", help="Use the GCD beta API in your metadata source order. Disabling it keeps the saved token.") %}
+        <input id="gcd-api-enabled" type="checkbox" class="checkbox-pb" x-model="enabled" :disabled="busy">
+      {% endcall %}
+      {% call settings_row(label="GCD API token", label_for="gcd-api-token", help="Enter your GCD API token. Leave this field blank to keep the saved token. Pullbox does not save your GCD username or password.") %}
+        <div class="w-full max-w-xl space-y-3">
+          <input id="gcd-api-token" type="password" class="input-pb w-full font-mono" x-model="token"
+                 autocomplete="new-password" maxlength="4096" spellcheck="false" autocapitalize="none"
+                 :disabled="busy || clearToken" aria-describedby="gcd-api-token-status">
+          <p id="gcd-api-token-status" class="text-sm text-pb-text-sec"
+             x-text="base.credential_configured ? 'A token is saved.' : 'No token is saved.'"></p>
+          <label class="flex items-center gap-3 text-sm text-pb-text" x-show="base.credential_configured" x-cloak>
+            <input type="checkbox" class="checkbox-pb" x-model="clearToken" :disabled="busy"
+                   @change="if (clearToken) token = ''">Remove saved token
+          </label>
+        </div>
+      {% endcall %}
+    </div>
+    <div class="px-5 pb-4 space-y-3">
+      <p class="text-sm text-pb-text-sec">Beta searches use a title substring and inspect at most 100 candidates. Use a specific title and year for broad searches. GCD covers and story arc search are not available here.</p>
+      <p class="text-sm text-pb-text-sec">Metadata from the <a class="text-pb-interactive underline" href="https://www.comics.org/" target="_blank" rel="noopener noreferrer">Grand Comics Database</a> is licensed separately from Pullbox.</p>
+      <p role="alert" class="text-sm text-pb-danger" x-show="error" x-text="error" x-cloak></p>
+      <p role="status" class="text-sm text-pb-success" x-show="message" x-text="message" x-cloak></p>
+    </div>
+    {% call settings_footer(align="end") %}
+      <div class="settings-footer-actions ml-auto justify-end">
+        <button type="button" class="btn-ghost" x-show="conflict" x-cloak :disabled="busy" @click="reload()">Load saved GCD API settings</button>
+        <button type="submit" class="btn-primary" :disabled="busy || !dirty" :aria-busy="busy">Save GCD API settings</button>
+      </div>
+    {% endcall %}
+  </form>
+{% endcall %}
+</div>
+<script>
+function gcdApiEditor() {
+  return gcdApiSettings({{ gcd_api|tojson }}, {{ csrf_token|tojson }});
+}
+</script>
+{% endif %}

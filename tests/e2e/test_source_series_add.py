@@ -22,7 +22,11 @@ def preview(source="metron_api", identifier="42", **updates):
             "status": "ok",
             "data": {
                 "source": source,
-                "identity_namespace": "metron" if source == "metron_api" else "comicvine",
+                "identity_namespace": "metron"
+                if source == "metron_api"
+                else "gcd"
+                if source.startswith("gcd_")
+                else "comicvine",
                 "external_id": identifier,
                 "title": "Verified series",
                 "year_start": 2024,
@@ -49,7 +53,7 @@ def open_result(page, source="metron_api", identifier="42"):
     )
 
 
-@pytest.mark.parametrize("source", ["comicvine_local", "comicvine_api", "metron_api"])
+@pytest.mark.parametrize("source", ["comicvine_local", "comicvine_api", "metron_api", "gcd_api_v2"])
 def test_preview_then_add_sends_only_source_identity_revision_and_root(
     authed_page, seeded_server, source
 ):
