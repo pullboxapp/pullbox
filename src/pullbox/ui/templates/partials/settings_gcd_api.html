@@ -35,6 +35,29 @@
       </div>
     {% endcall %}
   </form>
+  <details class="m-5 rounded-xl border border-pb-border p-4"
+           @toggle="if (!$el.open) clearSignIn()">
+    <summary class="flex items-center gap-2 text-sm font-medium text-pb-text">{{ ui_icon('chevron-down') }} Sign in with GCD instead</summary>
+    <form class="mt-4" @submit.prevent="signIn()" autocomplete="off">
+      <p class="mb-3 text-sm text-pb-text-sec">Send your credentials only to GCD's beta HTTPS endpoint. Pullbox clears them after submission and saves only a verified token. This enables GCD API v2 without changing your source order.</p>
+      <div class="settings-rows settings-rows-align-end">
+        {% call settings_row(label="GCD username", label_for="gcd-sign-in-username") %}
+          <input id="gcd-sign-in-username" type="text" class="input-pb w-full" x-model="username"
+                 maxlength="1024" autocomplete="off" spellcheck="false" autocapitalize="none"
+                 :disabled="busy || dirty">
+        {% endcall %}
+        {% call settings_row(label="GCD password", label_for="gcd-sign-in-password") %}
+          <input id="gcd-sign-in-password" type="password" class="input-pb w-full" x-model="password"
+                 maxlength="4096" autocomplete="new-password" :disabled="busy || dirty">
+        {% endcall %}
+      </div>
+      <p class="mt-3 text-sm text-pb-text-sec" x-show="dirty" x-cloak>Save or reload your pending API settings changes before signing in.</p>
+      <div class="mt-4 flex justify-end">
+        <button type="submit" class="btn-primary" :disabled="busy || dirty || !username || !password"
+                :aria-busy="busy">Sign in and enable GCD</button>
+      </div>
+    </form>
+  </details>
 {% endcall %}
 </div>
 <script>

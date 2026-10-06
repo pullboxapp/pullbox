@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, urlsplit
 
 import httpx
+from pydantic import SecretStr
 
 from pullbox import __version__
 from pullbox.core.provider_cooldown import ProviderCooldown, provider_cooldown, retry_after_seconds
@@ -26,12 +27,89 @@ from pullbox.services.metadata_source_reads import MAX_PAGE, PAGE_SIZE, page_num
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pydantic import SecretStr
-
     from pullbox.schemas.metadata_sources import SeriesDiscoveryQuery
 
 _BASE = "https://beta.comics.org/api/v2/"
 _MAX_BYTES = 2 * 1024 * 1024
+
+
+async def exchange_gcd_token(
+    username: SecretStr,
+    password: SecretStr,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    cooldown: ProviderCooldown | None = None,
+) -> SecretStr:
+    """Exchange request-scoped credentials at the fixed GCD token endpoint."""
+    hold = cooldown or provider_cooldown("gcd_api_v2", "token-exchange")
+    credentials = {"username": username.get_secret_value(), "password": password.get_secret_value()}
+    try:
+        async with asyncio.timeout(8), hold.request_lock:
+            if hold.remaining_seconds:
+                raise MetadataSourceError(SourceStatus.RATE_LIMITED, hold.remaining_seconds)
+            async with (
+                httpx.AsyncClient(
+                    base_url=_BASE,
+                    headers={"User-Agent": f"Pullbox/{__version__}", "Accept": "application/json"},
+                    timeout=httpx.Timeout(8, connect=4),
+                    follow_redirects=False,
+                    transport=transport,
+                ) as client,
+                client.stream("POST", "auth/token/", json=credentials) as response,
+            ):
+                status = response.status_code
+                if status in {400, 401, 403}:
+                    raise MetadataSourceError(SourceStatus.AUTHENTICATION_FAILED)
+                if status == 429 or status in {500, 502, 503, 504}:
+                    if status == 429 or "Retry-After" in response.headers:
+                        hold.defer(
+                            retry_after_seconds(response.headers.get("Retry-After"), default=60)
+                        )
+                    raise MetadataSourceError(
+                        SourceStatus.RATE_LIMITED if status == 429 else SourceStatus.UNAVAILABLE,
+                        hold.remaining_seconds or None,
+                    )
+                if (
+                    status != 200
+                    or response.headers.get("content-type", "").split(";")[0] != "application/json"
+                ):
+                    raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE)
+                body = bytearray()
+                try:
+                    async for chunk in response.aiter_bytes():
+                        if len(body) + len(chunk) > 8192:
+                            raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE)
+                        body.extend(chunk)
+                    payload = json.loads(
+                        body, object_pairs_hook=_json_object, parse_constant=_json_constant
+                    )
+                    token = (
+                        payload.get("token")
+                        if isinstance(payload, dict) and set(payload) == {"token"}
+                        else None
+                    )
+                    if (
+                        not isinstance(token, str)
+                        or not token
+                        or len(token) > 4096
+                        or not token.isascii()
+                        or token.startswith("enc:")
+                        or any(
+                            char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token
+                        )
+                    ):
+                        raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE)
+                    return SecretStr(token)
+                except (ValueError, TypeError, OverflowError, RecursionError):
+                    raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE) from None
+                finally:
+                    body.clear()
+    except (TimeoutError, httpx.TimeoutException):
+        raise MetadataSourceError(SourceStatus.TIMEOUT) from None
+    except httpx.HTTPError:
+        raise MetadataSourceError(SourceStatus.UNAVAILABLE) from None
+    finally:
+        credentials.clear()
 
 
 def _json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

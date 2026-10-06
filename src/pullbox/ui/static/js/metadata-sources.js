@@ -67,7 +67,9 @@ function gcdApiSettings(seed, csrf) {
   return {
     base: clone(seed), enabled: Boolean(seed?.enabled), token: '', clearToken: false,
     busy: false, error: '', message: '', conflict: false, alive: true, controller: null,
-    destroy() { this.alive = false; this.token = ''; this.controller?.abort(); },
+    username: '', password: '',
+    clearSignIn() { this.username = ''; this.password = ''; },
+    destroy() { this.alive = false; this.token = ''; this.clearSignIn(); this.controller?.abort(); },
     get dirty() {
       return this.enabled !== this.base.enabled || Boolean(this.token) || this.clearToken;
     },
@@ -96,7 +98,7 @@ function gcdApiSettings(seed, csrf) {
         if (!response.ok) throw new Error('load');
         this.base = clone(response.data.find(item => item.source === 'gcd_api_v2'));
         this.enabled = this.base.enabled;
-        this.token = ''; this.clearToken = false; this.conflict = false;
+        this.token = ''; this.clearToken = false; this.clearSignIn(); this.conflict = false;
         this.error = ''; this.message = '';
       } catch (_) {
         if (this.alive) this.error = 'Could not load GCD API settings. Your draft is kept; retry.';
@@ -141,6 +143,47 @@ function gcdApiSettings(seed, csrf) {
           this.error = 'Could not save GCD API settings. Your draft is kept. Load saved settings to confirm before retrying.';
         }
       } finally { this.busy = false; }
+    },
+    async signIn() {
+      if (this.busy || this.dirty || !this.username || !this.password) return;
+      const base = clone(this.base);
+      const input = {revision: base.revision, username: this.username, password: this.password};
+      this.busy = true; this.error = ''; this.message = ''; this.clearSignIn();
+      try {
+        const pending = this.request('/api/v1/metadata/sources/gcd_api_v2/sign-in', {
+          method: 'POST', body: JSON.stringify(input),
+        });
+        input.username = ''; input.password = '';
+        const response = await pending;
+        if (!this.alive) return;
+        if (response.status === 409) {
+          this.conflict = true;
+          this.error = 'GCD API settings changed. Your sign-in fields were cleared. Load saved GCD API settings before retrying.';
+          return;
+        }
+        if (!response.ok) {
+          const messages = new Map([
+            [400, 'GCD did not accept the sign-in or token. Check your GCD credentials. The saved source is unchanged.'],
+            [429, 'GCD is rate-limited. Wait before signing in again. The saved source is unchanged.'],
+            [502, 'GCD sign-in or its connection check failed. Try again later. The saved source is unchanged.'],
+            [504, 'GCD sign-in or its connection check timed out. Try again later. The saved source is unchanged.'],
+          ]);
+          if (!messages.has(response.status)) throw new Error('sign-in');
+          this.error = messages.get(response.status);
+          return;
+        }
+        this.base = clone(response.data); this.enabled = this.base.enabled;
+        this.token = ''; this.clearToken = false; this.conflict = false;
+        this.message = 'GCD connected. A verified token is saved; your username and password were not saved.';
+        window.dispatchEvent(new CustomEvent('metadata-credentials-updated', {
+          detail: {source: 'gcd_api_v2', previousRevision: base.revision, policy: response.data},
+        }));
+      } catch (_) {
+        if (this.alive) {
+          this.conflict = true;
+          this.error = 'The connection was lost. Your sign-in fields were cleared. Load saved GCD API settings to confirm before retrying.';
+        }
+      } finally { input.username = ''; input.password = ''; this.clearSignIn(); this.busy = false; }
     },
   };
 }

@@ -5,6 +5,7 @@ from typing import Literal
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import ValidationError
 
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser, Settings
 from pullbox.core.exceptions import ConfigurationError
@@ -13,6 +14,7 @@ from pullbox.models.library import LibraryRoot
 from pullbox.providers.metadata.gcd_local import GcdLocalSource
 from pullbox.schemas.metadata_sources import (
     DeferredMetadataRead,
+    GcdSignInRequest,
     MetadataFetch,
     MetadataPage,
     ProviderIssueRead,
@@ -36,6 +38,7 @@ from pullbox.schemas.metadata_sources import (
 )
 from pullbox.schemas.pagination import PaginatedResponse
 from pullbox.services.gcd_local_activation import activate_snapshot, validate_for_request
+from pullbox.services.gcd_sign_in import sign_in_gcd
 from pullbox.services.metadata_arc_preview import preview_source_arc
 from pullbox.services.metadata_discovery import MetadataSourceError, MetadataSourceRegistry
 from pullbox.services.metadata_read_cache import source_read_cache
@@ -234,6 +237,79 @@ async def save_priorities(
         raise HTTPException(409, str(exc)) from exc
     logger.info("metadata_source_priorities_updated", user_id=user.id)
     return await source_status(session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled)
+
+
+@router.post(
+    "/sources/gcd_api_v2/sign-in",
+    response_model=SourcePolicyRead,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": GcdSignInRequest.model_json_schema(),
+                }
+            },
+        }
+    },
+)
+async def gcd_sign_in(
+    request: Request,
+    session: DbSession,
+    user: InteractiveOperatorUser,
+    settings: Settings,
+) -> SourcePolicyRead:
+    user_id = user.id
+    if not settings.metadata_gcd_api_v2_enabled:
+        raise HTTPException(400, "GCD API v2 is disabled by the release feature flag.")
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+        raise HTTPException(415, "Use JSON for GCD sign-in.")
+    raw = bytearray()
+    try:
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 32768:
+                raise HTTPException(413, "GCD sign-in input is too large.")
+            raw.extend(chunk)
+        # Default request-validation errors can echo secret inputs. Keep this scoped.
+        try:
+            body = GcdSignInRequest.model_validate_json(raw)
+        except ValidationError:
+            raise HTTPException(
+                422, "Enter a GCD username, password, and current settings revision."
+            ) from None
+    finally:
+        raw.clear()
+    try:
+        result = await sign_in_gcd(session, body, gcd_api_enabled=True)
+    except SourceConfigurationConflictError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except MetadataSourceError as exc:
+        message = {
+            SourceStatus.AUTHENTICATION_FAILED: (
+                "GCD did not accept the sign-in or returned token. Check your GCD credentials."
+            ),
+            SourceStatus.RATE_LIMITED: "GCD is rate-limited. Wait before signing in again.",
+            SourceStatus.TIMEOUT: "GCD sign-in or its connection check timed out. Try again later.",
+        }.get(
+            exc.status,
+            "GCD sign-in or its connection check failed. "
+            "The saved source is unchanged; try again later.",
+        )
+        raise HTTPException(
+            {
+                SourceStatus.AUTHENTICATION_FAILED: 400,
+                SourceStatus.RATE_LIMITED: 429,
+                SourceStatus.TIMEOUT: 504,
+            }.get(exc.status, 502),
+            message,
+            headers={"Retry-After": str(exc.retry_after_seconds)}
+            if exc.retry_after_seconds
+            else None,
+        ) from None
+    finally:
+        body.clear_credentials()
+    logger.info("gcd_sign_in_complete", user_id=user_id, revision=result.revision)
+    return result
 
 
 @router.put("/sources/{source}", response_model=SourcePolicyRead)
