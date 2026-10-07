@@ -66,7 +66,7 @@
       </details>
     </div>
   </header>
-  {% if source_key|default("") == "gcd_local" %}
+  {% if source_key|default("") in ("gcd_local", "gcd_api_v2") %}
   <p class="text-sm text-pb-text-sec">GCD publication order is a starting point, not a curated reading order. Members may include reprints. Reorder or skip issues before adding.</p>
   {% else %}
   <p class="text-sm text-pb-text-sec">Issues are listed in {{ source_label }}'s returned order. Reorder or skip issues if needed.</p>

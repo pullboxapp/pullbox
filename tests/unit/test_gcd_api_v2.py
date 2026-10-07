@@ -258,6 +258,9 @@ def test_registry_advertises_only_implemented_gcd_capabilities():
             SourceCapability.SERIES_DETAILS,
             SourceCapability.ISSUE_LIST,
             SourceCapability.ISSUE_DETAILS,
+            SourceCapability.STORY_ARC_SEARCH,
+            SourceCapability.STORY_ARC_DETAILS,
+            SourceCapability.STORY_ARC_ISSUES,
         }
     )
     descriptor = describe_source_policies(
@@ -267,7 +270,8 @@ def test_registry_advertises_only_implemented_gcd_capabilities():
     assert descriptor.availability is SourceStatus.UNCONFIGURED
 
 
-async def test_disabled_feature_never_constructs_or_calls_gcd_transport(monkeypatch):
+@pytest.mark.parametrize("operation", ["series", "story_arc", "story_arc_issues"])
+async def test_disabled_feature_never_constructs_or_calls_gcd_transport(monkeypatch, operation):
     def unexpected(*args, **kwargs):
         pytest.fail("Disabled GCD feature executed a provider factory")
 
@@ -278,7 +282,7 @@ async def test_disabled_feature_never_constructs_or_calls_gcd_transport(monkeypa
     registry = MetadataSourceRegistry(
         [SourceRuntime(policy, SecretStr(TOKEN))], gcd_api_enabled=False
     )
-    result = await registry.series(MetadataSource.GCD_API_V2, "50494")
+    result = await getattr(registry, operation)(MetadataSource.GCD_API_V2, "50494")
     assert result.status is SourceStatus.FEATURE_DISABLED
 
 

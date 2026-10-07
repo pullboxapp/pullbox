@@ -9,7 +9,11 @@ from typing import cast
 
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
-from pullbox.schemas.metadata_sources import ProviderIssueRead, ProviderSeriesRead
+from pullbox.schemas.metadata_sources import (
+    ProviderIssueRead,
+    ProviderSeriesRead,
+    ProviderStoryArcRead,
+)
 
 SOURCE = MetadataSource.GCD_API_V2
 
@@ -122,4 +126,25 @@ def issue(value: object) -> ProviderIssueRead:
         page_count=page_count,
         resource_url=f"https://www.comics.org/issue/{identifier}/",
         source_updated_at=_updated(row.get("modified")),
+    )
+
+
+def story_arc(value: object) -> ProviderStoryArcRead:
+    row = object_row(value)
+    identifier = external_id(row.get("id"))
+    # The detail's primary stories exclude some reprints and are not a member catalog.
+    # Only the paginated native issue endpoint establishes complete membership.
+    return ProviderStoryArcRead(
+        source=SOURCE,
+        identity_namespace=SOURCE.identity_namespace,
+        external_id=identifier,
+        title=_text(row.get("name"), required=True) or "",
+        description=_description(row.get("notes")),
+        resource_url=f"https://www.comics.org/story_arc/{identifier}/",
+        source_updated_at=_updated(row.get("modified")),
+        warnings=[
+            "GCD publication order is a starting point, not a curated reading order. "
+            "Review it before Add.",
+            "GCD story associations may include reprints. Review which issues belong in your arc.",
+        ],
     )

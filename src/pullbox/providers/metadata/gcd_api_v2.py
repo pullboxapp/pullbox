@@ -19,6 +19,7 @@ from pullbox.schemas.metadata_sources import (
     MetadataPage,
     ProviderIssueRead,
     ProviderSeriesRead,
+    ProviderStoryArcRead,
     SourceStatus,
 )
 from pullbox.services.metadata_discovery import MetadataSourceError, SourcePage
@@ -301,7 +302,7 @@ class GcdApiV2Source:
         except httpx.HTTPError:
             raise MetadataSourceError(SourceStatus.UNAVAILABLE) from None
 
-    async def _detail[T: (ProviderSeriesRead, ProviderIssueRead)](
+    async def _detail[T: (ProviderSeriesRead, ProviderIssueRead, ProviderStoryArcRead)](
         self, path: str, external_id: str, normalize_row: Callable[[object], T]
     ) -> MetadataFetch[T]:
         identifier = normalize.external_id(external_id)
@@ -325,6 +326,77 @@ class GcdApiV2Source:
         self, external_id: str, *, validator: str | None = None
     ) -> MetadataFetch[ProviderIssueRead]:
         return await self._detail("issues", external_id, normalize.issue)
+
+    async def story_arc(
+        self, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderStoryArcRead]:
+        return await self._detail("story-arcs", external_id, normalize.story_arc)
+
+    async def story_arcs(self, query: str, *, page: int = 1) -> MetadataPage[ProviderStoryArcRead]:
+        if not isinstance(query, str) or not query.strip() or len(query) > 200:
+            raise ValueError("Expected a bounded arc query")
+        page_number(page)
+        if page > 100:
+            raise ValueError("Story arc search is bounded to 100 source pages")
+        params = {"name": query.strip(), "page_size": str(PAGE_SIZE), "page": str(page)}
+        status, payload = await self._get("story-arcs/", params)
+        if status is not SourceStatus.OK:
+            raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE)
+        try:
+            rows, total, next_page = _envelope(payload, "story-arcs/", params)
+            arcs = [normalize.story_arc(row) for row in rows]
+            if len({row.external_id for row in arcs}) != len(arcs):
+                raise ValueError("Repeated GCD arc identity")
+            truncated = next_page is not None and page == 100
+            return MetadataPage(
+                results=arcs,
+                total=total,
+                next_page=None if truncated else next_page,
+                truncated=truncated,
+            )
+        except (ValueError, TypeError):
+            raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE) from None
+
+    async def story_arc_issues(
+        self, external_id: str, *, page: int = 1, validator: str | None = None
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        identifier = normalize.external_id(external_id)
+        page_number(page)
+        if page > 50:
+            raise ValueError("Story arc membership is bounded to 5000 issues")
+        path = f"story-arcs/{identifier}/issues/"
+        params = {"page_size": str(PAGE_SIZE), "page": str(page)}
+        status, payload = await self._get(path, params)
+        if status is not SourceStatus.OK:
+            return MetadataFetch(status=status)
+        try:
+            rows, total, next_page = _envelope(payload, path, params)
+            issues = [normalize.issue(row) for row in rows]
+            if total > 5000 or len({row.external_id for row in issues}) != len(issues):
+                raise ValueError("Inconsistent GCD arc membership")
+            known = {row.external_id: row for row in issues}
+            for raw, issue in zip(rows, issues, strict=True):
+                wire = normalize.object_row(raw)
+                if "variant_of" not in wire:
+                    raise ValueError("Missing GCD variant evidence")
+                if wire["variant_of"] is None:
+                    continue
+                base_id = normalize.external_id(wire["variant_of"])
+                base = known.get(base_id)
+                if base is None:
+                    # Only variants need an extra read, within the existing page budget.
+                    fetched = await self.issue(base_id)
+                    if fetched.status is not SourceStatus.OK or fetched.data is None:
+                        raise ValueError("Missing GCD variant base")
+                    base = known[base_id] = fetched.data
+                if base.series_external_id == issue.series_external_id:
+                    raise ValueError("Same-series GCD cover variant requires review")
+            return MetadataFetch(
+                status=SourceStatus.OK,
+                data=MetadataPage(results=issues, total=total, next_page=next_page),
+            )
+        except (ValueError, TypeError, ArithmeticError):
+            raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE) from None
 
     async def issues(
         self, external_id: str, *, page: int = 1, validator: str | None = None

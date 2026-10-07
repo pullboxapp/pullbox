@@ -69,12 +69,51 @@ GCD API settings** confirms the persisted state before retrying.
 
 ## Deliberately Incomplete
 
-This milestone does not add GCD cover ingestion, conditional refresh, Story Arc
-search, recent-issue discovery, or automatic identity matching. Authenticated
+This milestone does not add GCD cover ingestion, conditional refresh,
+recent-issue discovery, or automatic identity matching. Authenticated
 live GCD search/Add still needs an operator-supplied token or successful sign-in.
 No production automatic-writing default, import/recovery policy, reader state,
 or file-safety guarantee changes here. Cross-series cover variants are not
 implicitly reassigned; inconsistent catalog membership requires review.
+
+## Story Arcs
+
+The adapter supports native arc search, exact detail, and paginated membership
+through the shared Story Arc preview, reading-order review, Add, and refresh
+workflow. This requires the upstream
+[Story Arc member endpoint](https://github.com/GrandComicsDatabase/gcd-django/pull/786)
+to be merged and deployed. Until then, an unavailable member endpoint prevents
+Add from proceeding; the older detail's `stories` field is never used as a fallback
+issue catalog. Live endpoint qualification is still required before activation.
+
+- Search uses `story-arcs/?name=...&page_size=100&page=...`. Same-named arcs
+  remain distinct native GCD identities. Detail notes are escaped, and absent
+  artwork stays absent.
+- Membership uses `story-arcs/{id}/issues/?page_size=100&page=...` and retains
+  exact issue and parent-series IDs. Ordinary members need one request per page,
+  rather than one request per issue. Each distinct parent is read by the existing
+  catalog workflow, without loading its entire issue catalog.
+- GCD's publication sorting is not curated reading order. The preview explains
+  this and that story associations may include reprints. Existing reorder and
+  skip controls remain authoritative.
+- Complete counts, unique identities, same-endpoint continuations, and exact
+  parent details are required. Add re-fetches and compares the reviewed snapshot.
+  Missing, partial, repeated, changed, or inconsistent evidence stops adoption
+  before graph or file writes. Existing catalog limits remain unchanged.
+- Variant membership requires explicit `variant_of` evidence. A variant whose
+  base belongs to a different series retains its own native identity and parent;
+  it is never silently replaced by the base. A same-series cover variant or
+  missing base is refused. Only variants whose bases are absent from the page
+  need extra exact issue reads, deduplicated within that page and still bounded
+  by the existing eight-second operation budget.
+- No new flags, migrations, retry loops, concurrency increases, import behavior,
+  or file-writing defaults are introduced. The existing GCD flag remains off by
+  default, and a configured source must also be explicitly enabled.
+
+Offline tests cover the actual upstream wire contract, paginated adoption,
+duplicate prevention, preserved skip/order decisions on refresh, stale source
+settings, typed failures, and unchanged files after failed revalidation. Browser
+tests exercise the shared controls in Light, Dark, and System on desktop/mobile.
 
 ## Verification And Manual Test
 

@@ -515,6 +515,9 @@ def metadata_sources() -> dict[MetadataSource, SourceRegistration]:
                     SourceCapability.SERIES_DETAILS,
                     SourceCapability.ISSUE_LIST,
                     SourceCapability.ISSUE_DETAILS,
+                    SourceCapability.STORY_ARC_SEARCH,
+                    SourceCapability.STORY_ARC_DETAILS,
+                    SourceCapability.STORY_ARC_ISSUES,
                 }
             ),
             _gcd_api,
