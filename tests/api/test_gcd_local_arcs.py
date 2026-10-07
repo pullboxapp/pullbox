@@ -20,6 +20,16 @@ sec_db = _sec_db
 PREVIEW = "/story-arcs/catalog/gcd_local/4"
 
 
+async def test_gcd_arc_without_description_has_no_literal_none_text(authenticated_client, tmp_path):
+    path = arc_dump(tmp_path / "gcd.db")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE gcd_story_arc SET description='', notes='' WHERE id=4")
+    assert (await activate(authenticated_client, path)).status_code == 200
+    response = await authenticated_client.get(PREVIEW)
+    assert response.status_code == 200
+    assert seed(response.text)["description"] == ""
+
+
 async def test_gcd_local_arc_search_review_add_repeat_and_refresh(
     authenticated_client, sec_db, tmp_path, monkeypatch
 ):

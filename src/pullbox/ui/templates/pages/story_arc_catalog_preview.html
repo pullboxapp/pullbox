@@ -18,7 +18,7 @@
 {% set preview_data = {
   "ready": true if can_add else false,
   "title": preview.metadata.title if preview else "Review Story Arc",
-  "description": preview.metadata.description|striptags if preview else "",
+  "description": (preview.metadata.description or "")|striptags if preview else "",
   "coverUrl": preview_cover_url if preview_cover_url is defined else preview.metadata.cover_url if preview and preview.metadata.cover_url else "",
   "sourceLabel": source_label,
   "sourceRevision": source_revision|default(none),
