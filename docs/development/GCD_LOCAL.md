@@ -61,5 +61,53 @@ refresh, local edits/clears, and reconciled offline-validated paired XML.
 Integration cases run against SQLite and the dedicated disposable PostgreSQL
 database. CI uses deterministic dump-shaped fixtures, not live GCD requests.
 
-This is creator enrichment, not Story Arc activation or a complete mapping of
-all GCD descriptive fields. GCD Local supplies no cover URL or inferred crosswalk.
+## Story Arcs
+
+The existing Add Story Arc source selector now supports GCD Local discovery,
+reading-order review, Add, and catalog refresh. This uses the optional official
+`gcd_story_arc` / `gcd_story_story_arc` / `gcd_story` tables, not an API request
+per issue. Dumps without these tables retain series/issue functionality and
+report Story Arc search as unsupported. Present malformed tables fail safely.
+
+Membership means distinct active issue records associated with active stories,
+under public comic series. Multiple stories in one issue are deduplicated.
+Deleted stories/issues/series are excluded. Broken member/parent references and
+same-series variants stop the preview; Pullbox does not replace an explicit
+variant with a guessed base issue or silently drop it to claim completeness.
+Cross-series representatives retain their exact native identity, as in existing
+GCD series reads. Ambiguous issue designations also retain the shared catalog
+saver's existing rejection policy.
+
+The initial order follows GCD's publication sorting (key date, sale date, series
+sort name, issue sort code), with native issue ID as a stable final tie-breaker.
+It is **not a curated reading order**. The preview says so and notes that story
+associations can include reprints. Users can reorder or skip members using the
+existing controls before Add. Related/sub-arcs and translations are not
+automatically combined into a larger arc.
+
+Search is bounded to 100 results per source page / 100 pages; member reads are
+bounded to 100 issues per page and 5,000 distinct issues. The shared Add/refresh
+command still requires a complete snapshot and applies its smaller 2,000-member
+and 200-parent limits. The existing arc-membership FK index drives the join;
+structured credits remain batched per member page. Arc descriptions/notes are
+bounded in SQL before materialization. There are no new indexes or migrations.
+
+Search cache keys include the validated dump generation. Signature checks run
+before and after reads and before/after cached discovery; a changed or unreadable
+dump cannot supply a stale result as current evidence. Healthy remote-provider
+results remain available when GCD Local fails.
+
+Native GCD arc/series/issue identities use the shared server-owned snapshot and
+atomic catalog saver. Add is repeat-safe, refresh preserves reviewed order and
+removed members, and new members require review. Existing file defaults, roots,
+monitoring/search-on-add behavior, owned files, import recovery, and placement
+safety remain unchanged. This activates **GCD Local**, not GCD API v2 Story Arcs.
+
+Verification includes `test_gcd_local_arcs.py` in the unit, API,
+metadata-identity integration, and browser suites: native namespace isolation,
+multi-story deduplication, cross-series members, paging, invalid/changed dumps,
+fixed indexed query counts, bounded text, caller rollback, reviewed refresh,
+and the existing keyboard/reorder/skip controls in light, dark, and mobile views.
+PostgreSQL parity uses the existing disposable test database; no live provider
+is required by CI. GCD Local still supplies no cover URL or inferred crosswalk,
+and this is not a complete mapping of every GCD descriptive field.

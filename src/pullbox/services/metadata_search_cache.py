@@ -132,10 +132,14 @@ class MetadataSearchCache:
         )
 
     async def get_arcs(
-        self, key: str, loader: Callable[[], Awaitable[StoryArcDiscoveryRead]]
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[StoryArcDiscoveryRead]],
+        *,
+        cache_result: bool = True,
     ) -> StoryArcDiscoveryRead:
         return StoryArcDiscoveryRead.model_validate_json(
-            await self._get_payload(key, loader, cache_result=True)
+            await self._get_payload(key, loader, cache_result=cache_result)
         )
 
     async def _get_payload(

@@ -7,14 +7,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.config import get_settings
 from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
+from pullbox.providers.metadata.gcd_local import GcdLocalSource
 from pullbox.schemas.metadata_sources import (
     SourceCapability,
     SourceStatus,
     StoryArcDiscoveryQuery,
     StoryArcDiscoveryRead,
+    StoryArcSourceOutcome,
 )
 from pullbox.services.metadata_arc_search import collect_arc_candidates
-from pullbox.services.metadata_discovery import MetadataSourceRegistry, describe_source_policies
+from pullbox.services.metadata_discovery import (
+    MetadataSourceError,
+    MetadataSourceRegistry,
+    describe_source_policies,
+)
 from pullbox.services.metadata_search_cache import MetadataSearchBusyError, discovery_cache_key
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.provider_artwork import allowed_artwork_url
@@ -44,11 +50,58 @@ async def arc_search_context(
     if len(query) >= 2 and selected:
         search = StoryArcDiscoveryQuery(query=query, sources=selected)
         registry = MetadataSourceRegistry(runtime, gcd_api_enabled=flag)
+        gcd_runtime = next(
+            (
+                item
+                for item in runtime
+                if item.policy.source is MetadataSource.GCD_LOCAL
+                and item.policy.enabled
+                and item.policy.source in selected
+            ),
+            None,
+        )
+        generation = None
+        if gcd_runtime is not None:
+            try:
+                generation = await GcdLocalSource(gcd_runtime.gcd_snapshot).cache_token()
+            except MetadataSourceError:
+                generation = "unreadable"
         try:
             snapshot = await _request_search_cache(request).get_arcs(
-                discovery_cache_key(search, runtime, catalog_generation=None, gcd_api_enabled=flag),
+                discovery_cache_key(
+                    search,
+                    runtime,
+                    catalog_generation=None,
+                    gcd_api_enabled=flag,
+                    gcd_generation=generation,
+                ),
                 lambda: collect_arc_candidates(registry, search),
+                cache_result=generation != "unreadable",
             )
+            if gcd_runtime is not None:
+                status = SourceStatus.INVALID_CONFIG
+                try:
+                    changed = (
+                        await GcdLocalSource(gcd_runtime.gcd_snapshot).cache_token() != generation
+                    )
+                except MetadataSourceError as exc:
+                    changed, status = True, exc.status
+                if changed:
+                    snapshot.results = [
+                        row
+                        for row in snapshot.results
+                        if row.source is not MetadataSource.GCD_LOCAL
+                    ]
+                    for row in snapshot.results:
+                        row.also_from = [
+                            item for item in row.also_from if item is not MetadataSource.GCD_LOCAL
+                        ]
+                    snapshot.sources = [
+                        StoryArcSourceOutcome(source=row.source, status=status, truncated=True)
+                        if row.source is MetadataSource.GCD_LOCAL
+                        else row
+                        for row in snapshot.sources
+                    ]
         except MetadataSearchBusyError as exc:
             error = str(exc)
     if not snapshot.results and any(

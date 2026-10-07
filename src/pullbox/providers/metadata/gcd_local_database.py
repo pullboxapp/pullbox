@@ -100,12 +100,12 @@ def optional_profile(db: sqlite3.Connection, tables: tuple[TableClause, ...]) ->
         if kind is None:
             continue
         if kind[0] != "table" or not kind[1] or "VIRTUAL TABLE" in kind[1].upper():
-            raise GcdDatabaseError("The optional GCD credit schema is incompatible.")
+            raise GcdDatabaseError("The optional GCD schema is incompatible.")
         actual = {
             row[0] for row in db.execute("SELECT name FROM pragma_table_info(?)", (expected.name,))
         }
         if not set(expected.c.keys()) <= actual:
-            raise GcdDatabaseError("The optional GCD credit schema is incompatible.")
+            raise GcdDatabaseError("The optional GCD schema is incompatible.")
     return all(kind is not None for kind in found)
 
 

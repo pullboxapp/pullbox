@@ -527,6 +527,9 @@ def metadata_sources() -> dict[MetadataSource, SourceRegistration]:
                     SourceCapability.ISSUE_LIST,
                     SourceCapability.ISSUE_DETAILS,
                     SourceCapability.OFFLINE,
+                    SourceCapability.STORY_ARC_SEARCH,
+                    SourceCapability.STORY_ARC_DETAILS,
+                    SourceCapability.STORY_ARC_ISSUES,
                 }
             ),
             lambda runtime: GcdLocalSource(runtime.gcd_snapshot),
