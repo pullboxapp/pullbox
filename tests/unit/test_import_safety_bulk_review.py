@@ -17,6 +17,7 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
@@ -87,6 +88,112 @@ async def _seed_size_blocks(session: AsyncSession, *, count: int) -> int:
         )
     await session.commit()
     return int(job.id)
+
+
+async def test_nested_repair_is_separate_from_override_and_preserves_ambiguous_rows(
+    db_session: AsyncSession,
+) -> None:
+    job_id = await _seed_size_blocks(db_session, count=3)
+    files = list(
+        (
+            await db_session.scalars(
+                select(ImportedFile)
+                .where(ImportedFile.import_job_id == job_id)
+                .order_by(ImportedFile.id)
+            )
+        ).all()
+    )
+    for index, file in enumerate(files):
+        file.source_signature = {
+            "schema_version": 1,
+            "resolved_path": file.file_path,
+            "size": 1,
+            "mtime_ns": 10,
+            "device": 1,
+            "inode": index + 1,
+        }
+        file.diagnostics = {
+            "safety_block": build_import_safety_diagnostics(
+                "nested_comic_archive", code="nested_comic_archive"
+            ),
+            "source_metadata": {
+                "nested_comic": {"version": 1, "eligible": index < 2, "comicinfo": None}
+            },
+        }
+    await db_session.commit()
+    category = ImportSafetyCategory("nested_comic_archive")
+    ordinary = await preview_import_safety_category(db_session, job_id, category, actor_id=42)
+    assert ordinary.preview_token is None
+    preview = await preview_import_safety_category(
+        db_session, job_id, category, actor_id=42, repair_nested=True
+    )
+    assert preview.affected_count == 2 and preview.skipped_count == 1
+    assert preview.preview_token
+    with pytest.raises(ValidationError):
+        await allow_import_safety_category_once(
+            db_session,
+            job_id,
+            category,
+            actor_id=43,
+            preview_token=preview.preview_token,
+            repair_nested=True,
+        )
+    with pytest.raises(ValidationError):
+        await allow_import_safety_category_once(
+            db_session,
+            job_id,
+            category,
+            actor_id=42,
+            preview_token=preview.preview_token,
+        )
+    result = await allow_import_safety_category_once(
+        db_session,
+        job_id,
+        category,
+        actor_id=42,
+        preview_token=preview.preview_token,
+        repair_nested=True,
+        page_size=1,
+    )
+    assert result.affected_count == 2
+    files = list(
+        (
+            await db_session.scalars(
+                select(ImportedFile)
+                .where(ImportedFile.import_job_id == job_id)
+                .order_by(ImportedFile.id)
+            )
+        ).all()
+    )
+    assert files[0].diagnostics["nested_repair"]["approved"] is True
+    assert "safety_exception" not in files[0].diagnostics
+    assert files[2].status == ImportedFileStatus.SAFETY_BLOCKED
+    with pytest.raises(ValidationError):
+        await allow_import_safety_category_once(
+            db_session,
+            job_id,
+            category,
+            actor_id=42,
+            preview_token=preview.preview_token,
+            repair_nested=True,
+        )
+    audits = list((await db_session.scalars(select(AuditLog))).all())
+    assert any('"action": "repair_nested"' in row.metadata_json for row in audits)
+
+
+async def test_nested_repair_preview_rejects_keep_in_place(db_session: AsyncSession) -> None:
+    job_id = await _seed_size_blocks(db_session, count=1)
+    job = await db_session.get(ImportJob, job_id)
+    job.file_handling_mode = ImportFileHandlingMode.IN_PLACE
+    await db_session.commit()
+    with pytest.raises(ValidationError, match="Copy"):
+        await preview_import_safety_category(
+            db_session,
+            job_id,
+            ImportSafetyCategory("nested_comic_archive"),
+            actor_id=42,
+            repair_nested=True,
+        )
 
 
 async def _seed_one_page_blocks(

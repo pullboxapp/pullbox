@@ -19,6 +19,7 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSourceType,
@@ -118,9 +119,58 @@ def _category_filters(job_id: int, category: ImportSafetyCategory) -> tuple[Any,
 
 
 def _eligible_expression(category: ImportSafetyCategory) -> Any:
+    if category is ImportSafetyCategory.NESTED_COMIC_ARCHIVE:
+        return (
+            ImportedFile.diagnostics["source_metadata"]["nested_comic"]["eligible"]
+            .as_boolean()
+            .is_(True)
+        ) & (ImportedFile.source_signature["schema_version"].as_integer() == 1)
     if category is not ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT:
         return false()
     return _overrideable_expression().is_(True)
+
+
+def _require_nested_copy(job: ImportJob, category: ImportSafetyCategory) -> None:
+    if category is not ImportSafetyCategory.NESTED_COMIC_ARCHIVE:
+        raise ValidationError("This category does not contain nested comics.")
+    if job.file_handling_mode != ImportFileHandlingMode.MANAGED_COPY or not job.move_to_library:
+        raise ValidationError(
+            "Choose Copy into library to repair nested comics. "
+            "Keep-in-place originals are not rewritten."
+        )
+
+
+def _approve_nested_file(file: ImportedFile, allowed_at: datetime) -> None:
+    diagnostics = dict(file.diagnostics or {})
+    metadata = dict(diagnostics.get("source_metadata") or {})
+    nested = metadata.get("nested_comic")
+    if (
+        not isinstance(nested, dict)
+        or nested.get("eligible") is not True
+        or not file.source_signature
+    ):
+        raise ValidationError("This nested comic needs another inspection before repair.")
+    diagnostics.pop("safety_block", None)
+    diagnostics["nested_repair"] = {
+        "approved": True,
+        "approved_at": allowed_at.isoformat(),
+        "source_signature": dict(file.source_signature),
+    }
+    comicinfo = nested.get("comicinfo")
+    if isinstance(comicinfo, dict):
+        diagnostics.pop("archive_member_evidence", None)
+        metadata["archive_member_evidence"] = {
+            "member_index_scanned": True,
+            "comicinfo_entry_count": 1,
+            "comicinfo": comicinfo,
+        }
+        metadata["archive_metadata_deferred"] = True
+        metadata["archive_metadata_loaded"] = False
+    diagnostics["source_metadata"] = metadata
+    file.diagnostics = diagnostics
+    file.status = ImportedFileStatus.SAFETY_APPROVED
+    file.include_in_import = False
+    file.error_message = None
 
 
 def _snapshot_updated_at(value: datetime | None) -> str | None:
@@ -147,7 +197,7 @@ async def _load_scope_digest(
                 select(
                     ImportedFile.id,
                     ImportedFile.updated_at,
-                    _overrideable_expression(),
+                    _eligible_expression(category),
                 )
                 .where(
                     *_category_filters(job_id, category),
@@ -372,16 +422,21 @@ async def preview_import_safety_category(
     *,
     actor_id: int,
     example_limit: int = IMPORT_SAFETY_PREVIEW_EXAMPLE_LIMIT,
+    repair_nested: bool = False,
 ) -> ImportSafetyBulkPreview:
     """Preview one existing structured safety category without mutating rows."""
     job = await _load_review_job(session, job_id)
+    if repair_nested:
+        _require_nested_copy(job, category)
     snapshot = await _load_snapshot(session, job_id, category)
     if snapshot.matching_count == 0:
         raise ValidationError(
             "No safety-blocked files in this job use the selected structured category."
         )
 
-    can_override = category in _BULK_OVERRIDEABLE_CATEGORIES and snapshot.eligible_count > 0
+    can_override = (
+        category in _BULK_OVERRIDEABLE_CATEGORIES or repair_nested
+    ) and snapshot.eligible_count > 0
     examples = await _load_bounded_examples(
         session,
         job_id,
@@ -394,6 +449,7 @@ async def preview_import_safety_category(
             category=category,
             actor_id=actor_id,
             snapshot=snapshot,
+            action="repair_nested" if repair_nested else _ALLOW_ONCE_ACTION,
         )
         if can_override
         else None
@@ -488,7 +544,14 @@ async def _write_durable_bulk_audit(
     action: str = _ALLOW_ONCE_ACTION,
 ) -> None:
     """Commit a fixed-field, path-free audit record before returning."""
-    action_label = "skip" if action == _SKIP_ACTION else "override"
+    if (
+        result.category is ImportSafetyCategory.NESTED_COMIC_ARCHIVE
+        and action == _ALLOW_ONCE_ACTION
+    ):
+        action = "repair_nested"
+    action_label = {"repair_nested": "repair approval", _SKIP_ACTION: "skip"}.get(
+        action, "override"
+    )
     detail_by_outcome = {
         "requested": f"Import safety category {action_label} requested.",
         "completed": f"Import safety category {action_label} completed.",
@@ -524,9 +587,10 @@ async def allow_import_safety_category_once(
     source_ip: str | None = None,
     preview_token: str,
     page_size: int = IMPORT_SAFETY_BULK_PAGE_SIZE,
+    repair_nested: bool = False,
 ) -> ImportSafetyBulkResult:
-    """Apply one previewed size-limit exception in bounded committed pages."""
-    if category not in _BULK_OVERRIDEABLE_CATEGORIES:
+    """Approve a previewed exception or nested repair in bounded committed pages."""
+    if category not in _BULK_OVERRIDEABLE_CATEGORIES and not repair_nested:
         raise ValidationError("This safety category cannot be bulk-overridden.")
     if page_size < 1 or page_size > IMPORT_SAFETY_BULK_PAGE_SIZE:
         raise ValidationError(
@@ -534,12 +598,15 @@ async def allow_import_safety_category_once(
         )
 
     job = await _load_review_job(session, job_id)
+    if repair_nested:
+        _require_nested_copy(job, category)
     payload = _load_preview_token(preview_token)
     preview_snapshot = _validate_preview_token_scope(
         payload,
         job=job,
         category=category,
         actor_id=actor_id,
+        action="repair_nested" if repair_nested else _ALLOW_ONCE_ACTION,
     )
     if preview_snapshot.eligible_count <= 0 or preview_snapshot.max_file_id is None:
         raise ValidationError("This safety category has no eligible files to override.")
@@ -621,6 +688,13 @@ async def allow_import_safety_category_once(
             current_job is None
             or current_job.status != ImportJobStatus.REVIEW
             or current_job.control_request != ImportControlRequest.NONE
+            or (
+                repair_nested
+                and (
+                    current_job.file_handling_mode != ImportFileHandlingMode.MANAGED_COPY
+                    or not current_job.move_to_library
+                )
+            )
         ):
             partial_result = _result(
                 job_id=job_id,
@@ -675,12 +749,14 @@ async def allow_import_safety_category_once(
             raw_block = diagnostics.get("safety_block")
             if not isinstance(raw_block, Mapping):
                 continue
-            if (
-                raw_block.get("category") != category.value
-                or raw_block.get("overrideable") is not True
+            if raw_block.get("category") != category.value or (
+                not repair_nested and raw_block.get("overrideable") is not True
             ):
                 continue
-            apply_safety_allow_once_to_file(imp_file, allowed_at=allowed_at)
+            if repair_nested:
+                _approve_nested_file(imp_file, allowed_at)
+            else:
+                apply_safety_allow_once_to_file(imp_file, allowed_at=allowed_at)
             affected_file_ids.append(imp_file.id)
             affected_series_ids.add(imp_file.import_series_id)
             affected_count += 1

@@ -211,7 +211,11 @@ def is_resource_safety_exception_allowed(diagnostics: Mapping[str, Any] | None) 
     previous_block = safety_exception.get("previous_block")
     if not isinstance(previous_block, Mapping):
         return False
-    if previous_block.get("code") in {"archive_no_pages", "single_page_comic"}:
+    if previous_block.get("code") in {
+        "archive_no_pages",
+        "single_page_comic",
+        "nested_comic_archive",
+    }:
         return False
     return bool(previous_block.get("overrideable", True))
 

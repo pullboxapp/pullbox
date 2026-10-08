@@ -231,7 +231,7 @@ def inspect_review_source(
         inspection = run_safety_checks(
             path, block_dangerous=block_dangerous, max_archive_size=max_archive_size
         )
-        content = inspect_import_content(path, inspection)
+        content = inspect_import_content(path, inspection, max_archive_size=max_archive_size)
         report = next((r for r in inspection.archives if r.archive_path == path), None)
         evidence = (
             None

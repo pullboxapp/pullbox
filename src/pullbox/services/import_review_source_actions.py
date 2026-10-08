@@ -57,6 +57,7 @@ RECHECK_CATEGORIES = frozenset(
         "archive_inspection_failed",
         "zero_byte",
         "archive_no_pages",
+        "nested_comic_archive",
         "source_changed",
         "source_missing",
         "unsupported_file_type",

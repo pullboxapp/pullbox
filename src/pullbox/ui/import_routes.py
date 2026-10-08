@@ -746,6 +746,75 @@ async def _load_import_safety_bulk_skip_preview(
 
 
 @router.get(
+    "/import/{job_id}/nested-comics/preview", response_class=HTMLResponse, include_in_schema=False
+)
+async def import_nested_repair_preview(
+    job_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    status: str | None = Query("fix_source"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    category = ImportSafetyCategory.NESTED_COMIC_ARCHIVE
+    try:
+        preview = await preview_import_safety_category(
+            session, job_id, category, actor_id=user.id, repair_nested=True
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return await _render_import_review_partial(
+        job_id,
+        request,
+        user,
+        session,
+        status=status,
+        page=page,
+        sort=sort,
+        extra_context={"nested_repair_preview": preview},
+    )
+
+
+@router.post(
+    "/import/{job_id}/nested-comics/approve", response_class=HTMLResponse, include_in_schema=False
+)
+async def import_nested_repair_approve(
+    job_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    preview_token: Annotated[str, Form(min_length=1, max_length=4096)],
+    status: str | None = Query("fix_source"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    try:
+        await allow_import_safety_category_once(
+            session,
+            job_id,
+            ImportSafetyCategory.NESTED_COMIC_ARCHIVE,
+            actor_id=user.id,
+            actor_username=user.username,
+            source_ip=source_ip_from_request(request),
+            preview_token=preview_token,
+            repair_nested=True,
+        )
+    except ImportSafetyBulkInterruptedError:
+        trigger_import_safety_bulk_rematch(job_id)
+        raise HTTPException(
+            status_code=409, detail="The import changed. Review the latest repair approvals."
+        ) from None
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    trigger_import_safety_bulk_rematch(job_id)
+    return await import_review_partial(
+        job_id, request, user, session, status=status, page=page, sort=sort
+    )
+
+
+@router.get(
     "/import/{job_id}/safety/categories/{category}/preview",
     response_class=HTMLResponse,
     include_in_schema=False,

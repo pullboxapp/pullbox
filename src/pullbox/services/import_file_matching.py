@@ -1409,6 +1409,7 @@ async def run_import_file_matching(
                 and _file_has_deferred_archive_metadata(imp_file)
                 and (
                     imp_series.cv_match_method == "mylar3_cv_id"
+                    or bool((imp_file.diagnostics or {}).get("nested_repair"))
                     or (
                         (release := parse_release_title(imp_file.file_name)) is not None
                         and release.issue_type.value in {"annual", "volume"}
@@ -2018,7 +2019,11 @@ def _persist_deferred_source_evidence(
 ) -> None:
     """Persist local archive evidence without replacing Mylar row authority."""
     diagnostics = dict(imp_file.diagnostics or {})
+    nested = dict(diagnostics.get("source_metadata") or {}).get("nested_comic")
     diagnostics["source_metadata"] = dict(metadata.diagnostics)
+    if isinstance(nested, dict):
+        # Archive extraction refreshes identity signals, not the scan's repair contract.
+        diagnostics["source_metadata"]["nested_comic"] = nested
     diagnostics["metadata_signals"] = {
         key: signal.value for key, signal in metadata.signals.items()
     }

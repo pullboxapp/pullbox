@@ -753,6 +753,15 @@ async def source_metadata_for_matching_series(
                 )
         archive_metadata: SourceMetadata | None = None
         has_deferred_archive_metadata = import_file_has_deferred_archive_metadata(imp_file)
+        member_evidence = _archive_member_evidence_for_import_file(imp_file)
+        has_inspected_comicinfo = (
+            member_evidence is not None
+            and member_evidence.get("member_index_scanned") is True
+            and isinstance(member_evidence.get("comicinfo"), dict)
+            # Mylar's reconciliation/file-matching phase owns archive overrides
+            # of database identities; do not move those overrides into discovery.
+            and persisted_source_metadata.get("mylar3_folder_metadata_scanned") is not True
+        )
         should_probe_trusted_identity = (
             probed_archive_count < trusted_identity_probe_limit
             and has_deferred_archive_metadata
@@ -772,14 +781,18 @@ async def source_metadata_for_matching_series(
         if (
             imp_file.status not in {ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SKIPPED}
             and has_deferred_archive_metadata
-            and (load_deferred_archive_metadata or should_probe_trusted_identity)
+            and (
+                has_inspected_comicinfo
+                or load_deferred_archive_metadata
+                or should_probe_trusted_identity
+            )
         ):
             archive_metadata = await load_deferred_source_metadata_for_import_file(
                 imp_series,
                 imp_file,
                 include_archive_entry_issue_hint=load_deferred_archive_metadata,
             )
-            if should_probe_trusted_identity:
+            if should_probe_trusted_identity and not has_inspected_comicinfo:
                 probed_archive_count += 1
 
             if (

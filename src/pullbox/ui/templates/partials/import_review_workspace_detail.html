@@ -73,6 +73,15 @@
         {% endif %}
         {% if block.get('code') and block.get('category') not in ('dangerous_path_or_payload', 'unsupported_file_type', 'decompression_size_limit') %}<details class="mt-2 text-xs text-pb-text-dim"><summary class="cursor-pointer">Inspection details</summary><p>Code: {{ block.code }}</p></details>{% endif %}
         {% if block.get('category') == 'source_missing' %}<p class="mt-1 text-xs text-pb-text-dim">Pair a verified file, restore the recorded path and recheck it, or skip this stale reference.</p>{% endif %}
+        {% set nested = (file.diagnostics or {}).get('source_metadata', {}).get('nested_comic', {}) %}
+        {% if nested %}
+        <dl class="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm text-pb-text-sec" data-testid="nested-comic-details">
+          <dt>Inner comic</dt><dd class="break-words">{{ nested.get('inner_name', 'Multiple or unsupported archives') }}</dd>
+          <dt>Format / pages</dt><dd>{{ nested.get('inner_format', 'Unknown')|upper }} / {{ nested.get('page_count', 'Not inspected') }}</dd>
+          <dt>ComicInfo</dt><dd>{{ nested.get('metadata_sources', [])|join(' and ') or 'Not found' }}</dd>
+          <dt>Repair</dt><dd>{{ 'Eligible for a repaired CBZ copy' if nested.get('eligible') else nested_repair_reasons.get(nested.get('reason'), 'Inspection did not finish safely. Repair the source and recheck it.') }}</dd>
+        </dl>
+        {% endif %}
         {% if block.get('category') == 'outside_approved_root' %}<button type="button" class="btn-ghost btn-sm mt-2" @click="window.dispatchEvent(new CustomEvent('wizard:advance', {detail: {step: 1}}))">Review import setup</button>{% endif %}
       </div>
       {% if block.get('category') != 'decompression_size_limit' or file.status.value != 'safety_blocked' %}<div class="flex flex-wrap gap-2">
@@ -84,7 +93,7 @@
           {% if row.updating %}<span class="pill pill-info" title="Preparing this file for matching"><svg data-testid="import-review-safety-rematch-spinner" class="h-3 w-3 animate-spin motion-reduce:animate-none" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2"/></svg>Preparing match</span>
           {% else %}<span class="pill pill-info">Approved &middot; match needed</span>{% endif %}
         {% else %}
-          {% if block.get('category') in ('permission_unreadable', 'archive_inspection_failed', 'zero_byte', 'archive_no_pages', 'source_changed', 'source_missing', 'unknown') %}
+          {% if block.get('category') in ('permission_unreadable', 'archive_inspection_failed', 'zero_byte', 'archive_no_pages', 'nested_comic_archive', 'source_changed', 'source_missing', 'unknown') %}
           <button type="button" class="btn-primary btn-sm" data-testid="import-review-recheck-source" hx-get="/import/{{ job.id }}/files/{{ file.id }}/source" hx-target="#cv-search-modal" hx-swap="innerHTML">{{ 'Resolve reference' if block.get('category') == 'source_missing' else 'Recheck source' }}</button>
           {% endif %}
           {% if block.get('overrideable') is sameas true %}

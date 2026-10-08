@@ -37,6 +37,7 @@ REASON_DESCRIPTIONS = {
     "outside_approved_root": "Register or map the source in import setup before continuing.",
     "zero_byte": "An empty file cannot contain a comic. Replace it or skip it.",
     "archive_no_pages": "No readable comic pages were found in this archive.",
+    "nested_comic_archive": "Review nested comics for source-preserving repair into CBZ.",
     "dangerous_path_or_payload": "Unsafe archive content cannot be allowed.",
     "unsupported_file_type": (
         "This file type is not supported. Convert or replace it, then recheck it."
