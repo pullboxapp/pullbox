@@ -23,6 +23,7 @@ from pullbox.services.catalog.database import open_readonly, safe_path, validate
 from pullbox.services.catalog.storage import disk_work, load_json
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 logger = structlog.get_logger(__name__)
@@ -190,6 +191,23 @@ class CatalogReader:
             return None
         row = rows[0]
         return self._issue_metadata(row, cutoff, preserve_number_text=preserve_number_text)
+
+    async def issue_batch(self, issue_ids: Sequence[int]) -> dict[str, IssueMetadata]:
+        """Resolve exact issue identities in bounded, read-only catalog queries."""
+        ids = list(dict.fromkeys(issue_ids))
+        found: dict[str, IssueMetadata] = {}
+        for offset in range(0, len(ids), 200):
+            batch = ids[offset : offset + 200]
+            placeholders = ",".join("?" for _ in batch)
+            rows, cutoff = await disk_work(
+                self._query,
+                f"SELECT {ISSUE_COLUMNS} FROM issues WHERE id IN ({placeholders})",
+                tuple(batch),
+            )
+            for row in rows:
+                issue = self._issue_metadata(row, cutoff, preserve_number_text=False)
+                found[issue.provider_id] = issue
+        return found
 
     def _issue_metadata(
         self, row: Any, cutoff: datetime, *, preserve_number_text: bool

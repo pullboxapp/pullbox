@@ -34,6 +34,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import IssueType
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services.import_embedded_issue_parent import evaluate_embedded_issue_parent
 from pullbox.services.import_known_cv_match import (
     ComicVineMatchEvaluation,
     known_cv_id_evaluation_from_source,
@@ -783,6 +784,16 @@ async def run_import_series_matching(
                     series_source_metadata,
                     match_threshold=job.cv_match_threshold,
                 )
+                if evaluation.diagnostics.get("reason") == "trusted_source_identity_missing":
+                    embedded_evaluation = await evaluate_embedded_issue_parent(
+                        session,
+                        item,
+                        provider=metadata_provider,
+                        match_threshold=job.cv_match_threshold,
+                        raise_if_cancelled=raise_if_cancelled,
+                    )
+                    if embedded_evaluation is not None:
+                        evaluation = embedded_evaluation
             else:
                 evaluation = await evaluate_match_with_progress(
                     item,

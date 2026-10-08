@@ -170,10 +170,17 @@ def select_file_match_candidate(
         matched_issue_id, matched_issue_cv_id, has_library_file, matched_issue, issue_title = (
             target_index.cv_id_map[imp_file.comicvine_issue_id]
         )
+        cached_issue = target_index.cached_issue_metadata.get(imp_file.comicvine_issue_id)
         return FileMatchCandidate(
             matched_issue_id=matched_issue_id,
             matched_issue_cv_id=matched_issue_cv_id,
-            target_issue_number=matched_issue.issue_number if matched_issue is not None else None,
+            target_issue_number=(
+                matched_issue.issue_number
+                if matched_issue is not None
+                else cached_issue.issue_number
+                if cached_issue is not None
+                else None
+            ),
             has_library_file=has_library_file,
             matched_issue=matched_issue,
             target_issue_title=issue_title,
