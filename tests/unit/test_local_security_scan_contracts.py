@@ -243,7 +243,7 @@ def test_september_26_runtime_refresh_exceptions_are_exact_and_expiring() -> Non
     assert "NOT fixes" in config_text
 
 
-def test_october_7_renewal_is_limited_to_seventeen_exact_matches() -> None:
+def test_october_renewals_and_expat_exception_are_limited_to_eighteen_exact_matches() -> None:
     config_text = (ROOT / ".grype.yaml").read_text()
     config = yaml.safe_load(config_text)
     expected = (
@@ -262,12 +262,13 @@ def test_october_7_renewal_is_limited_to_seventeen_exact_matches() -> None:
             for cve in ("CVE-2026-76642", "CVE-2026-78408", "CVE-2026-78409", "CVE-2026-78410")
         }
         | {("CVE-2026-85091", "zlib1g", "1:1.3.dfsg+really1.3.1-1+dhi4")}
+        | {("CVE-2026-77214", "libexpat1", "2.8.3-1~deb13u1+dhi5")}
     )
     reviewed_versions = {version for _cve, _name, version in expected}
     entries = [
         entry for entry in config["ignore"] if entry["package"]["version"] in reviewed_versions
     ]
-    assert len(entries) == 17
+    assert len(entries) == 18
     assert {
         (entry["vulnerability"], entry["package"]["name"], entry["package"]["version"])
         for entry in entries
@@ -289,6 +290,33 @@ def test_october_7_renewal_is_limited_to_seventeen_exact_matches() -> None:
     assert "Re-reviewed and renewed by Adam Hernandez on 2026-10-07 ONLY" in config_text
     assert "Re-review by 2026-10-14 or the next base-image refresh" in config_text
     assert "dependency\n  # reachability remains unproven" in config_text
+
+
+def test_expat_parse_buffer_exception_is_exact_and_documents_accepted_risk() -> None:
+    config_text = (ROOT / ".grype.yaml").read_text()
+    config = yaml.safe_load(config_text)
+    entries = [entry for entry in config["ignore"] if entry["vulnerability"] == "CVE-2026-77214"]
+
+    assert entries == [
+        {
+            "vulnerability": "CVE-2026-77214",
+            "package": {"name": "^libexpat1$", "version": "2.8.3-1~deb13u1+dhi5", "type": "deb"},
+        }
+    ]
+    pattern = entries[0]["package"]["name"]
+    assert re.search(pattern, "libexpat1")
+    for other_package in ("libexpat1-dev", "other-libexpat1", "python", "expat"):
+        assert not re.search(pattern, other_package)
+
+    review = config_text.split("  # Approved by Adam Hernandez on 2026-10-08", 1)[1].split(
+        "  - vulnerability: CVE-2026-77214", 1
+    )[0]
+    assert "Accepted risk, NOT a fix or a false-positive claim" in review
+    assert "XML_ParseBuffer" in review
+    assert "Fontconfig" in review
+    assert "native dependency reachability remains unproven" in review
+    assert "Re-review by 2026-10-14 or the next base-image refresh" in review
+    assert "all other High/Critical findings remain blocking" in review
 
 
 def test_september_13_dhi_renewal_covers_only_eight_approved_matches() -> None:

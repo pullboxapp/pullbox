@@ -13,6 +13,26 @@
 # stable Python 3.14 or Debian 13 packages become available upstream.
 
 ignore:
+  # Approved by Adam Hernandez on 2026-10-08 for this exact package/CVE only.
+  # Accepted risk, NOT a fix or a false-positive claim. CVE-2026-77214 requires
+  # a caller to pass XML_ParseBuffer a length exceeding available buffer space.
+  # Reviewed CPython 3.14.8 and Fontconfig 2.15.0 callers bound their lengths;
+  # full shipped native dependency reachability remains unproven. Python uses
+  # a separate bundled Expat; this exception does not cover Python findings.
+  # Debian 13 has no fixed stable package; upstream Expat 2.9.0 contains the fix.
+  # Re-review by 2026-10-14 or the next base-image refresh, whichever comes
+  # first; remove when a verified patched package is available. Other versions,
+  # other packages, and all other High/Critical findings remain blocking.
+  # https://security-tracker.debian.org/tracker/CVE-2026-77214
+  # https://github.com/libexpat/libexpat/pull/1393
+  # https://github.com/python/cpython/blob/v3.14.8/Modules/pyexpat.c
+  # https://sources.debian.org/src/fontconfig/2.15.0-2.3/src/fcxml.c/
+  - vulnerability: CVE-2026-77214
+    package:
+      name: '^libexpat1$'
+      version: 2.8.3-1~deb13u1+dhi5
+      type: deb
+
   # Approved by Adam Hernandez on 2026-10-07 for ONLY these ten refreshed
   # package/advisory matches. Accepted risk, NOT upstream vulnerability fixes.
   # Re-review by 2026-10-14 or the next base-image refresh, whichever comes
