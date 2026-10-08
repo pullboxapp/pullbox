@@ -39,6 +39,7 @@ from pullbox.services.import_known_cv_match import (
     ComicVineMatchEvaluation,
     known_cv_id_evaluation_from_source,
 )
+from pullbox.services.import_local_catalog_match import evaluate_local_catalog_match
 from pullbox.services.import_progress_runtime import (
     ScanReviewFileMatchProfile,
     ScanReviewProgressPlan,
@@ -794,6 +795,16 @@ async def run_import_series_matching(
                     )
                     if embedded_evaluation is not None:
                         evaluation = embedded_evaluation
+                    else:
+                        local_evaluation = await evaluate_local_catalog_match(
+                            session,
+                            item,
+                            series_source_metadata,
+                            provider=metadata_provider,
+                            match_threshold=job.cv_match_threshold,
+                        )
+                        if local_evaluation is not None:
+                            evaluation = local_evaluation
             else:
                 evaluation = await evaluate_match_with_progress(
                     item,

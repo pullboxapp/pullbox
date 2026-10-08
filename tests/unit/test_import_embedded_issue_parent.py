@@ -343,11 +343,13 @@ async def test_real_cbz_scan_uses_embedded_issue_identity_without_changing_archi
     )
     file = await db_session.scalar(select(ImportedFile).where(ImportedFile.import_job_id == job.id))
     assert job.status == ImportJobStatus.REVIEW
-    assert item.cv_id == (10 if expected_id else None)
-    assert file.status == (
-        ImportedFileStatus.MATCHED if expected_id else ImportedFileStatus.NO_MATCH
+    assert item.cv_id == 10
+    assert file.status == ImportedFileStatus.MATCHED
+    assert file.matched_issue_cv_id == 100
+    assert file.comicvine_issue_id == expected_id
+    assert item.diagnostics["reason"] == (
+        "comicinfo_issue_parent_verified" if expected_id else "local_catalog_title_year_verified"
     )
-    assert file.matched_issue_cv_id == expected_id
     assert file.diagnostics.get("comicvine_series_id") is None
     assert remote.mock_calls == []
     assert hashlib.sha256(comic.read_bytes()).digest() == original

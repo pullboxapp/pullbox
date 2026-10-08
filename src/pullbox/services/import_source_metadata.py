@@ -752,9 +752,7 @@ async def source_metadata_for_matching_series(
                     or persisted_series_signal.value
                 )
         archive_metadata: SourceMetadata | None = None
-        has_deferred_archive_metadata = _has_deferred_archive_metadata(
-            file_diagnostics.get("source_metadata")
-        )
+        has_deferred_archive_metadata = import_file_has_deferred_archive_metadata(imp_file)
         should_probe_trusted_identity = (
             probed_archive_count < trusted_identity_probe_limit
             and has_deferred_archive_metadata
@@ -772,7 +770,7 @@ async def source_metadata_for_matching_series(
             )
         )
         if (
-            imp_file.status != ImportedFileStatus.SAFETY_BLOCKED
+            imp_file.status not in {ImportedFileStatus.SAFETY_BLOCKED, ImportedFileStatus.SKIPPED}
             and has_deferred_archive_metadata
             and (load_deferred_archive_metadata or should_probe_trusted_identity)
         ):
@@ -784,7 +782,10 @@ async def source_metadata_for_matching_series(
             if should_probe_trusted_identity:
                 probed_archive_count += 1
 
-            if archive_metadata.comicvine_series_id is not None:
+            if (
+                archive_metadata.comicvine_series_id is not None
+                or archive_metadata.diagnostics.get("archive_metadata_loaded") is True
+            ):
                 refreshed_diagnostics = dict(imp_file.diagnostics or {})
                 refreshed_diagnostics.update(
                     sync_import_file_source_metadata(
