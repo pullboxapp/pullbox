@@ -13,6 +13,81 @@
 # stable Python 3.14 or Debian 13 packages become available upstream.
 
 ignore:
+  # Approved by Adam Hernandez on 2026-10-07 for ONLY these ten refreshed
+  # package/advisory matches. Accepted risk, NOT upstream vulnerability fixes.
+  # Re-review by 2026-10-14 or the next base-image refresh, whichever comes
+  # first; remove when fixed Debian 13 packages become available. Other package
+  # versions and all other High findings remain blocking.
+  #
+  # libexpat1 supports the Fontconfig/Poppler dependency closure. The separately
+  # bundled Python parser reported Expat 2.8.5 and passed the malformed UTF-16
+  # guard. This does not prove the system Expat library or its callers safe.
+  # https://security-tracker.debian.org/tracker/CVE-2026-66046
+  # https://security-tracker.debian.org/tracker/CVE-2026-76956
+  # https://security-tracker.debian.org/tracker/CVE-2026-76957
+  # https://security-tracker.debian.org/tracker/CVE-2026-93990
+  - vulnerability: CVE-2026-66046
+    package:
+      name: '^libexpat1$'
+      version: 2.8.3-1~deb13u1+dhi5
+      type: deb
+  - vulnerability: CVE-2026-76956
+    package:
+      name: '^libexpat1$'
+      version: 2.8.3-1~deb13u1+dhi5
+      type: deb
+  - vulnerability: CVE-2026-76957
+    package:
+      name: '^libexpat1$'
+      version: 2.8.3-1~deb13u1+dhi5
+      type: deb
+  - vulnerability: CVE-2026-93990
+    package:
+      name: '^libexpat1$'
+      version: 2.8.3-1~deb13u1+dhi5
+      type: deb
+
+  # CVE-2026-102010 affects a PBDS template header. No direct PBDS/erase_if
+  # callers were found in Pullbox; third-party reachability is not fully proven.
+  # For CVE-2026-95619, upstream says the posix_memalign implementation is not
+  # affected. The local ARM64 runtime rejected all nine upstream oversized
+  # allocation cases through the nothrow aligned-new entry point. This evidence
+  # does not qualify other architectures or prove every dependency safe.
+  # https://security-tracker.debian.org/tracker/CVE-2026-102010
+  # https://github.com/gcc-mirror/gcc/commit/aaa8351f4d2e636f9680a1f0a8ebc2f0a60611e6
+  # https://security-tracker.debian.org/tracker/CVE-2026-95619
+  # https://github.com/gcc-mirror/gcc/commit/59d235ffa5a69231eb42e5290d52dc8c90d28b7a
+  - vulnerability: CVE-2026-102010
+    package:
+      name: '^gcc-14-base$'
+      version: 14.2.0-19+dhi5
+      type: deb
+  - vulnerability: CVE-2026-102010
+    package:
+      name: '^libgcc-s1$'
+      version: 14.2.0-19+dhi5
+      type: deb
+  - vulnerability: CVE-2026-102010
+    package:
+      name: '^libstdc\+\+6$'
+      version: 14.2.0-19+dhi5
+      type: deb
+  - vulnerability: CVE-2026-95619
+    package:
+      name: '^gcc-14-base$'
+      version: 14.2.0-19+dhi5
+      type: deb
+  - vulnerability: CVE-2026-95619
+    package:
+      name: '^libgcc-s1$'
+      version: 14.2.0-19+dhi5
+      type: deb
+  - vulnerability: CVE-2026-95619
+    package:
+      name: '^libstdc\+\+6$'
+      version: 14.2.0-19+dhi5
+      type: deb
+
   # Approved by Adam Hernandez on 2026-09-26 only for the exact refreshed DHI
   # runtime revisions below. These are accepted-risk exceptions, NOT fixes.
   # Pullbox now strictly normalizes valid UTF-16 and rejects malformed surrogate
@@ -21,8 +96,8 @@ ignore:
   # not imported comic XML. Residual upstream-library risk remains until DHI
   # ships fixed packages; all other High findings continue to block.
   #
-  # Re-reviewed and renewed by Adam Hernandez on 2026-10-01 ONLY for the two
-  # libc6 2.41-12+deb13u4+dhi1 matches below: re-review by 2026-10-04 or the
+  # Re-reviewed and renewed by Adam Hernandez on 2026-10-07 ONLY for the two
+  # libc6 2.41-12+deb13u4+dhi1 matches below: re-review by 2026-10-14 or the
   # next base refresh. Debian 13 has no fixed stable packages, and no direct
   # affected calls were found in Pullbox or its pinned MEGA SDK; dependency
   # reachability remains unproven. Older libc exceptions are not renewed.
@@ -162,7 +237,8 @@ ignore:
   # These util-linux source-package findings attach to libuuid1, but concern
   # privileged mount/nsenter helpers. The inspected ARM64 production image
   # contains libuuid1 and neither executable. Other architectures still need
-  # their normal image validation. Re-review by 2026-10-04 or the next base
+  # their normal image validation. Renewed by Adam Hernandez on 2026-10-07
+  # for only these four exact matches. Re-review by 2026-10-14 or the next base
   # refresh, whichever comes first; remove when fixed stable packages ship.
   # https://security-tracker.debian.org/tracker/CVE-2026-76642
   # https://security-tracker.debian.org/tracker/CVE-2026-78408
@@ -170,22 +246,22 @@ ignore:
   # https://security-tracker.debian.org/tracker/CVE-2026-78410
   - vulnerability: CVE-2026-76642
     package:
-      name: libuuid1
+      name: '^libuuid1$'
       version: 2.41.5-0+deb13u1+dhi3
       type: deb
   - vulnerability: CVE-2026-78408
     package:
-      name: libuuid1
+      name: '^libuuid1$'
       version: 2.41.5-0+deb13u1+dhi3
       type: deb
   - vulnerability: CVE-2026-78409
     package:
-      name: libuuid1
+      name: '^libuuid1$'
       version: 2.41.5-0+deb13u1+dhi3
       type: deb
   - vulnerability: CVE-2026-78410
     package:
-      name: libuuid1
+      name: '^libuuid1$'
       version: 2.41.5-0+deb13u1+dhi3
       type: deb
 
@@ -620,10 +696,13 @@ ignore:
       name: zlib1g
       version: 1:1.3.dfsg+really1.3.1-1+dhi3
       type: deb
-  # Re-reviewed 2026-09-17 for the DHI package refresh; same exposure and deadline.
+  # Renewed by Adam Hernandez on 2026-10-07 only for zlib1g at this exact
+  # revision. No direct affected calls were found; third-party reachability
+  # remains unproven. Re-review by 2026-10-14 or the next base refresh,
+  # whichever comes first. Older revisions and zlib1g-dev are not renewed.
   - vulnerability: CVE-2026-85091
     package:
-      name: zlib1g
+      name: '^zlib1g$'
       version: 1:1.3.dfsg+really1.3.1-1+dhi4
       type: deb
   - vulnerability: CVE-2026-85091

@@ -16,7 +16,7 @@ from packaging.utils import canonicalize_name
 
 PROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 NLTK_ADVISORY_IDS = {"PYSEC-2026-3740", "GHSA-8mgp-746c-j5xp", "CVE-2026-81726"}
-NLTK_EXCEPTION_EXPIRES = date(2026, 10, 3)
+NLTK_EXCEPTION_EXPIRES = date(2026, 10, 14)
 
 
 def _dependencies(report: object) -> dict[str, dict[str, Any]]:

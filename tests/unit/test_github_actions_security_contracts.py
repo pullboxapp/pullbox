@@ -1012,6 +1012,7 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         ("libexpat1-dev", "2.8.3-1~deb13u1+dhi2", "deb"),
         ("libexpat1", "2.8.3-1~deb13u1+dhi3", "deb"),
         ("libexpat1", "2.8.3-1~deb13u1+dhi4", "deb"),
+        ("^libexpat1$", "2.8.3-1~deb13u1+dhi5", "deb"),
     }
 
     current_expat_exceptions = [
@@ -1019,7 +1020,7 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         for entry in config["ignore"]
         if entry.get("vulnerability") in {"CVE-2026-76956", "CVE-2026-76957"}
     ]
-    assert "Re-review by 2026-10-07" in config_text
+    assert "Re-review by 2026-10-14 or the next base-image refresh" in config_text
     assert {
         (
             entry["vulnerability"],
@@ -1036,6 +1037,9 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
             "2.8.3-1~deb13u1+dhi3",
             "2.8.3-1~deb13u1+dhi4",
         )
+    } | {
+        (cve, "^libexpat1$", "2.8.3-1~deb13u1+dhi5", "deb")
+        for cve in {"CVE-2026-76956", "CVE-2026-76957"}
     }
 
     utf16_injection_exceptions = [
@@ -1045,11 +1049,19 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         {
             "vulnerability": "CVE-2026-93990",
             "package": {
+                "name": "^libexpat1$",
+                "version": "2.8.3-1~deb13u1+dhi5",
+                "type": "deb",
+            },
+        },
+        {
+            "vulnerability": "CVE-2026-93990",
+            "package": {
                 "name": "libexpat1",
                 "version": "2.8.3-1~deb13u1+dhi4",
                 "type": "deb",
             },
-        }
+        },
     ]
 
 
@@ -1065,7 +1077,7 @@ def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() 
     }
     entries = [entry for entry in config["ignore"] if entry.get("vulnerability") in reviewed_cves]
 
-    assert "Re-review by 2026-10-04" in config_text
+    assert "Re-review by 2026-10-14" in config_text
     assert {
         (
             entry["vulnerability"],
@@ -1083,12 +1095,34 @@ def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() 
         )
         for package in ("zlib1g", "zlib1g-dev")
     } | {
-        ("CVE-2026-85091", "zlib1g", "1:1.3.dfsg+really1.3.1-1+dhi4", "deb"),
+        ("CVE-2026-85091", "^zlib1g$", "1:1.3.dfsg+really1.3.1-1+dhi4", "deb"),
     } | {
-        (cve, "libuuid1", version, "deb")
+        (cve, package, version, "deb")
         for cve in reviewed_cves - {"CVE-2026-85091"}
-        for version in ("2.41.5-0+deb13u1+dhi2", "2.41.5-0+deb13u1+dhi3")
+        for package, version in (
+            ("libuuid1", "2.41.5-0+deb13u1+dhi2"),
+            ("^libuuid1$", "2.41.5-0+deb13u1+dhi3"),
+        )
     }
+
+
+def test_grype_reviewed_gcc_exceptions_are_exact() -> None:
+    config = _load_yaml(GRYPE_CONFIG)
+    reviewed_cves = {"CVE-2026-102010", "CVE-2026-95619"}
+    entries = [entry for entry in config["ignore"] if entry.get("vulnerability") in reviewed_cves]
+    packages = {"^gcc-14-base$", "^libgcc-s1$", r"^libstdc\+\+6$"}
+
+    assert {
+        (
+            entry["vulnerability"],
+            entry["package"]["name"],
+            entry["package"]["version"],
+            entry["package"]["type"],
+        )
+        for entry in entries
+    } == {
+        (cve, package, "14.2.0-19+dhi5", "deb") for cve in reviewed_cves for package in packages
+    } | {("CVE-2026-102010", package, "14.2.0-19+dhi3", "deb") for package in packages}
 
 
 def test_docker_workflow_signs_and_verifies_published_images() -> None:
