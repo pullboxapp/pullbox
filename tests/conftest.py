@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -34,7 +36,13 @@ def _configure_worker_runtime_environment() -> None:
     """
 
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "main")
-    runtime_root = Path(tempfile.gettempdir()) / "pullbox-pytest-runtime" / worker_id
+    invocation_id = os.environ.setdefault("_PULLBOX_PYTEST_RUN_UID", uuid4().hex)
+    run_id = os.environ.get("PYTEST_XDIST_TESTRUNUID", invocation_id)
+    # Worker names repeat across jobs, and workers inherit the controller's env.
+    # Hash the namespace to keep paths bounded and independent of env spelling.
+    namespace = hashlib.sha256(f"{run_id}/{worker_id}".encode()).hexdigest()[:24]
+    temp_root = Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
+    runtime_root = temp_root / "pullbox-pytest-runtime" / namespace
     data_dir = runtime_root / "data"
     library_root = runtime_root / "library"
     logs_dir = data_dir / "logs"
@@ -45,17 +53,36 @@ def _configure_worker_runtime_environment() -> None:
     for path in (data_dir, library_root, logs_dir, temp_dir, backup_dir, covers_dir):
         path.mkdir(parents=True, exist_ok=True)
 
-    os.environ.setdefault("PULLBOX_DATA_DIR", str(data_dir))
-    os.environ.setdefault("PULLBOX_LIBRARY_ROOT", str(library_root))
-    os.environ.setdefault("PULLBOX_LOGS_DIR", str(logs_dir))
-    os.environ.setdefault("PULLBOX_TEMP_DIR", str(temp_dir))
-    os.environ.setdefault("PULLBOX_BACKUP_DIR", str(backup_dir))
-    os.environ.setdefault("PULLBOX_COVERS_DIR", str(covers_dir))
-    os.environ.setdefault("PULLBOX_DB_URL", f"sqlite+aiosqlite:///{data_dir / 'pullbox.db'}")
-    os.environ.setdefault("PULLBOX_ALLOW_WEAK_SECRET_FOR_TESTS", "true")
+    defaults = {
+        "PULLBOX_DATA_DIR": str(data_dir),
+        "PULLBOX_LIBRARY_ROOT": str(library_root),
+        "PULLBOX_LOGS_DIR": str(logs_dir),
+        "PULLBOX_TEMP_DIR": str(temp_dir),
+        "PULLBOX_BACKUP_DIR": str(backup_dir),
+        "PULLBOX_COVERS_DIR": str(covers_dir),
+        "PULLBOX_DB_URL": f"sqlite+aiosqlite:///{data_dir / 'pullbox.db'}",
+        "PULLBOX_ALLOW_WEAK_SECRET_FOR_TESTS": "true",
+    }
+    inherited = json.loads(os.environ.get("_PULLBOX_PYTEST_DEFAULTS", "{}"))
+    generated = {}
+    for key, value in defaults.items():
+        # Replace only defaults we generated, never explicit caller overrides.
+        if key not in os.environ or os.environ[key] == inherited.get(key):
+            os.environ[key] = value
+            generated[key] = value
+    os.environ["_PULLBOX_PYTEST_DEFAULTS"] = json.dumps(generated)
 
 
 _configure_worker_runtime_environment()
+
+
+def pytest_make_parametrize_id(val: object, argname: str) -> str | None:
+    """Never serialize large adversarial payloads into test names or CI logs."""
+    if isinstance(val, (str, bytes)) and len(val) > 128:
+        payload = val.encode("utf-8", errors="backslashreplace") if isinstance(val, str) else val
+        digest = hashlib.sha256(payload).hexdigest()[:12]
+        return f"{argname}-{type(val).__name__}-{len(val)}-{digest}"
+    return None
 
 
 @pytest.fixture

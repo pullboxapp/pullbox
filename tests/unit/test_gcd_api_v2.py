@@ -322,6 +322,7 @@ async def test_incomplete_duplicate_foreign_or_variant_catalog_cannot_claim_comp
         (b"x" * (2 * 1024 * 1024 + 1), "application/json"),
         (b"<html>challenge</html>", "text/html"),
     ],
+    ids=["duplicate-id", "non-finite-id", "oversized-body", "html-challenge"],
 )
 async def test_malformed_or_oversized_provider_body_is_a_safe_failure(body, content_type):
     client = source(
