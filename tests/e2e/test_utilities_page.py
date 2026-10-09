@@ -3368,22 +3368,33 @@ class TestUtilitiesPage:
             }"""
         )
 
+    @pytest.mark.parametrize("settle_delay_ms", [20, 400])
     def test_mass_rename_browser_is_constrained_to_library_roots(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
+        settle_delay_ms: int,
     ) -> None:
         utilities = UtilitiesPage(authed_page, seeded_server)
         utilities.goto()
 
+        authed_page.evaluate("delay => htmx.config.defaultSettleDelay = delay", settle_delay_ms)
+
         utilities.mass_rename_card.click()
         authed_page.wait_for_url("**/utilities/mass-rename", timeout=5000)
+        # The URL changes before afterSettle resets the content scroll position.
+        # Wait for that reset before Playwright scrolls Browse into view to click.
+        authed_page.wait_for_function(
+            "() => !document.querySelector('#content.htmx-settling')", timeout=5000
+        )
 
         page = UtilitiesMassRenamePage(authed_page, seeded_server)
         with authed_page.expect_response(
             lambda resp: "/api/v1/filesystem/directories" in resp.url,  # type: ignore[arg-type]
+            timeout=5000,
         ) as response_info:
-            page.browse_button.click()
+            # A held pointer makes the navigation's late scroll reset observable.
+            page.browse_button.click(delay=600 if settle_delay_ms > 20 else 0)
         payload = response_info.value.json()
 
         assert "roots=" in response_info.value.request.url

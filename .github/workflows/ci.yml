@@ -24,11 +24,12 @@ on:
   workflow_dispatch:
     inputs:
       pytest_workers:
-        description: Workers per Python job (manual performance comparison)
+        description: Workers per Python job (auto uses six self-hosted, five hosted)
         required: false
         type: choice
-        default: "5"
+        default: "auto"
         options:
+          - "auto"
           - "5"
           - "6"
       e2e_diagnostics:
@@ -237,7 +238,7 @@ jobs:
         env:
           COVERAGE_FAIL_UNDER: ${{ matrix.coverage_fail_under }}
           PULLBOX_SECRET_KEY: test-ci-key
-          PYTEST_WORKERS: ${{ github.event_name == 'workflow_dispatch' && inputs.pytest_workers || env.PYTEST_WORKERS }}
+          PYTEST_WORKERS: ${{ github.event_name == 'workflow_dispatch' && inputs.pytest_workers != 'auto' && inputs.pytest_workers || (runner.environment == 'self-hosted' && '6' || env.PYTEST_WORKERS) }}
 
       - name: Upload coverage report
         if: always()

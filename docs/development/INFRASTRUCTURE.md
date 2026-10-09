@@ -27,7 +27,9 @@ requirements.
 - CI runs the complete test suite and uploads coverage for Python 3.12, 3.13,
   and 3.14. The blocking 90% coverage gate applies to the production/default
   Python 3.14 runtime and local full CI.
-- Self-hosted Python matrix jobs use five pytest workers per Python version.
+- Self-hosted Python matrix jobs use six pytest workers per Python version;
+  GitHub-hosted jobs retain five. Manual dispatch can explicitly select five
+  or six workers instead of the runner-specific default.
 - Self-hosted functional E2E jobs use three isolated pytest workers per browser.
 - Normal PR E2E runs disable video encoding; manual CI dispatches can enable
   retained failure video and tracing with the `e2e_diagnostics` input.
@@ -98,6 +100,9 @@ tests/e2e/
 ### 1.3 Current repo nuances
 
 - Tests outside `tests/unit/` are treated as slower coverage.
+- Shared security fixtures reuse one production-cost bcrypt seed hash per
+  worker. User objects and databases remain fresh per test; password hashing,
+  password changes, and login verification still use the real auth service.
 - E2E tests run a live app and seed through API-style setup rather than relying
   on broad seed scripts.
 - Each parallel E2E worker creates its own temporary database, data directories,

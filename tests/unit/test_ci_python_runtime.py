@@ -1,4 +1,4 @@
-"""Keep worker experiments opt-in without weakening the Python CI gates."""
+"""Keep runner-specific worker defaults without weakening the Python CI gates."""
 
 from pathlib import Path
 
@@ -7,13 +7,13 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_worker_benchmark_is_bounded_and_defaults_to_five_workers():
+def test_worker_default_uses_six_only_on_self_hosted_runners():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     events = workflow.get("on", workflow.get(True))
     workers = events["workflow_dispatch"]["inputs"].get("pytest_workers", {})
     assert workers.get("type") == "choice"
-    assert workers.get("options") == ["5", "6"]
-    assert workers.get("default") == "5"
+    assert workers.get("options") == ["auto", "5", "6"]
+    assert workers.get("default") == "auto"
     assert workflow["env"]["PYTEST_WORKERS"] == "5"
     step = next(
         step
@@ -22,7 +22,8 @@ def test_worker_benchmark_is_bounded_and_defaults_to_five_workers():
     )
     assert step["env"]["PYTEST_WORKERS"] == (
         "${{ github.event_name == 'workflow_dispatch' "
-        "&& inputs.pytest_workers || env.PYTEST_WORKERS }}"
+        "&& inputs.pytest_workers != 'auto' && inputs.pytest_workers "
+        "|| (runner.environment == 'self-hosted' && '6' || env.PYTEST_WORKERS) }}"
     )
 
 

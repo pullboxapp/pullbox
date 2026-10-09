@@ -167,6 +167,14 @@ async def db_session(async_engine) -> AsyncGenerator[AsyncSession, None]:
         await session.rollback()
 
 
+@pytest.fixture(scope="session")
+def seeded_user_password_hash() -> str:
+    """Share only immutable seed data; keep user rows and auth calls isolated."""
+    from pullbox.services.auth_service import AuthService
+
+    return AuthService.hash_password("Test@1234")
+
+
 @pytest.fixture
 def nzbgeek_issues():
     """Real-world NZB issue titles from NZBGeek."""

@@ -43,12 +43,14 @@ async def sec_db() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
 
 
 @pytest.fixture
-async def sec_user(sec_db: async_sessionmaker[AsyncSession]) -> User:
+async def sec_user(
+    sec_db: async_sessionmaker[AsyncSession], seeded_user_password_hash: str
+) -> User:
     """Create a test user with known credentials."""
     async with sec_db() as session:
         user = User(
             username="testuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.commit()
