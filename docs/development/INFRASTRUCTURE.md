@@ -30,12 +30,20 @@ requirements.
 - Self-hosted Python matrix jobs use six pytest workers per Python version;
   GitHub-hosted jobs retain five. Manual dispatch can explicitly select five
   or six workers instead of the runner-specific default.
-- Manual CI dispatch can opt Python 3.12/3.13 into a coverage engine trial with
-  `compatibility_coverage_core`. The default is `auto`; production Python 3.14
-  always keeps coverage.py's default. Every Python job uploads collector
-  evidence for the controller and each worker. Explicit trials fail if the
-  requested engine silently falls back. Test selection and coverage gates do
-  not change.
+- Python 3.12/3.13 CI jobs default to coverage.py's `sysmon` engine on both
+  hosted and self-hosted runners. Manual dispatch can select `auto` (coverage.py's
+  default), `ctrace` (the previous compatibility engine), or `sysmon` with
+  `compatibility_coverage_core`; omitting the input uses `sysmon`. Production
+  Python 3.14 always keeps `auto`. Every Python job uploads collector evidence
+  for the controller and each worker; explicit engines, including the normal
+  compatibility default, fail if coverage is missing or the engine falls back.
+  Test selection, worker counts, and coverage gates do not change.
+- This `sysmon` configuration measures statement coverage, without coverage
+  plugins, dynamic contexts, or concurrency overrides. Python 3.12/3.13 do not
+  support branch coverage with `sysmon`; revisit the engine choice before
+  enabling those features rather than suppressing a fallback warning. Engine
+  changes can change line attribution, so compare statement inventories and
+  covered lines, not percentages alone.
 - Self-hosted functional E2E jobs use three isolated pytest workers per browser.
 - Firefox starts after the independent production Python 3.14 job succeeds;
   Chromium waits for all Python versions. The compatibility matrix and both

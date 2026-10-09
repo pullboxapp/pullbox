@@ -1,4 +1,4 @@
-"""Coverage experiments must identify the real engine without relaxing CI."""
+"""Coverage defaults and overrides must identify the real engine without relaxing CI."""
 
 import json
 import os
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 pytest_plugins = ["pytester"]
 
 
-@pytest.mark.parametrize("core", ["auto", "sysmon"])
+@pytest.mark.parametrize("core", ["auto", "ctrace", "sysmon"])
 def test_workflow_launcher_loads_checkout_plugin_before_collection(
     tmp_path: Path, core: str
 ) -> None:
@@ -64,7 +64,11 @@ def test_workflow_launcher_loads_checkout_plugin_before_collection(
     reports = [json.loads(path.read_text()) for path in directory.glob("*.json")]
     assert len(reports) == 3
     assert {item["worker"] for item in reports} == {"controller", "gw0", "gw1"}
-    expected_core = "SysMonitor" if core == "sysmon" or sys.version_info >= (3, 14) else "CTracer"
+    expected_core = (
+        "SysMonitor"
+        if core == "sysmon" or (core == "auto" and sys.version_info >= (3, 14))
+        else "CTracer"
+    )
     assert all(item["core"] == expected_core and item["expected_core"] == core for item in reports)
 
 
@@ -166,18 +170,18 @@ def test_probe_is_inert_outside_explicit_measurements(
 
 
 @pytest.mark.parametrize("job_name", ["test", "test-production"])
-def test_workflow_keeps_core_experiment_opt_in_and_records_workers(job_name: str) -> None:
+def test_workflow_defaults_compatibility_to_sysmon_and_records_workers(job_name: str) -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     events = workflow.get("on", workflow.get(True))
     selection = events["workflow_dispatch"]["inputs"].get("compatibility_coverage_core", {})
-    assert selection.get("default") == "auto"
+    assert selection.get("default") == "sysmon"
     assert selection.get("type") == "choice"
     assert selection.get("options") == ["auto", "ctrace", "sysmon"]
     steps = workflow["jobs"][job_name]["steps"]
     run = next(s for s in steps if s.get("name") == "Run tests with coverage")
     assert run["env"]["PULLBOX_CI_COVERAGE_EXPECTED_CORE"] == (
-        "${{ github.event_name == 'workflow_dispatch' && matrix.python-version != '3.14' "
-        "&& inputs.compatibility_coverage_core || 'auto' }}"
+        "${{ matrix.python-version != '3.14' && (github.event_name == 'workflow_dispatch' "
+        "&& inputs.compatibility_coverage_core || 'sysmon') || 'auto' }}"
     )
     assert 'case "$PULLBOX_CI_COVERAGE_EXPECTED_CORE" in' in run["run"]
     assert "auto) unset COVERAGE_CORE" in run["run"]

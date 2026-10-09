@@ -33,10 +33,10 @@ on:
           - "5"
           - "6"
       compatibility_coverage_core:
-        description: Coverage engine trial for Python 3.12/3.13 (auto keeps defaults)
+        description: Coverage engine for Python 3.12/3.13 (auto uses coverage.py defaults)
         required: false
         type: choice
-        default: "auto"
+        default: "sysmon"
         options:
           - "auto"
           - "ctrace"
@@ -223,7 +223,7 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          # Keep production and ordinary runs on coverage.py's default engine.
+          # Compatibility defaults to sysmon; production keeps coverage.py's default.
           case "$PULLBOX_CI_COVERAGE_EXPECTED_CORE" in
             auto) unset COVERAGE_CORE ;;
             ctrace|sysmon) export COVERAGE_CORE="$PULLBOX_CI_COVERAGE_EXPECTED_CORE" ;;
@@ -250,7 +250,7 @@ jobs:
             -o faulthandler_timeout=180 \
             -q
         env:
-          PULLBOX_CI_COVERAGE_EXPECTED_CORE: ${{ github.event_name == 'workflow_dispatch' && matrix.python-version != '3.14' && inputs.compatibility_coverage_core || 'auto' }}
+          PULLBOX_CI_COVERAGE_EXPECTED_CORE: ${{ matrix.python-version != '3.14' && (github.event_name == 'workflow_dispatch' && inputs.compatibility_coverage_core || 'sysmon') || 'auto' }}
           PULLBOX_CI_COVERAGE_REPORT_DIR: ${{ runner.temp }}/coverage-core-${{ github.run_id }}-${{ github.run_attempt }}-py${{ matrix.python-version }}
           COVERAGE_FAIL_UNDER: ${{ matrix.coverage_fail_under }}
           PULLBOX_SECRET_KEY: test-ci-key
