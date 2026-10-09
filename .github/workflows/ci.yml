@@ -32,6 +32,15 @@ on:
           - "auto"
           - "5"
           - "6"
+      compatibility_coverage_core:
+        description: Coverage engine trial for Python 3.12/3.13 (auto keeps defaults)
+        required: false
+        type: choice
+        default: "auto"
+        options:
+          - "auto"
+          - "ctrace"
+          - "sysmon"
       e2e_diagnostics:
         description: Retain E2E failure video and traces
         required: false
@@ -214,6 +223,12 @@ jobs:
 
       - name: Run tests with coverage
         run: |
+          # Keep production and ordinary runs on coverage.py's default engine.
+          case "$PULLBOX_CI_COVERAGE_EXPECTED_CORE" in
+            auto) unset COVERAGE_CORE ;;
+            ctrace|sysmon) export COVERAGE_CORE="$PULLBOX_CI_COVERAGE_EXPECTED_CORE" ;;
+            *) echo "Unsupported coverage engine" >&2; exit 2 ;;
+          esac
           # VM-wide samples expose CPU contention and active swapping while the
           # three Python jobs run together. The first row is since boot.
           if command -v vmstat >/dev/null 2>&1; then
@@ -223,6 +238,7 @@ jobs:
           fi
           pytest tests/ \
             --ignore=tests/e2e \
+            -p tests.ci_coverage_core \
             -n "${PYTEST_WORKERS}" \
             --dist=worksteal \
             --cov=pullbox \
@@ -234,9 +250,20 @@ jobs:
             -o faulthandler_timeout=180 \
             -q
         env:
+          PULLBOX_CI_COVERAGE_EXPECTED_CORE: ${{ github.event_name == 'workflow_dispatch' && matrix.python-version != '3.14' && inputs.compatibility_coverage_core || 'auto' }}
+          PULLBOX_CI_COVERAGE_REPORT_DIR: ${{ runner.temp }}/coverage-core-${{ github.run_id }}-${{ github.run_attempt }}-py${{ matrix.python-version }}
           COVERAGE_FAIL_UNDER: ${{ matrix.coverage_fail_under }}
           PULLBOX_SECRET_KEY: test-ci-key
           PYTEST_WORKERS: ${{ github.event_name == 'workflow_dispatch' && inputs.pytest_workers != 'auto' && inputs.pytest_workers || (runner.environment == 'self-hosted' && '6' || env.PYTEST_WORKERS) }}
+
+      - name: Upload coverage core evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-core-py${{ matrix.python-version }}
+          path: ${{ runner.temp }}/coverage-core-${{ github.run_id }}-${{ github.run_attempt }}-py${{ matrix.python-version }}
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload coverage report
         if: always()

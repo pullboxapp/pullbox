@@ -30,6 +30,12 @@ requirements.
 - Self-hosted Python matrix jobs use six pytest workers per Python version;
   GitHub-hosted jobs retain five. Manual dispatch can explicitly select five
   or six workers instead of the runner-specific default.
+- Manual CI dispatch can opt Python 3.12/3.13 into a coverage engine trial with
+  `compatibility_coverage_core`. The default is `auto`; production Python 3.14
+  always keeps coverage.py's default. Every Python job uploads collector
+  evidence for the controller and each worker. Explicit trials fail if the
+  requested engine silently falls back. Test selection and coverage gates do
+  not change.
 - Self-hosted functional E2E jobs use three isolated pytest workers per browser.
 - Firefox starts after the independent production Python 3.14 job succeeds;
   Chromium waits for all Python versions. The compatibility matrix and both
