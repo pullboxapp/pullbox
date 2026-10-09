@@ -28,7 +28,6 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.download import (
     DownloadClientType,
     DownloadHistory,
@@ -37,7 +36,7 @@ from pullbox.models.download import (
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.models.user import APIKey, User
-from pullbox.services.auth_service import AuthService
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -57,21 +56,24 @@ async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]
     """In-memory database with all tables."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
 
 
 @pytest.fixture
-async def api_key(db_factory: async_sessionmaker[AsyncSession]) -> str:
+async def api_key(
+    db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
+) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "c" * 64
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     async with db_factory() as session:
         user = User(
             username="clearuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()
