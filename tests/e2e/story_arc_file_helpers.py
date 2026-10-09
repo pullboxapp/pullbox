@@ -31,18 +31,17 @@ def configure_arc_file_defaults(page: Page, base_url: str, *, prefix: bool) -> N
     expect(section.get_by_test_id("arc-files-preview")).not_to_have_attribute("aria-busy", "true")
     save = section.get_by_role("button", name="Save story arc defaults")
     if save.is_enabled():
-        # Changing the prefix collapses controls above Save. Settle scrolling
-        # and input blur before the pointer click, especially in Firefox.
-        save.scroll_into_view_if_needed()
+        # This helper sets up arc tests through the accessible form. Changing
+        # the prefix shifts the nested settings scroller, so activate the
+        # focused submit button without depending on its pointer coordinates.
         save.focus()
         expect(save).to_be_focused()
-        expect(save).to_be_in_viewport()
         with page.expect_response(
             lambda response: (
                 response.url.endswith("/api/v1/config") and response.request.method == "PUT"
             )
         ) as saved:
-            save.click()
+            save.press("Enter")
         assert saved.value.status == 200, saved.value.text()
         expect(save).to_be_disabled()
     page.reload(wait_until="load")
