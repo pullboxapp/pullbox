@@ -13,6 +13,13 @@ from tests.e2e.story_arc_file_helpers import configure_arc_file_defaults
 pytestmark = pytest.mark.e2e
 
 
+def test_arc_file_defaults_can_disable_existing_reading_order_prefix(
+    authed_page: Page, seeded_server: str
+) -> None:
+    configure_arc_file_defaults(authed_page, seeded_server, prefix=True)
+    configure_arc_file_defaults(authed_page, seeded_server, prefix=False)
+
+
 @pytest.mark.parametrize("prefix", [False, True])
 def test_new_arc_copy_policy_keeps_original_names_with_optional_prefix(
     authed_page: Page, seeded_server: str, prefix: bool
