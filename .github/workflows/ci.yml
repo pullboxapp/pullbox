@@ -179,7 +179,7 @@ jobs:
         run: mypy src/pullbox/
 
   # ──────────────────────────────────────────────
-  # Job 3: Tests + Coverage (matrix: 3.12, 3.13, 3.14)
+  # Job 3: Tests + Coverage (compatibility: 3.12/3.13, production: 3.14)
   # Every version runs the complete suite and publishes coverage. The blocking
   # 90% release gate follows the production/default Python 3.14 runtime.
   # ──────────────────────────────────────────────
@@ -199,9 +199,7 @@ jobs:
             coverage_fail_under: 0
           - python-version: "3.13"
             coverage_fail_under: 0
-          - python-version: "3.14"
-            coverage_fail_under: 90
-    steps:
+    steps: &python-test-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -265,6 +263,24 @@ jobs:
           path: runner-resources.log
           if-no-files-found: warn
           retention-days: 7
+
+  # A separate production job lets Firefox use the first available test runner
+  # without waiting for the compatibility matrix. Both lanes remain required.
+  test-production:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
+    needs: [release_sync_check, full_ci_check, quality-gate, typecheck, alembic-check]
+    if: needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.run_full == 'true'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.14"
+            coverage_fail_under: 90
+    steps: *python-test-steps
 
   # ──────────────────────────────────────────────
   # Job 4: Alembic Migration Sanity Check
@@ -395,12 +411,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ──────────────────────────────────────────────
-  # Job 6: E2E Tests (per-browser isolated pytest sessions, after tests pass)
+  # Job 6: Chromium after all Python jobs; Firefox after production Python.
   # ──────────────────────────────────────────────
   e2e:
     name: E2E Tests (${{ matrix.browser }})
     runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
-    needs: [release_sync_check, full_ci_check, test]
+    needs: [release_sync_check, full_ci_check, test, test-production]
     if: needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.run_full == 'true'
     timeout-minutes: 30
     permissions:
@@ -411,13 +427,11 @@ jobs:
         include:
           - browser: chromium
             pytest_extra_args: ""
-          - browser: firefox
-            pytest_extra_args: "--durations=25 --durations-min=1.0"
-    env:
+    env: &e2e-env
       PULLBOX_SECRET_KEY: test-ci-key
       PULLBOX_RATE_LIMIT_ENABLED: "false"
       PULLBOX_DB_URL: "sqlite+aiosqlite:///test_e2e_${{ github.run_id }}_${{ github.run_attempt }}_${{ matrix.browser }}.db"
-    steps:
+    steps: &e2e-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -483,6 +497,23 @@ jobs:
             echo "- Failure artifacts: uploaded only when the job fails or is canceled"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  e2e-firefox:
+    name: E2E Tests (${{ matrix.browser }})
+    runs-on: ${{ fromJSON(((github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]')) || vars.PULLBOX_CHECKS_RUNNER == 'github-hosted') && '["ubuntu-latest"]' || '["self-hosted","Linux","X64","ci"]') }}
+    needs: [release_sync_check, full_ci_check, test-production]
+    if: needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.run_full == 'true'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - browser: firefox
+            pytest_extra_args: "--durations=25 --durations-min=1.0"
+    env: *e2e-env
+    steps: *e2e-steps
+
   # Stable aggregate required check for branch rulesets.
   ci-required:
     name: CI Required
@@ -494,8 +525,10 @@ jobs:
       - typecheck
       - alembic-check
       - test
+      - test-production
       - accessibility
       - e2e
+      - e2e-firefox
     if: always()
     timeout-minutes: 5
     permissions:

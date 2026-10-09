@@ -31,6 +31,10 @@ requirements.
   GitHub-hosted jobs retain five. Manual dispatch can explicitly select five
   or six workers instead of the runner-specific default.
 - Self-hosted functional E2E jobs use three isolated pytest workers per browser.
+- Firefox starts after the independent production Python 3.14 job succeeds;
+  Chromium waits for all Python versions. The compatibility matrix and both
+  browsers remain blocking dependencies of `CI Required`. Shared YAML steps
+  keep test commands, artifact names, and browser setup identical across lanes.
 - Normal PR E2E runs disable video encoding; manual CI dispatches can enable
   retained failure video and tracing with the `e2e_diagnostics` input.
 - Python 3.14 is the production container runtime.

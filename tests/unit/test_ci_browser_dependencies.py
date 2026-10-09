@@ -8,7 +8,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("job_name", ["accessibility", "e2e"])
+@pytest.mark.parametrize("job_name", ["accessibility", "e2e", "e2e-firefox"])
 def test_browser_jobs_install_locked_node_dependencies_before_pytest(job_name: str) -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"][job_name]["steps"]

@@ -244,8 +244,11 @@ def test_ci_and_local_full_ci_enforce_v1_coverage_gate() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     ci_local_match = re.search(r"^ci-local:.*?(?=^\S|\Z)", makefile, re.MULTILINE | re.DOTALL)
 
-    test_job = ci_config["jobs"]["test"]
-    matrix_rows = test_job["strategy"]["matrix"]["include"]
+    matrix_rows = [
+        row
+        for name in ("test", "test-production")
+        for row in ci_config["jobs"][name]["strategy"]["matrix"]["include"]
+    ]
     assert matrix_rows == [
         {"python-version": "3.12", "coverage_fail_under": 0},
         {"python-version": "3.13", "coverage_fail_under": 0},
@@ -398,8 +401,10 @@ def test_release_sync_fast_path_is_wired_to_required_aggregate_workflows() -> No
                 "typecheck",
                 "alembic-check",
                 "test",
+                "test-production",
                 "accessibility",
                 "e2e",
+                "e2e-firefox",
             ],
             "message": "heavyweight CI jobs intentionally skipped",
         },
@@ -495,7 +500,15 @@ def test_self_hosted_jobs_separate_heavy_ci_from_lightweight_checks() -> None:
     """Keep matrix tests off runners used by accessibility and security checks."""
     expected_labels = {
         "ci.yml": {
-            "ci": ["quality-gate", "typecheck", "test", "alembic-check", "e2e"],
+            "ci": [
+                "quality-gate",
+                "typecheck",
+                "test",
+                "test-production",
+                "alembic-check",
+                "e2e",
+                "e2e-firefox",
+            ],
             "checks": ["accessibility"],
         },
         "security.yml": {
@@ -582,6 +595,7 @@ def test_ci_video_and_trace_capture_are_manual_diagnostics_only() -> None:
     for job_name, step_name in [
         ("accessibility", "Run accessibility browser tests"),
         ("e2e", "Run E2E tests"),
+        ("e2e-firefox", "Run E2E tests"),
     ]:
         job = jobs.get(job_name)
         assert isinstance(job, dict)
