@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +12,60 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 pytest_plugins = ["pytester"]
+
+
+@pytest.mark.parametrize("core", ["auto", "sysmon"])
+def test_workflow_launcher_loads_checkout_plugin_before_collection(
+    tmp_path: Path, core: str
+) -> None:
+    """Run the real shell step without pytester's sys.path bootstrap."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    step = next(
+        s for s in workflow["jobs"]["test"]["steps"] if s.get("name") == "Run tests with coverage"
+    )
+    package = tmp_path / "pullbox"
+    package.mkdir()
+    (package / "__init__.py").write_text("def double(value):\n    return value * 2\n")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "__init__.py").write_text("")
+    shutil.copyfile(ROOT / "tests/ci_coverage_core.py", tests / "ci_coverage_core.py")
+    (tests / "test_probe.py").write_text(
+        "import pytest\nfrom pullbox import double\n"
+        "@pytest.mark.parametrize('value', range(6))\ndef test_double(value):\n"
+        "    assert double(value) == value + value\n"
+    )
+    env = os.environ.copy()
+    for name in ("PYTHONPATH", "PYTEST_ADDOPTS", "COVERAGE_RCFILE", "COVERAGE_FILE"):
+        env.pop(name, None)
+    directory = tmp_path / "core-evidence"
+    env.update(
+        PATH=str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTEST_PLUGINS="pytest_cov.plugin,xdist.plugin",
+        PYTEST_WORKERS="2",
+        COVERAGE_FAIL_UNDER="100",
+        PULLBOX_CI_COVERAGE_EXPECTED_CORE=core,
+        PULLBOX_CI_COVERAGE_REPORT_DIR=str(directory),
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "6 passed" in result.stdout
+    assert (tmp_path / "coverage.xml").is_file()
+    assert (tmp_path / "test-results.xml").is_file()
+    reports = [json.loads(path.read_text()) for path in directory.glob("*.json")]
+    assert len(reports) == 3
+    assert {item["worker"] for item in reports} == {"controller", "gw0", "gw1"}
+    expected_core = "SysMonitor" if core == "sysmon" or sys.version_info >= (3, 14) else "CTracer"
+    assert all(item["core"] == expected_core and item["expected_core"] == core for item in reports)
 
 
 def _probe(

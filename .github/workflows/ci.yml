@@ -236,7 +236,7 @@ jobs:
             RESOURCE_MONITOR_PID=$!
             trap 'kill "$RESOURCE_MONITOR_PID" 2>/dev/null || true' EXIT
           fi
-          pytest tests/ \
+          python -m pytest tests/ \
             --ignore=tests/e2e \
             -p tests.ci_coverage_core \
             -n "${PYTEST_WORKERS}" \
