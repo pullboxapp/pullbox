@@ -18,9 +18,9 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.user import APIKey, User
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -33,12 +33,13 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-security-tests"
 async def sec_db() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     """Create an in-memory database with all tables."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield factory
-    await engine.dispose()
+    try:
+        async with engine.begin() as conn:
+            await create_test_schema(conn)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        yield factory
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture

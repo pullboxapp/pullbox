@@ -15,8 +15,8 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.providers.base import ReleaseResult
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -150,10 +150,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 async def async_engine():
     """Create a fresh in-memory async SQLite engine with all tables."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
+    try:
+        async with engine.begin() as conn:
+            await create_test_schema(conn)
+        yield engine
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
