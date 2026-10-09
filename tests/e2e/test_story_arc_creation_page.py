@@ -13,11 +13,60 @@ from tests.e2e.story_arc_file_helpers import configure_arc_file_defaults
 pytestmark = pytest.mark.e2e
 
 
-def test_arc_file_defaults_can_disable_existing_reading_order_prefix(
-    authed_page: Page, seeded_server: str
+@pytest.mark.parametrize("delayed_endpoint", ["library-roots", "naming/preview"])
+def test_arc_file_defaults_wait_for_media_loads_and_persist_prefix(
+    authed_page: Page, seeded_server: str, delayed_endpoint: str
 ) -> None:
+    # Late media data expands cards above the arc form. Record premature
+    # pointer actions deterministically instead of relying on a mid-click race.
+    premature_actions: list[str] = []
+    authed_page.expose_function(
+        "recordPrematureArcAction", lambda value: premature_actions.append(value)
+    )
+    authed_page.add_init_script(
+        """(() => {
+        const originalFetch = window.fetch;
+        window.arcMediaPending = true;
+        window.fetch = async function(input, options) {
+            if (String(input).endsWith('/api/v1/config/DELAYED_ENDPOINT')) {
+                window.arcMediaPending = true;
+                try {
+                    const [response] = await Promise.all([
+                        originalFetch.call(this, input, options),
+                        new Promise(resolve => setTimeout(resolve, 1200)),
+                    ]);
+                    return response;
+                } finally {
+                    window.arcMediaPending = false;
+                }
+            }
+            return originalFetch.call(this, input, options);
+        };
+        document.addEventListener('pointerdown', event => {
+            if (window.arcMediaPending && event.target.closest('#story-arc-files')) {
+                window.recordPrematureArcAction(event.target.outerHTML);
+            }
+        }, true);
+    })()""".replace("DELAYED_ENDPOINT", delayed_endpoint)
+    )
+    authed_page.goto(f"{seeded_server}/settings?tab=media", wait_until="load")
+    response = authed_page.request.put(
+        f"{seeded_server}/api/v1/config",
+        headers={"X-CSRF-Token": authed_page.evaluate("readCsrfTokenFromBody()")},
+        data={
+            "values": {
+                "story_arc_files_enabled": "false",
+                "story_arc_files_library_root_id": "",
+                "story_arc_files_destination": "",
+                "story_arc_files_prefix_reading_order": "false",
+            }
+        },
+    )
+    assert response.status == 200, response.text()
+    authed_page.reload(wait_until="load")
     configure_arc_file_defaults(authed_page, seeded_server, prefix=True)
     configure_arc_file_defaults(authed_page, seeded_server, prefix=False)
+    assert premature_actions == []
 
 
 @pytest.mark.parametrize("prefix", [False, True])
