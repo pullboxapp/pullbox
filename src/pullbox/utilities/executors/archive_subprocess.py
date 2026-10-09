@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import structlog
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
+from pullbox.core.library_file_ownership import ReferencedFileValidationError
 
 if TYPE_CHECKING:
     from types import FrameType
@@ -569,6 +570,15 @@ def _raise_worker_error(
         raise FileNotFoundError(message)
     if exc_type == "FileExistsError":
         raise FileExistsError(message)
+    if exc_type == "ReferencedFileValidationError":
+        reason = str((details or {}).get("reason") or "")
+        if reason not in {
+            "source_changed",
+            "source_signature_missing",
+            "source_signature_unsupported",
+        }:
+            raise RuntimeError("Archive worker returned an invalid source-validation reason.")
+        raise ReferencedFileValidationError(reason, message)
     if exc_type == "ValueError":
         raise ValueError(message)
     if operation == "convert" and _is_corrupt_archive_error(exc_type, message):
@@ -666,7 +676,9 @@ def _worker_main(argv: list[str]) -> int:
                 )
                 != payload["expected_report"]
             ):
-                raise ValueError("Nested comic changed after review. Recheck the source.")
+                raise ReferencedFileValidationError(
+                    "source_changed", "Nested comic changed after review. Recheck the source."
+                )
             _write_progress_state(Path(payload["progress_path"]), "extracting", 1, 1, "archives")
             normalize_nested_comic(
                 source,
@@ -681,14 +693,10 @@ def _worker_main(argv: list[str]) -> int:
         else:
             raise ValueError(f"Unsupported archive worker operation: {operation}")
     except Exception as exc:  # pragma: no cover - exercised via parent wrapper
-        sys.stderr.write(
-            json.dumps(
-                {
-                    "type": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
-        )
+        error = {"type": type(exc).__name__, "message": str(exc)}
+        if isinstance(exc, ReferencedFileValidationError):
+            error["reason"] = exc.reason
+        sys.stderr.write(json.dumps(error))
         return 1
     finally:
         if previous_handler is not None:

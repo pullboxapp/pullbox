@@ -43,8 +43,16 @@ def test_nested_repair_preview_both_themes(authed_page, seeded_server, browser_n
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
-    page.get_by_test_id("import-review-lane-fix_source").click()
+    # The seeded group also contains large-file decisions, so its primary lane
+    # remains Needs a decision even though the nested file needs source repair.
+    page.get_by_test_id("import-review-lane-decide").click()
+    expect(
+        page.locator("#import-step-review-shell input[name='review_status_filter']")
+    ).to_have_value("decide")
     page.get_by_test_id("import-review-reason-nested_comic_archive").click()
+    expect(page.get_by_test_id("import-review-reason-nested_comic_archive")).to_have_attribute(
+        "aria-pressed", "true"
+    )
     page.get_by_role("button", name="Review nested repairs").click()
     preview = page.get_by_test_id("nested-repair-preview")
     expect(preview).to_be_visible()

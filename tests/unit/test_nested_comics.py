@@ -1,6 +1,7 @@
 """Nested comic normalization never modifies the source or guesses an identity."""
 
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -236,6 +237,84 @@ async def test_approval_does_not_survive_source_change(tmp_path):
             ),
             file,
         )
+
+
+@pytest.mark.parametrize(
+    ("changed_evidence", "reason"),
+    [
+        ("signature", "source_changed"),
+        ("report", "source_changed"),
+        ("missing", "source_signature_missing"),
+        ("unsupported", "source_signature_unsupported"),
+    ],
+)
+async def test_worker_source_change_preserves_review_reason(
+    tmp_path: Path, changed_evidence: str, reason: str
+) -> None:
+    from pullbox.core.library_file_ownership import (
+        ReferencedFileValidationError,
+        build_file_identity_signature,
+    )
+    from pullbox.utilities.executors.archive_subprocess import repair_nested_comic_interruptible
+
+    source = wrapper(tmp_path, outer=XML)
+    original = source.read_bytes()
+    signature = build_file_identity_signature(source)
+    report = inspect_nested_comic(source)
+    assert report is not None
+    if changed_evidence == "signature":
+        signature["size"] = len(original) + 1
+    elif changed_evidence == "missing":
+        signature.clear()
+    elif changed_evidence == "unsupported":
+        signature["schema_version"] = 2
+    else:
+        report["page_count"] = 99
+    target = tmp_path / "normalized.cbz"
+    with pytest.raises(ReferencedFileValidationError) as error:
+        await repair_nested_comic_interruptible(
+            source,
+            target,
+            max_bytes=2_000_000,
+            expected_signature=signature,
+            expected_report=report,
+        )
+    assert error.value.reason == reason
+    assert source.read_bytes() == original
+    assert not target.exists()
+
+
+def test_worker_preserves_post_normalization_source_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from pullbox.core.library_file_ownership import (
+        ReferencedFileValidationError,
+        build_file_identity_signature,
+    )
+    from pullbox.utilities.executors import archive_subprocess
+
+    source = wrapper(tmp_path, outer=XML)
+    target = tmp_path / "normalized.cbz"
+    payload = {
+        "source": str(source),
+        "target": str(target),
+        "max_bytes": 2_000_000,
+        "expected_signature": build_file_identity_signature(source),
+        "expected_report": inspect_nested_comic(source),
+        "progress_path": str(tmp_path / "progress.json"),
+    }
+
+    def change_source(*args, **kwargs):
+        normalize_nested_comic(*args, **kwargs)
+        with source.open("ab") as stream:
+            stream.write(b"changed during repair")
+
+    monkeypatch.setattr("pullbox.core.nested_comics.normalize_nested_comic", change_source)
+    assert archive_subprocess._worker_main(["--worker", "nested_repair", json.dumps(payload)]) == 1
+    stderr = capsys.readouterr().err.encode()
+    with pytest.raises(ReferencedFileValidationError) as error:
+        archive_subprocess._raise_worker_error("nested_repair", payload, b"", stderr, returncode=1)
+    assert error.value.reason == "source_changed"
 
 
 def test_scan_reports_nested_comic_instead_of_empty_archive(tmp_path: Path) -> None:
