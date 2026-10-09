@@ -681,8 +681,7 @@ class TestImportCollectionTab:
         assert authed_page.locator("[data-testid='import-collection-body']").count() == 1
         assert import_page.review_matched_diagnostics.is_visible()
 
-        import_page.conflicts_tab.click()
-        import_page.wait_for_htmx()
+        import_page.click_review_control(import_page.conflicts_tab, timeout=5000)
         import_page.conflicts_panel.wait_for(state="visible", timeout=5000)
 
         assert authed_page.locator("[data-testid='import-header']").count() == 1
