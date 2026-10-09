@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import urljoin
 
 from tests.e2e.pages.base import BasePage
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Locator, Page
+    from playwright.sync_api import Locator, Page, Request
 
 
 class ImportPage(BasePage):
@@ -23,6 +24,43 @@ class ImportPage(BasePage):
             path += f"&view={view}"
         self.navigate(path)
         self.workspace_root.wait_for(state="visible", timeout=5000)
+
+    def click_review_control(self, control: Locator, *, timeout: int = 10000) -> None:
+        """Wait for this click's response and the review DOM update, not global HTMX."""
+        target = control.get_attribute("hx-target")
+        request_url = control.get_attribute("data-import-review-nav-url") or control.get_attribute(
+            "hx-get"
+        )
+        assert target == "#import-step-review-shell" and request_url
+        url = urljoin(self.page.url, request_url)
+        idle = """selector => {
+            const shell = document.querySelector(selector);
+            return shell && !shell.classList.contains('htmx-request')
+                && !window.__pbImportReviewNavPending;
+        }"""
+        self.page.wait_for_function(idle, arg=target, timeout=timeout)
+        requests: set[Request] = set()
+
+        def record_request(request: Request) -> None:
+            if request.url == url and request.method == "GET":
+                requests.add(request)
+
+        # Arm before clicking, and exclude responses to older or unrelated
+        # requests. A pre-existing ready filter is not proof of a fresh refresh.
+        self.page.on("request", record_request)
+        try:
+            with self.page.expect_response(
+                lambda response: response.request in requests, timeout=timeout
+            ) as pending:
+                control.click(timeout=timeout)
+            response = pending.value
+            assert response.ok, f"Import review refresh failed: HTTP {response.status}"
+            # fetch headers arrive before response.text() and the DOM morph.
+            # The review loader clears this marker in its final completion path;
+            # it does not emit afterSettle for workspace updates.
+            self.page.wait_for_function(idle, arg=target, timeout=timeout)
+        finally:
+            self.page.remove_listener("request", record_request)
 
     @property
     def workspace_root(self) -> Locator:
