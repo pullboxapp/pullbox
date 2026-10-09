@@ -99,6 +99,7 @@ from pullbox.models.series import (
     SeriesStatusOverride,
     SeriesType,
 )
+from pullbox.models.series_interest import SeriesInterest, SeriesInterestState
 from pullbox.models.story_arc import (
     ImportedStoryArcStatus,
     IssueStoryArc,
@@ -227,6 +228,8 @@ __all__ = [
     "SeriesCatalogCheckpoint",
     "SeriesExternalIdentity",
     "SeriesIdentityEvent",
+    "SeriesInterest",
+    "SeriesInterestState",
     "SeriesMetadataBaseline",
     "SeriesStatus",
     "SeriesStatusOverride",

@@ -5,16 +5,38 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING, Annotated, Any, Never
 
-from fastapi import APIRouter, BackgroundTasks, Query, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Path, Query, status
+from pydantic import BaseModel, ConfigDict
 
-from pullbox.api.deps import AuthenticatedUser, DbSession  # noqa: TC001
+from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser  # noqa: TC001
+from pullbox.config import get_settings
 from pullbox.core.exceptions import PullboxError
+from pullbox.schemas.search import (
+    DcGrabRequest,
+    DcGrabResponse,
+    DirectGrabRequest,
+    DirectGrabResponse,
+    GrabReleaseRequest,
+    GrabReleaseResponse,
+)
 from pullbox.schemas.whats_new import (
     WhatsNewCacheMetadata,
     WhatsNewCurrentWeekResponse,
+    WhatsNewIssueSelection,
     WhatsNewUpcomingResponse,
+    WhatsNewWatchRequest,
 )
+from pullbox.services.library_root_management import available_add_series_roots
+from pullbox.services.series_interest import (
+    ACTIVE_STATES,
+    cancel_watch,
+    find_watch,
+    save_watch,
+    watch_response,
+)
+from pullbox.services.whats_new_actions import WhatsNewSelectionError, load_release_selection
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
+from pullbox.services.whats_new_grab import validate_issue_selection
 from pullbox.services.whats_new_refresh_queue import (
     RefreshQueueStatus,
     WhatsNewRefreshCoordinator,
@@ -28,6 +50,130 @@ router = APIRouter(prefix="/whats-new", tags=["whats-new"], include_in_schema=Fa
 refresh_coordinator = WhatsNewRefreshCoordinator(runner=run_whats_new_refresh)
 
 StoreDateQuery = Annotated[date | None, Query(alias="date")]
+
+
+class ReleaseGrabRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    selection: WhatsNewIssueSelection
+    result: GrabReleaseRequest | DirectGrabRequest | DcGrabRequest
+
+
+_grabbing_issues: set[int] = set()
+
+
+@router.post("/grab", status_code=201)
+async def grab_selected_release(
+    body: ReleaseGrabRequest, session: DbSession, user: InteractiveOperatorUser
+) -> object:
+    """Admit one confirmed missing issue, then use the current selected-grab handlers."""
+    from pullbox.api.v1 import issues
+
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    issue_id = body.selection.issue_id
+    if issue_id in _grabbing_issues:
+        raise HTTPException(409, "This issue already has a Grab request in progress.")
+    _grabbing_issues.add(issue_id)
+    try:
+        try:
+            await validate_issue_selection(session, body.selection)
+        except WhatsNewSelectionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        response: DirectGrabResponse | DcGrabResponse | GrabReleaseResponse
+        if isinstance(body.result, DirectGrabRequest):
+            response = await issues.grab_direct_release(
+                issue_id=issue_id, body=body.result, _user=user, session=session
+            )
+        elif isinstance(body.result, DcGrabRequest):
+            response = await issues.grab_direct_connect_release(
+                issue_id=issue_id, body=body.result, user=user, session=session
+            )
+        else:
+            response = await issues.grab_release(
+                issue_id=issue_id, body=body.result, _user=user, session=session
+            )
+        await session.commit()
+        return response
+    finally:
+        _grabbing_issues.discard(issue_id)
+
+
+@router.post("/issue-state")
+async def release_issue_state(
+    body: WhatsNewIssueSelection, session: DbSession, user: InteractiveOperatorUser
+) -> dict[str, object]:
+    del user
+    try:
+        state = await validate_issue_selection(session, body, require_missing=False)
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"issue_id": state.issue_id, "state": state.state.value, "label": state.label}
+
+
+@router.post("/watch")
+async def create_release_watch(
+    body: WhatsNewWatchRequest, session: DbSession, user: InteractiveOperatorUser
+) -> dict[str, object]:
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        return watch_response(await save_watch(session, body, user.id))
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/watch/{interest_id}/cancel")
+async def cancel_release_watch(
+    interest_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
+    session: DbSession,
+    user: InteractiveOperatorUser,
+) -> dict[str, object]:
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        return watch_response(await cancel_watch(session, interest_id, user.id))
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/resolve/{cache_id}/{release_id}")
+async def resolve_release_context(
+    cache_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
+    release_id: Annotated[int, Path(gt=0, le=2**63 - 1)],
+    session: DbSession,
+    _user: InteractiveOperatorUser,
+) -> dict[str, object]:
+    """Read saved discovery context without fetching providers or matching by title."""
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        context = await load_release_selection(session, cache_id, release_id)
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    watch_roots = await available_add_series_roots(session, require_default=False)
+    default_id = (
+        watch_roots[0]["id"]
+        if watch_roots and watch_roots[0]["is_default_managed_destination"]
+        else None
+    )
+    roots = watch_roots if default_id else []
+    interest = await find_watch(session, context.locg_series_id) if context.locg_series_id else None
+    if interest is not None and interest.state in ACTIVE_STATES:
+        roots = [root for root in watch_roots if root["id"] == interest.target_library_root_id]
+    return {
+        "selection": context.selection.model_dump(),
+        "title": context.title,
+        "publisher": context.publisher,
+        "year": context.year,
+        "can_link": context.locg_series_id is not None,
+        "locg_series_id": context.locg_series_id,
+        "roots": roots,
+        "watch_roots": watch_roots,
+        "watch_default_id": default_id,
+        "can_watch": bool(
+            context.locg_series_id and context.store_date and context.store_date > date.today()
+        ),
+    }
 
 
 @router.get("")

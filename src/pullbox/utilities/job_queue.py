@@ -516,8 +516,10 @@ class JobQueueManager:
     async def recover_and_dispatch(self) -> int:
         """Recover interrupted jobs, then restart serial dispatch for queued work."""
         from pullbox.services.issue_file_metadata_recovery import recover_file_metadata_jobs
+        from pullbox.utilities.executors.mass_paired_conversion import recover_paired_mass_jobs
 
         await recover_file_metadata_jobs(self._session_factory)
+        await recover_paired_mass_jobs(self._session_factory)
         async with self._session_factory() as session:
             recovered = await self.recover_interrupted_jobs(session)
             await session.commit()

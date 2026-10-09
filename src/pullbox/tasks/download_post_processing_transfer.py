@@ -31,6 +31,7 @@ async def transfer_and_register_library_file(
     set_transfer_progress: SetTransferProgress,
     infer_effective_transfer_method: InferEffectiveTransferMethod,
     replacement_trash_dir: Path | None = None,
+    paired_metadata: bool = False,
 ) -> Path:
     """Transfer the completed download into the library and update trace state."""
     method = ingest_policy.post_processing_method
@@ -54,6 +55,15 @@ async def transfer_and_register_library_file(
             register_phase_entered = True
             runtime.enter_phase(PostProcessingPhase.REGISTERING_LIBRARY_FILE)
 
+    metadata_options: dict[str, Any] = {}
+    if paired_metadata:
+        # Preserve original embedded evidence and every download/seeding source.
+        # The journaled writer runs only after this managed copy is durable.
+        metadata_options = {
+            "transfer_method": "copy",
+            "normalize_to_cbz": False,
+            "update_embedded_comicinfo_from_match": False,
+        }
     library_file = await register_library_file(
         session,
         comic_file,
@@ -62,9 +72,12 @@ async def transfer_and_register_library_file(
         move_to_library=True,
         library_root_id=preferred_managed_root_id(series),
         transfer_progress_callback=_on_transfer_progress,
-        download_client=download.download_client,
+        # Seed-safe path-only planning may otherwise hardlink this copy and apply
+        # library permissions to the original inode before paired publication.
+        download_client=None if paired_metadata else download.download_client,
         replace_existing_library_file=bool(getattr(download, "replace_existing_file", False)),
         replacement_trash_dir=replacement_trash_dir,
+        **metadata_options,
     )
     dest_path = Path(library_file.file_path)
     trace.final_path = str(dest_path)
@@ -72,11 +85,15 @@ async def transfer_and_register_library_file(
         None,
         comic_file.exists,
     )
-    trace.effective_transfer_method = infer_effective_transfer_method(
-        source_path=comic_file,
-        destination_path=dest_path,
-        configured_transfer_method=method,
-        seed_safe_torrent_import=bool(trace.seed_safe_torrent_import),
+    trace.effective_transfer_method = (
+        "copy"
+        if paired_metadata
+        else infer_effective_transfer_method(
+            source_path=comic_file,
+            destination_path=dest_path,
+            configured_transfer_method=method,
+            seed_safe_torrent_import=bool(trace.seed_safe_torrent_import),
+        )
     )
     trace.file_size_bytes = library_file.file_size
     if trace.transferred_bytes is None:

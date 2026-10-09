@@ -29,12 +29,19 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-post-processing
 
 @pytest.fixture
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    from pullbox.tasks.post_processing_progress import _post_processing_cache
+
+    # Each fresh database reuses IDs; progress from other tests must not hide its rows.
+    _post_processing_cache.clear()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield factory
-    await engine.dispose()
+    try:
+        yield factory
+    finally:
+        _post_processing_cache.clear()
+        await engine.dispose()
 
 
 @pytest.fixture

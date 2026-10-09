@@ -1,4 +1,5 @@
 <div
+  id="issue-search-controller"
   x-data="issueSearchModal()"
   @open-search.window="open($event.detail)"
 >
@@ -21,10 +22,12 @@
       x-transition:leave-end="opacity-0 scale-95"
       class="modal-panel issue-search-modal-panel"
       @click.stop
+      role="dialog" aria-modal="true" aria-labelledby="issue-search-title"
+      tabindex="-1" x-ref="searchDialog" @keydown.tab="trapSearchFocus($event)"
     >
       <div class="modal-header issue-search-modal-header">
         <div class="min-w-0">
-          <h3 class="issue-search-modal-title">ISSUE <span>SEARCH</span></h3>
+          <h3 id="issue-search-title" class="issue-search-modal-title">ISSUE <span>SEARCH</span></h3>
           <p class="issue-search-modal-subtitle">
             <span x-text="searchSeriesTitle"></span>
             <span x-show="searchSeriesYear">(<span x-text="searchSeriesYear"></span>)</span>
@@ -51,6 +54,7 @@
       </div>
 
       <div class="modal-body issue-search-modal-body min-h-0">
+        <p x-show="searchError" x-cloak role="alert" class="inline-alert inline-alert-danger" x-text="searchError"></p>
         <div
           x-show="searching"
           class="issue-search-loading-state flex flex-col items-center justify-center px-6 py-12 text-center"

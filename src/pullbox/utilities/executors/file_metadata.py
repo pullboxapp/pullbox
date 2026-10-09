@@ -100,7 +100,7 @@ class FileMetadataExecutor(JobExecutor):
                 # Stage-local measurements are real; overall reserves the commit/finalize tail.
                 percent = (
                     (5 + 65 * ratio)
-                    if stage == "transferring"
+                    if stage in {"transferring", "extracting", "rendering"}
                     else (70 + 20 * ratio)
                     if stage == "verifying"
                     else 90
@@ -110,8 +110,10 @@ class FileMetadataExecutor(JobExecutor):
                     replace(
                         update,
                         phase=stage,
-                        message="Preparing reconciled metadata"
-                        if stage == "transferring"
+                        message="Rendering comic pages"
+                        if stage == "rendering"
+                        else "Preparing reconciled metadata"
+                        if stage in {"transferring", "extracting"}
                         else "Verifying preserved comic pages",
                         overall=OperationProgressMeasure(percent=percent),
                         item=OperationItemProgress(

@@ -10,6 +10,7 @@ from pullbox.config import get_settings
 from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
 from pullbox.providers.metadata import comicvine_normalization as normalize
 from pullbox.providers.metadata.comicvine import ComicVineError, ComicVineProvider
+from pullbox.providers.metadata.gcd_api_v2 import GcdApiV2Source
 from pullbox.providers.metadata.gcd_local import GcdLocalSource
 from pullbox.providers.metadata.metron import MetronSource
 from pullbox.schemas.metadata_sources import (
@@ -498,9 +499,29 @@ def _metron(runtime: SourceRuntime) -> MetronSource:
     return MetronSource(runtime.credential)
 
 
+def _gcd_api(runtime: SourceRuntime) -> GcdApiV2Source:
+    if runtime.credential is None:
+        raise MetadataSourceError(SourceStatus.UNCONFIGURED)
+    return GcdApiV2Source(runtime.credential)
+
+
 def metadata_sources() -> dict[MetadataSource, SourceRegistration]:
     return {
         **comicvine_sources(),
+        MetadataSource.GCD_API_V2: SourceRegistration(
+            frozenset(
+                {
+                    SourceCapability.SERIES_SEARCH,
+                    SourceCapability.SERIES_DETAILS,
+                    SourceCapability.ISSUE_LIST,
+                    SourceCapability.ISSUE_DETAILS,
+                    SourceCapability.STORY_ARC_SEARCH,
+                    SourceCapability.STORY_ARC_DETAILS,
+                    SourceCapability.STORY_ARC_ISSUES,
+                }
+            ),
+            _gcd_api,
+        ),
         MetadataSource.GCD_LOCAL: SourceRegistration(
             frozenset(
                 {
@@ -509,6 +530,9 @@ def metadata_sources() -> dict[MetadataSource, SourceRegistration]:
                     SourceCapability.ISSUE_LIST,
                     SourceCapability.ISSUE_DETAILS,
                     SourceCapability.OFFLINE,
+                    SourceCapability.STORY_ARC_SEARCH,
+                    SourceCapability.STORY_ARC_DETAILS,
+                    SourceCapability.STORY_ARC_ISSUES,
                 }
             ),
             lambda runtime: GcdLocalSource(runtime.gcd_snapshot),

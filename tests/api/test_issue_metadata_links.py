@@ -264,6 +264,60 @@ async def test_issue_refresh_fills_gaps_and_preserves_manual_fields_and_ownershi
         assert issue.description == "Later manual edit" and issue.page_count == 40
 
 
+async def test_issue_refresh_endpoint_fills_proven_cached_store_date(
+    authenticated_client, issue_target, sec_db
+):
+    from pullbox.services.whats_new_cache_service import WhatsNewCacheService
+
+    await link(authenticated_client, issue_target)
+    async with sec_db.begin() as session:
+        issue = await session.get(Issue, issue_target)
+        session.add(
+            SeriesExternalIdentity(
+                series_id=issue.series_id,
+                identity_namespace="locg",
+                external_id="77",
+                verification_state="verified",
+                evidence_kind="user_selection",
+            )
+        )
+        await WhatsNewCacheService().upsert_upcoming(
+            session,
+            payload={
+                "weeks": [
+                    {
+                        "issues": [
+                            {
+                                "locg_issue_id": 1001,
+                                "locg_series_id": 77,
+                                "metron_issue_id": 123,
+                                "issue_number": "50-x",
+                                "store_date": "2026-09-30",
+                                "series": {"locg_series_id": 77, "metron_series_id": 42},
+                            }
+                        ]
+                    }
+                ]
+            },
+        )
+    response = await authenticated_client.post(
+        f"/api/v1/issues/{issue_target}/refresh-metadata", headers=csrf(authenticated_client)
+    )
+    assert response.status_code == 200, response.text
+    panel = await authenticated_client.get(url(issue_target))
+    origin = next(item for item in panel.json()["origins"] if item["field"] == "store_date")
+    assert origin["source"] is None
+    assert origin["passive_release"]["match_kind"] == "exact_issue"
+    assert origin["passive_release"]["issue_number_text"] == "50-X"
+    async with sec_db() as session:
+        issue = await session.get(Issue, issue_target)
+        assert issue.store_date == date(2026, 9, 30) and issue.release_date == date(1999, 1, 1)
+        assert issue.status is IssueStatus.OWNED and issue.manual_skip
+        assert issue.title == "My manual title"
+        assert await session.scalar(select(func.count()).select_from(Issue)) == 1
+        assert await session.scalar(select(func.count()).select_from(IssueExternalIdentity)) == 1
+
+
 async def test_link_and_refresh_require_operator_csrf_and_parent_link(
     authenticated_client, unauthenticated_client, sec_api_key, issue_target, sec_db
 ):

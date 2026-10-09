@@ -12,6 +12,8 @@ from sqlalchemy import case, func, not_, or_, select
 
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
+from pullbox.providers.metadata import gcd_local_arcs
+from pullbox.providers.metadata.gcd_local_credits import read_credits
 from pullbox.providers.metadata.gcd_local_database import (
     ISSUE,
     LANGUAGE,
@@ -29,6 +31,7 @@ from pullbox.schemas.metadata_sources import (
     MetadataPage,
     ProviderIssueRead,
     ProviderSeriesRead,
+    ProviderStoryArcRead,
     SeriesDiscoveryQuery,
     SourceStatus,
 )
@@ -41,6 +44,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from sqlalchemy.sql import Select
+
+    from pullbox.schemas.metadata_credits import MetadataCredit
 
 SOURCE = MetadataSource.GCD_LOCAL
 BASE = ISSUE.alias("base_issue")
@@ -111,7 +116,11 @@ def _series(row: sqlite3.Row, snapshot: GcdSnapshot) -> ProviderSeriesRead:
     )
 
 
-def _issue(row: sqlite3.Row, snapshot: GcdSnapshot) -> ProviderIssueRead:
+def _issue(
+    row: sqlite3.Row,
+    snapshot: GcdSnapshot,
+    credits: tuple[MetadataCredit, ...] | None = None,
+) -> ProviderIssueRead:
     number = row["number"]
     try:
         key = normalize_issue_number_text(number)
@@ -119,6 +128,7 @@ def _issue(row: sqlite3.Row, snapshot: GcdSnapshot) -> ProviderIssueRead:
         key = None
     pages = row["page_count"]
     return ProviderIssueRead(
+        credits=credits,
         source=SOURCE,
         identity_namespace=SOURCE.identity_namespace,
         external_id=str(row["id"]),
@@ -164,6 +174,48 @@ class GcdLocalSource:
 
     async def close(self) -> None:
         return None
+
+    async def story_arcs(self, query: str, *, page: int = 1) -> MetadataPage[ProviderStoryArcRead]:
+        page_number(page)
+        if page > 100:
+            raise ValueError("Story arc search is bounded to 100 pages")
+        return await self._read(
+            lambda db: gcd_local_arcs.search_arcs(db, self.snapshot, query, page)
+        )
+
+    async def story_arc(
+        self, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderStoryArcRead]:
+        identifier = source_id(SOURCE, MetadataEntityKind.STORY_ARC, external_id)
+        result = await self._read(lambda db: gcd_local_arcs.read_arc(db, self.snapshot, identifier))
+        return MetadataFetch(
+            status=SourceStatus.OK if result else SourceStatus.NOT_FOUND, data=result
+        )
+
+    async def story_arc_issues(
+        self, external_id: str, *, page: int = 1, validator: str | None = None
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        identifier = source_id(SOURCE, MetadataEntityKind.STORY_ARC, external_id)
+        page_number(page)
+        if page > 50:
+            raise ValueError("Story arc membership is bounded to 5000 issues")
+
+        def read(db: sqlite3.Connection) -> MetadataPage[ProviderIssueRead] | None:
+            result = gcd_local_arcs.read_members(db, identifier, page)
+            if result is None:
+                return None
+            found, total = result
+            credits = read_credits(db, [row["id"] for row in found])
+            return MetadataPage(
+                results=[_issue(row, self.snapshot, credits.get(row["id"])) for row in found],
+                total=total,
+                next_page=page + 1 if page * PAGE_SIZE < total else None,
+            )
+
+        result = await self._read(read)
+        return MetadataFetch(
+            status=SourceStatus.OK if result else SourceStatus.NOT_FOUND, data=result
+        )
 
     async def search(self, query: SeriesDiscoveryQuery, offset: int) -> SourcePage:
         terms = re.findall(r"\w+", query.query, flags=re.UNICODE)[:16]
@@ -237,10 +289,11 @@ class GcdLocalSource:
                 .offset((page - 1) * PAGE_SIZE),
             )
             more = page * PAGE_SIZE < total
+            credits = read_credits(db, [row["id"] for row in found])
             return MetadataFetch(
                 status=SourceStatus.OK,
                 data=MetadataPage(
-                    results=[_issue(row, self.snapshot) for row in found],
+                    results=[_issue(row, self.snapshot, credits.get(row["id"])) for row in found],
                     total=total,
                     next_page=page + 1 if more and page < MAX_PAGE else None,
                     truncated=more and page == MAX_PAGE,
@@ -253,15 +306,21 @@ class GcdLocalSource:
         self, external_id: str, *, validator: str | None = None
     ) -> MetadataFetch[ProviderIssueRead]:
         identifier = int(source_id(SOURCE, MetadataEntityKind.ISSUE, external_id))
-        found = await self._read(
-            lambda db: rows(
+
+        def read(db: sqlite3.Connection) -> ProviderIssueRead | None:
+            found = rows(
                 db,
                 issue_query()
                 .join(SERIES, SERIES.c.id == ISSUE.c.series_id)
                 .where(ISSUE.c.id == identifier, PUBLIC),
             )
-        )
+            if not found:
+                return None
+            credits = read_credits(db, [identifier])
+            return _issue(found[0], self.snapshot, credits.get(identifier))
+
+        result = await self._read(read)
         return MetadataFetch(
-            status=SourceStatus.OK if found else SourceStatus.NOT_FOUND,
-            data=_issue(found[0], self.snapshot) if found else None,
+            status=SourceStatus.OK if result else SourceStatus.NOT_FOUND,
+            data=result,
         )

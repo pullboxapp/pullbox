@@ -113,6 +113,7 @@ def configure_utility_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger("pullbox.utilities")
+    logger.disabled = False
 
     # Remove any existing handlers to avoid duplicates on reconfigure
     for handler in logger.handlers[:]:

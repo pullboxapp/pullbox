@@ -26,7 +26,7 @@ from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
 from pullbox.models.user import User
 from pullbox.schemas.metadata_sources import SeriesDiscoveryQuery, SourceCapability
 from pullbox.services.cover_url_service import build_series_cover_url
-from pullbox.services.library_root_management import list_library_roots
+from pullbox.services.library_root_management import available_add_series_roots
 from pullbox.services.metadata_discovery import describe_source_policies
 from pullbox.services.metadata_search_cache import MetadataSearchBusyError, MetadataSearchCache
 from pullbox.services.metadata_sources import load_source_runtime, read_source_policies
@@ -536,25 +536,7 @@ async def add_series_page(
     source: Annotated[MetadataSource | Literal["all"], Query()] = "all",
 ) -> Response:
     """Render Add Series with shared, source-aware metadata discovery."""
-    roots = [
-        root
-        for root in await list_library_roots(session)
-        if bool(root["enabled"])
-        and bool(root["allow_managed_writes"])
-        and bool(root["available"])
-        and bool(root["writable"])
-    ]
-    roots.sort(
-        key=lambda root: (
-            not bool(root["is_default_managed_destination"]),
-            str(root["name"]).casefold(),
-            int(root["id"]),
-        )
-    )
-    if not roots or not bool(roots[0]["is_default_managed_destination"]):
-        # The page intentionally has no arbitrary first-root fallback.  A
-        # managed default must be selected through root management first.
-        roots = []
+    roots = await available_add_series_roots(session)
 
     add_series_sort_options = COMICVINE_SERIES_SORT_OPTIONS
     add_series_search_ctx = await load_add_series_search_context(

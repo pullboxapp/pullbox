@@ -15,7 +15,7 @@ from scripts import run_dependency_audit as audit
 if TYPE_CHECKING:
     from pathlib import Path
 
-TODAY = date(2026, 9, 3)
+TODAY = date(2026, 10, 7)
 ADVISORY_IDS = ["PYSEC-2026-3740", "GHSA-8mgp-746c-j5xp", "CVE-2026-81726"]
 
 
@@ -44,16 +44,16 @@ def test_only_reviewed_development_finding_is_temporarily_accepted(
     output = capsys.readouterr().out
     assert "ACCEPTED" in output
     assert "nltk==3.10.3" in output
-    assert "2026-10-03" in output
+    assert "2026-10-14" in output
 
 
-@pytest.mark.parametrize("day", [date(2026, 10, 3), date(2027, 1, 1)])
+@pytest.mark.parametrize("day", [date(2026, 10, 14), date(2027, 1, 1)])
 def test_exception_expires_at_start_of_review_date(report: dict[str, Any], day: date) -> None:
     assert audit.evaluate_report(report, 1, set(), day) == 1
 
 
 def test_exception_still_valid_day_before_expiry(report: dict[str, Any]) -> None:
-    assert audit.evaluate_report(report, 1, set(), date(2026, 10, 2)) == 0
+    assert audit.evaluate_report(report, 1, set(), date(2026, 10, 13)) == 0
 
 
 @pytest.mark.parametrize("package,version", [(0, "3.8.2"), (1, "3.10.2"), (1, "3.10.4")])
@@ -215,7 +215,7 @@ def test_cli_evaluates_expiry_after_scanner_completes(
 ) -> None:
     requirements = tmp_path / "requirements.txt"
     requirements.write_text("safety==3.8.1\nnltk==3.10.3\n", encoding="utf-8")
-    current_time = datetime(2026, 10, 2, 23, 59, 59, tzinfo=UTC)
+    current_time = datetime(2026, 10, 13, 23, 59, 59, tzinfo=UTC)
 
     class Clock:
         @staticmethod
@@ -224,7 +224,7 @@ def test_cli_evaluates_expiry_after_scanner_completes(
 
     def scan(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         nonlocal current_time
-        current_time = datetime(2026, 10, 3, 0, 0, 1, tzinfo=UTC)
+        current_time = datetime(2026, 10, 14, 0, 0, 1, tzinfo=UTC)
         return subprocess.CompletedProcess([], 1, stdout=json.dumps(report), stderr="")
 
     monkeypatch.setattr(audit, "datetime", Clock)

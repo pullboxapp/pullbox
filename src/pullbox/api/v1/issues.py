@@ -18,9 +18,7 @@ from pullbox.composition.airdcpp import (
 )
 from pullbox.config import get_settings
 from pullbox.core.exceptions import ConfigurationError, NotFoundError, ValidationError
-from pullbox.core.file_ops import register_library_file
 from pullbox.core.file_safety import classify_resource_safety_exception
-from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
 from pullbox.models.download import DownloadClientType, DownloadState
@@ -64,10 +62,10 @@ from pullbox.services.direct_search_coordinator import (
 )
 from pullbox.services.issue_file_service import (
     delete_issue_library_file,
-    resolve_configured_utility_trash_dir,
 )
 from pullbox.services.issue_import_service import (
     ManualIssueImportError,
+    execute_manual_issue_import,
     prepare_manual_issue_import,
 )
 from pullbox.services.issue_service import IssueService
@@ -1160,7 +1158,7 @@ async def import_file_for_issue(
     """Manually import a local file for a specific issue.
 
     Validates the file exists and has a supported comic format, then
-    delegates to ``register_library_file()`` for move/rename/registration.
+    delegates to the same service used by background manual imports.
     """
     try:
         prepared = await prepare_manual_issue_import(
@@ -1169,22 +1167,12 @@ async def import_file_for_issue(
             file_path=body.file_path,
             move_to_library=body.move_to_library,
         )
-        existing_library_file = getattr(prepared.issue, "__dict__", {}).get("library_file")
-        library_file = await register_library_file(
+        result = await execute_manual_issue_import(
             session,
-            source_path=prepared.source_path,
-            issue=prepared.issue,
-            confidence=MatchConfidence.MANUAL,
-            move_to_library=True,
-            library_root_id=preferred_managed_root_id(prepared.issue.series),
-            loaded_issue=prepared.issue,
-            ingest_policy=prepared.ingest_policy,
+            prepared,
             allow_resource_safety_exception=body.allow_resource_safety_exception,
-            replace_existing_library_file=existing_library_file is not None,
-            replacement_trash_dir=await resolve_configured_utility_trash_dir(session)
-            if existing_library_file is not None
-            else None,
         )
+        library_file = result.library_file
     except ManualIssueImportError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except FileNotFoundError as exc:
@@ -1202,7 +1190,7 @@ async def import_file_for_issue(
         issue_id=issue_id,
         library_file_id=library_file.id,
         file_name=library_file.file_name,
-        transfer_method=prepared.ingest_policy.post_processing_method,
+        transfer_method=result.ingest_policy.post_processing_method,
     )
 
     return _build_manual_file_import_response(

@@ -235,6 +235,37 @@ pytestmark = pytest.mark.e2e
 class TestIssueDetailPage:
     """Behavior-first E2E coverage for /issues/{id}."""
 
+    def test_failed_manual_import_can_close_and_choose_another_source(
+        self, authed_page, seeded_server: str
+    ) -> None:
+        issue = IssueDetailPage(authed_page, seeded_server)
+        issue.goto(2)
+        authed_page.route(
+            "**/api/v1/issues/2/import-file/cancel",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "issue_id": 2,
+                        "state": "failed",
+                        "error_message": "Import metadata needs review.",
+                    }
+                ),
+            ),
+        )
+        authed_page.evaluate("""() => {
+            const state = Alpine.$data(document.querySelector('[data-testid="issue-detail-page"]'));
+            state.importState = 'failed';
+            state.importErrorMessage = 'Import metadata needs review.';
+            state.importModalOpen = true;
+        }""")
+        issue.import_modal.wait_for(state="visible")
+        authed_page.locator("[data-testid='issue-import-cancel']").click()
+        issue.import_modal.wait_for(state="hidden", timeout=1500)
+        issue.open_import_file_browser()
+        assert authed_page.locator("[data-testid='file-browser-modal']").is_visible()
+
     def test_reader_opens_seeded_cbz_through_real_backend(
         self,
         authed_page,

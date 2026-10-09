@@ -23,6 +23,14 @@ on:
       - unlabeled
   workflow_dispatch:
     inputs:
+      pytest_workers:
+        description: Workers per Python job (manual performance comparison)
+        required: false
+        type: choice
+        default: "5"
+        options:
+          - "5"
+          - "6"
       e2e_diagnostics:
         description: Retain E2E failure video and traces
         required: false
@@ -207,6 +215,13 @@ jobs:
 
       - name: Run tests with coverage
         run: |
+          # VM-wide samples expose CPU contention and active swapping while the
+          # three Python jobs run together. The first row is since boot.
+          if command -v vmstat >/dev/null 2>&1; then
+            vmstat -w -t 5 > runner-resources.log &
+            RESOURCE_MONITOR_PID=$!
+            trap 'kill "$RESOURCE_MONITOR_PID" 2>/dev/null || true' EXIT
+          fi
           pytest tests/ \
             --ignore=tests/e2e \
             -n "${PYTEST_WORKERS}" \
@@ -216,11 +231,13 @@ jobs:
             --cov-report=term-missing \
             --cov-fail-under="${COVERAGE_FAIL_UNDER}" \
             --junitxml=test-results.xml \
-            -v
+            --durations=25 --durations-min=1.0 \
+            -o faulthandler_timeout=180 \
+            -q
         env:
           COVERAGE_FAIL_UNDER: ${{ matrix.coverage_fail_under }}
           PULLBOX_SECRET_KEY: test-ci-key
-          PYTEST_WORKERS: ${{ env.PYTEST_WORKERS }}
+          PYTEST_WORKERS: ${{ github.event_name == 'workflow_dispatch' && inputs.pytest_workers || env.PYTEST_WORKERS }}
 
       - name: Upload coverage report
         if: always()
@@ -238,6 +255,15 @@ jobs:
           name: test-results-py${{ matrix.python-version }}
           path: test-results.xml
           retention-days: 30
+
+      - name: Upload runner resource samples
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runner-resources-py${{ matrix.python-version }}
+          path: runner-resources.log
+          if-no-files-found: warn
+          retention-days: 7
 
   # ──────────────────────────────────────────────
   # Job 4: Alembic Migration Sanity Check

@@ -30,12 +30,11 @@
     {% set next_sort = field %}
   {% endif %}
   {% set sort_sep = "&" if "?" in sort_base_url else "?" %}
-  <th class="{{ extra_classes }} {{ width }}">
+  <th class="{{ extra_classes }} {{ width }}" aria-sort="{{ ('descending' if active_sort_desc else 'ascending') if is_active else 'none' }}">
     <button
       type="button"
       data-testid="whats-new-sort-{{ field }}"
       class="downloads-sort-btn"
-      {% if is_active %}aria-sort="{{ 'descending' if active_sort_desc else 'ascending' }}"{% else %}aria-sort="none"{% endif %}
       {% if is_active %}data-sort-active="true"{% endif %}
       hx-get="{{ sort_base_url }}{{ sort_sep }}sort={{ next_sort|urlencode }}"
       hx-target="#whats-new-results-body"
@@ -72,6 +71,7 @@
           {{ sort_header(testid_prefix ~ "-release-table", "pulls", "Pulls", type="number", extra_classes="c whats-new-pulls-col", width="w-[96px]") }}
           {{ sort_header(testid_prefix ~ "-release-table", "rating", "Rating", type="number", extra_classes="c", width="w-[96px]") }}
           {{ sort_header(testid_prefix ~ "-release-table", "price", "Price", type="number", extra_classes="r", width="w-[96px]") }}
+          {% if whats_new_actions_enabled %}<th class="r">Library</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -125,6 +125,39 @@
             <td class="r table-mono-dim">
               {% if release.price %}{{ "$%.2f"|format(release.price) }}{% else %}&mdash;{% endif %}
             </td>
+            {% if whats_new_actions_enabled %}
+            <td class="r" data-discovery-series="{{ release.discovery_series_id or '' }}" data-discovery-issue="{{ release.local_issue.issue_id if release.local_issue else '' }}">
+              {% if release.local_series %}
+                <a data-testid="whats-new-local-series" class="btn-ghost btn-sm" href="/series/{{ release.local_series.id }}">Added</a>
+                <span class="badge badge-muted">{{ 'Tracked' if release.local_series.monitored else 'Paused' }}</span>
+                {% if release.local_issue %}
+                <div class="mt-1 flex flex-wrap items-center justify-end gap-2">
+                  <span data-testid="whats-new-issue-state" class="badge {{ 'badge-success' if release.local_issue.state == 'owned' else 'badge-muted' }}">{{ release.local_issue.label }}</span>
+                  {% if release.local_issue.issue_id %}
+                  <a data-testid="whats-new-local-issue" class="btn-ghost btn-sm whitespace-nowrap" href="/issues/{{ release.local_issue.issue_id }}" aria-label="View {{ release.series.title }} issue {{ release.issue_number }}">View issue</a>
+                  {% endif %}
+                  {% if release.grab_selection %}
+                  <button type="button" class="btn-primary btn-sm" data-testid="whats-new-grab"
+                          @click='$dispatch("open-search", { issueId: {{ release.local_issue.issue_id }}, issueNum: {{ release.issue_number|tojson }}, seriesTitle: {{ release.series.title|tojson }}, seriesYear: {{ release.series.start_year|default(none)|tojson }}, releaseSelection: {{ release.grab_selection|tojson }}, trigger: $el })'>Grab</button>
+                  {% endif %}
+                </div>
+                {% endif %}
+              {% elif release.discovery_release_id %}
+                <button type="button" class="btn-ghost btn-sm whitespace-nowrap" data-testid="whats-new-find-add"
+                        @click="findRelease({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, $el)">Find &amp; Add</button>
+                <span data-discovery-watch="{{ release.discovery_series_id or '' }}" data-watch-cache="{{ release.discovery_cache_id }}" data-watch-release="{{ release.discovery_release_id }}" data-watchable="{{ 'true' if release.watchable else 'false' }}">
+                  {% if release.watch_id %}
+                  <span class="badge badge-muted">{{ 'Needs confirmation' if release.watch_state == 'needs_confirmation' else 'Watching' }}</span>
+                  <button type="button" class="btn-ghost btn-sm whitespace-nowrap" :disabled="watchBusy" @click="cancelWatch({{ release.watch_id }}, '{{ release.discovery_series_id }}', $el)">Cancel Watch</button>
+                  {% elif release.watchable %}
+                  <button type="button" class="btn-ghost btn-sm" :disabled="watchBusy" @click="startWatch({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, '{{ release.discovery_series_id }}', $el)">Watch</button>
+                  {% endif %}
+                </span>
+              {% else %}
+                <span class="text-pb-text-dim">Release details unavailable</span>
+              {% endif %}
+            </td>
+            {% endif %}
           </tr>
         {% endfor %}
       </tbody>

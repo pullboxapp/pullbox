@@ -20,15 +20,16 @@ from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.file_safety import classify_resource_safety_exception
 from pullbox.core.filesystem_scan import iter_supported_files
-from pullbox.core.issue_numbers import format_issue_number
 from pullbox.models.issue import Issue
 from pullbox.models.library import FileFormat, LibraryFile, LibraryFileStorageMode
 from pullbox.models.series import Series
@@ -43,6 +44,11 @@ from pullbox.utilities.base_executor import (
     RuntimeLogEntry,
 )
 from pullbox.utilities.cancellation import check_cancelled
+from pullbox.utilities.executors.mass_paired_conversion import (
+    guard_paired_rollback,
+    paired_mass_enabled,
+    process_paired_mass,
+)
 from pullbox.utilities.executors.utility_archive_work import (
     convert_utility_file,
     embed_utility_metadata,
@@ -66,18 +72,27 @@ _SUPPORTED_LIBRARY_FORMATS = (
 _PIPELINE_STEP_ORDER = (1, 2, 4)
 
 
+def _guard_existing_metadata_pair(path: Path) -> None:
+    with ZipFile(path) as archive:
+        contains_metroninfo = any(
+            not entry.is_dir()
+            and entry.filename.replace("\\", "/").rsplit("/", 1)[-1].casefold() == "metroninfo.xml"
+            for entry in archive.infolist()
+        )
+    if contains_metroninfo:
+        raise ValueError(
+            "This file contains MetronInfo.xml. Mass Convert cannot update both metadata "
+            "documents together yet. Use Write file metadata on the series page, or disable "
+            "the ComicInfo step before retrying. The original file has not been changed."
+        )
+
+
 def _is_relative_to(path: Path, other: Path) -> bool:
     try:
         path.relative_to(other)
         return True
     except ValueError:
         return False
-
-
-def _format_issue_number(value: float | int | None) -> str | None:
-    if value is None:
-        return None
-    return format_issue_number(value)
 
 
 def _build_comicinfo_metadata(library_file: LibraryFile) -> dict[str, Any]:
@@ -91,7 +106,7 @@ def _build_comicinfo_metadata(library_file: LibraryFile) -> dict[str, Any]:
         if series.year_start is not None:
             metadata["Year"] = series.year_start
     if issue is not None:
-        number = _format_issue_number(issue.issue_number)
+        number = issue.effective_issue_number_text
         if number:
             metadata["Number"] = number
         if issue.title:
@@ -242,6 +257,7 @@ class MassConvertPipelineExecutor(JobExecutor):
             if tracked is not None:
                 item["library_file_id"] = tracked.id
                 item["storage_mode"] = tracked.storage_mode.value
+                item["has_comicinfo"] = tracked.has_comicinfo
                 metadata = _build_comicinfo_metadata(tracked)
                 if metadata:
                     item["metadata"] = metadata
@@ -255,6 +271,11 @@ class MassConvertPipelineExecutor(JobExecutor):
         job_config: dict[str, Any],
     ) -> dict[str, Any]:
         scope = str(job_config.get("scope", "manual")).strip().lower()
+        runtime_context = (
+            {"factory": async_sessionmaker(session.bind, expire_on_commit=False)}
+            if paired_mass_enabled(job_config)
+            else {}
+        )
         referenced_paths = list(
             (
                 await session.execute(
@@ -323,6 +344,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     "operation": "pipeline",
                     "library_file_id": library_file.id,
                     "storage_mode": library_file.storage_mode.value,
+                    "has_comicinfo": library_file.has_comicinfo,
                     "trash_relative_path": _relative_trash_path(
                         path,
                         Path(library_file.library_root.path)
@@ -335,7 +357,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     item["metadata"] = metadata
                     item["metadata_source"] = "library"
                 items.append(item)
-            return {"items": items, "referenced_paths": referenced_paths}
+            return {"items": items, "referenced_paths": referenced_paths, **runtime_context}
 
         deduped_paths = list(dict.fromkeys(candidate_paths))
         try:
@@ -360,7 +382,23 @@ class MassConvertPipelineExecutor(JobExecutor):
                 Path(item["file_path"]),
                 relative_to,
             )
-        return {"items": items, "referenced_paths": referenced_paths}
+        return {"items": items, "referenced_paths": referenced_paths, **runtime_context}
+
+    def get_execution_mode(
+        self, job_config: dict[str, Any], job_context: dict[str, Any] | None = None
+    ) -> ExecutionMode:
+        return ExecutionMode.ASYNC if "factory" in (job_context or {}) else self.execution_mode
+
+    async def process_item_async(
+        self,
+        item_data: dict[str, Any],
+        job_config: dict[str, Any],
+        job_context: dict[str, Any] | None = None,
+    ) -> ProcessedItem:
+        start = time.monotonic()
+        processed = await process_paired_mass(item_data, job_config, job_context or {})
+        processed.duration_ms = int((time.monotonic() - start) * 1000)
+        return processed
 
     async def generate_items(
         self,
@@ -492,6 +530,7 @@ class MassConvertPipelineExecutor(JobExecutor):
                     )
                 )
                 if metadata:
+                    _guard_existing_metadata_pair(current_path)
                     log_entries.append(
                         (
                             "DEBUG",
@@ -587,13 +626,17 @@ class MassConvertPipelineExecutor(JobExecutor):
                 current_path = target_path
 
             duration_ms = int((time.monotonic() - start) * 1000)
+            before_state: dict[str, Any] = {
+                "path": str(source),
+                "format": source.suffix.lstrip("."),
+            }
+            original_has_comicinfo = item_data.get("has_comicinfo")
+            if isinstance(original_has_comicinfo, bool):
+                before_state["has_comicinfo"] = original_has_comicinfo
             return ProcessedItem(
                 item_id=item_id,
                 result=ItemResult.COMPLETED,
-                before_state={
-                    "path": str(source),
-                    "format": source.suffix.lstrip("."),
-                },
+                before_state=before_state,
                 after_state={
                     "path": str(current_path),
                     "format": "cbz",
@@ -679,6 +722,7 @@ class MassConvertPipelineExecutor(JobExecutor):
             if isinstance(before_state, str):
                 before_state = json.loads(before_state)
             original_path = Path(before_state.get("path", ""))
+            guard_paired_rollback(before_state, after_state)
             had_converted_output = converted_path.exists()
             restore_file_from_utility_trash(
                 trash_path,
@@ -777,15 +821,22 @@ class MassConvertPipelineExecutor(JobExecutor):
         if isinstance(before_state, str):
             before_state = json.loads(before_state or "{}")
         original_path = str(before_state.get("path", "") or "")
-        converted_path = str(item_data.get("file_path", "") or "")
+        after_state = item_data.get("after_state", {})
+        if isinstance(after_state, str):
+            after_state = json.loads(after_state or "{}")
+        converted_path = str(after_state.get("path") or item_data.get("file_path", "") or "")
         if not original_path or not converted_path:
             return ApplyResult()
 
+        original_has_comicinfo = before_state.get("has_comicinfo")
         await _sync_converted_file_record(
             session,
             before_path=converted_path,
             after_path=original_path,
             metadata_embedded=False,
+            restore_has_comicinfo=(
+                original_has_comicinfo if isinstance(original_has_comicinfo, bool) else None
+            ),
         )
         return ApplyResult(
             extra_logs=[

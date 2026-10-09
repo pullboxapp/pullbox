@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException, Response
+from fastapi import HTTPException, Request, Response
 from sqlalchemy import select
 
 from pullbox.api.v1 import series as series_api
@@ -289,9 +289,12 @@ async def test_add_update_refresh_and_folder_routes_delegate(
             SeriesCreate(comicvine_id=1234, search_on_add=False),
             _user(),
             db_session,
+            Request({"type": "http"}),
         )
 
-    added = await series_api.add_series(SeriesCreate(comicvine_id=1234), _user(), db_session)
+    added = await series_api.add_series(
+        SeriesCreate(comicvine_id=1234), _user(), db_session, Request({"type": "http"})
+    )
     assert added.id == 10
     service.add_from_comicvine.assert_awaited_once_with(
         db_session,

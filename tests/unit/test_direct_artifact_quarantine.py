@@ -144,6 +144,8 @@ async def test_direct_artifact_marks_resource_limit_as_overrideable_review(
     assert caught.value.code == "artifact_resource_safety_review"
     assert caught.value.intervention is True
     assert caught.value.overrideable is True
+    from pullbox.core.library_file_ownership import build_file_identity_signature
+
     assert caught.value.safety_block == {
         "kind": "archive_decompressed_size",
         "reason": (
@@ -152,6 +154,7 @@ async def test_direct_artifact_marks_resource_limit_as_overrideable_review(
         "details": [],
         "source": "file_safety",
         "overrideable": True,
+        "source_signature": build_file_identity_signature(final_path),
     }
 
 
@@ -380,6 +383,10 @@ async def test_direct_artifact_reports_unreadable_final_stat(
 
     session = AsyncMock()
     monkeypatch.setattr(
+        "pullbox.services.direct_artifact_quarantine.build_file_identity_signature",
+        lambda _path: {"size": 1},
+    )
+    monkeypatch.setattr(
         "pullbox.services.direct_artifact_quarantine.get_allowed_extensions",
         AsyncMock(return_value={".cbz"}),
     )
@@ -403,5 +410,15 @@ async def test_direct_artifact_reports_unreadable_final_stat(
     with pytest.raises(DirectArtifactValidationError) as caught:
         await validate_direct_artifact(session, UnreadablePath())  # type: ignore[arg-type]
 
+    assert caught.value.code == "artifact_quarantine_unreadable"
+    assert caught.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_direct_artifact_reports_missing_source_before_inspection(tmp_path: Path) -> None:
+    session = AsyncMock()
+    session.get.return_value = None
+    with pytest.raises(DirectArtifactValidationError) as caught:
+        await validate_direct_artifact(session, tmp_path / "missing.cbz")
     assert caught.value.code == "artifact_quarantine_unreadable"
     assert caught.value.retryable is True

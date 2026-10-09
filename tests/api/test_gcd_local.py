@@ -163,6 +163,54 @@ async def test_cross_series_variant_stays_represented(authenticated_client, tmp_
     assert result.json()["issues"]["data"]["results"][0]["external_id"] == "15"
 
 
+async def test_gcd_preview_and_add_expose_structured_credits(
+    authenticated_client, sec_db, monkeypatch, tmp_path
+):
+    from pullbox.models.creator import Creator
+    from pullbox.utilities.comicinfo_creators import load_comicinfo_creator_fields
+    from tests.unit.test_gcd_local_credits import EXPECTED, credited_dump
+
+    path = credited_dump(tmp_path / "gcd.db")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert (await activate(authenticated_client, path)).status_code == 200
+    preview = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "gcd_local", "external_id": "2999"},
+        headers=csrf(authenticated_client),
+    )
+    assert preview.status_code == 200
+    issues = preview.json()["issues"]["data"]["results"]
+    assert issues[0]["credits"] == EXPECTED
+    assert issues[2]["credits"] is None
+    root_path = tmp_path / "library"
+    root_path.mkdir()
+    async with sec_db.begin() as session:
+        root = LibraryRoot(name="Test", path=str(root_path), allow_managed_writes=True)
+        session.add(root)
+        await session.flush()
+        root_id = root.id
+    monkeypatch.setattr("pullbox.api.v1.series.get_event_bus", EventBus)
+    result = await authenticated_client.post(
+        "/api/v1/series",
+        json={
+            "source": "gcd_local",
+            "external_id": "2999",
+            "source_revision": 1,
+            "library_root_id": root_id,
+        },
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 201, result.text
+    async with sec_db() as session:
+        issue_id = await session.scalar(select(Issue.id).order_by(Issue.id))
+        assert (await load_comicinfo_creator_fields(session, issue_id))["Writer"] == "Alan Moore"
+        assert all(item.comicvine_id is None for item in await session.scalars(select(Creator)))
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    assert not [item for item in root_path.rglob("*") if item.is_file()], (
+        "Metadata Add may create its series directory, but must not create comic files"
+    )
+
+
 @pytest.mark.parametrize("kind", ["missing", "symlink", "incompatible"])
 async def test_invalid_gcd_candidates_fail_without_leaking_paths(
     authenticated_client, tmp_path, kind

@@ -11,9 +11,9 @@ remain blocking. Safety and Bandit retain their existing advisory status.
 | Package | `nltk==3.10.3` |
 | Development tool | `safety==3.8.1` |
 | Advisory | `PYSEC-2026-3740`, `GHSA-8mgp-746c-j5xp`, `CVE-2026-81726` |
-| Approval | Maintainer-approved temporary development-toolchain acceptance |
-| Review date | 2026-09-03 UTC (2026-09-02 local development date) |
-| Expires | **2026-10-03 at 00:00 UTC**, exclusive; no automatic renewal |
+| Approval | Maintainer-approved temporary development-toolchain acceptance, explicitly renewed on 2026-10-07 |
+| Review date | 2026-10-07 UTC; original review 2026-09-03 UTC |
+| Expires | **2026-10-14 at 00:00 UTC**, exclusive; no automatic renewal |
 | Owner | Pullbox maintainer |
 | Production applicability | None; production image checks reject Safety or NLTK |
 
@@ -31,6 +31,12 @@ vulnerable model read/write APIs. Pullbox has no NLTK application imports.
 Safety and NLTK are development dependencies; the production Docker build
 installs `.[prod]` into a fresh environment, not `.[dev]`. The local production
 image was also checked for both packages' absence during review.
+
+The October 7 renewal retained exactly the same package versions, advisory,
+and development-only scope. The upstream advisory still listed no patched
+release, PyPI still published 3.10.3 as current, and the freshly built local
+production image again passed the Safety/NLTK exclusion check. This renewal
+does not assert that the vulnerability is fixed.
 
 Development-only does not mean harmless or sandboxed: an added model-path
 consumer could expose developer/runner filesystem access. This exception

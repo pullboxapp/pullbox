@@ -9,9 +9,10 @@ from typing import Annotated
 from urllib.parse import unquote, urlencode, urlsplit
 
 import structlog
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError as SchemaValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 from starlette.responses import Response
@@ -28,6 +29,7 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 from pullbox.models.story_arc import IssueStoryArc, StoryArc
+from pullbox.schemas.whats_new import WhatsNewIssueSelection
 from pullbox.services.airdcpp_route_tokens import get_airdcpp_route_token_store
 from pullbox.services.airdcpp_search_types import AirDcppSearchProgress
 from pullbox.services.reader_state_service import load_reader_state
@@ -37,6 +39,8 @@ from pullbox.services.reading_query_service import (
 )
 from pullbox.services.search_service import load_issue_search_target
 from pullbox.services.series_service import SeriesService
+from pullbox.services.whats_new_actions import WhatsNewSelectionError
+from pullbox.services.whats_new_grab import validate_issue_selection
 from pullbox.ui.comicvine_series_search import wrap_comicvine_provider_for_ui_cache
 from pullbox.ui.reading_presenters import IssueReadingView, present_issue_reading
 
@@ -76,6 +80,26 @@ def _ctx(request: Request, user: object | None = None, **kwargs: object) -> dict
         raise RuntimeError(msg)
     context: Mapping[str, object] = _build_context(request, user, **kwargs)
     return dict(context)
+
+
+async def _release_issue_context(
+    session: DbSession, issue_id: int, value: str | None
+) -> dict[str, object] | None:
+    if value is None:
+        return None
+    try:
+        selected = WhatsNewIssueSelection.model_validate_json(value)
+        if selected.issue_id != issue_id:
+            raise WhatsNewSelectionError("This release does not authorize that issue.")
+        await validate_issue_selection(session, selected)
+    except (SchemaValidationError, WhatsNewSelectionError) as exc:
+        detail = (
+            str(exc)
+            if isinstance(exc, WhatsNewSelectionError)
+            else "Invalid release selection. Reload What's New."
+        )
+        raise HTTPException(409, detail) from exc
+    return selected.model_dump()
 
 
 def _pull_list_return_url(return_to: str | None) -> str:
@@ -379,6 +403,20 @@ async def issue_detail(
 
     credits = await read_issue_credits(session, [issue.id])
 
+    paired_import_metadata_enabled = False
+    if getattr(get_settings(), "metadata_paired_import_writer_enabled", False):
+        from pullbox.core.library_policy import (
+            load_effective_library_ingest_policy,
+            load_library_ingest_policy,
+        )
+
+        policy = (
+            await load_effective_library_ingest_policy(session, issue.series.library_root_id)
+            if issue.series.library_root_id is not None
+            else await load_library_ingest_policy(session)
+        )
+        paired_import_metadata_enabled = policy.update_embedded_comicinfo_from_match
+
     return _templates().TemplateResponse(
         request,
         "pages/issue_detail.html",
@@ -386,6 +424,7 @@ async def issue_detail(
             request,
             user,
             issue=issue,
+            paired_import_metadata_enabled=paired_import_metadata_enabled,
             issue_metadata_credits=credits.get(issue.id, ()),
             issue_story_arc_origin=story_arc_origin,
             issue_detail_back_url=issue_detail_back_url,
@@ -527,9 +566,11 @@ async def htmx_issue_dc_search_status(
     issue_id: int,
     user: AuthenticatedUser,
     session: DbSession,
+    release_selection: Annotated[str | None, Query(max_length=512)] = None,
 ) -> JSONResponse:
     """Return a secret-free cooldown projection without reserving a search."""
     del user
+    await _release_issue_context(session, issue_id, release_selection)
     if not get_settings().airdcpp_enabled or await session.get(Issue, issue_id) is None:
         return JSONResponse({"available": False, "client_count": 0, "remaining_seconds": 0})
     registry = get_airdcpp_supervisor_registry()
@@ -558,8 +599,10 @@ async def htmx_issue_dc_search_results(
     issue_id: int,
     user: AuthenticatedUser,
     session: DbSession,
+    release_selection: Annotated[str | None, Query(max_length=512)] = None,
 ) -> Response:
     """Stream DC-only progress after existing source results have rendered."""
+    discovery = await _release_issue_context(session, issue_id, release_selection)
     if not get_settings().airdcpp_enabled:
         return Response(status_code=404)
     target = await load_issue_search_target(session, issue_id)
@@ -639,6 +682,7 @@ async def htmx_issue_dc_search_results(
                     },
                     outcome=outcome,
                     dc_rows=dc_rows,
+                    release_selection=discovery,
                 )
             )
             result_count = len(outcome.matched) + len(outcome.rejected)
@@ -735,6 +779,7 @@ async def htmx_issue_search_results(
     issue_id: int,
     user: AuthenticatedUser,
     session: DbSession,
+    release_selection: Annotated[str | None, Query(max_length=512)] = None,
 ) -> Response:
     """Return interactive search results as an HTML partial (HTMX)."""
     from pullbox.api.v1.issues import (
@@ -743,6 +788,7 @@ async def htmx_issue_search_results(
         _run_issue_search,
     )
 
+    discovery = await _release_issue_context(session, issue_id, release_selection)
     issue = await session.get(Issue, issue_id)
     if issue is None:
         return Response(status_code=404)
@@ -752,6 +798,7 @@ async def htmx_issue_search_results(
         issue_id,
         include_download_clients=False,
     )
+    await _release_issue_context(session, issue_id, release_selection)
     issue_ctx = {
         "id": bundle.issue.id,
         "series_id": bundle.target.series_id,
@@ -769,6 +816,7 @@ async def htmx_issue_search_results(
                 matched=[],
                 rejected=[],
                 search_time_ms=bundle.search_time_ms,
+                release_selection=discovery,
             ),
         )
 
@@ -797,6 +845,7 @@ async def htmx_issue_search_results(
             rejected=[r.model_dump() for r in bundle.rejected_items],
             search_time_ms=bundle.search_time_ms,
             search_log_id=search_log.id,
+            release_selection=discovery,
         ),
     )
 

@@ -686,6 +686,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "search_history_log_detail",
             "search_history_log_detail",
         ),
+        (
+            "/whats-new/find-series/{cache_id}/{release_id}",
+            ("GET",),
+            "find_release_series",
+            "find_release_series",
+        ),
         ("/whats-new", ("GET",), "whats_new_page", "whats_new_page"),
         ("/login", ("GET",), "login_page", "login_page"),
         ("/login", ("POST",), "login_form", "login_form"),

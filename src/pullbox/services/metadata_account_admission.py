@@ -80,7 +80,8 @@ async def account_request(
         if gate is None or runtime.policy.source not in _REMOTE or runtime.credential is None:
             yield AccountAttempt()
             return
-        attempt = await gate.admit(runtime, retry_authentication=retry_authentication)
+        async with asyncio.timeout_at(deadline):
+            attempt = await gate.admit(runtime, retry_authentication=retry_authentication)
         try:
             yield attempt
         finally:
@@ -99,6 +100,34 @@ class MetadataAccountAdmission:
 
     async def admit(
         self, runtime: SourceRuntime, *, retry_authentication: bool = False
+    ) -> AccountAttempt:
+        # Retry local deadline exhaustion once, in a new transaction. Provider
+        # I/O has not started; each attempt rechecks credentials and cooldowns.
+        for attempt in range(2):
+            try:
+                return await self._admit_once(runtime, retry_authentication=retry_authentication)
+            except TimeoutError:
+                if attempt == 0:
+                    logger.debug(
+                        "metadata_account_admission_retry",
+                        source=runtime.policy.source.value,
+                        failure_kind="timeout",
+                    )
+        logger.warning(
+            "metadata_account_admission_unavailable",
+            source=runtime.policy.source.value,
+            failure_kind="timeout",
+        )
+        return AccountAttempt(
+            blocked=SourceOutcome(
+                source=runtime.policy.source,
+                status=SourceStatus.UNAVAILABLE,
+                retry_after_seconds=5,
+            )
+        )
+
+    async def _admit_once(
+        self, runtime: SourceRuntime, *, retry_authentication: bool
     ) -> AccountAttempt:
         from pullbox.models.metadata_series_retry import MetadataSeriesRetry
         from pullbox.services.metadata_series_retry import config_key
@@ -188,8 +217,13 @@ class MetadataAccountAdmission:
                     authentication_probe=authentication_probe,
                     config_key=config_key(current),
                 )
-        except (SQLAlchemyError, TimeoutError):
-            logger.warning("metadata_account_admission_unavailable", source=source.value)
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "metadata_account_admission_unavailable",
+                source=source.value,
+                failure_kind="database",
+                error_type=type(exc).__name__,
+            )
             return AccountAttempt(
                 blocked=SourceOutcome(
                     source=source, status=SourceStatus.UNAVAILABLE, retry_after_seconds=5

@@ -17,7 +17,7 @@
   {% endif %}
 
   {% if status_items %}
-  <div class="page-dock-status" data-testid="page-dock-status">
+  <div class="page-dock-status" data-testid="page-dock-status" tabindex="0">
     {% for item in status_items %}
       <span class="page-dock-status-item">
         {% if item.led %}
@@ -35,7 +35,7 @@
 {% macro status_dock(status_items=[]) %}
 {% if status_items %}
 <div class="page-dock-inner page-dock-inner-status-only" data-testid="page-dock-inner">
-  <div class="page-dock-status" data-testid="page-dock-status">
+  <div class="page-dock-status" data-testid="page-dock-status" tabindex="0">
     {% for item in status_items %}
       <span class="page-dock-status-item">
         {% if item.led %}

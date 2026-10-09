@@ -177,6 +177,7 @@ async def test_direct_pack_always_imports_the_explicitly_selected_skipped_issue(
         prepared: SimpleNamespace,
         **_kwargs: Any,
     ) -> SimpleNamespace:
+        assert _kwargs.get("use_paired_metadata") is False
         return SimpleNamespace(
             issue_id=prepared.issue_id,
             library_file=SimpleNamespace(id=prepared.issue_id, file_path=str(extracted_path)),

@@ -464,6 +464,23 @@ A stale read aborts the complete membership and metadata write, including when a
 caller catches the domain error. Secondary sources never acquire membership or
 identity ownership through descriptive enrichment.
 
+Fresh cached public release context may fill missing series publisher/start-year/
+volume during normal source-aware series refresh. Both series refresh and the
+individual issue Refresh Metadata command may fill existing issue store dates.
+The series must already have a verified LOCG link. Issue dates reuse the existing
+exact provider-ID or unique number/date release resolver, in 200-release batches;
+ambiguous variants, unknown IDs and unsupported date proofs cannot fill a gap.
+Passive issue provenance retains a verified native issue identity, normalized
+number, observed store date and distinct many-to-one release IDs. Baseline saves
+also verify the issue's actual parent still owns the confirmed LOCG series link.
+Cache facts and issue proofs are rechecked under the existing refresh locks after
+provider I/O. This adds no issue identities, provider requests or local issues.
+User edits/clears, archive disagreement and stronger values remain protected;
+store dates never become cover dates. Refresh itself writes no archive or sidecar.
+Individual issue refresh captures only its target's metadata state, but release
+resolution still considers sibling candidates; a newly ambiguous sibling match
+aborts the refresh before values, credits or provenance are written.
+
 Issue snapshots can retain up to 128 descriptive creator credits. Each credit
 has a bounded name and normalized role list compatible with the existing
 Creator/IssueCreator columns. Relations and baseline values commit together;
