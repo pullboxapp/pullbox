@@ -18,6 +18,7 @@ class ImportSafetyCategory(enum.StrEnum):
     ARCHIVE_INSPECTION_FAILED = "archive_inspection_failed"
     ZERO_BYTE = "zero_byte"
     ARCHIVE_NO_PAGES = "archive_no_pages"
+    NESTED_COMIC_ARCHIVE = "nested_comic_archive"
     SINGLE_PAGE_COMIC = "single_page_comic"
     DECOMPRESSION_SIZE_LIMIT = "decompression_size_limit"
     DANGEROUS_PATH_OR_PAYLOAD = "dangerous_path_or_payload"
@@ -33,6 +34,7 @@ _CATEGORY_LABELS: dict[ImportSafetyCategory, str] = {
     ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED: "Archive inspection failed",
     ImportSafetyCategory.ZERO_BYTE: "Zero-byte file",
     ImportSafetyCategory.ARCHIVE_NO_PAGES: "No comic pages",
+    ImportSafetyCategory.NESTED_COMIC_ARCHIVE: "Comic inside another archive",
     ImportSafetyCategory.SINGLE_PAGE_COMIC: "One-page archive",
     ImportSafetyCategory.DECOMPRESSION_SIZE_LIMIT: "Decompression-size limit",
     ImportSafetyCategory.DANGEROUS_PATH_OR_PAYLOAD: "Dangerous link, path, or payload",
@@ -50,6 +52,10 @@ def import_safety_category_label(category: ImportSafetyCategory) -> str:
 
 
 _SANITIZED_REASONS: dict[ImportSafetyCategory, str] = {
+    ImportSafetyCategory.NESTED_COMIC_ARCHIVE: (
+        "This archive contains another comic archive. Review it for repair into a normal CBZ. "
+        "The original file will be preserved."
+    ),
     ImportSafetyCategory.PERMISSION_UNREADABLE: (
         "Pullbox could not read this file. Check its permissions and try again."
     ),
@@ -97,6 +103,7 @@ _RETRYABLE_CATEGORIES = frozenset(
         ImportSafetyCategory.ARCHIVE_INSPECTION_FAILED,
         ImportSafetyCategory.ZERO_BYTE,
         ImportSafetyCategory.ARCHIVE_NO_PAGES,
+        ImportSafetyCategory.NESTED_COMIC_ARCHIVE,
         ImportSafetyCategory.OUTSIDE_APPROVED_ROOT,
         ImportSafetyCategory.UNSUPPORTED_FILE_TYPE,
         ImportSafetyCategory.SOURCE_CHANGED,
@@ -108,7 +115,7 @@ _RETRYABLE_CATEGORIES = frozenset(
 _PERMISSION_CODES = frozenset({"permission_denied", "source_unreadable", "unreadable"})
 _INSPECTION_CODES = frozenset({"archive_inspection_failed", "corrupt_archive", "inspection_failed"})
 _ZERO_BYTE_CODES = frozenset({"zero_byte", "zero_byte_file", "empty_file"})
-_CONTENT_CODES = frozenset({"archive_no_pages", "single_page_comic"})
+_CONTENT_CODES = frozenset({"archive_no_pages", "single_page_comic", "nested_comic_archive"})
 _SIZE_CODES = frozenset(
     {
         "archive_decompressed_size",
@@ -261,7 +268,11 @@ def classify_import_safety_failure(
         stable_code = normalized_code or "zero_byte_file"
     elif evidence_tokens & _CONTENT_CODES:
         stable_code = (
-            "archive_no_pages" if "archive_no_pages" in evidence_tokens else "single_page_comic"
+            "nested_comic_archive"
+            if "nested_comic_archive" in evidence_tokens
+            else "archive_no_pages"
+            if "archive_no_pages" in evidence_tokens
+            else "single_page_comic"
         )
         category = ImportSafetyCategory(stable_code)
     elif evidence_tokens & _SIZE_CODES or _contains_any(

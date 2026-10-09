@@ -756,14 +756,6 @@ def _extract_issue_number(
     # Remove limited series markers first: (of 05)
     clean = _LIMITED_SERIES_RE.sub("", title).strip()
 
-    # Priority 0: Word numbers — "Book Two", "Part Three", "Volume One"
-    m = _WORD_NUMBER_RE.search(clean)
-    if m:
-        num = float(_WORD_NUMBERS[m.group(1).lower()])
-        _, exact_text = parse_issue_number_text(num)
-        remaining = clean[: m.start()] + clean[m.end() :]
-        return num, remaining.strip(), exact_text
-
     # Priority 1: Hash prefix — #045, #5, #5.1
     m = _ISSUE_HASH_RE.search(clean)
     if m:
@@ -806,6 +798,16 @@ def _extract_issue_number(
     m = _SPECIAL_POSITIONAL_ISSUE_RE.search(clean)
     if m:
         num, exact_text = parse_issue_number_text(m.group("issue"))
+        remaining = clean[: m.start()] + clean[m.end() :]
+        return num, remaining.strip(), exact_text
+
+    # A story's "Part Five" is weaker than an explicit issue marker or a
+    # trailing issue number. Keep word-number collections such as "100 Bullets
+    # Book Two" working: a number in the series title is not stronger evidence.
+    m = _WORD_NUMBER_RE.search(clean)
+    if m and not re.search(r"\s\d{1,3}(?:\.\d+)?(?:-?[A-Za-z]+)?\s*$", clean[m.end() :]):
+        num = float(_WORD_NUMBERS[m.group(1).lower()])
+        _, exact_text = parse_issue_number_text(num)
         remaining = clean[: m.start()] + clean[m.end() :]
         return num, remaining.strip(), exact_text
 

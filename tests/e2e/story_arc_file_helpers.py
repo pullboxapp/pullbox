@@ -5,6 +5,18 @@ from playwright.sync_api import Page, expect
 
 def configure_arc_file_defaults(page: Page, base_url: str, *, prefix: bool) -> None:
     page.goto(f"{base_url}/settings?tab=media#story-arc-files", wait_until="load")
+    # The document load event precedes the asynchronous naming examples. They expand
+    # the card above this form and can move controls between pointerdown/up.
+    naming = page.get_by_test_id("settings-naming-editor")
+    expect(naming).to_have_attribute("aria-busy", "false")
+    previews = naming.locator("[data-preview-ready]")
+    expect(previews).to_have_count(5)
+    for preview in previews.all():
+        expect(preview).to_have_attribute("data-preview-ready", "true")
+    roots = page.get_by_test_id("settings-media-library-roots")
+    expect(roots.locator(':scope > [aria-live="polite"]')).not_to_have_attribute(
+        "aria-busy", "true"
+    )
     section = page.get_by_test_id("settings-story-arc-files")
     # Wait for Alpine, then use the visible label rather than its clipped input.
     expect(section.get_by_test_id("arc-files-preview")).to_contain_text("The Court of Owls/")
@@ -28,6 +40,7 @@ def configure_arc_file_defaults(page: Page, base_url: str, *, prefix: bool) -> N
     expect(section.get_by_test_id("arc-files-preview")).to_contain_text(
         "The Court of Owls/01 - Batman 001.cbz" if prefix else "The Court of Owls/Batman 001.cbz"
     )
+    expect(section.get_by_test_id("arc-files-preview")).not_to_have_attribute("aria-busy", "true")
     save = section.get_by_role("button", name="Save story arc defaults")
     if save.is_enabled():
         with page.expect_response(

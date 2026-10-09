@@ -410,8 +410,9 @@ async def test_terminate_worker_process_handles_completed_and_kill_paths(
 
 
 @pytest.mark.parametrize("ignore_terminate", [False, True])
+@pytest.mark.parametrize("operation", ["convert", "nested_repair"])
 async def test_task_cancellation_reaps_real_worker_before_returning(
-    tmp_path, monkeypatch, ignore_terminate
+    tmp_path, monkeypatch, ignore_terminate, operation
 ):
     """Task.cancel is distinct from a polled utility cancel/pause exception."""
     import os
@@ -438,7 +439,7 @@ async def test_task_cancellation_reaps_real_worker_before_returning(
 
     monkeypatch.setattr(archive_subprocess.asyncio, "create_subprocess_exec", launch)
     monkeypatch.setattr(archive_subprocess, "_PROCESS_TERMINATE_TIMEOUT_SECONDS", 0.05)
-    task = asyncio.create_task(_run_archive_operation("convert", {}, cleanup_paths=[partial]))
+    task = asyncio.create_task(_run_archive_operation(operation, {}, cleanup_paths=[partial]))
     try:
         await asyncio.wait_for(started.wait(), 5)
         async with asyncio.timeout(5):

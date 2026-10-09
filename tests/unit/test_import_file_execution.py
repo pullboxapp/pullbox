@@ -76,6 +76,60 @@ def _make_service(
     )
 
 
+async def test_nested_repair_import_and_rollback_preserve_wrapper(db_session, tmp_path):
+    from pullbox.core.nested_comics import inspect_nested_comic
+    from pullbox.services.import_rollback_execution import RollbackActionPlan
+    from tests.unit.test_nested_comics import XML, wrapper
+
+    job, _item, files, series, _issues = await _setup_full_scenario(db_session, num_issues=1)
+    source = wrapper(tmp_path, outer=XML)
+    original = source.read_bytes()
+    file = files[0]
+    file.file_path, file.file_name = str(source), source.name
+    file.file_size = source.stat().st_size
+    file.source_signature = build_file_identity_signature(source)
+    file.diagnostics = {
+        "source_metadata": {"nested_comic": inspect_nested_comic(source)},
+        "nested_repair": {"approved": True, "source_signature": file.source_signature},
+    }
+    file.has_comicinfo = True
+    job.source_path = str(tmp_path)
+    job.file_handling_mode = ImportFileHandlingMode.MANAGED_COPY
+    job.effective_transfer_method = "copy"
+    job.update_embedded_comicinfo_from_match = True
+    await db_session.commit()
+    series_service = AsyncMock()
+    series_service.add_from_comicvine.return_value = series
+    service = _make_service(series_service=series_service)
+    await service.run_import(db_session, job.id)
+    await db_session.refresh(file)
+    assert file.status == ImportedFileStatus.IMPORTED, file.error_message
+    registered = await db_session.get(LibraryFile, file.library_file_id)
+    destination = Path(registered.file_path)
+    with zipfile.ZipFile(destination) as archive:
+        assert archive.read("ComicInfo.xml") == XML
+        assert archive.namelist() == ["001.jpg", "002.jpg", "ComicInfo.xml"]
+    assert source.read_bytes() == original
+    action = await db_session.scalar(
+        select(ImportJobAction).where(
+            ImportJobAction.import_job_id == job.id,
+            ImportJobAction.action_type == "library_file_registered",
+        )
+    )
+    assert action.payload["transfer_method"] == "copy"
+    await service._rollback_action(
+        db_session,
+        RollbackActionPlan(
+            action_id=action.id,
+            sequence_no=action.sequence_no,
+            action_type=action.action_type,
+            payload=dict(action.payload),
+        ),
+    )
+    assert not destination.exists()
+    assert source.read_bytes() == original
+
+
 @pytest.mark.parametrize("source_type", list(ImportSourceType))
 @pytest.mark.parametrize("in_place", [True, False])
 @pytest.mark.parametrize("manual", [True, False])

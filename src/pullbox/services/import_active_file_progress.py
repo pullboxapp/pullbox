@@ -94,7 +94,8 @@ def active_file_stage_plan(
 ) -> list[tuple[str, float]]:
     plan: list[tuple[str, float]] = []
     suffix = Path(imp_file.file_path).suffix.lower()
-    needs_conversion = (
+    nested_repair = bool((getattr(imp_file, "diagnostics", None) or {}).get("nested_repair"))
+    needs_conversion = nested_repair or (
         settings.move_to_library
         and (settings.convert_to_preferred_format or settings.update_embedded_comicinfo_from_match)
         and suffix != ".cbz"
@@ -107,7 +108,7 @@ def active_file_stage_plan(
             plan.extend(_ARCHIVE_STAGE_WEIGHTS)
     if settings.move_to_library:
         plan.append(("transferring", _TRANSFER_STAGE_WEIGHT))
-    if settings.update_embedded_comicinfo_from_match:
+    if settings.update_embedded_comicinfo_from_match and not nested_repair:
         plan.append(("rewriting", _REWRITE_STAGE_WEIGHT))
     plan.append(("finalizing", _FINALIZE_STAGE_WEIGHT))
     return plan

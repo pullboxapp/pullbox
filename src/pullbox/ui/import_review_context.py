@@ -682,6 +682,27 @@ async def load_import_review_context(
             session, job_id, [item.id for item in series_items]
         ),
         "safety_reason_keys": {str(item["category"]) for item in safety_failure_summary},
+        "nested_repair_reasons": {
+            "metadata_conflict": (
+                "Outer and inner metadata disagree. Resolve the identity before repair."
+            ),
+            "multiple_inner_comics": (
+                "Multiple comics may be a collection. Separate and review them manually."
+            ),
+            "mixed_wrapper_content": (
+                "The wrapper has additional content that cannot be discarded automatically."
+            ),
+            "deeper_nesting": "More than one wrapper level. Manual repair is needed.",
+            "resource_limit": (
+                "Combined archive content exceeds a safety limit. No automatic repair."
+            ),
+            "unsafe_member": "An unsafe path, link or payload was found. No automatic repair.",
+            "duplicate_members": "Duplicate archive member names need manual review.",
+            "encrypted_archive": "Password-protected archives cannot be repaired automatically.",
+            "ambiguous_metadata": "Multiple ComicInfo documents need manual review.",
+            "unsupported_inner_format": "Automatic repair supports one CBZ or CBR inside a CBZ.",
+            "insufficient_pages": "The inner archive has fewer than two non-empty image pages.",
+        },
         "review_lanes": LANES,
         "review_reasons": REASONS,
         "lane_counts": lane_counts,

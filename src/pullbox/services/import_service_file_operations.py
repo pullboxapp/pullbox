@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from pullbox.core.file_safety import get_archive_size_limit_bytes
+from pullbox.core.nested_comics import DEFAULT_LIMIT
 from pullbox.services.import_comicinfo_metadata import (
     enrich_issue_for_comicinfo as enrich_import_issue_for_comicinfo,
 )
@@ -158,6 +160,14 @@ class ImportServiceFileOperationsMixin:
             imp_file,
             converter=converter,
             progress_callback=progress_callback,
+            max_archive_size=(
+                await get_archive_size_limit_bytes(session)
+                if (imp_file.diagnostics or {}).get("nested_repair")
+                else DEFAULT_LIMIT
+            ),
+            cancellation_check=lambda: self._raise_if_job_cancelled_immediately(
+                session, int(job.id)
+            ),
         )
 
     async def _convert_import_file_interruptible(

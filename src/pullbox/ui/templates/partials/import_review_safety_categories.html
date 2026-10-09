@@ -6,7 +6,28 @@
           {% set bulk_error_for_category = safety_bulk_error if safety_bulk_error is defined and safety_bulk_error_category is defined and safety_bulk_error_category == safety_category.category else '' %}
           {% set bulk_overrideable_count = safety_category.bulk_overrideable_count|default(0)|int %}
           <div class="rounded-lg border border-pb-border bg-pb-card-hover/40 px-3.5 py-3">
-            {% if safety_category.category == 'single_page_comic' %}
+            {% if safety_category.category == 'nested_comic_archive' %}
+            <h3 class="text-sm font-semibold text-pb-text">Comic inside another archive · {{ safety_category.count }}</h3>
+            <p class="mt-2 text-sm text-pb-text-sec">Repair eligible single-comic wrappers into normal CBZ files. Original files will not be changed or deleted. Conflicting metadata and ambiguous archives stay in review.</p>
+            {% if job.file_handling_mode.value == 'in_place' %}
+            <p class="mt-2 text-sm text-pb-text-sec">Keep-in-place imports do not repair originals. Import these files separately with Copy into library to create repaired copies.</p>
+            {% else %}
+            <button type="button" class="btn-ghost btn-sm mt-3" hx-get="/import/{{ job.id }}/nested-comics/preview?status={{ active_review_view }}&amp;reason=nested_comic_archive" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">Review nested repairs</button>
+            {% endif %}
+            {% if nested_repair_preview is defined and nested_repair_preview %}
+            <section class="mt-3 space-y-3 rounded-lg border border-pb-border p-3" aria-label="Repair nested comics" data-testid="nested-repair-preview">
+              <h4 class="text-sm font-semibold text-pb-text">Repair nested comics</h4>
+              <p class="text-sm text-pb-text-sec">{{ nested_repair_preview.affected_count }} eligible {{ 'file' if nested_repair_preview.affected_count == 1 else 'files' }} will be prepared for matching. {{ nested_repair_preview.skipped_count }} will stay blocked. Repairs run only when you import the matched files into the selected library destination, using its naming rules.</p>
+              <p class="text-sm text-pb-text-sec">Compatible metadata is preserved; inner fields take precedence and missing fields are filled from the wrapper. Rollback removes the imported copies, not the originals.</p>
+              {% if nested_repair_preview.preview_token %}
+              <form method="post" action="/import/{{ job.id }}/nested-comics/approve" hx-post="/import/{{ job.id }}/nested-comics/approve?status={{ active_review_view }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">
+                <input type="hidden" name="preview_token" value="{{ nested_repair_preview.preview_token }}">
+                <button type="submit" class="btn-primary btn-sm">Approve {{ nested_repair_preview.affected_count }} {{ 'repair' if nested_repair_preview.affected_count == 1 else 'repairs' }}</button>
+              </form>
+              {% else %}<p class="text-sm text-pb-warning">None of these wrappers qualify for automatic repair. Check the file details below.</p>{% endif %}
+            </section>
+            {% endif %}
+            {% elif safety_category.category == 'single_page_comic' %}
             <div class="flex flex-wrap items-center justify-between gap-2">
               <p class="text-sm font-semibold text-pb-text">One-page archive</p>
               <span class="pill pill-warning">{{ safety_category.count }} {{ 'file' if safety_category.count == 1 else 'files' }} in {{ safety_category.series_count }} series</span>
