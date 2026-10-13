@@ -32,9 +32,11 @@ class _FakeClient:
 class _FakeService:
     def __init__(self, client: _FakeClient) -> None:
         self.client = client
+        self.identities: list[tuple[object, object]] = []
 
-    def get_client_for_type(self, client_type: object) -> _FakeClient:
+    def get_client_for_identity(self, client_config_id: object, client_type: object) -> _FakeClient:
         assert client_type == "qbittorrent"
+        self.identities.append((client_config_id, client_type))
         return self.client
 
 
@@ -88,3 +90,33 @@ async def test_poll_download_clients_matches_missing_external_id_by_title() -> N
         },
     ]
     assert client.status_calls == ["matched-hash"]
+
+
+@pytest.mark.asyncio
+async def test_poll_download_clients_asks_for_the_exact_client() -> None:
+    """With two clients of one type, polling must reach the one that has the download."""
+    from pullbox.tasks import download_monitor_poll
+    from pullbox.tasks.download_monitor_updates import build_status_update
+
+    service = _FakeService(_FakeClient())
+
+    await download_monitor_poll.poll_download_clients(
+        [
+            {
+                "id": 8,
+                "external_id": "hash-8",
+                "title": "Batman 001.cbz",
+                "download_client": "qbittorrent",
+                "download_client_config_id": 5,
+                "downloaded_path": None,
+                "issue_id": 99,
+            }
+        ],
+        service,
+        record_download_progress=lambda download_id, status, event_logger: False,
+        build_status_update=build_status_update,
+        build_status_check_error_update=lambda **kwargs: None,
+        event_logger=_FakeLogger(),
+    )
+
+    assert service.identities == [(5, "qbittorrent")]

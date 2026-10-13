@@ -3,7 +3,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +34,13 @@ class IndexerConfig(Base, IdentityMixin, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(default=True)
     priority: Mapped[int] = mapped_column(Integer, default=50)
     categories: Mapped[str | None] = mapped_column(Text)
+
+    # Download client every grab from this indexer is sent to. Null means the
+    # highest-priority client for the release's protocol.
+    download_client_id: Mapped[int | None] = mapped_column(
+        ForeignKey("download_client_configs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Manager sync tracking. The legacy Prowlarr integer remains during the
     # additive migration so existing databases and integrations stay readable.

@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from pullbox.api.deps import DbSession, InteractiveOperatorUser
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.encryption import decrypt_secret, encrypt_secret
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.sqlite_lock import (
@@ -16,7 +17,9 @@ from pullbox.core.sqlite_lock import (
     is_sqlite_locked_error,
     sqlite_lock_retry_delay,
 )
-from pullbox.models.indexer import IndexerConfig
+from pullbox.models.client import DownloadClientConfig
+from pullbox.models.download import DownloadClientType
+from pullbox.models.indexer import IndexerConfig, IndexerType
 from pullbox.schemas.indexer import (
     IndexerCreate,
     IndexerResponse,
@@ -54,6 +57,7 @@ def _redact_indexer(indexer: IndexerConfig) -> dict[str, object]:
         "enable_automatic_search": indexer.enable_automatic_search,
         "enable_interactive_search": indexer.enable_interactive_search,
         "resolver_enabled": indexer.resolver_enabled,
+        "download_client_id": indexer.download_client_id,
         "last_success_at": indexer.last_success_at,
         "last_failure_at": indexer.last_failure_at,
         "last_error": indexer.last_error,
@@ -136,6 +140,7 @@ async def add_indexer(
         source="manual",
         resolver_enabled=body.resolver_enabled,
     )
+    await _validate_download_client(session, body.indexer_type, body.download_client_id)
     indexer = IndexerConfig(
         name=body.name,
         indexer_type=body.indexer_type,
@@ -149,6 +154,7 @@ async def add_indexer(
         enable_automatic_search=body.enable_automatic_search,
         enable_interactive_search=body.enable_interactive_search,
         resolver_enabled=body.resolver_enabled,
+        download_client_id=body.download_client_id,
     )
     session.add(indexer)
     await session.flush()
@@ -501,6 +507,11 @@ async def update_indexer(
             resolver_enabled=True,
         )
 
+    if update_data.get("download_client_id") is not None:
+        await _validate_download_client(
+            session, indexer.indexer_type, update_data["download_client_id"]
+        )
+
     # Encrypt api_key if provided; omitted → keep existing encrypted value
     if update_data.get("api_key"):
         update_data["api_key"] = encrypt_secret(update_data["api_key"])
@@ -527,6 +538,35 @@ def _validate_resolver_scope(
     if indexer_type != "torznab" or source != "manual":
         raise ValidationError(
             "Browser resolver support is available only for a manual Torznab indexer."
+        )
+
+
+_PROTOCOL_BY_INDEXER_TYPE: dict[str, tuple[AcquisitionProtocol, ...]] = {
+    IndexerType.TORZNAB: (AcquisitionProtocol.TORRENT,),
+    IndexerType.NEWZNAB: (AcquisitionProtocol.USENET,),
+}
+
+
+async def _validate_download_client(
+    session: DbSession,
+    indexer_type: object,
+    download_client_id: int | None,
+) -> None:
+    """Check a pinned client exists and takes the protocol this indexer returns."""
+    if download_client_id is None:
+        return
+    client = await session.get(DownloadClientConfig, download_client_id)
+    if client is None:
+        raise ValidationError(f"Download client {download_client_id} does not exist.")
+    wanted = _PROTOCOL_BY_INDEXER_TYPE.get(
+        str(indexer_type),
+        (AcquisitionProtocol.TORRENT, AcquisitionProtocol.USENET),
+    )
+    if DownloadClientType(client.client_type).acquisition_protocol not in wanted:
+        kind = " or ".join(protocol.value for protocol in wanted)
+        raise ValidationError(
+            f'"{client.name}" is not a {kind} download client, so it cannot '
+            "take releases from this indexer."
         )
 
 

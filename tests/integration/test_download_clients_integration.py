@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.events import EventBus
+from pullbox.core.exceptions import ProviderError
 from pullbox.models import Base
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
@@ -289,6 +290,118 @@ class TestDownloadRouting:
 
 
 # ── Client type affinity ─────────────────────────────────────────
+
+
+async def _pin_indexer(
+    session: AsyncSession,
+    client_config_id: int,
+    client_type: DownloadClientType = DownloadClientType.QBITTORRENT,
+) -> None:
+    session.add(
+        DownloadClientConfig(
+            id=client_config_id,
+            name=f"Client {client_config_id}",
+            client_type=client_type,
+            url=f"http://client-{client_config_id}.test",
+        )
+    )
+    await session.flush()
+    indexer = await session.get(IndexerConfig, 7)
+    assert indexer is not None
+    indexer.download_client_id = client_config_id
+    await session.flush()
+
+
+@pytest.mark.asyncio
+class TestIndexerPinnedClient:
+    """An indexer pinned to a download client always sends its grabs there."""
+
+    async def test_pinned_client_wins_over_priority(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+    ) -> None:
+        reg = ProviderRegistry()
+        default = _mock_client("qbittorrent", "default")
+        tracker = _mock_client("qbittorrent", "tracker")
+        reg.register_download_client(1, default, priority=10)
+        reg.register_download_client(2, tracker, priority=90)
+        await _pin_indexer(session, 2)
+
+        svc = DownloadService(registry=reg, event_bus=EventBus())
+        release = _make_release("Pinned", is_torrent=True, registry=reg)
+        dl = await svc.send_to_client(session, release, issue.id)
+
+        tracker.add_torrent_data.assert_awaited_once_with(b"fixture-torrent", "Pinned")
+        default.add_torrent_data.assert_not_awaited()
+        assert dl.download_client_config_id == 2
+        assert svc.get_client_for_download(dl) is tracker
+
+    async def test_unpinned_indexer_keeps_priority_selection(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+    ) -> None:
+        reg = ProviderRegistry()
+        default = _mock_client("qbittorrent", "default")
+        tracker = _mock_client("qbittorrent", "tracker")
+        reg.register_download_client(1, default, priority=10)
+        reg.register_download_client(2, tracker, priority=90)
+        session.add(
+            DownloadClientConfig(
+                id=1,
+                name="Default",
+                client_type=DownloadClientType.QBITTORRENT,
+                url="http://default.test",
+            )
+        )
+        await session.flush()
+
+        svc = DownloadService(registry=reg, event_bus=EventBus())
+        release = _make_release("Unpinned", is_torrent=True, registry=reg)
+        dl = await svc.send_to_client(session, release, issue.id)
+
+        default.add_torrent_data.assert_awaited_once()
+        tracker.add_torrent_data.assert_not_awaited()
+        assert dl.download_client_config_id == 1
+
+    async def test_unavailable_pinned_client_fails_instead_of_falling_back(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+    ) -> None:
+        reg = ProviderRegistry()
+        default = _mock_client("qbittorrent", "default")
+        reg.register_download_client(1, default, priority=10)
+        # Client 2 exists but is disabled, so it is not registered.
+        await _pin_indexer(session, 2)
+
+        svc = DownloadService(registry=reg, event_bus=EventBus())
+        release = _make_release("Pinned", is_torrent=True, registry=reg)
+        with pytest.raises(ProviderError, match="Client 2"):
+            await svc.send_to_client(session, release, issue.id)
+
+        default.add_torrent_data.assert_not_awaited()
+
+    async def test_pinned_client_of_another_protocol_is_refused(
+        self,
+        session: AsyncSession,
+        issue: Issue,
+    ) -> None:
+        reg = ProviderRegistry()
+        default = _mock_client("qbittorrent", "default")
+        sab = _mock_client("sabnzbd", "sab")
+        reg.register_download_client(1, default, priority=10)
+        reg.register_download_client(2, sab, priority=10)
+        await _pin_indexer(session, 2, DownloadClientType.SABNZBD)
+
+        svc = DownloadService(registry=reg, event_bus=EventBus())
+        release = _make_release("Pinned", is_torrent=True, registry=reg)
+        with pytest.raises(ProviderError, match="cannot take torrent"):
+            await svc.send_to_client(session, release, issue.id)
+
+        default.add_torrent_data.assert_not_awaited()
+        sab.add_nzb.assert_not_awaited()
 
 
 @pytest.mark.asyncio

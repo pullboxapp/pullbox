@@ -13,12 +13,14 @@ from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
 from pullbox.config import get_settings
+from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.naming import (
     resolve_collection_non_standard_file_template,
     resolve_single_non_standard_file_template,
 )
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.config import SystemConfig
+from pullbox.models.download import DownloadClientType
 from pullbox.models.indexer import IndexerConfig
 
 page_router = APIRouter()
@@ -181,6 +183,29 @@ def load_client_status_seed(
     return seed
 
 
+async def _indexer_download_client_choices(session: DbSession) -> list[dict[str, object]]:
+    """Clients an indexer can be pinned to: the torrent and Usenet ones."""
+    result = await session.execute(
+        select(DownloadClientConfig).order_by(
+            DownloadClientConfig.priority, DownloadClientConfig.name
+        )
+    )
+    choices: list[dict[str, object]] = []
+    for client in result.scalars().all():
+        protocol = DownloadClientType(client.client_type).acquisition_protocol
+        if protocol not in {AcquisitionProtocol.TORRENT, AcquisitionProtocol.USENET}:
+            continue
+        choices.append(
+            {
+                "id": client.id,
+                "name": client.name,
+                "protocol": protocol.value,
+                "enabled": client.enabled,
+            }
+        )
+    return choices
+
+
 def load_indexer_status_seed(
     request: Request,
     indexers: Sequence[IndexerConfig],
@@ -337,6 +362,7 @@ async def load_settings_tab(request: Request, session: DbSession, tab: str) -> d
         ctx["browser_resolver_available"] = (
             await session.scalar(select(DirectResolverConfig.id).limit(1)) is not None
         )
+        ctx["indexer_download_clients"] = await _indexer_download_client_choices(session)
         manager_sources_by_name: dict[str, set[str]] = {}
         manager_display_names: dict[str, str] = {}
         for indexer in indexers:

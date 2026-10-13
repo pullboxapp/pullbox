@@ -311,6 +311,12 @@
                   {% if idx.priority != 50 %}
                     <span class="pill pill-purple">Priority {{ idx.priority }}</span>
                   {% endif %}
+                  {% if idx.download_client_id %}
+                    {% set pinned = (indexer_download_clients|default([]))|selectattr("id", "equalto", idx.download_client_id)|first %}
+                    {% if pinned %}
+                      <span class="pill pill-info" data-testid="settings-indexers-client-{{ idx.id }}">Client: {{ pinned.name }}</span>
+                    {% endif %}
+                  {% endif %}
                   {% if idx.failure_count > 0 %}
                     <span class="pill pill-warning">{{ idx.failure_count }} fail{{ 's' if idx.failure_count != 1 }}</span>
                   {% endif %}
@@ -757,6 +763,18 @@
                 </div>
               </div>
 
+              <div data-testid="settings-indexers-download-client">
+                <label class="block text-xs font-medium text-pb-text-sec mb-1.5">Download client</label>
+                <select x-model="form.download_client_id" class="input-pb">
+                  <option value="">Default (highest-priority client)</option>
+                  <template x-for="client in downloadClientChoices()" :key="client.id">
+                    <option :value="String(client.id)" :selected="String(client.id) === form.download_client_id"
+                            x-text="client.enabled ? client.name : client.name + ' (disabled)'"></option>
+                  </template>
+                </select>
+                <p class="text-[11px] text-pb-text-dim mt-1">Send every grab from this indexer to this client. If it is disabled or unreachable the grab fails rather than going to another client.</p>
+              </div>
+
               <div
                 x-show="form.indexer_type === 'torznab' && form.source === 'manual'"
                 data-testid="settings-indexers-manual-torznab-resolver"
@@ -975,12 +993,19 @@ function indexersSettings() {
     testSuccess: false,
     modalError: '',
     resolverChainAvailable: {{ browser_resolver_available|default(false)|tojson }},
+    downloadClients: {{ indexer_download_clients|default([], true)|tojson }},
+
+    downloadClientChoices() {
+      const wanted = { torznab: ['torrent'], newznab: ['usenet'] }[this.form.indexer_type]
+        || ['torrent', 'usenet'];
+      return this.downloadClients.filter(client => wanted.includes(client.protocol));
+    },
 
     form: {
       indexer_type: '', name: '', url: '', api_key: '', has_api_key: false, enabled: true,
       priority: 50, categories: '', source: 'manual',
       enable_rss: true, enable_automatic_search: true, enable_interactive_search: true,
-      resolver_enabled: false,
+      resolver_enabled: false, download_client_id: '',
     },
 
     // Prowlarr connection state
@@ -1014,7 +1039,7 @@ function indexersSettings() {
         indexer_type: '', name: '', url: '', api_key: '', has_api_key: false, enabled: true,
         priority: 50, categories: '', source: 'manual',
         enable_rss: true, enable_automatic_search: true, enable_interactive_search: true,
-        resolver_enabled: false,
+        resolver_enabled: false, download_client_id: '',
       };
     },
 
@@ -1170,6 +1195,7 @@ function indexersSettings() {
             enable_automatic_search: data.enable_automatic_search !== false,
             enable_interactive_search: data.enable_interactive_search !== false,
             resolver_enabled: this.resolverChainAvailable && data.resolver_enabled === true,
+            download_client_id: data.download_client_id == null ? '' : String(data.download_client_id),
           };
           this.showModal = true;
         })
@@ -1204,6 +1230,7 @@ function indexersSettings() {
           && this.form.source === 'manual'
           ? this.form.resolver_enabled
           : false,
+        download_client_id: this.form.download_client_id ? Number(this.form.download_client_id) : null,
       };
 
       // Only send api_key if user entered a new one

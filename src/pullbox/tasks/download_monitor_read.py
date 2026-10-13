@@ -37,6 +37,7 @@ def build_poll_item(download: Any) -> dict[str, object]:
         "external_id": download.external_id,
         "title": download.title,
         "download_client": download.download_client,
+        "download_client_config_id": download.download_client_config_id,
         "downloaded_path": download.downloaded_path,
         "issue_id": download.issue_id,
         "retry_count": download.retry_count,

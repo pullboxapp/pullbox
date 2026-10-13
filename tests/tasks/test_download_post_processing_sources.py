@@ -35,7 +35,9 @@ async def test_resolve_local_download_root_uses_enabled_client_directory() -> No
     result = MagicMock()
     result.scalars.return_value.first.return_value = SimpleNamespace(download_dir="/downloads/")
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
-    download = SimpleNamespace(download_client=DownloadClientType.SABNZBD)
+    download = SimpleNamespace(
+        download_client_config_id=None, download_client=DownloadClientType.SABNZBD
+    )
 
     root = await _resolve_local_download_root(session, download)
 
@@ -51,7 +53,9 @@ async def test_resolve_local_download_root_requires_configured_directory() -> No
     result = MagicMock()
     result.scalars.return_value.first.return_value = SimpleNamespace(download_dir=None)
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
-    download = SimpleNamespace(download_client=DownloadClientType.SABNZBD)
+    download = SimpleNamespace(
+        download_client_config_id=None, download_client=DownloadClientType.SABNZBD
+    )
 
     root = await _resolve_local_download_root(session, download)
 
@@ -97,6 +101,7 @@ async def test_resolve_local_path_normalizes_windows_remote_path() -> None:
     )
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     download = SimpleNamespace(
+        download_client_config_id=None,
         download_client=DownloadClientType.SABNZBD,
         downloaded_path=r"E:\Temp\Pullbox_Downloads\Release\file.cbr",
     )
@@ -120,6 +125,7 @@ async def test_resolve_local_path_rejects_unmapped_windows_path() -> None:
     )
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     download = SimpleNamespace(
+        download_client_config_id=None,
         download_client=DownloadClientType.SABNZBD,
         downloaded_path=r"E:\Temp\Release\file.cbr",
     )
@@ -141,6 +147,7 @@ async def test_resolve_local_path_matches_windows_paths_case_insensitively() -> 
     )
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     download = SimpleNamespace(
+        download_client_config_id=None,
         download_client=DownloadClientType.SABNZBD,
         downloaded_path=r"e:\temp\pullbox_downloads\Release\file.cbr",
     )
@@ -163,6 +170,7 @@ async def test_resolve_local_path_requires_windows_component_boundary() -> None:
     )
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     download = SimpleNamespace(
+        download_client_config_id=None,
         download_client=DownloadClientType.SABNZBD,
         downloaded_path=r"E:\Temp\Pullbox_Downloads-old\Release\file.cbr",
     )
@@ -184,6 +192,7 @@ async def test_resolve_local_path_maps_windows_unc_path() -> None:
     )
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     download = SimpleNamespace(
+        download_client_config_id=None,
         download_client=DownloadClientType.SABNZBD,
         downloaded_path=r"\\SERVER\SHARE\Downloads\Release\file.cbr",
     )
@@ -206,6 +215,7 @@ async def test_resolve_local_path_rejects_windows_parent_traversal() -> None:
     )
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     download = SimpleNamespace(
+        download_client_config_id=None,
         download_client=DownloadClientType.SABNZBD,
         downloaded_path=r"E:\Temp\Pullbox_Downloads\..\outside\file.cbr",
     )
@@ -227,6 +237,7 @@ async def test_resolve_local_path_preserves_posix_literal_backslash() -> None:
     )
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     download = SimpleNamespace(
+        download_client_config_id=None,
         download_client=DownloadClientType.SABNZBD,
         downloaded_path="/remote/file.cbz",
     )
@@ -247,7 +258,9 @@ async def test_resolve_local_download_root_preserves_posix_literal_backslash() -
         download_dir="/downloads/Batman\\Superman"
     )
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
-    download = SimpleNamespace(download_client=DownloadClientType.SABNZBD)
+    download = SimpleNamespace(
+        download_client_config_id=None, download_client=DownloadClientType.SABNZBD
+    )
 
     root = await _resolve_local_download_root(session, download)
 
@@ -284,3 +297,45 @@ def test_post_processing_integrity_exception_distinguishes_missing_source() -> N
     )
 
     assert isinstance(exc, FileNotFoundError)
+
+
+@pytest.mark.asyncio
+async def test_resolve_local_path_uses_the_exact_client_when_types_repeat() -> None:
+    """Two clients of one type can map different paths; the download's own client wins."""
+    from pullbox.models.download import DownloadClientType
+    from pullbox.tasks.download_post_processing_sources import _resolve_local_path
+
+    exact = SimpleNamespace(remote_path="/tracker/complete", download_dir="/tracker-downloads")
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=exact),
+        execute=AsyncMock(side_effect=AssertionError("type lookup must not run")),
+    )
+    download = SimpleNamespace(
+        download_client=DownloadClientType.QBITTORRENT,
+        download_client_config_id=5,
+        downloaded_path="/tracker/complete/Release/file.cbz",
+    )
+
+    resolved = await _resolve_local_path(session, download)
+
+    assert resolved == "/tracker-downloads/Release/file.cbz"
+    assert session.get.await_args.args[1] == 5
+
+
+@pytest.mark.asyncio
+async def test_resolve_local_download_root_uses_the_exact_client_when_types_repeat() -> None:
+    from pullbox.models.download import DownloadClientType
+    from pullbox.tasks.download_post_processing_sources import _resolve_local_download_root
+
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(download_dir="/tracker-downloads")),
+        execute=AsyncMock(side_effect=AssertionError("type lookup must not run")),
+    )
+    download = SimpleNamespace(
+        download_client=DownloadClientType.QBITTORRENT,
+        download_client_config_id=5,
+    )
+
+    root = await _resolve_local_download_root(session, download)
+
+    assert root == Path("/tracker-downloads")

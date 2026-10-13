@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.models.client import DownloadClientConfig
     from pullbox.models.download import DownloadHistory
 
 logger = structlog.get_logger(__name__)
@@ -251,13 +252,7 @@ async def _resolve_local_path(
         )
         return str(mapped)
 
-    result = await session.execute(
-        select(DownloadClientConfig).where(
-            DownloadClientConfig.client_type == download.download_client,
-            DownloadClientConfig.enabled.is_(True),
-        )
-    )
-    client_cfg = result.scalars().first()
+    client_cfg = await _download_client_config(session, download)
 
     if client_cfg and client_cfg.remote_path and client_cfg.download_dir:
         windows_origin = _is_windows_origin_path(client_cfg.remote_path)
@@ -299,20 +294,38 @@ async def _resolve_local_path(
     return raw_path
 
 
-async def _resolve_local_download_root(
+async def _download_client_config(
     session: AsyncSession,
     download: DownloadHistory,
-) -> Path | None:
-    """Return the configured local root that bounds source cleanup."""
+) -> DownloadClientConfig | None:
+    """Return the config of the client that handled this download.
+
+    Several clients can share a type, so the exact config recorded on the
+    download wins; rows recorded before that identity existed fall back to the
+    first enabled client of the same type. The exact config is used even when
+    it has since been disabled: its paths still describe where this download is.
+    """
     from pullbox.models.client import DownloadClientConfig
 
+    if download.download_client_config_id is not None:
+        exact = await session.get(DownloadClientConfig, download.download_client_config_id)
+        if exact is not None:
+            return exact
     result = await session.execute(
         select(DownloadClientConfig).where(
             DownloadClientConfig.client_type == download.download_client,
             DownloadClientConfig.enabled.is_(True),
         )
     )
-    client_cfg = result.scalars().first()
+    return result.scalars().first()
+
+
+async def _resolve_local_download_root(
+    session: AsyncSession,
+    download: DownloadHistory,
+) -> Path | None:
+    """Return the configured local root that bounds source cleanup."""
+    client_cfg = await _download_client_config(session, download)
     if client_cfg is None or not client_cfg.download_dir:
         return None
     download_dir = client_cfg.download_dir.strip()

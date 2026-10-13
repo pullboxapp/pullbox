@@ -30,7 +30,9 @@ async def poll_download_clients(
         client_type = item["download_client"]
         existing_path = item["downloaded_path"]
 
-        client = download_svc.get_client_for_type(client_type)
+        client = download_svc.get_client_for_identity(
+            item.get("download_client_config_id"), client_type
+        )
         if not client:
             continue
 

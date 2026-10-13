@@ -260,7 +260,7 @@ class TestMonitorDownloadsImmediateHandoff:
             )
         )
         fake_service = MagicMock()
-        fake_service.get_client_for_type.return_value = fake_client
+        fake_service.get_client_for_identity.return_value = fake_client
         trigger = MagicMock()
         fake_logger = _FakeLogger()
 
@@ -337,7 +337,7 @@ class TestMonitorDownloadsImmediateHandoff:
             )
         )
         fake_service = MagicMock()
-        fake_service.get_client_for_type.return_value = fake_client
+        fake_service.get_client_for_identity.return_value = fake_client
         fake_logger = _FakeLogger()
 
         monkeypatch.setattr(download_task, "get_session_factory", lambda: db_factory)
@@ -399,7 +399,7 @@ class TestMonitorDownloadsImmediateHandoff:
             )
         )
         fake_service = MagicMock()
-        fake_service.get_client_for_type.return_value = fake_client
+        fake_service.get_client_for_identity.return_value = fake_client
         fake_logger = _FakeLogger()
 
         monkeypatch.setattr(download_task, "get_session_factory", lambda: db_factory)
@@ -455,7 +455,7 @@ class TestMonitorDownloadsImmediateHandoff:
             )
         )
         fake_service = MagicMock()
-        fake_service.get_client_for_type.return_value = fake_client
+        fake_service.get_client_for_identity.return_value = fake_client
         fake_logger = _FakeLogger()
 
         monkeypatch.setattr(download_task, "get_session_factory", lambda: db_factory)
@@ -491,7 +491,7 @@ class TestMonitorDownloadsImmediateHandoff:
         fake_client = MagicMock()
         fake_client.get_download_status = AsyncMock(side_effect=RuntimeError("not found"))
         fake_service = MagicMock()
-        fake_service.get_client_for_type.return_value = fake_client
+        fake_service.get_client_for_identity.return_value = fake_client
         fake_logger = _FakeLogger()
 
         monkeypatch.setattr(download_task, "get_session_factory", lambda: db_factory)
