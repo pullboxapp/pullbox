@@ -1,5 +1,6 @@
 """GCD credits reach the existing canonical graph and paired XML on both databases."""
 
+from contextlib import closing
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -104,7 +105,7 @@ async def test_gcd_refresh_preserves_local_credit_edits_and_clears(
             creator.name = "Local Author"
         elif edit == "clear":
             await session.execute(delete(IssueCreator).where(IssueCreator.issue_id == issue_id))
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE gcd_creator_name_detail SET name='Replacement' WHERE id=101")
     adapter, _ = await source_bundle(path)
     source_registry = MetadataSourceRegistry(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Protocol
 
@@ -25,14 +26,13 @@ def auto_detect_mylar3_path_map(
 ) -> dict[str, str] | None:
     """Auto-detect path mapping for Mylar3 by examining ComicLocation values."""
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        rows = conn.execute(
-            "SELECT ComicLocation FROM comics "
-            "WHERE ComicLocation IS NOT NULL AND ComicLocation != '' "
-            "ORDER BY ComicLocation "
-            "LIMIT 50"
-        ).fetchall()
-        conn.close()
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+            rows = conn.execute(
+                "SELECT ComicLocation FROM comics "
+                "WHERE ComicLocation IS NOT NULL AND ComicLocation != '' "
+                "ORDER BY ComicLocation "
+                "LIMIT 50"
+            ).fetchall()
     except sqlite3.DatabaseError:
         return None
 

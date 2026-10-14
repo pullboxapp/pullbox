@@ -947,7 +947,11 @@ class TestMigrationChain:
             engine.dispose()
 
         command.upgrade(cfg, "head")
-        assert "story_arc_placements" in inspect(create_engine(sync_url)).get_table_names()
+        engine = create_engine(sync_url)
+        try:
+            assert "story_arc_placements" in inspect(engine).get_table_names()
+        finally:
+            engine.dispose()
 
     def test_story_arc_domain_downgrade_blocks_unresolved_memberships(
         self,

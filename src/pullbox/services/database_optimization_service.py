@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,7 +71,7 @@ class DatabaseOptimizationService:
     def preview(self) -> DatabaseOptimizationPreview:
         """Return current free-list and disk-capacity information without mutation."""
         self._ensure_database_exists()
-        with self._connect(read_only=True) as connection:
+        with closing(self._connect(read_only=True)) as connection, connection:
             return self._build_preview(connection)
 
     def optimize(self) -> DatabaseOptimizationResult:
@@ -82,7 +83,7 @@ class DatabaseOptimizationService:
                 f"Need at least {before.required_free_bytes} additional bytes."
             )
 
-        with self._connect(read_only=False) as connection:
+        with closing(self._connect(read_only=False)) as connection, connection:
             checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if checkpoint is not None and int(checkpoint[0]) != 0:
                 raise DatabaseOptimizationBusyError(
@@ -100,7 +101,7 @@ class DatabaseOptimizationService:
     def maintain(self) -> DatabaseMaintenanceResult:
         """Rebuild indexes, refresh planner statistics, and verify integrity."""
         self._ensure_database_exists()
-        with self._connect(read_only=False) as connection:
+        with closing(self._connect(read_only=False)) as connection, connection:
             checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if checkpoint is not None and int(checkpoint[0]) != 0:
                 raise DatabaseOptimizationBusyError(
@@ -141,7 +142,11 @@ class DatabaseOptimizationService:
                 timeout=_BUSY_TIMEOUT_MS / 1000,
                 isolation_level=None,
             )
-        connection.execute("PRAGMA busy_timeout=30000")
+        try:
+            connection.execute("PRAGMA busy_timeout=30000")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     def _build_preview(self, connection: sqlite3.Connection) -> DatabaseOptimizationPreview:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -817,7 +818,7 @@ async def test_prepared_journal_commits_before_filesystem_and_db_paths_stay_old_
 
     def fail_first_move(**_kwargs: object) -> None:
         nonlocal observed_committed_checkpoint
-        with sqlite3.connect(tmp_path / "reorder.db") as connection:
+        with closing(sqlite3.connect(tmp_path / "reorder.db")) as connection, connection:
             rows = connection.execute(
                 "SELECT placement_path, operation_token, last_result "
                 "FROM story_arc_placements WHERE issue_story_arc_id IN (?, ?) "
@@ -1423,7 +1424,7 @@ async def test_concurrent_nonrenamed_inspection_truth_is_not_overwritten_at_reco
         cancellation_requested: object,
     ) -> object:
         result = original_complete(plan, cancellation_requested)  # type: ignore[arg-type]
-        with sqlite3.connect(tmp_path / "reorder.db") as connection:
+        with closing(sqlite3.connect(tmp_path / "reorder.db")) as connection, connection:
             connection.execute(
                 "UPDATE story_arc_placements SET state = ?, last_result = ? WHERE id = ?",
                 ("missing", json.dumps(concurrent_result), referenced_id),
@@ -1500,7 +1501,7 @@ async def test_concurrent_managed_unchanged_truth_is_not_overwritten_at_reconcil
         cancellation_requested: object,
     ) -> object:
         result = original_complete(plan, cancellation_requested)  # type: ignore[arg-type]
-        with sqlite3.connect(tmp_path / "reorder.db") as connection:
+        with closing(sqlite3.connect(tmp_path / "reorder.db")) as connection, connection:
             connection.execute(
                 "UPDATE story_arc_placements SET state = ?, last_result = ? WHERE id = ?",
                 ("drifted", json.dumps(concurrent_result), victim_id),

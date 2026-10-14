@@ -67,9 +67,12 @@ def test_migration_issue_title_snapshot_matches_release_classifier(title: str) -
     )
 
 
-def test_classification_repair_updates_only_heuristic_and_inherited_types() -> None:
+def test_classification_repair_updates_only_heuristic_and_inherited_types(
+    request: pytest.FixtureRequest,
+) -> None:
     migration = _load_migration()
     engine = sa.create_engine("sqlite:///:memory:")
+    request.addfinalizer(engine.dispose)
     metadata = sa.MetaData()
     series = sa.Table(
         "series",
