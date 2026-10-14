@@ -46,6 +46,14 @@ on:
         required: false
         type: boolean
         default: false
+      firefox_workers:
+        description: Firefox workers for manual comparison (Chromium stays at three)
+        required: false
+        type: choice
+        default: "3"
+        options:
+          - "3"
+          - "4"
 
 permissions:
   contents: read
@@ -482,6 +490,8 @@ jobs:
         run: playwright install ${{ matrix.browser }}
 
       - name: Run E2E tests
+        env:
+          E2E_WORKERS: "${{ matrix.browser == 'firefox' && github.event_name == 'workflow_dispatch' && inputs.firefox_workers == '4' && '4' || '3' }}"
         run: |
           mkdir -p test-results/e2e test-results/playwright
           pytest tests/e2e/ \

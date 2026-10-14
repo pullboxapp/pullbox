@@ -17,7 +17,15 @@ def _jobs() -> dict:
 
 
 def test_firefox_starts_after_production_without_waiting_for_compatibility() -> None:
-    jobs = _jobs()
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    jobs = workflow["jobs"]
+    events = workflow.get("on", workflow.get(True))
+    workers = events["workflow_dispatch"]["inputs"].get("firefox_workers", {})
+    assert workers.get("type") == "choice"
+    assert workers.get("default") == "3"
+    assert workers.get("options") == ["3", "4"]
+    assert workflow["env"]["E2E_WORKERS"] == "3"
+    assert "E2E_WORKERS" not in jobs["e2e"]["env"]
     assert "test-production" in jobs, "Production Python needs an independent completion signal"
     assert "e2e-firefox" in jobs, "Firefox must be scheduled independently of Chromium"
     assert jobs["e2e-firefox"]["needs"] == [
@@ -41,6 +49,13 @@ def test_firefox_starts_after_production_without_waiting_for_compatibility() -> 
     ]
     assert jobs["e2e-firefox"]["steps"] == jobs["e2e"]["steps"]
     assert jobs["e2e-firefox"]["env"] == jobs["e2e"]["env"]
+    step = next(step for step in jobs["e2e"]["steps"] if step.get("name") == "Run E2E tests")
+    assert step["env"] == {
+        "E2E_WORKERS": (
+            "${{ matrix.browser == 'firefox' && github.event_name == 'workflow_dispatch' "
+            "&& inputs.firefox_workers == '4' && '4' || '3' }}"
+        )
+    }
 
 
 @pytest.mark.parametrize("job_name", TEST_JOBS)
