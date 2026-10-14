@@ -29,6 +29,7 @@ from pullbox.utilities.executors.mass_convert_pipeline import MassConvertPipelin
 from pullbox.utilities.executors.rollback_executor import RollbackExecutor
 from pullbox.utilities.job_queue import JobQueueManager
 from pullbox.utilities.models import ItemState, JobState, JobType, UtilityJob, UtilityJobItem
+from tests.file_preservation import file_preservation_snapshot
 from tests.integration.metadata_identity.test_library_paired_conversion import (
     paired_conversion_setting,  # noqa: F401
     registered_nonzip,
@@ -458,7 +459,7 @@ async def test_paired_conversion_preserves_os_readonly_sources(
     protected = source if readonly == "file" else source.parent
     original_mode = protected.stat().st_mode & 0o777
     protected.chmod(0o444 if readonly == "file" else 0o555)
-    before = source.read_bytes(), source.stat()
+    before = file_preservation_snapshot(source)
     try:
         if entrypoint == "mass":
             result = await execute(executor, config, context, item)
@@ -473,7 +474,7 @@ async def test_paired_conversion_preserves_os_readonly_sources(
                         trash_dir=tmp_path / "trash",
                         trash_relative_path=source.name,
                     )
-        assert (source.read_bytes(), source.stat()) == before
+        assert file_preservation_snapshot(source) == before
         assert not source.with_suffix(".cbz").exists()
     finally:
         if protected.exists():

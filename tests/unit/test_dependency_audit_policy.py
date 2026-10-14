@@ -241,6 +241,7 @@ def test_runner_does_not_reuse_stale_success_report(
 ) -> None:
     evidence = tmp_path / "audit.json"
     evidence.write_text("stale successful report", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("safety==3.8.1\n", encoding="utf-8")
     monkeypatch.setattr(
         subprocess,
         "run",

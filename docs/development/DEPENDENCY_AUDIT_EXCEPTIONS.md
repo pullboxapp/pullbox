@@ -6,6 +6,51 @@ remain blocking. Safety and Bandit retain their existing advisory status.
 
 ## NLTK Used By Safety
 
+### October 14 Remediation: Remove The Dependency
+
+The acceptance below expired and has **not** been renewed. NLTK still has no
+patched release. Instead, development installs pin Safety to its merged upstream
+[PR #913](https://github.com/pyupio/safety/pull/913), commit
+`ac505430fc55403af338ece39489f3e3b01a7d97`. It removes NLTK and retains only the
+pure edit-distance algorithm, not the vulnerable model-file APIs. Pullbox's
+direct NLTK requirement is removed too; no scanner is removed or downgraded.
+Production continues to exclude both packages. The immutable commit archive
+is SHA-256 pinned, so installation also works in the Git-free development
+image; no additional system package is needed.
+
+This source still identifies itself as Safety 3.8.1. It is three commits beyond
+the release and also includes upstream authentication updates, requiring
+Authlib >=1.6.12, joserfc >=1.6.8 and safety-schemas 0.0.19. Verify the actual
+Safety CLI and JSON scan output, not just its edit-distance helper. Replace the
+source pin with a published release only after verifying that release includes
+the NLTK removal and passes the same checks.
+
+Pip-audit cannot audit a direct URL requirement. The shared wrapper therefore
+normalizes **only** this exact Safety repository/commit to its installed
+`safety==3.8.1` metadata version. It first verifies PEP 610 source provenance,
+the archive's exact SHA-256, version, noneditable install and absence of an NLTK requirement.
+Other URLs or changed/missing provenance fail closed. Every frozen transitive
+dependency remains in the blocking audit; findings for Safety itself are not
+suppressed. The raw scanner report remains unchanged, with source provenance
+saved separately in `dependency-audit-report-provenance.json` and uploaded even
+on failure. This version-based vulnerability check does not independently scan
+the upstream source code; the exact merged patch must also be reviewed.
+
+An existing virtual environment can retain orphaned NLTK after installing the
+new Safety build. Pip may also keep the released Safety wheel because the
+upstream source has the same version: verify `direct_url.json`, and explicitly
+reinstall the exact pinned Safety source with `--force-reinstall --no-deps` after
+resolving the updated development requirements if provenance is missing.
+Verify no other installed distribution requires NLTK before removing that
+orphan, then run `pip check` and the complete security gate. CI's
+manifest-keyed environment cache creates a fresh environment for this change.
+
+The expired record and expiry regressions below remain as historical evidence;
+they grant no current exception. Source-pin coverage is in
+`tests/unit/test_dependency_audit_source_pin.py`.
+
+### Historical Acceptance (Expired)
+
 | Field | Reviewed scope |
 | --- | --- |
 | Package | `nltk==3.10.3` |

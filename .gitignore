@@ -119,3 +119,4 @@ output/playwright/
 bandit-report.json
 safety-report.json
 dependency-audit-report.json
+dependency-audit-report-provenance.json

@@ -654,7 +654,10 @@ def test_dependency_audit_policy_is_shared_and_retains_raw_ci_evidence() -> None
         step for step in job["steps"] if step.get("name") == "Upload dependency audit report"
     )
     assert upload["if"] == "always()"
-    assert upload["with"]["path"] == "dependency-audit-report.json"
+    assert upload["with"]["path"].splitlines() == [
+        "dependency-audit-report.json",
+        "dependency-audit-report-provenance.json",
+    ]
 
 
 def test_environment_bootstrap_uses_current_packaging_tool_floor() -> None:
