@@ -27,7 +27,6 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.indexer import IndexerConfig, IndexerSource, IndexerType
 from pullbox.models.issue import Issue, IssueStatus
@@ -35,6 +34,7 @@ from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchCo
 from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -71,7 +71,7 @@ GRAB_BODY_TORRENT = {
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
