@@ -17,7 +17,6 @@ from pullbox.models.download import DownloadClientType, DownloadHistory, Downloa
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.models.user import APIKey, User
-from pullbox.services.auth_service import AuthService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -38,13 +37,15 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 
 
 @pytest.fixture()
-async def _api_key_header(_db_factory: async_sessionmaker[AsyncSession]) -> str:
+async def _api_key_header(
+    _db_factory: async_sessionmaker[AsyncSession], seeded_user_password_hash: str
+) -> str:
     raw_key = "pb_k1_" + "d" * 64
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     async with _db_factory() as session:
         user = User(
             username="dlblockuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

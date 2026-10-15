@@ -35,7 +35,6 @@ from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchCo
 from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
-from pullbox.services.auth_service import AuthService
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -81,6 +80,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "f" * 64
@@ -88,7 +88,7 @@ async def _api_key_header(
     async with _db_factory() as session:
         user = User(
             username="grabuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

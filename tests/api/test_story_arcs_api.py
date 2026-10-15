@@ -23,7 +23,6 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.models.user import APIKey, User
-from pullbox.services.auth_service import AuthService
 from pullbox.services.story_arc_service import StoryArcService
 
 if TYPE_CHECKING:
@@ -51,12 +50,14 @@ async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]
 
 
 @pytest.fixture
-async def api_key(db_factory: async_sessionmaker[AsyncSession]) -> str:
+async def api_key(
+    db_factory: async_sessionmaker[AsyncSession], seeded_user_password_hash: str
+) -> str:
     raw_key = "pb_k1_" + "7" * 64
     async with db_factory() as session:
         user = User(
             username="storyarcapi",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

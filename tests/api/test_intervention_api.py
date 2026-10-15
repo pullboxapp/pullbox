@@ -31,7 +31,6 @@ from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
-from pullbox.services.auth_service import AuthService
 from pullbox.services.intervention_service import InterventionService
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -58,6 +57,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "a" * 64
@@ -65,7 +65,7 @@ async def _api_key_header(
     async with _db_factory() as session:
         user = User(
             username="interventionuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

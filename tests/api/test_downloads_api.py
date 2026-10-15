@@ -38,7 +38,6 @@ from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
 from pullbox.providers.download.qbittorrent import QBittorrentError
 from pullbox.providers.indexer.newznab import NewznabError
 from pullbox.providers.indexer.prowlarr import ProwlarrError
-from pullbox.services.auth_service import AuthService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -57,13 +56,15 @@ async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]
 
 
 @pytest.fixture
-async def api_key(db_factory: async_sessionmaker[AsyncSession]) -> str:
+async def api_key(
+    db_factory: async_sessionmaker[AsyncSession], seeded_user_password_hash: str
+) -> str:
     raw_key = "pb_k1_" + "a" * 64
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     async with db_factory() as session:
         user = User(
             username="downloadsapi",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()
