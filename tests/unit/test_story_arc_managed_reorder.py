@@ -15,7 +15,6 @@ from sqlalchemy import select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.issue import Issue
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.series import Series
@@ -41,6 +40,7 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicyMode,
     StoryArcPlacementSyncService,
 )
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -54,7 +54,7 @@ async def reorder_db(
 ) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reorder.db'}")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

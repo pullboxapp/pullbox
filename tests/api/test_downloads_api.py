@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.api.v1 import downloads as downloads_api
 from pullbox.core.exceptions import NotFoundError
-from pullbox.models import Base
 from pullbox.models.airdcpp import AirDcppAcquisition
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import (
@@ -38,6 +37,7 @@ from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
 from pullbox.providers.download.qbittorrent import QBittorrentError
 from pullbox.providers.indexer.newznab import NewznabError
 from pullbox.providers.indexer.prowlarr import ProwlarrError
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -49,7 +49,7 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-downloads-api")
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

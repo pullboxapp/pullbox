@@ -16,7 +16,6 @@ from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.core.scheduler import PullboxScheduler, get_registered_tasks
-from pullbox.models import Base
 from pullbox.models.import_job import (
     ImportControlRequest,
     ImportJob,
@@ -60,6 +59,7 @@ from pullbox.services.story_arc_sync_queue import (
 from pullbox.tasks import story_arc_sync_task as sync_task_module
 from pullbox.tasks.import_task import ImportRunner
 from pullbox.tasks.story_arc_sync_task import scheduled_sync_story_arc_placements
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 async def db_factory(tmp_path: Path) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'arc-sync-task.db'}")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
