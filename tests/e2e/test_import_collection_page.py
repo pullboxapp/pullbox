@@ -3687,8 +3687,15 @@ class TestImportCollectionTab:
         import_page.file_handling_in_place_ready.wait_for(state="visible", timeout=5000)
 
         assert import_page.start_scan_button.is_enabled()
-        import_page.start_scan_button.click()
-        authed_page.wait_for_timeout(100)
+        with authed_page.expect_response(
+            lambda response: (
+                response.url == f"{seeded_server}/api/v1/import"
+                and response.request.method == "POST"
+            ),
+            timeout=5000,
+        ) as submission:
+            import_page.start_scan_button.click()
+        assert submission.value.status == 201
 
         assert created_requests
         assert created_requests[-1]["file_handling_mode"] == "in_place"
