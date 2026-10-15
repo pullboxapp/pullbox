@@ -20,10 +20,13 @@ def test_firefox_starts_after_production_without_waiting_for_compatibility() -> 
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     jobs = workflow["jobs"]
     events = workflow.get("on", workflow.get(True))
-    for browser, choices in (("chromium", ["3", "4"]), ("firefox", ["3", "4", "5"])):
+    for browser, default, choices in (
+        ("chromium", "4", ["3", "4"]),
+        ("firefox", "5", ["3", "4", "5"]),
+    ):
         workers = events["workflow_dispatch"]["inputs"].get(f"{browser}_workers", {})
         assert workers.get("type") == "choice", browser
-        assert workers.get("default") == "3", browser
+        assert workers.get("default") == default, browser
         assert workers.get("options") == choices, browser
     assert workflow["env"]["E2E_WORKERS"] == "3"
     assert "E2E_WORKERS" not in jobs["e2e"]["env"]
@@ -54,9 +57,10 @@ def test_firefox_starts_after_production_without_waiting_for_compatibility() -> 
     assert step["env"] == {
         "E2E_WORKERS": (
             "${{ github.event_name == 'workflow_dispatch' && "
-            "((matrix.browser == 'chromium' && inputs.chromium_workers == '4' && '4') || "
-            "(matrix.browser == 'firefox' && inputs.firefox_workers == '5' && '5') || "
-            "(matrix.browser == 'firefox' && inputs.firefox_workers == '4' && '4')) || '3' }}"
+            "((matrix.browser == 'chromium' && inputs.chromium_workers == '3' && '3') || "
+            "(matrix.browser == 'firefox' && inputs.firefox_workers == '3' && '3') || "
+            "(matrix.browser == 'firefox' && inputs.firefox_workers == '4' && '4')) || "
+            "(matrix.browser == 'firefox' && '5' || '4') }}"
         )
     }
 

@@ -44,7 +44,8 @@ requirements.
   enabling those features rather than suppressing a fallback warning. Engine
   changes can change line attribution, so compare statement inventories and
   covered lines, not percentages alone.
-- Self-hosted functional E2E jobs use three isolated pytest workers per browser.
+- Functional E2E jobs default to four isolated pytest workers for Chromium and
+  five for Firefox. Manual dispatch retains Chromium 3/4 and Firefox 3/4/5 choices.
 - Firefox starts after the independent production Python 3.14 job succeeds;
   Chromium waits for all Python versions. The compatibility matrix and both
   browsers remain blocking dependencies of `CI Required`. Shared YAML steps

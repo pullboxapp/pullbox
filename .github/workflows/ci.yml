@@ -50,7 +50,7 @@ on:
         description: Chromium workers for manual comparison
         required: false
         type: choice
-        default: "3"
+        default: "4"
         options:
           - "3"
           - "4"
@@ -58,7 +58,7 @@ on:
         description: Firefox workers for manual comparison
         required: false
         type: choice
-        default: "3"
+        default: "5"
         options:
           - "3"
           - "4"
@@ -502,9 +502,10 @@ jobs:
         env:
           E2E_WORKERS: >-
             ${{ github.event_name == 'workflow_dispatch' &&
-            ((matrix.browser == 'chromium' && inputs.chromium_workers == '4' && '4') ||
-            (matrix.browser == 'firefox' && inputs.firefox_workers == '5' && '5') ||
-            (matrix.browser == 'firefox' && inputs.firefox_workers == '4' && '4')) || '3' }}
+            ((matrix.browser == 'chromium' && inputs.chromium_workers == '3' && '3') ||
+            (matrix.browser == 'firefox' && inputs.firefox_workers == '3' && '3') ||
+            (matrix.browser == 'firefox' && inputs.firefox_workers == '4' && '4')) ||
+            (matrix.browser == 'firefox' && '5' || '4') }}
         run: |
           mkdir -p test-results/e2e test-results/playwright
           pytest tests/e2e/ \
