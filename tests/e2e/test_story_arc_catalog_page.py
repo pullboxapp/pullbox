@@ -136,7 +136,7 @@ def test_catalog_results_use_add_series_card_layout(
     card = results.locator(".add-series-result-card").first
     title = card.locator(".add-series-result-title").bounding_box()
     meta = card.locator(".add-series-result-meta").bounding_box()
-    action = card.get_by_role("link", name="Preview Numbering Event").bounding_box()
+    action = card.get_by_role("link", name="Preview members of Numbering Event").bounding_box()
     bounds = card.bounding_box()
     assert title and meta and action and bounds
     assert meta["y"] >= title["y"] + title["height"], "Metadata belongs below the title"
@@ -170,7 +170,7 @@ def test_catalog_results_use_add_series_card_layout(
     assert page.locator("#content").evaluate(
         "element => element.scrollWidth <= element.clientWidth"
     )
-    expect(card.get_by_role("link", name="Preview Numbering Event")).to_be_visible()
+    expect(card.get_by_role("link", name="Preview members of Numbering Event")).to_be_visible()
     assert_no_axe_violations(page, name="arc-search-mobile", include=["#content"])
     page.screenshot(path=str(output / "mobile.png"), full_page=True)
 
@@ -194,9 +194,9 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     expect(cover).to_have_attribute(
         "src", "https://comicvine.gamespot.com/a/uploads/story-arcs/42.jpg"
     )
-    expect(page.get_by_role("link", name="Preview Numbering Event")).to_be_visible()
+    expect(page.get_by_role("link", name="Preview members of Numbering Event")).to_be_visible()
     query.press("Tab")
-    page.get_by_role("link", name="Preview Numbering Event").focus()
+    page.get_by_role("link", name="Preview members of Numbering Event").focus()
     page.keyboard.press("Enter")
     page.wait_for_url("**/story-arcs/catalog/comicvine_api/42")
     expect(

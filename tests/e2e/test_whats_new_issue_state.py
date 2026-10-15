@@ -129,6 +129,9 @@ def test_real_release_state_links_reflow_and_accessibility(
     expect(linked.get_by_test_id("whats-new-local-issue")).to_have_attribute(
         "href", f"/issues/{issue_ids[0]}"
     )
+    expect(linked.get_by_test_id("whats-new-local-issue")).to_have_accessible_name(
+        "View issue 1 of Atlas Deluxe"
+    )
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
     assert_no_axe_violations(page, name=f"release-issue-state-{theme}-{width}")
     page.screenshot(

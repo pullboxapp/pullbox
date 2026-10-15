@@ -44,7 +44,7 @@
             {% if result.existing_id %}
               {{ comicvine_in_library_badge() }}
             {% else %}
-              <a href="{{ result.preview_url|default('/story-arcs/catalog/' ~ result.metadata.provider_id) }}" class="btn-primary btn-sm add-series-result-add" aria-label="Preview {{ result.metadata.title }}">Preview members</a>
+              <a href="{{ result.preview_url|default('/story-arcs/catalog/' ~ result.metadata.provider_id) }}" class="btn-primary btn-sm add-series-result-add" aria-label="Preview members of {{ result.metadata.title }}">Preview members</a>
             {% endif %}
           {% endif %}
         {% endcall %}

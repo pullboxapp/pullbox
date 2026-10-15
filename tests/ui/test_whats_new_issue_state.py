@@ -2,6 +2,7 @@
 
 import re
 from datetime import UTC, date, datetime
+from html.parser import HTMLParser
 
 import pytest
 
@@ -17,6 +18,19 @@ from tests.ui.test_whats_new_ui_routes import _issue_summary
 pytest_plugins = ["conftest_security"]
 
 
+class _ReleaseLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.nodes: list[tuple[str, dict[str, str | None]]] = []
+        self.text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.nodes.append((tag, dict(attrs)))
+
+    def handle_data(self, data: str) -> None:
+        self.text.append(data)
+
+
 @pytest.fixture
 def actions_enabled(monkeypatch):
     monkeypatch.setenv("PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED", "true")
@@ -25,11 +39,16 @@ def actions_enabled(monkeypatch):
     get_settings.cache_clear()
 
 
+@pytest.mark.parametrize(
+    "series_title",
+    ["Absolute Flash", 'Flash" onfocus="alert(1)"><i data-label-x>&'],
+    ids=["normal", "escaped"],
+)
 async def test_confirmed_release_links_issue_and_unresolved_row_stays_non_actionable(
-    authenticated_client, sec_db, actions_enabled
+    authenticated_client, sec_db, actions_enabled, series_title
 ):
     async with sec_db.begin() as session:
-        series = Series(title="Absolute Flash", sort_title="Absolute Flash")
+        series = Series(title=series_title, sort_title=series_title)
         session.add(series)
         await session.flush()
         identity = SeriesExternalIdentity(
@@ -40,6 +59,8 @@ async def test_confirmed_release_links_issue_and_unresolved_row_stays_non_action
             evidence_kind=IdentityEvidenceKind.USER_SELECTION,
         )
         source = _issue_summary()
+        assert isinstance(source["series"], dict)
+        source["series"]["title"] = series_title
         identity.external_id = str(source["series"]["locg_series_id"])
         issue = Issue(
             series_id=series.id,
@@ -80,6 +101,19 @@ async def test_confirmed_release_links_issue_and_unresolved_row_stays_non_action
     assert "Issue not linked" in unlinked
     assert 'data-testid="whats-new-local-issue"' not in unlinked
     assert 'data-testid="whats-new-grab"' not in response.text
+    parser = _ReleaseLinkParser()
+    parser.feed(response.text)
+    links = [
+        attrs
+        for tag, attrs in parser.nodes
+        if tag == "a" and attrs.get("data-testid") == "whats-new-local-issue"
+    ]
+    assert len(links) == 1
+    assert links[0]["aria-label"] == f"View issue 1 of {series_title}"
+    assert links[0]["href"] == f"/issues/{issue_id}"
+    assert "View issue" in parser.text
+    assert "onfocus" not in links[0]
+    assert not any("data-label-x" in attrs for _, attrs in parser.nodes)
 
 
 def test_grouping_retains_every_source_release_without_changing_cache():

@@ -84,9 +84,11 @@ def test_gcd_search_review_reorder_skip_and_caveat(
     page.set_viewport_size({"width": width, "height": 900})
     page.goto(f"{seeded_server}/story-arcs/add?q=Civil+War&source=gcd_local")
     page.evaluate("theme => applyTheme(theme)", theme)
-    expect(page.get_by_role("link", name="Preview Civil War [Marvel]", exact=True)).to_be_visible()
+    expect(
+        page.get_by_role("link", name="Preview members of Civil War [Marvel]", exact=True)
+    ).to_be_visible()
     assert_no_axe_violations(page, name=f"gcd-arc-search-{theme}-{width}", include=["#content"])
-    page.get_by_role("link", name="Preview Civil War [Marvel]", exact=True).click()
+    page.get_by_role("link", name="Preview members of Civil War [Marvel]", exact=True).click()
     page.wait_for_url("**/story-arcs/catalog/gcd_local/4")
     expect(
         page.get_by_text("GCD publication order is a starting point", exact=False)
