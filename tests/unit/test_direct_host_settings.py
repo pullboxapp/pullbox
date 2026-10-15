@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.core.encryption import _get_fernet, is_encrypted
 from pullbox.core.exceptions import ValidationError
-from pullbox.models import Base
 from pullbox.models.direct_acquisition import (
     DirectArtifactHostKind,
     DirectHostAccountState,
@@ -23,6 +22,7 @@ from pullbox.services.direct_host_settings import (
     list_direct_host_settings,
     update_direct_host_setting,
 )
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterator
@@ -42,7 +42,7 @@ def _deterministic_application_secret() -> Iterator[None]:
 async def session() -> AsyncGenerator[AsyncSession, None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db_session:
         yield db_session

@@ -15,7 +15,6 @@ from sqlalchemy.orm import joinedload
 
 from pullbox.api.v1 import issues as issues_api
 from pullbox.core.exceptions import ConfigurationError, NotFoundError, ProviderError
-from pullbox.models import Base
 from pullbox.models.download import DownloadState
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
@@ -26,6 +25,7 @@ from pullbox.schemas.issue import IssueUpdate, ManualFileImportRequest
 from pullbox.schemas.search import GrabReleaseRequest, MatchDetails, SearchResultItem
 from pullbox.services.issue_import_service import ManualIssueImportError
 from pullbox.services.search_service import IssueSearchOutcome, IssueSearchTarget, SearchRuntime
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -51,7 +51,7 @@ def _make_release(title: str = "Absolute Superman 009") -> ReleaseResult:
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
