@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import zipfile
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
@@ -25,7 +26,7 @@ def _sha256(path: Path) -> str:
 
 
 def _build_catalog(path: Path, *, issue_counts: tuple[int, ...] = (8, 4, 5, 4, 3, 2)) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.executescript(
             """
             CREATE TABLE cv_publisher (
@@ -122,7 +123,7 @@ def test_realistic_skew_plan_is_exact_deterministic_and_honors_cap(tmp_path: Pat
 def test_plan_treats_malformed_catalog_years_as_unknown(tmp_path: Path) -> None:
     catalog = tmp_path / "localcv.db"
     _build_catalog(catalog)
-    with sqlite3.connect(catalog) as connection:
+    with closing(sqlite3.connect(catalog)) as connection, connection:
         connection.execute("UPDATE cv_volume SET start_year = '195-?'")
 
     plan = plan_import_scale_fixture(_request(catalog, tmp_path / "unused"))

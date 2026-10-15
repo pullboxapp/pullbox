@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,7 +23,7 @@ def _manifest(root: Path) -> dict[str, object]:
 
 
 def _table_names(database: Path) -> set[str]:
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         return {
             row[0]
             for row in connection.execute(
@@ -114,7 +115,7 @@ def test_mylar_fixture_is_deterministic_and_covers_path_resolution_cases(tmp_pat
         "legacy_storyarc_table",
     } <= cases.keys()
 
-    with sqlite3.connect(first / "mylar.db") as connection:
+    with closing(sqlite3.connect(first / "mylar.db")) as connection, connection:
         rows = {
             name: location
             for name, location in connection.execute(
@@ -142,7 +143,7 @@ def test_mylar_fixture_has_storyarc_readlist_and_schema_variants(tmp_path: Path)
     root = tmp_path / "mylar-fixture"
     generate_mylar_fixture(root, seed=55)
 
-    with sqlite3.connect(root / "mylar.db") as connection:
+    with closing(sqlite3.connect(root / "mylar.db")) as connection, connection:
         issue_numbers = {row[0] for row in connection.execute("SELECT Issue_Number FROM issues")}
         assert {"0", ".5", "0.5", "1/2", "1A", "10000", "1000000"} <= issue_numbers
         assert connection.execute("SELECT COUNT(*) FROM storyarcs").fetchone()[0] >= 3
@@ -154,10 +155,10 @@ def test_mylar_fixture_has_storyarc_readlist_and_schema_variants(tmp_path: Path)
     assert {"storyarcs", "readlist"}.isdisjoint(_table_names(absent))
     assert {"storyarcs", "readlist"} <= _table_names(empty)
     assert {"storyarcs", "readlist"} <= _table_names(legacy)
-    with sqlite3.connect(empty) as connection:
+    with closing(sqlite3.connect(empty)) as connection, connection:
         assert connection.execute("SELECT COUNT(*) FROM storyarcs").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM readlist").fetchone()[0] == 0
-    with sqlite3.connect(legacy) as connection:
+    with closing(sqlite3.connect(legacy)) as connection, connection:
         legacy_columns = {row[1] for row in connection.execute("PRAGMA table_info(storyarcs)")}
     assert legacy_columns == {"StoryArcID", "StoryArc", "ReadingOrder", "IssueNumber"}
 
@@ -228,7 +229,7 @@ def test_mylar_fixture_adds_mapped_genuine_cbr_conversion_cases(tmp_path: Path) 
     assert manifest["cbr_seed_set"]["status"] == "provided"
     assert cases["mapped_genuine_cbr_conversion"]["expected_outcome"] == "success"
     assert cases["mapped_genuine_cbr_conversion"]["expected_materialization"] == "cbz"
-    with sqlite3.connect(root / "mylar.db") as connection:
+    with closing(sqlite3.connect(root / "mylar.db")) as connection, connection:
         location = connection.execute(
             "SELECT ComicLocation FROM comics WHERE ComicName = 'Mapped CBR Series'"
         ).fetchone()[0]

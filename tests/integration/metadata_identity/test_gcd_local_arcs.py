@@ -1,6 +1,7 @@
 """Real local arc reads feed the existing atomic saver on both app databases."""
 
 import sqlite3
+from contextlib import closing
 
 import pytest
 from sqlalchemy import func, select
@@ -115,7 +116,7 @@ async def test_gcd_arc_refresh_requires_review_and_preserves_removed_members(
             library_root_id=root_id,
         )
         arc_id, revision = arc.id, arc.revision
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("DELETE FROM gcd_story_story_arc WHERE story_id=205")
         db.execute("INSERT INTO gcd_story VALUES (208,12,19,0)")
         db.execute("INSERT INTO gcd_story_story_arc VALUES (7,208,4)")

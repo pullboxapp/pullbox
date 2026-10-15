@@ -32,7 +32,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.core.acquisition import AcquisitionProtocol
-from pullbox.models import Base
 from pullbox.models.airdcpp import AirDcppClientSettings
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import (
@@ -54,13 +53,13 @@ from pullbox.services.airdcpp_search_types import (
     DcSearchOutcome,
     DcValidatedCandidate,
 )
-from pullbox.services.auth_service import AuthService
 from pullbox.services.direct_search_coordinator import (
     DirectSearchOutcome,
     DirectSearchProvider,
     DirectValidatedCandidate,
 )
 from pullbox.services.release_validator import ReleaseValidator
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -193,7 +192,7 @@ def _make_release(
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
@@ -202,6 +201,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "e" * 64
@@ -209,7 +209,7 @@ async def _api_key_header(
     async with _db_factory() as session:
         user = User(
             username="uisearchuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

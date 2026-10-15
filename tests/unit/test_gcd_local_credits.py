@@ -2,6 +2,7 @@
 
 import hashlib
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -15,7 +16,7 @@ from tests.api.test_gcd_local import gcd_dump
 
 def credited_dump(path):
     gcd_dump(path)
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         # Columns and FKs observed in the official 2026-09-29 SQLite dump.
         db.executescript("""
             CREATE TABLE gcd_story (
@@ -90,7 +91,7 @@ async def test_absent_optional_tables_or_records_are_unknown_not_authoritative_c
 @pytest.mark.parametrize("problem", ["uncertain", "missing_name", "deleted_name", "missing_role"])
 async def test_incomplete_credit_set_is_not_published_as_a_partial_authority(tmp_path, problem):
     path = credited_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         sql = {
             "uncertain": "UPDATE gcd_story_credit SET uncertain=1 WHERE id=4",
             "missing_name": "DELETE FROM gcd_creator_name_detail WHERE id=101",
@@ -108,7 +109,7 @@ async def test_incomplete_credit_set_is_not_published_as_a_partial_authority(tmp
 )
 async def test_invalid_or_oversized_credit_profile_fails_safely(tmp_path, problem):
     path = credited_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         if problem == "view":
             db.executescript(
                 "ALTER TABLE gcd_story RENAME TO hidden_story; "
@@ -175,7 +176,7 @@ async def test_credit_queries_are_indexed_and_batched_for_a_full_issue_page(tmp_
     from pullbox.providers.metadata.gcd_local_database import open_readonly
 
     path = credited_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("CREATE INDEX deleted_story ON gcd_story(deleted)")
         db.execute("CREATE INDEX type_story ON gcd_story(type_id)")
         query = credit_query(STORY_CREDIT, list(range(10, 110))).compile(
@@ -217,7 +218,7 @@ async def test_credit_queries_are_indexed_and_batched_for_a_full_issue_page(tmp_
 
 async def test_duplicate_story_credits_do_not_overflow_unique_credit_limit(tmp_path):
     path = credited_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.executemany(
             "INSERT INTO gcd_story_credit VALUES (?,202,101,1,'',0,0)",
             [(1000 + n,) for n in range(129)],
@@ -229,7 +230,7 @@ async def test_duplicate_story_credits_do_not_overflow_unique_credit_limit(tmp_p
 @pytest.mark.parametrize("story_type", [2, 12, 16, 26, 28, 29])
 async def test_letters_ads_and_house_columns_are_not_comic_writer_credits(tmp_path, story_type):
     path = credited_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("INSERT INTO gcd_story VALUES (999,10,?,0)", (story_type,))
         db.execute("INSERT INTO gcd_story_credit VALUES (999,999,104,1,'',0,0)")
     adapter = GcdLocalSource(await validate_candidate(str(path)))
@@ -239,7 +240,7 @@ async def test_letters_ads_and_house_columns_are_not_comic_writer_credits(tmp_pa
 @pytest.mark.parametrize("story_type", [5, 6, 7, 13, 19, 21])
 async def test_all_gcd_core_story_categories_retain_descriptive_credits(tmp_path, story_type):
     path = credited_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE gcd_story SET type_id=? WHERE id=205", (story_type,))
     adapter = GcdLocalSource(await validate_candidate(str(path)))
     assert (await adapter.issue("11")).data.model_dump(mode="json")["credits"] == [
@@ -259,7 +260,7 @@ async def test_all_gcd_core_story_categories_retain_descriptive_credits(tmp_path
 )
 async def test_composite_cover_credit_does_not_become_interior_art(tmp_path, role, expected):
     path = credited_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("INSERT INTO gcd_credit_type VALUES (99,?)", (role,))
         db.execute("INSERT INTO gcd_creator_name_detail VALUES (999,9999,'Composite Cover',0)")
         db.execute("INSERT INTO gcd_story_credit VALUES (999,201,999,99,'',0,0)")
@@ -277,7 +278,7 @@ def test_credit_read_does_not_materialize_unbounded_optional_text(tmp_path):
     from pullbox.providers.metadata.gcd_local_database import open_readonly, rows
 
     path = credited_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE gcd_creator_name_detail SET name=? WHERE id=101", ("x" * 1000000,))
     with open_readonly(path, threading.Event(), time.monotonic() + 1) as db:
         found = rows(db, credit_query(STORY_CREDIT, [10]))

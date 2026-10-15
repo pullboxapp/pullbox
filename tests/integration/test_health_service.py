@@ -19,13 +19,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.health import HealthCheckResult as HealthCheckResultModel
 from pullbox.models.health import HealthCurrentStatus as HealthCurrentStatusModel
 from pullbox.models.health import HealthIncident as HealthIncidentModel
 from pullbox.models.health import HealthStatus
 from pullbox.providers.base import ProviderHealthResult, ProviderRegistry
 from pullbox.services.health_service import CheckOutcome, HealthService
+from tests.sqlite_schema import create_test_schema
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -36,7 +36,7 @@ from pullbox.services.health_service import CheckOutcome, HealthService
 async def async_engine():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     yield engine
     await engine.dispose()
 

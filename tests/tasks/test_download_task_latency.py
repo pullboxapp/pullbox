@@ -13,13 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.config import SystemConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.series import Series
+from tests.sqlite_schema import create_test_schema
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-download-task-latency")
 
@@ -55,7 +55,7 @@ async def db_factory():
     """Create an isolated async DB factory for task tests."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

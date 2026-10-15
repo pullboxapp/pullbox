@@ -26,7 +26,6 @@ from pullbox.models.config import SystemConfig
 from pullbox.models.series import SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
 from pullbox.schemas.series import SeriesResponse
-from pullbox.services.auth_service import AuthService
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -91,6 +90,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "b" * 64
@@ -98,7 +98,7 @@ async def _api_key_header(
     async with _db_factory() as session:
         user = User(
             username="testuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

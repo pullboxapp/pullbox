@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.acquisition import AcquisitionProtocol
-from pullbox.models import Base
 from pullbox.models.airdcpp import AirDcppAcquisition
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
@@ -30,6 +29,7 @@ from pullbox.services.airdcpp_reconciliation import (
     apply_airdcpp_bundle,
 )
 from pullbox.services.airdcpp_search_cooldown import AirDcppCooldownReservation
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -59,7 +59,7 @@ def test_overshoot_keeps_download_active_and_clamps_display_only() -> None:
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

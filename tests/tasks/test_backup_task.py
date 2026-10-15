@@ -31,7 +31,6 @@ from zipfile import ZipFile
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.services.backup_service import (
     BACKUP_EXTENSION,
@@ -40,6 +39,7 @@ from pullbox.services.backup_service import (
     METADATA_FILENAME,
     BackupService,
 )
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -56,7 +56,7 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-backup-task")
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

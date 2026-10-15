@@ -27,13 +27,12 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.api.v1.series import bulk_update_series
-from pullbox.models import Base
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
 from pullbox.schemas.series import SeriesBulkUpdate
-from pullbox.services.auth_service import AuthService
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -83,7 +82,7 @@ class StatementRecorder:
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
@@ -92,6 +91,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "b" * 64
@@ -99,7 +99,7 @@ async def _api_key_header(
     async with _db_factory() as session:
         user = User(
             username="bulkuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

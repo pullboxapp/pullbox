@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -51,7 +52,7 @@ async def test_mylar_partial_import_requires_acknowledgement_on_server(
     root = Path(default_managed_root.path)
     (root / "Existing").mkdir()
     database = tmp_path / "mylar.db"
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("CREATE TABLE comics (ComicID TEXT, ComicLocation TEXT)")
         connection.executemany(
             "INSERT INTO comics VALUES (?, ?)",
@@ -92,7 +93,7 @@ async def test_partial_acknowledgement_cannot_cover_changed_paths(
     root = Path(default_managed_root.path)
     (root / "Existing").mkdir()
     database = tmp_path / "mylar.db"
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("CREATE TABLE comics (ComicID TEXT, ComicLocation TEXT)")
         connection.executemany(
             "INSERT INTO comics VALUES (?, ?)",
@@ -114,7 +115,7 @@ async def test_partial_acknowledgement_cannot_cover_changed_paths(
         mylar3_allow_unresolved_paths=True,
         mylar3_unresolved_fingerprint=preview.unresolved_fingerprint,
     )
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             "UPDATE comics SET ComicLocation=? WHERE ComicID='2'",
             (str(root / "Other"),),
@@ -132,7 +133,7 @@ async def test_partial_acknowledgement_cannot_override_path_safety(
     root = Path(default_managed_root.path)
     (root / "Existing").mkdir()
     database = tmp_path / "mylar.db"
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("CREATE TABLE comics (ComicID TEXT, ComicLocation TEXT)")
         connection.executemany(
             "INSERT INTO comics VALUES (?, ?)",

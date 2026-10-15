@@ -44,9 +44,32 @@ _IMPORT_FILE_SERIES_INDEX_REVISION = "k2f3a4b5c678"
 _IMPORT_FILE_DELETE_REFERENCE_INDEX_REVISION = "l3f4a5b6c789"
 _IMPORT_JOB_ARCHIVE_REVISION = "m4g5h6i7j890"
 
+# Only final-state assertions may reuse migration output. Upgrade/downgrade,
+# backfill, refusal and connection-policy tests keep their fresh starting DBs.
+_HEAD_SCHEMA_TESTS = frozenset(
+    {
+        "test_managed_story_arc_placement_migration_enforces_complete_mode_matrix",
+        "test_import_owned_story_arc_sync_schema_enforces_provenance",
+        "test_series_has_path_column",
+        "test_series_has_issue_catalog_checked_timestamp",
+        "test_issues_has_issue_type_column",
+        "test_issue_type_default_value",
+        "test_naming_config_keys_seeded",
+        "test_series_library_root_fk",
+        "test_import_jobs_has_materialization_audit_fields",
+        "test_import_jobs_has_durable_layout_snapshot_fields",
+        "test_library_files_has_naming_snapshot",
+        "test_whats_new_release_cache_table",
+        "test_usage_stats_instance_id_config_seeded",
+        "test_direct_acquisition_tables_are_created_empty_with_recovery_indexes",
+        "test_direct_failure_constraints_include_route_safety",
+        "test_direct_resolver_migration_has_bounded_secret_configuration",
+    }
+)
+
 
 @pytest.fixture
-def alembic_cfg(tmp_path, monkeypatch):
+def alembic_cfg(tmp_path, monkeypatch, request):
     """Create an Alembic config pointing at a temp SQLite database.
 
     Uses the async driver for Alembic (which uses async_engine_from_config)
@@ -86,6 +109,8 @@ def alembic_cfg(tmp_path, monkeypatch):
         migration_engine_from_config,
     )
     monkeypatch.setenv("PULLBOX_DB_URL", async_url)
+    if request.node.originalname in _HEAD_SCHEMA_TESTS:
+        request.getfixturevalue("migrated_head_template").copy_to(db_path, cfg)
     yield cfg, sync_url
 
 
@@ -348,6 +373,11 @@ class TestMigrationChain:
     def test_upgrade_to_head(self, alembic_cfg) -> None:
         """All migrations apply without error."""
         cfg, sync_url = alembic_cfg
+        empty_engine = create_engine(sync_url)
+        try:
+            assert inspect(empty_engine).get_table_names() == []
+        finally:
+            empty_engine.dispose()
         command.upgrade(cfg, "head")
 
         engine = create_engine(sync_url)
@@ -947,7 +977,11 @@ class TestMigrationChain:
             engine.dispose()
 
         command.upgrade(cfg, "head")
-        assert "story_arc_placements" in inspect(create_engine(sync_url)).get_table_names()
+        engine = create_engine(sync_url)
+        try:
+            assert "story_arc_placements" in inspect(engine).get_table_names()
+        finally:
+            engine.dispose()
 
     def test_story_arc_domain_downgrade_blocks_unresolved_memberships(
         self,

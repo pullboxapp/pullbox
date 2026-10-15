@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 import unicodedata
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -109,9 +110,13 @@ def _validate_request(request: FixtureRequest) -> None:
 def _open_catalog(path: Path) -> sqlite3.Connection:
     encoded_path = quote(str(path.expanduser().absolute()), safe="/")
     connection = sqlite3.connect(f"file:{encoded_path}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only = ON")
-    connection.execute("PRAGMA temp_store = MEMORY")
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA temp_store = MEMORY")
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
@@ -306,7 +311,7 @@ def _load_selected_issues(
 def plan_import_scale_fixture(request: FixtureRequest) -> FixturePlan:
     """Select an exact deterministic workload without modifying the filesystem."""
     _validate_request(request)
-    with _open_catalog(request.catalog_path) as connection:
+    with closing(_open_catalog(request.catalog_path)) as connection, connection:
         candidates = _load_catalog_series(connection)
         if request.profile == "balanced":
             assignments = _balanced_assignments(candidates, request)

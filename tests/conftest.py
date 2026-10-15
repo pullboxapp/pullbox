@@ -15,8 +15,8 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.providers.base import ReleaseResult
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -150,10 +150,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 async def async_engine():
     """Create a fresh in-memory async SQLite engine with all tables."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
+    try:
+        async with engine.begin() as conn:
+            await create_test_schema(conn)
+        yield engine
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
@@ -163,6 +165,14 @@ async def db_session(async_engine) -> AsyncGenerator[AsyncSession, None]:
     async with session_factory() as session:
         yield session
         await session.rollback()
+
+
+@pytest.fixture(scope="session")
+def seeded_user_password_hash() -> str:
+    """Share only immutable seed data; keep user rows and auth calls isolated."""
+    from pullbox.services.auth_service import AuthService
+
+    return AuthService.hash_password("Test@1234")
 
 
 @pytest.fixture
@@ -251,3 +261,11 @@ def make_release(
         category="7030",
         published_at=datetime.now(UTC) - timedelta(days=age_days),
     )
+
+
+@pytest.fixture(scope="session")
+def migrated_head_template(tmp_path_factory):
+    """Share only a migration-built template, never a mutable test database."""
+    from tests.migration_template import MigratedHeadTemplate
+
+    return MigratedHeadTemplate(tmp_path_factory.mktemp("migration-head-template"))

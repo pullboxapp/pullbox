@@ -4,7 +4,7 @@ import hashlib
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 
 import pytest
@@ -19,7 +19,7 @@ from tests.unit.test_metadata_discovery import runtime
 
 def arc_dump(path):
     credited_dump(path)
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         # The official dump links stories to arcs, not issue IDs or reading positions.
         db.executescript("""
             CREATE TABLE gcd_story_arc (
@@ -90,7 +90,7 @@ async def test_gcd_arcs_are_native_distinct_and_readonly_with_no_curated_order_c
 
 async def test_gcd_arc_pages_are_stable_bounded_and_search_terms_are_bound(tmp_path):
     path = arc_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.executemany(
             "INSERT INTO gcd_issue VALUES (?,2999,?,'',?,0,NULL,'','2001-01-01','',32)",
             [(1000 + n, str(100 + n), 100 + n) for n in range(201)],
@@ -133,7 +133,7 @@ async def test_gcd_arc_pages_are_stable_bounded_and_search_terms_are_bound(tmp_p
 @pytest.mark.parametrize("problem", ["variant", "missing_story", "missing_issue", "missing_parent"])
 async def test_gcd_arc_never_substitutes_or_hides_an_ambiguous_member(tmp_path, problem):
     path = arc_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         sql = {
             "variant": "INSERT INTO gcd_story_story_arc VALUES (7,204,4)",
             "missing_story": "INSERT INTO gcd_story_story_arc VALUES (7,999,4)",
@@ -152,7 +152,7 @@ async def test_gcd_arc_never_substitutes_or_hides_an_ambiguous_member(tmp_path, 
 @pytest.mark.parametrize("problem", ["absent", "view", "column", "changed", "disabled", "overflow"])
 async def test_gcd_arc_absence_or_invalid_data_does_not_become_an_empty_catalog(tmp_path, problem):
     path = arc_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         if problem == "absent":
             db.execute("DROP TABLE gcd_story_arc")
         elif problem == "view":
@@ -177,7 +177,7 @@ async def test_gcd_arc_absence_or_invalid_data_does_not_become_an_empty_catalog(
             )
     source = await registry(path, enabled=problem != "disabled")
     if problem == "changed":
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db, db:
             db.execute("UPDATE gcd_story_arc SET name='Replaced' WHERE id=4")
     expected = {
         "absent": SourceStatus.UNSUPPORTED,
@@ -199,7 +199,7 @@ async def test_arc_membership_uses_existing_arc_index_and_fixed_query_count(tmp_
     from pullbox.providers.metadata.gcd_local_arcs import members_query
 
     path = arc_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("CREATE INDEX deleted_story ON gcd_story(deleted)")
         db.execute("CREATE INDEX deleted_issue ON gcd_issue(deleted)")
         compiled = members_query("4").compile(dialect=dialect(paramstyle="named"))
@@ -244,7 +244,7 @@ async def test_arc_descriptive_text_is_bounded_before_materialization(tmp_path):
     from pullbox.providers.metadata.gcd_local_arcs import arc_query
 
     path = arc_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute(
             "UPDATE gcd_story_arc SET description=?,notes=? WHERE id=4",
             ("x" * 1000000, "y" * 1000000),

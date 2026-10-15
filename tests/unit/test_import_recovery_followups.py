@@ -474,7 +474,17 @@ async def test_mixed_recovery_database_lock_retries_only_uncommitted_batch(
 
     from pullbox.core.exceptions import JobPausedError
     from pullbox.services import import_mixed_recovery_execution as mixed
+    from pullbox.services import import_recovery_checkpoint
 
+    retry_delays: list[float] = []
+    production_delay = import_recovery_checkpoint.sqlite_lock_retry_delay
+    assert import_recovery_checkpoint.SQLITE_LOCK_RETRY_ATTEMPTS == 8
+
+    def record_retry_delay(attempt: int) -> float:
+        retry_delays.append(production_delay(attempt))
+        return 0.0
+
+    monkeypatch.setattr(import_recovery_checkpoint, "sqlite_lock_retry_delay", record_retry_delay)
     async with recovery_factory() as session:
         job, source, _, file, _ = await _seed_mixed_folder_candidate(session)
         action = CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES
@@ -519,6 +529,15 @@ async def test_mixed_recovery_database_lock_retries_only_uncommitted_batch(
             await session.refresh(source)
             assert file.import_series_id == source.id
             assert file.status is ImportedFileStatus.NO_MATCH
+
+        if failure == "always":
+            assert attempts == 8
+            assert retry_delays == [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
+        elif failure == "once":
+            assert retry_delays == [0.25]
+        else:
+            assert attempts == 1
+            assert retry_delays == []
 
 
 @pytest.mark.parametrize(

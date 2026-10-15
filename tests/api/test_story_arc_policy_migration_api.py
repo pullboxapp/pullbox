@@ -22,7 +22,6 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.models.user import APIKey, User
-from pullbox.services.auth_service import AuthService
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicyInput,
     StoryArcPlacementPolicyMode,
@@ -52,12 +51,13 @@ async def migration_api_db(
 @pytest.fixture
 async def migration_api_key(
     migration_api_db: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     raw_key = "pb_k1_" + "6" * 64
     async with migration_api_db() as session:
         user = User(
             username="storyarcpolicymigration",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

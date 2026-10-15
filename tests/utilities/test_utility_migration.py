@@ -12,6 +12,8 @@ Run:
 from __future__ import annotations
 
 import os
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -24,9 +26,56 @@ from alembic import command
 _ALEMBIC_DIR = Path(__file__).resolve().parent.parent.parent / "alembic"
 _UTILITY_TABLES_REV = "a9eff3b660f5"  # The migration under test
 
+# Explicit allowlist: the three creation sentinels and four downgrade/roundtrip
+# tests still run real migrations from their original empty databases.
+_HEAD_SCHEMA_TESTS = frozenset(
+    {
+        "test_utility_jobs_has_all_columns",
+        "test_utility_job_items_has_all_columns",
+        "test_utility_job_logs_has_all_columns",
+        "test_issues_has_integrity_status",
+        "test_issues_has_integrity_checked_at",
+        "test_issues_has_integrity_details",
+        "test_integrity_status_defaults_to_unchecked",
+        "test_integrity_details_defaults_to_empty_json",
+        "test_utility_jobs_state_index",
+        "test_utility_jobs_created_at_index",
+        "test_utility_job_items_job_id_index",
+        "test_utility_job_items_job_id_state_index",
+        "test_utility_job_items_job_id_item_index_index",
+        "test_utility_job_logs_job_id_index",
+        "test_utility_job_logs_job_id_level_index",
+        "test_utility_job_logs_job_id_timestamp_index",
+        "test_issues_integrity_status_index",
+        "test_invalid_job_state_rejected",
+        "test_invalid_job_type_rejected",
+        "test_invalid_item_state_rejected",
+        "test_invalid_log_level_rejected",
+        "test_null_display_name_rejected",
+        "test_null_job_type_rejected",
+        "test_cascade_delete_removes_items_and_logs",
+        "test_item_with_nonexistent_job_id_rejected",
+        "test_parent_job_id_self_reference",
+        "test_parent_job_id_nonexistent_rejected",
+        "test_job_state_defaults_to_queued",
+        "test_job_config_defaults_to_empty_json",
+        "test_item_state_defaults_to_pending",
+        "test_item_before_after_state_defaults",
+        "test_log_level_defaults_to_info",
+        "test_log_extra_defaults_to_empty_json",
+        "test_unicode_display_name",
+        "test_large_config_json",
+        "test_negative_item_index_allowed",
+        "test_all_valid_job_states_accepted",
+        "test_all_valid_job_types_accepted",
+        "test_all_valid_item_states_accepted",
+        "test_all_valid_log_levels_accepted",
+    }
+)
+
 
 @pytest.fixture
-def alembic_cfg(tmp_path):
+def alembic_cfg(tmp_path, request):
     """Create an Alembic config pointing at a temp SQLite database."""
     db_path = tmp_path / "test.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
@@ -37,6 +86,8 @@ def alembic_cfg(tmp_path):
     cfg.set_main_option("sqlalchemy.url", async_url)
 
     os.environ["PULLBOX_DB_URL"] = async_url
+    if request.node.originalname in _HEAD_SCHEMA_TESTS:
+        request.getfixturevalue("migrated_head_template").copy_to(db_path, cfg)
     yield cfg, sync_url
     os.environ.pop("PULLBOX_DB_URL", None)
 
@@ -77,21 +128,28 @@ class TestUtilityTablesCreated:
 
     def test_upgrade_creates_utility_jobs_table(self, alembic_cfg) -> None:
         cfg, sync_url = alembic_cfg
+        assert _get_tables(sync_url) == set()
         command.upgrade(cfg, "head")
         assert "utility_jobs" in _get_tables(sync_url)
 
     def test_upgrade_creates_utility_job_items_table(self, alembic_cfg) -> None:
         cfg, sync_url = alembic_cfg
+        assert _get_tables(sync_url) == set()
         command.upgrade(cfg, "head")
         assert "utility_job_items" in _get_tables(sync_url)
 
     def test_upgrade_creates_utility_job_logs_table(self, alembic_cfg) -> None:
         cfg, sync_url = alembic_cfg
+        assert _get_tables(sync_url) == set()
         command.upgrade(cfg, "head")
         assert "utility_job_logs" in _get_tables(sync_url)
 
-    def test_utility_jobs_has_all_columns(self, alembic_cfg) -> None:
+    def test_utility_jobs_has_all_columns(
+        self, alembic_cfg, migrated_head_template, tmp_path
+    ) -> None:
         cfg, sync_url = alembic_cfg
+        # Schema-only checks start from a real migrated template, not an empty DB.
+        assert "alembic_version" in _get_tables(sync_url)
         command.upgrade(cfg, "head")
 
         columns = _get_columns(sync_url, "utility_jobs")
@@ -116,6 +174,30 @@ class TestUtilityTablesCreated:
             "parent_job_id",
         }
         assert expected.issubset(columns), f"Missing columns: {expected - columns}"
+
+        # Independent copies retain real migration state but never another
+        # test's committed rows. Reuse must not rebuild or mutate the template.
+        before = migrated_head_template.path.stat()
+        caller_url = os.environ["PULLBOX_DB_URL"]
+        first, second = tmp_path / "first.db", tmp_path / "second.db"
+        migrated_head_template.copy_to(first, cfg)
+        with closing(sqlite3.connect(first)) as connection:
+            connection.execute(
+                "INSERT INTO utility_jobs (id, job_type, display_name) "
+                "VALUES ('isolated-copy', 'file_convert', 'First copy')"
+            )
+            connection.commit()
+        migrated_head_template.copy_to(second, cfg)
+        with closing(sqlite3.connect(second)) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM utility_jobs").fetchone() == (0,)
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchone()
+            assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert first.stat().st_ino != second.stat().st_ino
+        after = migrated_head_template.path.stat()
+        assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)
+        assert os.environ["PULLBOX_DB_URL"] == caller_url
+        with pytest.raises(FileExistsError):
+            migrated_head_template.copy_to(second, cfg)
 
     def test_utility_job_items_has_all_columns(self, alembic_cfg) -> None:
         cfg, sync_url = alembic_cfg

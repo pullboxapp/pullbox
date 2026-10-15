@@ -15,7 +15,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from pullbox.models.base import Base
 from pullbox.models.operation_progress import OperationProgress
 from pullbox.services.utility_operation_progress import project_utility_operation_progress
 from pullbox.utilities.base_executor import ExecutionMode, FinalizeResult
@@ -33,6 +32,7 @@ from pullbox.utilities.models import (
     UtilityJobLog,
 )
 from pullbox.utilities.worker_pool import WorkerPool
+from tests.sqlite_schema import create_test_schema
 from tests.utilities.conftest import StubExecutor
 
 if TYPE_CHECKING:
@@ -45,7 +45,7 @@ async def session_factory(tmp_path: Path) -> AsyncIterator[Any]:
     # discard its connection, which would erase a shared in-memory test database.
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     try:
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
