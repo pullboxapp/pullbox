@@ -12,11 +12,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.models.user import APIKey, User
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -34,7 +34,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
     _post_processing_cache.clear()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield factory

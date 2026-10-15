@@ -12,7 +12,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.api.v1 import story_arcs as story_arcs_api
-from pullbox.models import Base
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
@@ -24,6 +23,7 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.user import APIKey, User
 from pullbox.services.story_arc_service import StoryArcService
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -43,7 +43,7 @@ def _enable_manual_story_arc_creation(monkeypatch: pytest.MonkeyPatch) -> None:
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

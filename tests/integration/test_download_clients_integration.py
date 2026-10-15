@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.events import EventBus
-from pullbox.models import Base
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.indexer import IndexerConfig, IndexerType
@@ -31,6 +30,7 @@ from pullbox.providers.base import (
 )
 from pullbox.providers.indexer.torznab_transport import TorznabDescriptor
 from pullbox.services.download_service import DownloadService
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -98,7 +98,7 @@ async def db() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     """Create an in-memory database with all tables."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
