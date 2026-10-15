@@ -37,7 +37,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 # Imported for direct handler tests
 from pullbox.core.exceptions import NotFoundError, ValidationError
-from pullbox.models import Base
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -58,7 +57,7 @@ from pullbox.schemas.import_job import (
     SeriesSelectionBulkUpdateRequest,
 )
 from pullbox.services import library_root_management
-from pullbox.services.auth_service import AuthService
+from tests.sqlite_schema import create_test_schema
 
 
 def _sqlite_database_locked_error() -> SQLAlchemyOperationalError:
@@ -86,7 +85,7 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-import")
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
@@ -95,6 +94,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "b" * 64
@@ -102,7 +102,7 @@ async def _api_key_header(
     async with _db_factory() as session:
         user = User(
             username="importuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

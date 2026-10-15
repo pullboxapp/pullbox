@@ -24,9 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.api.v1.system import _matches_level
 from pullbox.config import get_settings
-from pullbox.models import Base
 from pullbox.models.user import User
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -44,7 +44,7 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-log-streaming")
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
@@ -53,11 +53,12 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _session_token(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     async with _db_factory() as session:
         user = User(
             username="logstreamuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.commit()

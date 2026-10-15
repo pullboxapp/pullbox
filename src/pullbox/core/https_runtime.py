@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import ssl
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -91,10 +92,12 @@ def load_https_db_values(settings: PullboxSettings | object | None = None) -> di
         return {}
 
     try:
-        with sqlite3.connect(
-            f"file:{db_path.as_posix()}?mode=ro",
-            uri=True,
-            timeout=1.0,
+        with closing(
+            sqlite3.connect(
+                f"file:{db_path.as_posix()}?mode=ro",
+                uri=True,
+                timeout=1.0,
+            )
         ) as conn:
             rows = conn.execute(
                 _HTTPS_CONFIG_QUERY,

@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base, Issue, LibraryFile
+from pullbox.models import Issue, LibraryFile
 from pullbox.models.library import LibraryFileStorageMode
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.issue_file_metadata import file_metadata_error
@@ -21,6 +21,7 @@ from pullbox.utilities.job_queue import JobQueueManager
 from pullbox.utilities.models import JobType
 from tests.api.test_metadata_sources_api import csrf
 from tests.integration.metadata_identity.test_archive_metadata_publication import prepared
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 pytest_plugins = ["conftest_security"]
@@ -31,7 +32,7 @@ async def sec_db(tmp_path: Path) -> AsyncGenerator[async_sessionmaker[AsyncSessi
     # Background progress and publication use independent sessions, not one StaticPool connection.
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'archive-metadata.db'}")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     try:
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:

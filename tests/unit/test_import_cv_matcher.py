@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import httpx
@@ -12,11 +15,40 @@ from pullbox.core.source_metadata import MetadataSignal, SourceMetadata, SourceM
 from pullbox.models.issue import IssueType
 from pullbox.providers.base import IssueSummary, SeriesMetadata, SeriesSearchResult
 from pullbox.providers.metadata.comicvine import ComicVineError
+from pullbox.services import import_cv_search
 from pullbox.services.import_service import (
     _score_cv_result,
     evaluate_comicvine_match,
     match_to_comicvine,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+@pytest.fixture
+def retry_delays(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[float]]:
+    """Keep the real retry loop and an async yield without wall-clock backoff."""
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+    original_asyncio = import_cv_search.asyncio
+    assert import_cv_search._MAX_RETRIES == 3
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+        yielded: list[bool] = []
+        asyncio.get_running_loop().call_soon(yielded.append, True)
+        await real_sleep(0)
+        assert yielded == [True]
+
+    # Replace only this module's binding, never the shared asyncio.sleep function.
+    with monkeypatch.context() as patch:
+        patch.setattr(import_cv_search, "asyncio", SimpleNamespace(sleep=record_sleep))
+        assert asyncio.sleep is real_sleep
+        yield delays
+
+    assert import_cv_search.asyncio is original_asyncio
+    assert asyncio.sleep is real_sleep
 
 
 def _make_search_result(
@@ -279,7 +311,7 @@ class TestMatchToComicvine:
         assert result["cv_match_score"] < 0.95
 
     @pytest.mark.asyncio
-    async def test_no_match_found(self) -> None:
+    async def test_no_match_found(self, retry_delays: list[float]) -> None:
         """Search returns empty results."""
         provider = AsyncMock()
         provider.search_series.return_value = []
@@ -291,6 +323,9 @@ class TestMatchToComicvine:
         )
 
         assert result is None
+        assert provider.search_series.call_count == 3
+        assert import_cv_search._MAX_RETRIES == 3
+        assert retry_delays == [1, 2]
 
     @pytest.mark.asyncio
     async def test_no_match_below_threshold(self) -> None:
@@ -309,7 +344,7 @@ class TestMatchToComicvine:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_rate_limit_retry(self) -> None:
+    async def test_rate_limit_retry(self, retry_delays: list[float]) -> None:
         """Rate limit on first attempt, success on retry."""
         provider = AsyncMock()
         provider.search_series.side_effect = [
@@ -326,9 +361,10 @@ class TestMatchToComicvine:
         assert result is not None
         assert result["cv_id"] == 97508
         assert provider.search_series.call_count == 2
+        assert retry_delays == [1]
 
     @pytest.mark.asyncio
-    async def test_timeout_raises_provider_degraded(self) -> None:
+    async def test_timeout_raises_provider_degraded(self, retry_delays: list[float]) -> None:
         """Persistent timeout pauses import matching instead of faking a no-match."""
         provider = AsyncMock()
         provider.search_series.side_effect = httpx.TimeoutException("timed out")
@@ -340,9 +376,10 @@ class TestMatchToComicvine:
                 raw_year=2016,
             )
         assert provider.search_series.call_count == 3
+        assert retry_delays == [1, 2]
 
     @pytest.mark.asyncio
-    async def test_timeout_retry_can_recover(self) -> None:
+    async def test_timeout_retry_can_recover(self, retry_delays: list[float]) -> None:
         """A transient timeout should retry instead of degrading into no results."""
         provider = AsyncMock()
         provider.search_series.side_effect = [
@@ -359,9 +396,10 @@ class TestMatchToComicvine:
         assert result is not None
         assert result["cv_id"] == 97508
         assert provider.search_series.call_count == 2
+        assert retry_delays == [1]
 
     @pytest.mark.asyncio
-    async def test_empty_results_retry_can_recover(self) -> None:
+    async def test_empty_results_retry_can_recover(self, retry_delays: list[float]) -> None:
         """A transient empty search result should retry before declaring no match."""
         provider = AsyncMock()
         provider.search_series.side_effect = [
@@ -378,9 +416,12 @@ class TestMatchToComicvine:
         assert result is not None
         assert result["cv_id"] == 97508
         assert provider.search_series.call_count == 2
+        assert retry_delays == [1]
 
     @pytest.mark.asyncio
-    async def test_transient_comicvine_error_retry_can_recover(self) -> None:
+    async def test_transient_comicvine_error_retry_can_recover(
+        self, retry_delays: list[float]
+    ) -> None:
         """ComicVine transport errors should retry instead of becoming false no-matches."""
         provider = AsyncMock()
         provider.search_series.side_effect = [
@@ -397,9 +438,12 @@ class TestMatchToComicvine:
         assert result is not None
         assert result["cv_id"] == 97508
         assert provider.search_series.call_count == 2
+        assert retry_delays == [1]
 
     @pytest.mark.asyncio
-    async def test_persistent_comicvine_error_raises_provider_degraded(self) -> None:
+    async def test_persistent_comicvine_error_raises_provider_degraded(
+        self, retry_delays: list[float]
+    ) -> None:
         """Repeated ComicVine transport failures should not harden into no-results."""
         provider = AsyncMock()
         provider.search_series.side_effect = ComicVineError(0, "Request timed out: /search/")
@@ -412,6 +456,7 @@ class TestMatchToComicvine:
             )
 
         assert provider.search_series.call_count == 3
+        assert retry_delays == [1, 2]
 
     @pytest.mark.asyncio
     async def test_best_match_selected(self) -> None:

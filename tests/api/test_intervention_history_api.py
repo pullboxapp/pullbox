@@ -15,7 +15,6 @@ from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
-from pullbox.services.auth_service import AuthService
 
 
 @pytest.fixture
@@ -31,13 +30,14 @@ async def _db_factory() -> async_sessionmaker[AsyncSession]:
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     raw_key = "pb_k1_" + "c" * 64
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     async with _db_factory() as session:
         user = User(
             username="interventionhistoryapiuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

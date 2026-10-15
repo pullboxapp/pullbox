@@ -34,13 +34,13 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.publisher import Publisher
 from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.providers.base import ReleaseResult, SearchQuery
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -57,7 +57,7 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-esm-flows")
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

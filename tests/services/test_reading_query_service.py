@@ -13,7 +13,6 @@ from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchCo
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import User
-from pullbox.services.auth_service import AuthService
 from pullbox.services.reader_state_service import set_want_to_read, update_reader_progress
 from pullbox.services.reading_query_service import (
     list_continue_reading,
@@ -32,12 +31,14 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-async def reading_catalog(db_session: AsyncSession) -> AsyncIterator[dict[str, object]]:
+async def reading_catalog(
+    db_session: AsyncSession, seeded_user_password_hash: str
+) -> AsyncIterator[dict[str, object]]:
     now = datetime.now(UTC)
-    user = User(username="reader-one", password_hash=AuthService.hash_password("Test@1234"))
+    user = User(username="reader-one", password_hash=seeded_user_password_hash)
     other_user = User(
         username="reader-two",
-        password_hash=AuthService.hash_password("Test@1234"),
+        password_hash=seeded_user_password_hash,
     )
     root = LibraryRoot(name="Library", path="/comics", enabled=True)
     series = Series(

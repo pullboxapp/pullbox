@@ -681,8 +681,7 @@ class TestImportCollectionTab:
         assert authed_page.locator("[data-testid='import-collection-body']").count() == 1
         assert import_page.review_matched_diagnostics.is_visible()
 
-        import_page.conflicts_tab.click()
-        import_page.wait_for_htmx()
+        import_page.click_review_control(import_page.conflicts_tab, timeout=5000)
         import_page.conflicts_panel.wait_for(state="visible", timeout=5000)
 
         assert authed_page.locator("[data-testid='import-header']").count() == 1
@@ -706,8 +705,7 @@ class TestImportCollectionTab:
             authed_page.locator("input[name='review_status_filter']").first.input_value() == "ready"
         )
 
-        import_page.review_matched_tab.click()
-        import_page.wait_for_htmx(timeout=10000)
+        import_page.click_review_control(import_page.review_matched_tab)
         authed_page.wait_for_function(
             """() => {
                 const input = document.querySelector("#import-step-review-shell input[name='review_status_filter']");
@@ -716,8 +714,7 @@ class TestImportCollectionTab:
             timeout=5000,
         )
 
-        import_page.review_series_tab.click()
-        import_page.wait_for_htmx(timeout=10000)
+        import_page.click_review_control(import_page.review_series_tab)
         authed_page.wait_for_function(
             """() => {
                 const input = document.querySelector("#import-step-review-shell input[name='review_status_filter']");
@@ -800,20 +797,17 @@ class TestImportCollectionTab:
             has_empty_state = "No conflicts to resolve." in content
             assert has_table or has_empty_state
 
-        import_page.conflicts_tab.click()
-        import_page.wait_for_htmx(timeout=10000)
+        import_page.click_review_control(import_page.conflicts_tab)
         import_page.conflicts_panel.wait_for(state="visible", timeout=5000)
         assert_conflicts_panel_populated()
 
         assert import_page.save_conflict_choices_button.count() == 0
         assert import_page.reset_conflict_choices_button.count() == 0
 
-        import_page.review_series_tab.click()
-        import_page.wait_for_htmx(timeout=10000)
+        import_page.click_review_control(import_page.review_series_tab)
         import_page.review_panel.wait_for(state="visible", timeout=5000)
 
-        import_page.conflicts_tab.click()
-        import_page.wait_for_htmx(timeout=10000)
+        import_page.click_review_control(import_page.conflicts_tab)
         import_page.conflicts_panel.wait_for(state="visible", timeout=5000)
         assert_conflicts_panel_populated()
 
@@ -3100,10 +3094,12 @@ class TestImportCollectionTab:
         import_page = ImportPage(authed_page, seeded_server)
         self._goto_review_step(import_page, authed_page, seeded_server)
 
-        authed_page.get_by_role("button", name="Series", exact=True).click()
-        import_page.wait_for_htmx()
-        authed_page.get_by_role("button", name="Series", exact=True).click()
-        import_page.wait_for_htmx()
+        import_page.click_review_control(
+            authed_page.get_by_role("button", name="Series", exact=True), timeout=5000
+        )
+        import_page.click_review_control(
+            authed_page.get_by_role("button", name="Series", exact=True), timeout=5000
+        )
 
         assert authed_page.locator("input[name=review_sort]").input_value() == "-found_series"
         assert import_page.review_panel.locator("[data-import-review-series-row]").count() > 0
@@ -3691,8 +3687,15 @@ class TestImportCollectionTab:
         import_page.file_handling_in_place_ready.wait_for(state="visible", timeout=5000)
 
         assert import_page.start_scan_button.is_enabled()
-        import_page.start_scan_button.click()
-        authed_page.wait_for_timeout(100)
+        with authed_page.expect_response(
+            lambda response: (
+                response.url == f"{seeded_server}/api/v1/import"
+                and response.request.method == "POST"
+            ),
+            timeout=5000,
+        ) as submission:
+            import_page.start_scan_button.click()
+        assert submission.value.status == 201
 
         assert created_requests
         assert created_requests[-1]["file_handling_mode"] == "in_place"

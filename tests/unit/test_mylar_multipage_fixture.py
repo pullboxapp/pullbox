@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import zipfile
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ def _source(tmp_path: Path) -> Path:
             }
         )
     )
-    with sqlite3.connect(source / "mylar.db") as db:
+    with closing(sqlite3.connect(source / "mylar.db")) as db, db:
         db.executescript(
             "CREATE TABLE comics(ComicID TEXT, ComicLocation TEXT);"
             "CREATE TABLE issues(IssueID TEXT, ComicID TEXT, Location TEXT, ComicSize TEXT);"
@@ -56,7 +57,7 @@ def test_upgrade_preserves_original_and_builds_explicit_multipage_and_safety_cas
     assert result["issue_count"] == 4
     assert result["single_page_files"] == 1
     assert result["sqlite_integrity_check"] == "ok"
-    with sqlite3.connect(output / "mylar.db") as db:
+    with closing(sqlite3.connect(output / "mylar.db")) as db, db:
         assert (
             db.execute("SELECT ComicLocation FROM comics").fetchone()[0]
             == "/imports/new/source/Test"
@@ -91,7 +92,7 @@ def test_upgrade_rejects_non_fixture_or_escaping_sources_without_output(tmp_path
         link.unlink()
         link.symlink_to(original)
     else:
-        with sqlite3.connect(source / "mylar.db") as db:
+        with closing(sqlite3.connect(source / "mylar.db")) as db, db:
             db.execute("UPDATE issues SET Location='../outside.cbz' WHERE IssueID='1'")
     with pytest.raises(ValueError):
         upgrade_fixture(source, tmp_path / "new", container_root="/imports/new/source")

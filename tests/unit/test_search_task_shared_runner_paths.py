@@ -13,7 +13,6 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.indexer import IndexerConfig, IndexerType
 from pullbox.models.issue import Issue, IssueStatus, IssueType
@@ -24,6 +23,7 @@ from pullbox.providers.base import ReleaseResult
 from pullbox.services.search_acquisition_router import SearchAcquisitionRoutingResult
 from pullbox.services.search_service import IssueSearchOutcome, IssueSearchTarget
 from pullbox.tasks import search_task
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -81,7 +81,7 @@ async def task_db() -> AsyncGenerator[dict[str, object], None]:
         dbapi_conn.execute("PRAGMA foreign_keys=ON")  # type: ignore[union-attr]
 
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:

@@ -13,7 +13,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.core.acquisition import AcquisitionProtocol
-from pullbox.models import Base
 from pullbox.models.airdcpp import AirDcppAcquisition, AirDcppClientSettings
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
@@ -43,6 +42,7 @@ from pullbox.services.intervention_service import InterventionService
 from pullbox.services.release_validator import ReleaseValidator
 from pullbox.services.search_acquisition_router import route_search_acquisition
 from pullbox.services.search_targets import IssueSearchOutcome, IssueSearchTarget
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -54,7 +54,7 @@ _TTH = "CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y"
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

@@ -15,18 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.api.v1 import issues as issues_api
 from pullbox.core.exceptions import ProviderError
-from pullbox.models import Base
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import MatchConfidence
 from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
 from pullbox.providers.base import ProviderRegistry, ReleaseResult
-from pullbox.services.auth_service import AuthService
 from pullbox.services.direct_search_coordinator import DirectSearchOutcome
 from pullbox.services.release_validator import ReleaseValidator
 from pullbox.services.search_acquisition_router import SearchAcquisitionRoutingResult
 from pullbox.services.search_service import IssueSearchOutcome, IssueSearchTarget, SearchRuntime
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -52,7 +51,7 @@ def _make_release(title: str = "Absolute Superman 009") -> ReleaseResult:
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
@@ -61,6 +60,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def client(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> AsyncGenerator[AsyncClient, None]:
     from pullbox.api.deps import get_db_dep
     from pullbox.api.middleware import reset_setup_cache
@@ -71,7 +71,7 @@ async def client(
     async with _db_factory() as session:
         user = User(
             username="issuedownloaduser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

@@ -10,12 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullbox.core.metadata_identity import MetadataSource
-from pullbox.models import Base, MetadataSeriesRetry, Series
+from pullbox.models import MetadataSeriesRetry, Series
 from pullbox.schemas.metadata_sources import SourceOutcome, SourceStatus
 from pullbox.services.metadata_scheduled_refresh import ScheduledSeriesRefresh
 from pullbox.services.metadata_series_refresh import SeriesRefreshError
 from pullbox.tasks import metadata_task
 from pullbox.tasks.metadata_sweep_state import MetadataSweep, load_sweep, save_sweep
+from tests.sqlite_schema import create_test_schema
 
 _MOD = "pullbox.tasks.metadata_task"
 
@@ -24,7 +25,7 @@ _MOD = "pullbox.tasks.metadata_task"
 async def restore_db_factory(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'restore.db'}")
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
 

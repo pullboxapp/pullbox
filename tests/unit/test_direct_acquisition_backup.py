@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -33,7 +34,7 @@ def test_backup_restore_preserves_decryptable_direct_provider_ciphertext(
     backup_dir = tmp_path / "backups"
     original_ciphertext = encrypt_secret("provider-bearer-token")
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute(
             "CREATE TABLE direct_provider_configs "
             "(id INTEGER PRIMARY KEY, encrypted_bearer_token TEXT)"
@@ -46,14 +47,14 @@ def test_backup_restore_preserves_decryptable_direct_provider_ciphertext(
     service = BackupService(backup_dir=backup_dir, db_path=db_path)
     backup = service.create_backup()
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute(
             "UPDATE direct_provider_configs SET encrypted_bearer_token = ? WHERE id = 1",
             (encrypt_secret("replacement-token"),),
         )
     assert service.restore_backup(backup.filename) is True
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         restored_ciphertext = connection.execute(
             "SELECT encrypted_bearer_token FROM direct_provider_configs WHERE id = 1"
         ).fetchone()[0]
@@ -70,7 +71,7 @@ def test_backup_restore_preserves_decryptable_resolver_auth_headers(
     backup_dir = tmp_path / "backups"
     original_ciphertext = encrypt_secret("resolver-auth-token")
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute(
             "CREATE TABLE direct_resolver_configs "
             "(id INTEGER PRIMARY KEY, encrypted_auth_headers JSON)"
@@ -83,14 +84,14 @@ def test_backup_restore_preserves_decryptable_resolver_auth_headers(
     service = BackupService(backup_dir=backup_dir, db_path=db_path)
     backup = service.create_backup()
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute(
             "UPDATE direct_resolver_configs SET encrypted_auth_headers = ? WHERE id = 1",
             (json.dumps({"Authorization": encrypt_secret("replacement-token")}),),
         )
     assert service.restore_backup(backup.filename) is True
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         restored_json = connection.execute(
             "SELECT encrypted_auth_headers FROM direct_resolver_configs WHERE id = 1"
         ).fetchone()[0]

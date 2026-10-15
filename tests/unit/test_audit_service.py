@@ -19,9 +19,9 @@ import pytest
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.audit_log import AuditEventType
 from pullbox.services.audit_service import AuditService, audit_event
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -34,7 +34,7 @@ async def db() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     """Create an in-memory database with all tables."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

@@ -77,9 +77,13 @@ def safe_path(path: Path) -> Path:
 def open_readonly(path: Path) -> sqlite3.Connection:
     safe_path(path)
     db = sqlite3.connect(path.absolute().as_uri() + "?mode=ro&immutable=1", uri=True)
-    db.execute("PRAGMA query_only=ON")
-    db.execute("PRAGMA trusted_schema=OFF")
-    db.execute("PRAGMA cache_size=-8192")
+    try:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA trusted_schema=OFF")
+        db.execute("PRAGMA cache_size=-8192")
+    except BaseException:
+        db.close()
+        raise
     return db
 
 

@@ -2,6 +2,7 @@
 
 import hashlib
 import sqlite3
+from contextlib import closing
 
 from sqlalchemy import func, select
 
@@ -22,7 +23,7 @@ PREVIEW = "/story-arcs/catalog/gcd_local/4"
 
 async def test_gcd_arc_without_description_has_no_literal_none_text(authenticated_client, tmp_path):
     path = arc_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE gcd_story_arc SET description='', notes='' WHERE id=4")
     assert (await activate(authenticated_client, path)).status_code == 200
     response = await authenticated_client.get(PREVIEW)
@@ -105,7 +106,7 @@ async def test_changed_gcd_dump_cannot_commit_a_previously_reviewed_arc(
     result = await client.post(BASE + "/preview", json=selection, headers=csrf(client))
     assert result.status_code == 200 and len(result.json()["issues"]) == 3
     snapshot = result.json()
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("DELETE FROM gcd_story_story_arc WHERE story_id=205")
     decision = {
         **selection,
@@ -127,7 +128,7 @@ async def test_cached_gcd_arc_search_cannot_hide_a_changed_dump(authenticated_cl
     assert (await activate(client, path)).status_code == 200
     url = "/story-arcs/add?q=Civil%20War&source=gcd_local"
     assert f'href="{PREVIEW}"' in (await client.get(url)).text
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE gcd_story_arc SET name='Replaced' WHERE id=4")
     response = await client.get(url)
     assert f'href="{PREVIEW}"' not in response.text
