@@ -30,7 +30,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.core.exceptions import NotFoundError
-from pullbox.models import Base
 from pullbox.models.download import (
     DownloadClientType,
     DownloadHistory,
@@ -46,6 +45,7 @@ from pullbox.models.library import (
 )
 from pullbox.models.series import Series
 from pullbox.services.series_service import SeriesService
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -63,7 +63,7 @@ async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]
     """In-memory database with all tables."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

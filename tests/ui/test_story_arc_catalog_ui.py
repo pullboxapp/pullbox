@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_source import MetadataSourceConfig
@@ -23,6 +22,7 @@ from pullbox.models.story_arc import IssueStoryArc, StoryArc
 from pullbox.providers.metadata.comicvine import ComicVineError
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from pullbox.services.story_arc_catalog import StoryArcCatalogService
+from tests.sqlite_schema import create_test_schema
 from tests.story_arc_catalog_fixtures import CatalogProvider
 
 if TYPE_CHECKING:
@@ -41,7 +41,7 @@ async def sec_db(tmp_path_factory):
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await create_test_schema(connection)
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()

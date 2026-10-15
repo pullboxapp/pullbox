@@ -9,7 +9,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullbox.core.provider_cooldown import ProviderCooldown
-from pullbox.models import Base, Issue, Series, StoryArc, StoryArcExternalIdentity
+from pullbox.models import Issue, Series, StoryArc, StoryArcExternalIdentity
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_identity import IssueIdentityEvent
@@ -17,6 +17,7 @@ from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.story_arc import IssueStoryArc
 from pullbox.providers.metadata import sources
 from tests.api.test_metadata_sources_api import csrf, policy
+from tests.sqlite_schema import create_test_schema
 from tests.unit.test_metron_source import envelope, issue_row, series_row
 
 pytest_plugins = ["conftest_security"]
@@ -30,7 +31,7 @@ async def sec_db(tmp_path_factory):
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await create_test_schema(connection)
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()

@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.direct_acquisition import (
     DirectArtifactHostKind,
     DirectHostConfig,
@@ -35,6 +34,7 @@ from pullbox.providers.airdcpp.supervisor import (
 from pullbox.providers.base import ProviderHealthResult, ProviderRegistry
 from pullbox.services import health_service
 from pullbox.services.health_service import CheckOutcome, HealthService
+from tests.sqlite_schema import create_test_schema
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -45,7 +45,7 @@ from pullbox.services.health_service import CheckOutcome, HealthService
 async def async_engine():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     yield engine
     await engine.dispose()
 
