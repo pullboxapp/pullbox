@@ -261,3 +261,11 @@ def make_release(
         category="7030",
         published_at=datetime.now(UTC) - timedelta(days=age_days),
     )
+
+
+@pytest.fixture(scope="session")
+def migrated_head_template(tmp_path_factory):
+    """Share only a migration-built template, never a mutable test database."""
+    from tests.migration_template import MigratedHeadTemplate
+
+    return MigratedHeadTemplate(tmp_path_factory.mktemp("migration-head-template"))
