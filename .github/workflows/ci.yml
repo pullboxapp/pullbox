@@ -147,7 +147,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_DEFAULT }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -275,7 +275,7 @@ jobs:
 
       - name: Upload coverage core evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-core-py${{ matrix.python-version }}
           path: ${{ runner.temp }}/coverage-core-${{ github.run_id }}-${{ github.run_attempt }}-py${{ matrix.python-version }}
@@ -284,7 +284,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-report-py${{ matrix.python-version }}
           path: coverage.xml
@@ -293,7 +293,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results-py${{ matrix.python-version }}
           path: test-results.xml
@@ -301,7 +301,7 @@ jobs:
 
       - name: Upload runner resource samples
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runner-resources-py${{ matrix.python-version }}
           path: runner-resources.log
@@ -394,7 +394,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_DEFAULT }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -428,7 +428,7 @@ jobs:
 
       - name: Upload accessibility JUnit results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: accessibility-results
           path: test-results/accessibility-junit.xml
@@ -436,7 +436,7 @@ jobs:
 
       - name: Upload accessibility failure artifacts
         if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: accessibility-artifacts
           path: test-results/
@@ -485,7 +485,7 @@ jobs:
       - name: Setup runner-local venv
         run: .github/scripts/setup-runner-venv.sh "dev,e2e"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -523,7 +523,7 @@ jobs:
 
       - name: Upload E2E JUnit results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-results-${{ matrix.browser }}
           path: test-results/e2e-junit.xml
@@ -531,7 +531,7 @@ jobs:
 
       - name: Upload Playwright failure artifacts
         if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: playwright-artifacts-${{ matrix.browser }}
           path: test-results/

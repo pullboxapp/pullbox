@@ -1300,6 +1300,20 @@ class TestSettingsPage:
         settings = SettingsPage(authed_page, seeded_server)
         settings.goto("media")
 
+        # Preview rows change the card height after the naming controls enable.
+        authed_page.wait_for_function(
+            """() => {
+                const previews = [...document.querySelectorAll(
+                    '[data-testid="settings-naming-editor"] .settings-media-preview-panel'
+                )];
+                return previews.length === 5 && previews.every(
+                    panel => panel.dataset.previewReady === 'true'
+                );
+            }""",
+            timeout=5000,
+        )
+        expect(authed_page.locator("#preview-standard")).to_contain_text("Absolute Batman")
+
         naming_card = (
             authed_page.locator("[data-testid='settings-panel-media'] .section-card")
             .filter(has=authed_page.locator(".section-title-plain:text-is('Naming templates')"))
@@ -1309,7 +1323,9 @@ class TestSettingsPage:
             "[data-testid='settings-media-colon-replacement-select']"
         ).first
         trigger = dropdown.locator("[data-dropdown-select-trigger]").first
-        panel = authed_page.locator("[data-dropdown-select-panel]:visible").first
+        panel = authed_page.locator(
+            '[data-dropdown-select-panel][aria-labelledby="naming-colon-dropdown-trigger"]:visible'
+        )
 
         trigger.click()
         panel.wait_for(state="visible", timeout=5000)
