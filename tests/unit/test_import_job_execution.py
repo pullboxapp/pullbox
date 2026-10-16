@@ -1470,18 +1470,20 @@ async def test_catalog_hydration_scheduler_runs_background_hydration_one_at_a_ti
             search_on_add=False,
         )
         tasks = list(import_job_execution._catalog_hydration_tasks)
+        # These waits guard progress, not SQLite latency on a busy CI worker.
+        progress_timeout = 5
         try:
-            await asyncio.wait_for(first_started.wait(), timeout=1)
+            await asyncio.wait_for(first_started.wait(), timeout=progress_timeout)
             await asyncio.sleep(0.05)
             assert second_started.is_set() is False
             assert max_active_hydrations == 1
 
             release_first.set()
-            await asyncio.wait_for(second_started.wait(), timeout=1)
+            await asyncio.wait_for(second_started.wait(), timeout=progress_timeout)
             assert max_active_hydrations == 1
 
             release_second.set()
-            await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=progress_timeout)
         finally:
             release_first.set()
             release_second.set()
