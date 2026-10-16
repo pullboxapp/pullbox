@@ -11,6 +11,7 @@ from sqlalchemy import and_, case, func, not_, select
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.config import get_settings
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.models.series import Series
@@ -570,6 +571,7 @@ async def utilities_mass_convert(
         _ctx(
             request,
             user,
+            paired_metadata_enabled=get_settings().metadata_paired_conversion_writer_enabled,
             utility_trash_folder=utility_browse_paths["trash_folder"],
             utility_trash_folder_browse_path=utility_browse_paths["trash_folder"],
         ),

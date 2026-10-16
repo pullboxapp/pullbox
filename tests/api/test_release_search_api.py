@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from pullbox.models import Base
 from pullbox.models.user import APIKey, User
 from pullbox.providers.base import ProviderRegistry, ReleaseResult
-from pullbox.services.auth_service import AuthService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -49,6 +48,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def client(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> AsyncGenerator[AsyncClient, None]:
     from pullbox.api.deps import get_db_dep
     from pullbox.api.middleware import reset_setup_cache
@@ -59,7 +59,7 @@ async def client(
     async with _db_factory() as session:
         user = User(
             username="releasesearchuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

@@ -15,10 +15,20 @@ from pullbox.core.archive_format import archive_format
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.file_safety import is_resource_safety_exception_allowed
 from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.library_file_ownership import (
+    build_file_identity_signature,
+    validate_file_identity_signature,
+)
+from pullbox.core.nested_comics import DEFAULT_LIMIT
+from pullbox.models.import_job import ImportFileHandlingMode
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 from pullbox.utilities.comicinfo import embed_comicinfo_in_cbz
 from pullbox.utilities.comicinfo_creators import load_comicinfo_creator_fields
+from pullbox.utilities.executors.archive_subprocess import (
+    ControlCheck,
+    repair_nested_comic_interruptible,
+)
 from pullbox.utilities.executors.file_converter import convert_file
 
 if TYPE_CHECKING:
@@ -52,9 +62,51 @@ async def prepare_import_file(
     *,
     converter: FileConverter = convert_file,
     progress_callback: ProgressCallback | None = None,
+    max_archive_size: int = DEFAULT_LIMIT,
+    cancellation_check: ControlCheck | None = None,
 ) -> PreparedImportFile:
     """Stage a source file for import, including optional conversion."""
     source_path = Path(imp_file.file_path)
+    diagnostics = dict(imp_file.diagnostics or {})
+    nested = dict(diagnostics.get("source_metadata") or {}).get("nested_comic")
+    if isinstance(nested, dict):
+        if job.file_handling_mode == ImportFileHandlingMode.IN_PLACE or not job.move_to_library:
+            raise ValidationError(
+                "Nested repair requires Copy into library; "
+                "keep-in-place originals are not rewritten."
+            )
+        approval = diagnostics.get("nested_repair")
+        if (
+            not isinstance(approval, dict)
+            or approval.get("approved") is not True
+            or nested.get("eligible") is not True
+        ):
+            raise ValidationError("Nested comic repair requires review approval.")
+        expected = dict(approval.get("source_signature") or {})
+        if not expected or expected != dict(imp_file.source_signature or {}):
+            raise ValidationError("Nested comic changed after approval. Recheck the source.")
+        validate_file_identity_signature(
+            expected, await asyncio.to_thread(build_file_identity_signature, source_path)
+        )
+        if (job.effective_transfer_method or job.transfer_method) not in {"copy", "move"}:
+            raise ValidationError("Nested repair requires Copy into library, not a linked source.")
+        directory = Path(tempfile.mkdtemp(prefix="pullbox-import-nested-"))
+        try:
+            converted = await repair_nested_comic_interruptible(
+                source_path,
+                directory / source_path.name,
+                max_bytes=max_archive_size,
+                expected_signature=expected,
+                expected_report=nested,
+                cancellation_check=cancellation_check,
+                progress_callback=progress_callback,
+            )
+        except BaseException:
+            await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
+            raise
+        return PreparedImportFile(
+            converted, source_path, [directory], converted=True, skip_embedded_comicinfo=True
+        )
     needs_cbz_normalization = job.move_to_library and (
         job.convert_to_preferred_format or job.update_embedded_comicinfo_from_match
     )

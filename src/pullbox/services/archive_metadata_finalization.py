@@ -6,7 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.models import Issue, LibraryFile, Series
 from pullbox.models.archive_metadata_publication import PublicationState
-from pullbox.services.archive_metadata_binding import revalidate_archive_metadata_target
+from pullbox.schemas.metadata_snapshot import MetadataSnapshot
+from pullbox.services.archive_metadata_binding import (
+    ArchiveMetadataBinding,
+    revalidate_archive_metadata_target,
+)
 from pullbox.services.archive_metadata_publication import (
     ArchivePublicationError,
     ArchivePublicationInspection,
@@ -32,6 +36,41 @@ from pullbox.services.metadata_entity_values import (
     apply_series_metadata_values,
 )
 from pullbox.services.metadata_writer_identity import metadata_write_scope
+
+
+async def apply_bound_archive_metadata(
+    session: AsyncSession,
+    binding: ArchiveMetadataBinding,
+    series_snapshot: MetadataSnapshot,
+    issue_snapshot: MetadataSnapshot,
+) -> None:
+    """Apply a proven publication's descriptive values without changing identities/counts."""
+    bound = binding.metadata
+    if (
+        not series_snapshot.values.title
+        or not series_snapshot.values.sort_title
+        or series_snapshot.values.issue_count != bound.series.values.issue_count
+        or issue_snapshot.values.issue_number_text != bound.issues[0].values.issue_number_text
+    ):
+        raise ArchivePublicationError("invalid_plan")
+    async with metadata_write_scope(session):
+        series = await session.get(Series, bound.series.local_id)
+        issue = await session.get(Issue, bound.issues[0].local_id)
+        assert series is not None and issue is not None
+        await apply_series_metadata_values(session, series, series_snapshot.values)
+        apply_issue_metadata_values(issue, issue_snapshot.values)
+        await write_issue_credits(session, {issue.id: issue_snapshot.values.credits})
+        await save_metadata_baselines(
+            session,
+            [
+                MetadataBaselineWrite(entity.local_id, snapshot, entity.baseline_revision)
+                for entity, snapshot in (
+                    (bound.series, series_snapshot),
+                    (bound.issues[0], issue_snapshot),
+                )
+                if entity.baseline != snapshot
+            ],
+        )
 
 
 def _check_output(
@@ -92,29 +131,9 @@ async def finalize_archive_publication(
         await require_import_archive_owner(session, plan)
         await revalidate_archive_metadata_target(session, plan.target)
         modified_at = await _file_work(lambda stop: _check_output(receipt, inspection))
-        bound = plan.target.binding.metadata
-        if (
-            not plan.series.values.title
-            or not plan.series.values.sort_title
-            or plan.series.values.issue_count != bound.series.values.issue_count
-            or plan.issue.values.issue_number_text != bound.issues[0].values.issue_number_text
-        ):
-            raise ArchivePublicationError("invalid_plan")
-        series = await session.get(Series, bound.series.local_id)
-        issue = await session.get(Issue, bound.issues[0].local_id)
+        await apply_bound_archive_metadata(session, plan.target.binding, plan.series, plan.issue)
         file = await session.get(LibraryFile, plan.target.binding.library_file_id)
-        assert series is not None and issue is not None and file is not None
-        await apply_series_metadata_values(session, series, plan.series.values)
-        apply_issue_metadata_values(issue, plan.issue.values)
-        await write_issue_credits(session, {issue.id: plan.issue.values.credits})
-        await save_metadata_baselines(
-            session,
-            [
-                MetadataBaselineWrite(entity.local_id, snapshot, entity.baseline_revision)
-                for entity, snapshot in ((bound.series, plan.series), (bound.issues[0], plan.issue))
-                if entity.baseline != snapshot
-            ],
-        )
+        assert file is not None
         assert inspection.fingerprint is not None
         file.file_size = inspection.fingerprint[2]
         file.file_modified_at = modified_at

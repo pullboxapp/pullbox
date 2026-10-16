@@ -1512,6 +1512,18 @@ class CollectionScanner:
             return True
         if not metadata.series_name or _is_low_signal_file_series_name(metadata.series_name):
             return True
+        # A filename's extra words may be an issue title OR a different series.
+        # Consult embedded metadata before splitting; never collapse a prefix
+        # match (Batman / Batman Beyond) to the folder without that evidence.
+        folder_name, folder_year, _ = self._extract_folder_identity(
+            str(metadata.diagnostics.get("folder_name") or "")
+        )
+        if folder_name and not _should_collapse_to_folder_identity(
+            metadata.series_name, folder_name
+        ):
+            return True
+        if folder_year is not None and metadata.year not in {None, folder_year}:
+            return True
         if metadata.issue_number is not None:
             return False
         return metadata.comicvine_issue_id is None and metadata.comicvine_series_id is None
@@ -1649,6 +1661,7 @@ class CollectionScanner:
                 )
             )
             type_discriminator = _non_standard_group_discriminator(discovered_file.issue_type)
+            group_year = discovered_file.parsed_year or folder_year
             if collapse_to_folder:
                 # Once we decide a filename only differs from the folder by
                 # low-signal release noise, keep the file-level parsed series in
@@ -1660,12 +1673,17 @@ class CollectionScanner:
                 discovered_file.parsed_series = folder_name
                 if discovered_file.parsed_year is None:
                     discovered_file.parsed_year = folder_year
-                identity = (
-                    folder_identity,
-                    folder_year
-                    if volume_hint is not None
-                    else discovered_file.parsed_year or folder_year,
-                )
+                # Filename years normally describe publication, not the start
+                # of the series. Explicit embedded/layout series years still
+                # keep separate releases apart within a shared folder.
+                if volume_hint is not None or (
+                    folder_is_series_boundary
+                    and folder_year is not None
+                    and discovered_file.metadata_signals.get("year")
+                    not in {"comicinfo", "sidecar", "source_layout"}
+                ):
+                    group_year = folder_year
+                identity = (folder_identity, group_year)
 
             identity_key = (identity[0], identity[1], type_discriminator)
 
@@ -1689,9 +1707,7 @@ class CollectionScanner:
                 identity_key,
                 (
                     label_name,
-                    folder_year
-                    if volume_hint is not None and collapse_to_folder
-                    else discovered_file.parsed_year or folder_year,
+                    group_year,
                     discovered_file.parsed_publisher or folder_publisher,
                 ),
             )

@@ -140,6 +140,7 @@ async def source_arc_preview(
         preview_url=f"/story-arcs/catalog/{source.value}/{provider_id}",
         source_revision=revision,
         source_label=SOURCE_LABELS[source],
+        source_key=source.value,
         preview_cover_url=cover if cover and allowed_artwork_url(cover) else "",
         error_message=message,
         placement_roots=roots,

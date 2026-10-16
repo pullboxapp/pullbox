@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -412,7 +413,7 @@ async def test_identity_missing_paths_have_actionable_exceptions_and_safe_contin
         ],
         issues=[],
     )
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("ALTER TABLE comics ADD COLUMN ComicName TEXT")
         connection.execute("UPDATE comics SET ComicName = 'Missing series' WHERE ComicID = '2'")
     db_session.add(LibraryRoot(name="Comics", path=str(root), enabled=True))
@@ -540,7 +541,7 @@ async def test_io_errors_and_sensitive_missing_paths_are_not_skippable(
     )
     assert not preview.can_continue_with_unresolved
     assert preview.resolution.invalid == 1
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             "UPDATE comics SET ComicLocation=? WHERE ComicID='2'",
             ("/etc/missing-comic",),

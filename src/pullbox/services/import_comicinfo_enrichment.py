@@ -350,11 +350,12 @@ async def _load_pending_issue_cv_ids(
     job_id: int,
     imported_file_ids: list[int],
 ) -> list[int]:
-    """Load unique provider issue IDs already recorded in pending diagnostics."""
+    """Load current issue IDs after hydration, retaining legacy diagnostic fallback."""
     async with session_factory() as session:
         result = await session.execute(
-            sa_select(ImportedFile.diagnostics)
+            sa_select(ImportedFile.diagnostics, Issue.comicvine_id)
             .join(ImportJob, ImportedFile.import_job_id == ImportJob.id)
+            .outerjoin(Issue, Issue.id == ImportedFile.matched_issue_id)
             .where(ImportedFile.import_job_id == job_id)
             .where(ImportedFile.id.in_(imported_file_ids))
             .where(ImportJob.status == ImportJobStatus.COMPLETED)
@@ -364,11 +365,17 @@ async def _load_pending_issue_cv_ids(
         )
         provider_ids: list[int] = []
         seen: set[int] = set()
-        for diagnostics in result.scalars().all():
+        for diagnostics, current_provider_id in result.all():
             if not _is_pending_comicinfo_enrichment_diagnostics(diagnostics):
                 continue
             details = diagnostics.get(COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY, {})
-            raw_provider_id = details.get("issue_cv_id") if isinstance(details, dict) else None
+            raw_provider_id = (
+                current_provider_id
+                if current_provider_id is not None
+                else details.get("issue_cv_id")
+                if isinstance(details, dict)
+                else None
+            )
             if isinstance(raw_provider_id, bool) or not isinstance(raw_provider_id, (int, str)):
                 continue
             try:

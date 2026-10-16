@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Protocol
 
+from pullbox.config import get_settings
+from pullbox.services.series_interest import request_watch_confirmation
+from pullbox.services.whats_new_actions import available_release_series_ids
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from pullbox.services.whats_new_data_client import PullboxDataClientError, WhatsNewDataClient
 
@@ -56,6 +59,12 @@ class WhatsNewRefreshService:
             payload=current_payload,
         )
         await self.cache.upsert_upcoming(session, payload=upcoming_payload)
+
+        if get_settings().metadata_whats_new_actions_enabled:
+            as_of = date.today()
+            available = available_release_series_ids(current_payload, as_of=as_of)
+            available.update(available_release_series_ids(upcoming_payload, as_of=as_of))
+            await request_watch_confirmation(session, available)
 
         return WhatsNewRefreshResult(
             current_week_store_date=store_date,

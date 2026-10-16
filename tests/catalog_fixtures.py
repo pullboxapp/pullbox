@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 
 TABLES = {
     "publishers": ("id,name", "id"),
@@ -43,7 +44,7 @@ def content_hash(db):
 
 
 def build_snapshot(path, version="20260913T050000Z", name="Batman", *, extra_issue=False):
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.executescript(SCHEMA)
         db.execute("INSERT INTO publishers VALUES (1,'DC')")
         db.execute("INSERT INTO series VALUES (10,?,2016,1,1,NULL)", (name,))
@@ -86,9 +87,12 @@ def build_patch(path, base, target):
         "issues": "issue",
     }
     with (
-        sqlite3.connect(path) as db,
-        sqlite3.connect(base) as before,
-        sqlite3.connect(target) as after,
+        closing(sqlite3.connect(path)) as db,
+        db,
+        closing(sqlite3.connect(base)) as before,
+        before,
+        closing(sqlite3.connect(target)) as after,
+        after,
     ):
         db.execute("PRAGMA application_id=1346523204")
         db.execute("PRAGMA user_version=1")

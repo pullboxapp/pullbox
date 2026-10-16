@@ -16,6 +16,8 @@ import logging
 import traceback
 from pathlib import Path
 
+import pytest
+
 from pullbox.utilities.logging_config import (
     JSONFormatter,
     UtilityLogger,
@@ -233,6 +235,35 @@ class TestJSONFormatter:
 
 class TestConfigureUtilityLogging:
     """Verify rotating file handler is set up correctly."""
+
+    @pytest.mark.parametrize("runtime", [False, True])
+    def test_reconfigure_reenables_own_logger_after_migration_logging(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime: bool
+    ) -> None:
+        logger = logging.getLogger("pullbox.utilities")
+        unrelated_logger = logging.getLogger("pullbox.logging_reconfiguration_unrelated")
+        # Alembic's fileConfig disables loggers that already exist in the process.
+        monkeypatch.setattr(logger, "disabled", True)
+        monkeypatch.setattr(unrelated_logger, "disabled", True)
+
+        if runtime:
+            configure_utility_logging_runtime(tmp_path, level="warning")
+        else:
+            configure_utility_logging(tmp_path, level="WARNING")
+
+        assert logger.disabled is False
+        assert unrelated_logger.disabled is True
+        emit_utility_log_entry(job_id="job-reconfigured", level="INFO", message="below threshold")
+        emit_utility_log_entry(
+            job_id="job-reconfigured", level="WARNING", message="visible warning"
+        )
+        entries = [
+            json.loads(line) for line in (tmp_path / "utilities.log").read_text().splitlines()
+        ]
+        assert [(entry["level"], entry["message"]) for entry in entries] == [
+            ("WARNING", "visible warning")
+        ]
+        assert entries[0]["job_id"] == "job-reconfigured"
 
     def test_creates_log_file(self, tmp_path: Path) -> None:
         configure_utility_logging(tmp_path, level="DEBUG")

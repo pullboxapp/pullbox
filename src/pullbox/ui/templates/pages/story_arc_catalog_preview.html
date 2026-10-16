@@ -18,7 +18,7 @@
 {% set preview_data = {
   "ready": true if can_add else false,
   "title": preview.metadata.title if preview else "Review Story Arc",
-  "description": preview.metadata.description|striptags if preview else "",
+  "description": (preview.metadata.description or "")|striptags if preview else "",
   "coverUrl": preview_cover_url if preview_cover_url is defined else preview.metadata.cover_url if preview and preview.metadata.cover_url else "",
   "sourceLabel": source_label,
   "sourceRevision": source_revision|default(none),
@@ -66,7 +66,11 @@
       </details>
     </div>
   </header>
+  {% if source_key|default("") in ("gcd_local", "gcd_api_v2") %}
+  <p class="text-sm text-pb-text-sec">GCD publication order is a starting point, not a curated reading order. Members may include reprints. Reorder or skip issues before adding.</p>
+  {% else %}
   <p class="text-sm text-pb-text-sec">Issues are listed in {{ source_label }}'s returned order. Reorder or skip issues if needed.</p>
+  {% endif %}
   <p x-show="error" x-text="error" role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 px-4 py-3 text-sm text-pb-text">{{ preview_error }}</p>
   <p x-show="notice" x-text="notice" x-cloak role="status" class="rounded-lg border border-pb-border bg-pb-card px-4 py-3 text-sm text-pb-text-sec"></p>
 

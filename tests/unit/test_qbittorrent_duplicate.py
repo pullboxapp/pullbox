@@ -8,11 +8,18 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
+import builtins
+from types import FunctionType, SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from pullbox.providers.download.qbittorrent import QBittorrentClient, QBittorrentError
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _make_torrent(hash_: str, name: str = "test") -> dict[str, object]:
@@ -26,11 +33,48 @@ def _make_response(torrents: list[dict[str, object]]) -> MagicMock:
     return resp
 
 
+@pytest.fixture
+def poll_delays(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[float]]:
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+    real_import = builtins.__import__
+    original = QBittorrentClient.add_torrent
+
+    async def yield_without_waiting(delay: float) -> None:
+        delays.append(delay)
+        await real_sleep(0)
+
+    def provider_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "asyncio":
+            return SimpleNamespace(sleep=yield_without_waiting)
+        return real_import(name, *args, **kwargs)
+
+    # add_torrent imports asyncio locally. Keep its exact production bytecode,
+    # but give only that method a private import binding; no global sleep patch.
+    controlled = FunctionType(
+        original.__code__,
+        {**original.__globals__, "__builtins__": {**vars(builtins), "__import__": provider_import}},
+        original.__name__,
+        original.__defaults__,
+        original.__closure__,
+    )
+    controlled.__kwdefaults__ = original.__kwdefaults__
+    with monkeypatch.context() as scoped:
+        scoped.setattr(QBittorrentClient, "add_torrent", controlled)
+        assert controlled.__code__ is original.__code__
+        assert asyncio.sleep is real_sleep
+        assert builtins.__import__ is real_import
+        yield delays
+    assert QBittorrentClient.add_torrent is original
+    assert asyncio.sleep is real_sleep
+    assert builtins.__import__ is real_import
+
+
 class TestTorrentAddVerification:
     """add_torrent verifies whether qBittorrent accepted the torrent."""
 
     @pytest.mark.asyncio
-    async def test_unchanged_list_raises_not_added_error(self) -> None:
+    async def test_unchanged_list_raises_not_added_error(self, poll_delays: list[float]) -> None:
         """Hash list unchanged after POST -> not-added error with honest copy."""
         client = QBittorrentClient(
             url="http://localhost:9091",
@@ -39,7 +83,7 @@ class TestTorrentAddVerification:
         )
         existing = [_make_torrent("aaa"), _make_torrent("bbb")]
 
-        # _request: login, GET before, POST add, 6 GET polls, name check
+        # _request: GET before, POST add, 6 GET polls; name check uses the last list.
         call_count = 0
 
         async def mock_request(method: str, endpoint: str, **kwargs: object) -> MagicMock:
@@ -63,9 +107,13 @@ class TestTorrentAddVerification:
             await client.add_torrent(
                 "http://example.com/file.torrent", "Absolute Superman #14 (2025)"
             )
+        assert poll_delays == [0.3, 0.3, 1.0, 1.0, 1.0, 1.0]
+        assert call_count == 8
 
     @pytest.mark.asyncio
-    async def test_http_download_redirecting_to_magnet_uses_magnet_path(self) -> None:
+    async def test_http_download_redirecting_to_magnet_uses_magnet_path(
+        self, poll_delays: list[float]
+    ) -> None:
         """Prowlarr/Torznab download URLs that redirect to magnets are resolved first."""
         client = QBittorrentClient(
             url="http://localhost:9091",
@@ -109,9 +157,12 @@ class TestTorrentAddVerification:
 
         assert result == known_hash
         assert posted_urls == [magnet_url]
+        assert poll_delays == [0.3]
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_list_changed_but_hash_unidentified(self) -> None:
+    async def test_returns_none_when_list_changed_but_hash_unidentified(
+        self, poll_delays: list[float]
+    ) -> None:
         """Hash list changed (new unknown torrent) but name doesn't match → None."""
         client = QBittorrentClient(
             url="http://localhost:9091",
@@ -149,9 +200,10 @@ class TestTorrentAddVerification:
         result = await client.add_torrent("http://example.com/file.torrent", "My Title")
         # The new hash "ccc" is detected as the newly added torrent
         assert result == "ccc"
+        assert poll_delays == [0.3]
 
     @pytest.mark.asyncio
-    async def test_name_match_returns_hash_for_existing(self) -> None:
+    async def test_name_match_returns_hash_for_existing(self, poll_delays: list[float]) -> None:
         """When poll finds no new hash but name matches existing torrent → returns hash."""
         client = QBittorrentClient(
             url="http://localhost:9091",
@@ -177,9 +229,10 @@ class TestTorrentAddVerification:
 
         result = await client.add_torrent("http://example.com/file.torrent", title)
         assert result == "aaa"
+        assert poll_delays == [0.3, 0.3, 1.0, 1.0, 1.0, 1.0]
 
     @pytest.mark.asyncio
-    async def test_magnet_duplicate_returns_hash_not_error(self) -> None:
+    async def test_magnet_duplicate_returns_hash_not_error(self, poll_delays: list[float]) -> None:
         """Magnet link with known hash that already exists → returns hash, no error."""
         client = QBittorrentClient(
             url="http://localhost:9091",
@@ -206,3 +259,4 @@ class TestTorrentAddVerification:
         result = await client.add_torrent(f"magnet:?xt=urn:btih:{known_hash}&dn=test", "test")
         # Magnet path detects existing hash and returns it
         assert result == known_hash
+        assert poll_delays == []

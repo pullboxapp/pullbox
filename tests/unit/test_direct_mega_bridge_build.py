@@ -28,6 +28,17 @@ def test_mega_builder_installs_archive_decompression_support() -> None:
     assert "gzip" in mega_builder_dependencies
 
 
+def test_production_mega_builder_uses_verified_archive_without_git() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    mega_builder = dockerfile.split("\nFROM ", maxsplit=1)[0]
+    packages = mega_builder.split("apt-get install", maxsplit=1)[1].split("&&", maxsplit=1)[0]
+
+    assert "git" not in packages.split()
+    assert 'curl -fsSL "${MEGA_SDK_SOURCE_URL}" -o /tmp/mega-sdk.tar.gz' in mega_builder
+    assert 'echo "${MEGA_SDK_SOURCE_SHA256}  /tmp/mega-sdk.tar.gz" | sha256sum -c -' in mega_builder
+    assert "tar -xzf /tmp/mega-sdk.tar.gz" in mega_builder
+
+
 def test_development_image_includes_the_same_pinned_mega_bridge() -> None:
     dockerfile = DEV_DOCKERFILE.read_text(encoding="utf-8")
 

@@ -2616,7 +2616,12 @@ def request_story_arc_sync_now() -> None:
     from pullbox.core.scheduler import get_scheduler
 
     try:
-        status = get_scheduler().run_task_now(STORY_ARC_SYNC_TASK_ID)
+        scheduler = get_scheduler()
+        # A manual nudge can create a DB-owning worker without starting APScheduler.
+        # Keep it inside the app lifespan; the durable sweep handles missed nudges.
+        if not scheduler.running:
+            return
+        status = scheduler.run_task_now(STORY_ARC_SYNC_TASK_ID)
         if status == "queued":
             logger.debug("story_arc_sync_triggered_after_registration")
     except Exception:

@@ -59,6 +59,7 @@ class FileMetadataPreview(BaseModel):
     unchanged: bool
     ready: bool = True
     conflicts: list[FileMetadataConflict] = Field(default_factory=list)
+    converts_to_cbz: bool = False
 
 
 class FileMetadataApproval(FileMetadataReview):

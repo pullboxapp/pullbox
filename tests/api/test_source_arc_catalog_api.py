@@ -1,12 +1,15 @@
 """Real adapter, registry, snapshot and saver through authenticated commands."""
 
+import asyncio
+from contextlib import asynccontextmanager
+
 import httpx
 import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullbox.core.provider_cooldown import ProviderCooldown
-from pullbox.models import Base, Issue, Series, StoryArc, StoryArcExternalIdentity
+from pullbox.models import Issue, Series, StoryArc, StoryArcExternalIdentity
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_identity import IssueIdentityEvent
@@ -14,6 +17,7 @@ from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.story_arc import IssueStoryArc
 from pullbox.providers.metadata import sources
 from tests.api.test_metadata_sources_api import csrf, policy
+from tests.sqlite_schema import create_test_schema
 from tests.unit.test_metron_source import envelope, issue_row, series_row
 
 pytest_plugins = ["conftest_security"]
@@ -27,7 +31,7 @@ async def sec_db(tmp_path_factory):
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await create_test_schema(connection)
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()
@@ -137,6 +141,39 @@ async def test_arc_catalog_sessions_survive_peer_connection_invalidation(sec_db)
         await connection.invalidate()
         await peer.rollback()
         assert await reader.scalar(select(func.count()).select_from(StoryArc)) == 0
+
+
+async def test_arc_preview_recovers_one_local_admission_stall(
+    authenticated_client, arc_command_setup, sec_db, monkeypatch
+):
+    from pullbox.services import metadata_account_admission
+
+    admission = metadata_account_admission.source_account_admission
+    attempts = 0
+
+    def guarded(session, *, gcd_api_enabled):
+        gate = admission(session, gcd_api_enabled=gcd_api_enabled)
+        begin = gate.factory.begin
+
+        @asynccontextmanager
+        async def stalled_once():
+            nonlocal attempts
+            attempts += 1
+            async with begin() as account_session:
+                if attempts == 1:
+                    await asyncio.sleep(3)
+                yield account_session
+
+        monkeypatch.setattr(gate.factory, "begin", stalled_once)
+        return gate
+
+    monkeypatch.setattr(metadata_account_admission, "source_account_admission", guarded)
+    snapshot = await preview(authenticated_client, arc_command_setup)
+    assert snapshot["arc"]["title"] == "Native arc"
+    assert attempts == 4 and len(arc_command_setup["calls"]) == 3
+    assert not arc_command_setup["searches"] and not list(arc_command_setup["root"].iterdir())
+    async with sec_db() as session:
+        assert await session.scalar(select(func.count()).select_from(StoryArc)) == 0
 
 
 async def test_catalog_add_revalidates_saved_response_through_real_adapter(

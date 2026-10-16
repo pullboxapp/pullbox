@@ -94,6 +94,12 @@ class CatalogLookupService:
             )
         return result
 
+    async def get_issue_batch_cached(
+        self, issue_provider_ids: Sequence[str]
+    ) -> dict[str, IssueMetadata]:
+        """Missing local identities stay missing; never fall back to a remote provider."""
+        return await self.reader.issue_batch([int(value) for value in issue_provider_ids])
+
     async def close(self) -> None:
         """Queries own and close their connections individually."""
 

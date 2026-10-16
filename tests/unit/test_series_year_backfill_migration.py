@@ -32,9 +32,10 @@ def test_coerce_year_accepts_date_like_values() -> None:
     assert module._coerce_year(None) is None
 
 
-def test_upgrade_backfills_only_ended_series_missing_year_end(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_upgrade_backfills_only_ended_series_missing_year_end(monkeypatch, request) -> None:  # type: ignore[no-untyped-def]
     module = _load_migration_module()
     engine = sa.create_engine("sqlite:///:memory:")
+    request.addfinalizer(engine.dispose)
 
     with engine.begin() as conn:
         conn.execute(

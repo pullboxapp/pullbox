@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.direct_acquisition import (
     DirectArtifactHostKind,
     DirectHostConfig,
@@ -33,7 +32,9 @@ from pullbox.providers.airdcpp.supervisor import (
     AirDcppSupervisorState,
 )
 from pullbox.providers.base import ProviderHealthResult, ProviderRegistry
+from pullbox.services import health_service
 from pullbox.services.health_service import CheckOutcome, HealthService
+from tests.sqlite_schema import create_test_schema
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -44,7 +45,7 @@ from pullbox.services.health_service import CheckOutcome, HealthService
 async def async_engine():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     yield engine
     await engine.dispose()
 
@@ -2517,18 +2518,37 @@ class TestSystemResourcesCheck:
 class TestCrossCutting:
     @pytest.mark.asyncio
     async def test_timeout_returns_unhealthy(
-        self, db_session: AsyncSession, settings: MagicMock
+        self, db_session: AsyncSession, settings: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A check that exceeds 10s timeout should return UNHEALTHY."""
+        """A real timeout cancels the check and finishes cleanup before returning UNHEALTHY."""
         service = _make_service(settings)
+        assert health_service._CHECK_TIMEOUT_SECONDS == 10
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        cleaned_up = asyncio.Event()
 
         async def slow_check() -> CheckOutcome:
-            await asyncio.sleep(20)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            finally:
+                await asyncio.sleep(0)
+                cleaned_up.set()
             return CheckOutcome(
                 component="test", check_name="slow", status=HealthStatus.HEALTHY, message="ok"
             )
 
-        outcomes = await service._safe_run(slow_check(), "test", "slow")
+        # Keep real wait_for/cancellation, without waiting for the production deadline.
+        with monkeypatch.context() as scoped:
+            scoped.setattr(health_service, "_CHECK_TIMEOUT_SECONDS", 0.01)
+            outcomes = await service._safe_run(slow_check(), "test", "slow")
+        assert health_service._CHECK_TIMEOUT_SECONDS == 10
+        assert started.is_set()
+        assert cancelled.is_set()
+        assert cleaned_up.is_set()
         assert outcomes[0].status == HealthStatus.UNHEALTHY
         assert "timed out" in outcomes[0].message.lower()
 

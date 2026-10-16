@@ -24,7 +24,12 @@
           Import {{ issue.series.title }} #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}
         </h3>
         <p class="text-xs leading-5 text-pb-text-dim">
+          {% if paired_import_metadata_enabled %}
+          Pullbox prepares reconciled ComicInfo.xml and MetronInfo.xml in a library copy.
+          The original source stays unchanged; disagreements stop the import for review.
+          {% else %}
           Keep this dialog open while Pullbox prepares, transfers, and finalizes the selected file.
+          {% endif %}
         </p>
       </div>
     </div>
@@ -110,7 +115,7 @@
             x-bind:disabled="cancellingImport || importState === 'completed'"
             x-bind:aria-disabled="(cancellingImport || importState === 'completed') ? 'true' : 'false'"
           >
-            <span x-show="!cancellingImport">Cancel import</span>
+            <span x-show="!cancellingImport" x-text="importState === 'failed' || importState === 'safety_blocked' || importState === 'cancelled' ? 'Close' : 'Cancel import'">Cancel import</span>
             <span x-show="cancellingImport">Cancelling…</span>
           </button>
         </div>

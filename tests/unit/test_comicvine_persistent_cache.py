@@ -15,6 +15,22 @@ from pullbox.providers.story_arcs import StoryArcSearchResult
 from pullbox.services.comicvine_persistent_cache import PersistentComicVineCacheProvider
 
 
+async def test_cached_only_issue_batch_uses_fresh_rows_without_remote_fallback(async_engine):
+    factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    provider = _ComicVineProviderDouble()
+    now = datetime.now(UTC)
+    cached = PersistentComicVineCacheProvider(provider, factory, now_func=lambda: now)
+    await cached.get_issue_batch(["100", "101"])
+    async with factory() as session:
+        entries = list((await session.scalars(select(MetadataProviderCacheEntry))).all())
+        entries[0].expires_at = now - timedelta(seconds=1)
+        expired = entries[0].request["issue_provider_id"]
+        await session.commit()
+    result = await cached.get_issue_batch_cached(["100", "101", "999"])
+    assert set(result) == {"100", "101"} - {expired}
+    assert provider.issue_batch_calls == [["100", "101"]]
+
+
 class _ComicVineProviderDouble:
     name = "comicvine"
 

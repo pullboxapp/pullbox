@@ -1,4 +1,4 @@
-/* Preview and approve one existing managed CBZ; the server owns all paths. */
+/* Preview and approve one managed comic; native conversion is explicit. */
 function issueFileMetadata(issueId) {
   var endpoint = "/api/v1/issues/" + issueId + "/file-metadata";
   return {

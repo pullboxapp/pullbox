@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
@@ -18,11 +18,12 @@ from pullbox.core.archive import ArchiveError
 from pullbox.core.archive_metadata import (
     MAX_METADATA_BYTES,
     ArchiveMetadataFiles,
+    MetadataFile,
     read_archive_metadata,
 )
 from pullbox.models import LibraryFile
 from pullbox.models.archive_metadata_publication import PublicationState
-from pullbox.models.import_job import ImportedFile, ImportJob, ImportJobStatus
+from pullbox.models.library_conversion import LibraryConversion
 from pullbox.schemas.issue_file_metadata import (
     FileMetadataChange,
     FileMetadataChoices,
@@ -35,6 +36,7 @@ from pullbox.services.archive_metadata_binding import (
     assemble_bound_archive_metadata,
     inspect_archive_metadata_target,
     read_archive_metadata_binding,
+    require_unowned_metadata_file,
 )
 from pullbox.services.archive_metadata_finalization import finalize_archive_publication
 from pullbox.services.archive_metadata_publication import (
@@ -103,7 +105,12 @@ def file_metadata_error(exc: BaseException) -> str:
     }:
         return "Review and verify the issue and series provider links before writing this file."
     if code == "unsupported_format":
-        return "File metadata writing currently supports managed CBZ files only."
+        return "File metadata writing supports managed CBZ, CBR, CB7, and PDF files."
+    if code == "trash_not_configured":
+        return (
+            "Configure a library trash directory in Utilities settings "
+            "before converting this comic."
+        )
     if code in {"target_missing", "source_unavailable"}:
         return (
             "The registered comic file is unavailable. Restore or reconcile it, then preview again."
@@ -134,10 +141,15 @@ class PreparedFileMetadata:
     issue: MetadataSnapshot
     primary: ExternalIdentityRef | None
     preview: FileMetadataPreview
+    approved_resource_limit: int | None = None
 
 
 async def prepare_file_metadata(
-    session: AsyncSession, issue_id: int, *, choices: FileMetadataChoices | None = None
+    session: AsyncSession,
+    issue_id: int,
+    *,
+    choices: FileMetadataChoices | None = None,
+    approved_resource_limit: int | None = None,
 ) -> PreparedFileMetadata:
     """Release the clean read transaction before archive I/O; never fetch providers."""
     if session.new or session.dirty or session.deleted:
@@ -149,15 +161,39 @@ async def prepare_file_metadata(
     )
     if len(ids) != 1:
         raise ArchiveMetadataBindingError("target_missing")
-    binding = await read_archive_metadata_binding(session, ids[0], expected_issue_id=issue_id)
+    binding = await read_archive_metadata_binding(
+        session, ids[0], expected_issue_id=issue_id, allow_conversion_source=True
+    )
     await _require_no_import_owner(session, ids[0])
+    from pullbox.core.file_safety import get_archive_size_limit_bytes
+
+    limit = await get_archive_size_limit_bytes(session)
+    from pullbox.services.direct_metadata_approval import read_direct_metadata_approval
+
+    direct_approval = await read_direct_metadata_approval(session, ids[0])
+    if approved_resource_limit is not None:
+        limit = max(limit, approved_resource_limit)
     await session.commit()
-    target = await inspect_archive_metadata_target(binding)
+    target = await inspect_archive_metadata_target(binding, allow_conversion_source=True)
+    if direct_approval is not None:
+        approved_budget = await direct_approval.budget(target.path)
+        if approved_budget is not None:
+            approved_resource_limit = max(approved_resource_limit or 0, approved_budget)
+            limit = max(limit, approved_resource_limit)
     try:
-        files = await asyncio.to_thread(
-            read_archive_metadata, target.path, "cbz", max_solid_scan_bytes=MAX_METADATA_BYTES
+        kind = target.path.suffix.lstrip(".").casefold()
+        files = (
+            ArchiveMetadataFiles(MetadataFile("ComicInfo.xml"), MetadataFile("MetronInfo.xml"))
+            if kind == "pdf"
+            else await asyncio.to_thread(
+                read_archive_metadata,
+                target.path,
+                "cbz" if kind == "zip" else kind,
+                max_solid_scan_bytes=MAX_METADATA_BYTES if kind in {"cbz", "zip"} else limit,
+            )
         )
         prepared = await asyncio.to_thread(_prepare, target, files, choices or {})
+        prepared = replace(prepared, approved_resource_limit=approved_resource_limit)
     except (ArchiveError, BadZipFile) as exc:
         raise ArchiveMetadataBindingError("archive_unreadable") from exc
     await asyncio.to_thread(target.check_unchanged)
@@ -165,17 +201,7 @@ async def prepare_file_metadata(
 
 
 async def _require_no_import_owner(session: AsyncSession, file_id: int) -> None:
-    protected = await session.scalar(
-        select(ImportedFile.id)
-        .join(ImportJob)
-        .where(
-            ImportedFile.library_file_id == file_id,
-            ImportJob.status != ImportJobStatus.ROLLED_BACK,
-        )
-        .limit(1)
-    )
-    if protected:
-        raise ArchiveMetadataBindingError("import_rollback_protected")
+    await require_unowned_metadata_file(session, file_id)
 
 
 def _fields(payload: bytes | None) -> dict[str, str]:
@@ -203,6 +229,7 @@ def _prepare(
     target: ArchiveMetadataTarget, files: ArchiveMetadataFiles, choices: FileMetadataChoices
 ) -> PreparedFileMetadata:
     binding = target.binding
+    converts = target.path.suffix.casefold() in {".cbr", ".cb7", ".pdf"}
     archive = reconcile_archive_metadata(files)
     series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
     primary = archive_primary_identity(binding, archive)
@@ -246,6 +273,7 @@ def _prepare(
                 unchanged=False,
                 ready=False,
                 conflicts=conflicts,
+                converts_to_cbz=converts,
             ),
         )
     assert rendered is not None
@@ -274,8 +302,10 @@ def _prepare(
                 ),
             )
     review_key = hashlib.sha256(evidence + rendered.comicinfo + rendered.metroninfo).hexdigest()
-    with ZipFile(target.path) as archive_file:
-        canonical_names = {"ComicInfo.xml", "MetronInfo.xml"} <= set(archive_file.namelist())
+    canonical_names = False
+    if not converts:
+        with ZipFile(target.path) as archive_file:
+            canonical_names = {"ComicInfo.xml", "MetronInfo.xml"} <= set(archive_file.namelist())
     unchanged = canonical_names and all(old == new for _, old, new in pairs)
     return PreparedFileMetadata(
         target,
@@ -288,6 +318,7 @@ def _prepare(
             changes=changes[:200],
             review_key=review_key,
             unchanged=unchanged,
+            converts_to_cbz=converts,
             conflicts=conflicts,
         ),
     )
@@ -330,6 +361,29 @@ async def write_file_metadata(
     choices: FileMetadataChoices | None = None,
 ) -> str:
     """Approval is checked again before staging and under the publication lock."""
+    from uuid import uuid5
+
+    from pullbox.services.native_file_metadata import write_native_file_metadata
+
+    async with factory() as reader:
+        native_conversion = await reader.scalar(
+            select(LibraryConversion.id).where(
+                LibraryConversion.operation_id == str(uuid5(operation, "native-metadata"))
+            )
+        )
+        file = await reader.scalar(select(LibraryFile).where(LibraryFile.issue_id == issue_id))
+        native = file is not None and file.file_path.casefold().endswith((".cbr", ".cb7", ".pdf"))
+    if native or native_conversion is not None:
+        return await write_native_file_metadata(
+            factory,
+            issue_id,
+            review_key,
+            operation,
+            choices=choices,
+            check_control=check_control,
+            progress=progress,
+            limit=limit,
+        )
     recovered = await recover_file_metadata(factory, operation)
     if recovered is PublicationState.FINALIZED:
         return "recovered"
@@ -345,6 +399,7 @@ async def write_file_metadata(
     if prepared.preview.unchanged:
         return "unchanged"
     target, series, issue = prepared.target, prepared.series, prepared.issue
+    limit = max(limit, prepared.approved_resource_limit or 0)
     try:
         async with stage_cbz_metadata_interruptible(
             target.path,

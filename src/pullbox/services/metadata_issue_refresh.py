@@ -18,6 +18,11 @@ from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_meta
 from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_entity_values import apply_issue_metadata_values
+from pullbox.services.metadata_locg_enrichment import (
+    enrich_issue_snapshot,
+    read_issue_release_facts,
+    read_series_release_facts,
+)
 from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_refresh_snapshot import fetch_metadata_snapshot
 from pullbox.services.metadata_series_refresh_state import ISSUE_FIELDS, read_series_refresh_state
@@ -44,6 +49,10 @@ async def refresh_issue_from_sources(
     member = before.issues[0]
     if not member.identities:
         raise ValueError("Link a verified metadata provider to this issue before refreshing.")
+    release_facts = await read_series_release_facts(
+        session, before.series.identities, now=datetime.now(UTC)
+    )
+    issue_release_facts = await read_issue_release_facts(session, before, release_facts)
     if registry is None:
         registry = MetadataSourceRegistry(
             await load_source_runtime(session, gcd_api_enabled=gcd_api_enabled),
@@ -114,12 +123,31 @@ async def refresh_issue_from_sources(
                 "Issue metadata, identities or source settings changed. Retry the refresh; "
                 "no metadata was changed."
             )
+        rechecked_facts = await read_series_release_facts(
+            session, current.series.identities, now=datetime.now(UTC), lock=True
+        )
+        if rechecked_facts != release_facts:
+            raise ValueError(
+                "Cached release facts changed or expired during refresh. Retry the refresh; "
+                "no metadata was changed."
+            )
+        rechecked_issues = await read_issue_release_facts(session, current, rechecked_facts)
+        if rechecked_issues != issue_release_facts:
+            raise ValueError(
+                "Cached release issue matches changed during refresh. Retry the refresh; "
+                "no metadata was changed."
+            )
+        snapshot = enrich_issue_snapshot(
+            fetched.snapshot,
+            next((item for item in rechecked_issues if item.local_id == issue_id), None),
+            now=datetime.now(UTC),
+        )
         issue = await session.get(Issue, issue_id)
         assert issue is not None
-        apply_issue_metadata_values(issue, fetched.snapshot.values)
-        await write_issue_credits(session, {issue_id: fetched.snapshot.values.credits})
+        apply_issue_metadata_values(issue, snapshot.values)
+        await write_issue_credits(session, {issue_id: snapshot.values.credits})
         await save_metadata_baselines(
-            session, [MetadataBaselineWrite(issue_id, fetched.snapshot, member.baseline_revision)]
+            session, [MetadataBaselineWrite(issue_id, snapshot, member.baseline_revision)]
         )
         await session.flush()
     logger.info(

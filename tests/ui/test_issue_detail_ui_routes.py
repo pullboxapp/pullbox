@@ -24,6 +24,33 @@ def _issue_detail_content_html(html: str) -> str:
     return html[start:end]
 
 
+@pytest.mark.parametrize(("flag", "embedding"), [(True, True), (True, False), (False, True)])
+async def test_manual_import_explains_paired_source_preservation(
+    authenticated_client, seeded_issue_detail_ui_data, sec_db, monkeypatch, flag, embedding
+) -> None:
+    from pullbox.config import get_settings
+    from pullbox.models.config import SystemConfig
+
+    monkeypatch.setenv("PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED", str(flag).lower())
+    get_settings.cache_clear()
+    try:
+        async with sec_db.begin() as session:
+            session.add(
+                SystemConfig(
+                    key="update_embedded_comicinfo_from_match_on_import",
+                    value=str(embedding).lower(),
+                )
+            )
+        response = await authenticated_client.get(
+            f"/issues/{seeded_issue_detail_ui_data['wanted_issue_id']}"
+        )
+        assert response.status_code == 200
+        assert ("The original source stays unchanged" in response.text) is (flag and embedding)
+        assert ("ComicInfo.xml and MetronInfo.xml" in response.text) is (flag and embedding)
+    finally:
+        get_settings.cache_clear()
+
+
 @pytest.fixture
 async def seeded_issue_detail_ui_data(sec_db) -> dict[str, int]:  # type: ignore[no-untyped-def]
     """Seed a small issue-detail dataset with both owned and wanted states."""

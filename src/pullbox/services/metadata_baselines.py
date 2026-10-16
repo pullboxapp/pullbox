@@ -165,6 +165,36 @@ async def _lock_targets(session: AsyncSession, writes: Sequence[MetadataBaseline
     )
     if actual != parents:
         raise MetadataBaselineConflictError("Issue parent changed. Reload before retrying.")
+    release_proofs = [
+        (parents[item.local_id], origin.passive_release.locg_series_id)
+        for item in writes
+        if item.snapshot.entity_kind is MetadataEntityKind.ISSUE
+        for origin in item.snapshot.origins
+        if origin.passive_release is not None
+    ]
+    if release_proofs:
+        verified_parents = set(
+            (
+                await session.execute(
+                    select(SeriesExternalIdentity.series_id, SeriesExternalIdentity.external_id)
+                    .where(
+                        SeriesExternalIdentity.series_id.in_(
+                            {parent for parent, _ in release_proofs}
+                        ),
+                        SeriesExternalIdentity.identity_namespace == IdentityNamespace.LOCG,
+                        SeriesExternalIdentity.verification_state
+                        == IdentityVerificationState.VERIFIED,
+                    )
+                    .with_for_update(read=True)
+                )
+            )
+            .tuples()
+            .all()
+        )
+        if any(proof not in verified_parents for proof in release_proofs):
+            raise MetadataBaselineConflictError(
+                "The series release link changed. Review the confirmed LOCG link before retrying."
+            )
 
 
 async def _save_group(

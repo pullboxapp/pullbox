@@ -54,7 +54,7 @@ async def prepare_source_artifact(
             )
         else:
             converted_path = await converter(source_path, "cbz", temp_dir)
-    except Exception:
+    except BaseException:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
     return converted_path, [temp_dir]

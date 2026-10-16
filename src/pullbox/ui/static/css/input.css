@@ -540,6 +540,44 @@
     line-height: var(--pb-control-line-height);
     border-radius: var(--pb-control-radius);
   }
+  .app-header {
+    @apply relative flex h-12 items-center gap-3 px-4 sm:px-6;
+  }
+  .app-header > * {
+    flex-shrink: 0;
+  }
+  .app-header__spacer {
+    flex: 1;
+  }
+  .app-header > .app-header__user {
+    min-width: 0;
+    flex-shrink: 1;
+  }
+  @media (width < 40rem) {
+    .app-header {
+      height: auto;
+      flex-wrap: wrap;
+      gap: 0 0.5rem;
+      padding-block: 0.25rem;
+    }
+    .app-header__spacer {
+      flex: 0 0 100%;
+    }
+    /* Anchor mobile menus to the header, not to an off-centre trigger. */
+    .app-header .header-add-menu {
+      position: static;
+    }
+    .app-header .header-add-menu__panel {
+      left: 1rem;
+      top: 100%;
+    }
+    .app-header .header-add-menu__panel {
+      min-width: 0;
+      width: 17rem;
+      max-width: calc(100% - 2rem);
+      margin-top: 0.5rem;
+    }
+  }
   .header-add-menu {
     @apply relative inline-flex shrink-0;
   }
@@ -4934,13 +4972,13 @@
     min-height: 34px;
     display: inline-flex;
     align-items: center;
-    color: var(--pb-text-inverse);
+    color: var(--pb-text-primary);
   }
   .whats-new-cache-badge-success {
-    background: #1f6f4a;
+    background: var(--pb-success-dim);
   }
   .whats-new-cache-badge-error {
-    background: #9f2f24;
+    background: var(--pb-error-dim);
   }
   .whats-new-week-nav {
     display: inline-flex;

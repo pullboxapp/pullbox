@@ -88,3 +88,27 @@ async def test_cache_token_rejects_corrupted_generation(tmp_path):
     (reader.root / "bases/20260913T050000Z.db").write_bytes(b"not a database")
     with pytest.raises(CatalogError):
         await reader.cache_token()
+
+
+async def test_cached_issue_parent_batch_is_bounded_and_omits_missing_ids(tmp_path, monkeypatch):
+    from pullbox.services.catalog.lookup import CatalogLookupService
+
+    reader = installed_reader(tmp_path)
+    queries = []
+    original = reader._query
+
+    def capture(sql, params):
+        queries.append(params)
+        return original(sql, params)
+
+    monkeypatch.setattr(reader, "_query", capture)
+    lookup = CatalogLookupService(reader)
+    result = await lookup.get_issue_batch_cached([str(n) for n in range(1, 252)] + ["100"])
+
+    assert list(result) == ["100"]
+    assert result["100"].series_provider_id == "10"
+    assert result["100"].issue_number_text == "0.5"
+    assert len(queries) == 2
+    assert max(map(len, queries)) <= 200
+    assert await lookup.get_issue_batch_cached([]) == {}
+    assert len(queries) == 2

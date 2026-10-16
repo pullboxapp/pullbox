@@ -191,6 +191,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "import_review_rematch_status",
         ),
         (
+            "/import/{job_id}/nested-comics/preview",
+            ("GET",),
+            "import_nested_repair_preview",
+            "import_nested_repair_preview",
+        ),
+        (
+            "/import/{job_id}/nested-comics/approve",
+            ("POST",),
+            "import_nested_repair_approve",
+            "import_nested_repair_approve",
+        ),
+        (
             "/import/{job_id}/safety/categories/{category}/preview",
             ("GET",),
             "import_review_preview_safety_category",
@@ -685,6 +697,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             ("GET",),
             "search_history_log_detail",
             "search_history_log_detail",
+        ),
+        (
+            "/whats-new/find-series/{cache_id}/{release_id}",
+            ("GET",),
+            "find_release_series",
+            "find_release_series",
         ),
         ("/whats-new", ("GET",), "whats_new_page", "whats_new_page"),
         ("/login", ("GET",), "login_page", "login_page"),

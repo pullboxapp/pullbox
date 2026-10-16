@@ -13,7 +13,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.core.exceptions import NotFoundError
-from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.indexer import IndexerConfig, IndexerType
 from pullbox.models.issue import Issue, IssueStatus, IssueType
@@ -40,6 +39,7 @@ from pullbox.services.search_service import (
     load_series_wanted_search_targets,
     load_wanted_issue_search_targets,
 )
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Generator
@@ -123,7 +123,7 @@ def _make_outcome(
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

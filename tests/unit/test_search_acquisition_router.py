@@ -12,7 +12,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.core.exceptions import ProviderError
-from pullbox.models import Base
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
     DirectAcquisitionState,
@@ -40,6 +39,7 @@ from pullbox.services.direct_search_coordinator import (
 from pullbox.services.release_validator import ReleaseValidator
 from pullbox.services.search_acquisition_router import route_search_acquisition
 from pullbox.services.search_targets import IssueSearchOutcome, IssueSearchTarget
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 async def db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

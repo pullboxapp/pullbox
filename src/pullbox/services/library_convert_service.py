@@ -7,13 +7,23 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import structlog
 from sqlalchemy import select
 
-from pullbox.core.exceptions import ValidationError
+from pullbox.config import get_settings
+from pullbox.core.exceptions import JobCancelledError, ValidationError
+from pullbox.core.file_safety import (
+    get_archive_size_limit_bytes,
+    is_dangerous_file_blocking_enabled,
+)
 from pullbox.models.library import FileFormat, LibraryFile
+from pullbox.services.archive_metadata_binding import (
+    ArchiveMetadataBindingError,
+    read_archive_metadata_binding,
+    require_unowned_metadata_file,
+)
 from pullbox.services.library_conversion_files import prepare_conversion
 from pullbox.services.library_conversion_recovery import (
     publish_conversion,
@@ -26,10 +36,14 @@ from pullbox.services.library_mutation_coordination import (
     lock_file_mutation_admission,
     require_no_archive_publication,
 )
+from pullbox.utilities.executors.archive_metadata_staging import ArchiveMetadataStagingError
 from pullbox.utilities.settings import build_trash_destination
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from pullbox.services.issue_file_metadata import PreparedFileMetadata
+    from pullbox.utilities.executors.archive_subprocess import ControlCheck, ProgressCallback
 
 logger = structlog.get_logger(__name__)
 
@@ -50,6 +64,7 @@ async def _sync_converted_file_record(
     before_path: str,
     after_path: str,
     metadata_embedded: bool = False,
+    restore_has_comicinfo: bool | None = None,
 ) -> None:
     result = await session.execute(select(LibraryFile).where(LibraryFile.file_path == before_path))
     library_file = result.scalar_one_or_none()
@@ -57,11 +72,14 @@ async def _sync_converted_file_record(
         return
 
     updated_path = Path(after_path)
+    updated_format = FileFormat(updated_path.suffix.lstrip(".").casefold())
     library_file.file_path = after_path
     library_file.file_name = updated_path.name
-    library_file.file_format = FileFormat.CBZ
+    library_file.file_format = updated_format
     library_file.file_hash = None
-    if metadata_embedded:
+    if restore_has_comicinfo is not None:
+        library_file.has_comicinfo = restore_has_comicinfo
+    elif metadata_embedded:
         library_file.has_comicinfo = True
     if updated_path.exists():
         stat = updated_path.stat()
@@ -70,6 +88,27 @@ async def _sync_converted_file_record(
 
 
 def _conversion_error_message(exc: Exception) -> str:
+    if isinstance(exc, ArchiveMetadataBindingError):
+        if exc.code == "import_rollback_protected":
+            return (
+                "This file still belongs to an import's rollback journal. "
+                "Paired conversion is not available for it yet; the file has not been changed."
+            )
+        return (
+            "This comic's metadata match needs review before conversion. "
+            "Review the issue match, then retry."
+        )
+    if isinstance(exc, ArchiveMetadataStagingError):
+        if str(exc) == "metadata_conflict":
+            return (
+                "The comic's embedded metadata disagrees with its library metadata. "
+                "Review the file metadata before converting."
+            )
+        if str(exc) == "unsafe_archive":
+            return (
+                "The source could not pass archive safety checks. "
+                "Replace or repair it before converting."
+            )
     if isinstance(exc, FileNotFoundError):
         return "Selected library item no longer exists on disk."
     if isinstance(exc, FileExistsError):
@@ -85,12 +124,18 @@ async def convert_library_file(
     source: Path,
     trash_dir: Path,
     trash_relative_path: str | Path,
+    operation_id: UUID | None = None,
+    require_paired_metadata: bool = False,
+    repack_cbz: bool = False,
+    reviewed_metadata: PreparedFileMetadata | None = None,
+    check_control: ControlCheck | None = None,
+    progress: ProgressCallback | None = None,
 ) -> LibraryConvertOutcome:
     """Own the conversion session lifecycle, retaining recoverable public artifacts."""
     if session.new or session.dirty or session.deleted or session.in_nested_transaction():
         raise ValidationError("Conversion requires a clean session.")
     source = source.absolute()
-    operation_id = uuid4()
+    operation_id = operation_id or uuid4()
     target = source.with_suffix(".cbz")
     relative = Path(trash_relative_path)
     if relative.is_absolute() or ".." in relative.parts:
@@ -103,12 +148,72 @@ async def convert_library_file(
             session, source, target, backup, include_descendants=False
         )
         binding = await read_conversion_binding(session, source)
-        if target.exists() or target.is_symlink() or target == source:
+        metadata_state = None
+        limit = None
+        policy_limit = None
+        block_dangerous = True
+        if (
+            (
+                require_paired_metadata
+                or reviewed_metadata is not None
+                or get_settings().metadata_paired_conversion_writer_enabled
+            )
+            and binding.file_id is not None
+            and binding.issue_id is not None
+        ):
+            await require_unowned_metadata_file(session, binding.file_id)
+            captured = await read_archive_metadata_binding(
+                session,
+                binding.file_id,
+                expected_issue_id=binding.issue_id,
+                allow_conversion_source=True,
+            )
+            metadata_state = captured.metadata
+            if reviewed_metadata is not None:
+                if (
+                    not reviewed_metadata.preview.ready
+                    or not reviewed_metadata.preview.converts_to_cbz
+                    or reviewed_metadata.target.path != source
+                    or reviewed_metadata.target.binding != captured
+                ):
+                    raise ArchiveMetadataBindingError("approval_changed")
+                await asyncio.to_thread(reviewed_metadata.target.check_unchanged)
+            limit = await get_archive_size_limit_bytes(session)
+            policy_limit = limit
+            if (
+                reviewed_metadata is not None
+                and reviewed_metadata.approved_resource_limit is not None
+            ):
+                limit = max(limit, reviewed_metadata.approved_resource_limit)
+            block_dangerous = await is_dangerous_file_blocking_enabled(session)
+        if require_paired_metadata and metadata_state is None:
+            raise ValidationError("Paired conversion requires a verified library issue match.")
+        same_path_repack = repack_cbz and metadata_state is not None and target == source
+        if not same_path_repack and (target.exists() or target.is_symlink() or target == source):
             raise FileExistsError
         await session.commit()
-        async with prepare_conversion(source, backup, binding) as plan:
+        async with prepare_conversion(
+            source,
+            backup,
+            binding,
+            metadata_state=metadata_state,
+            max_uncompressed_bytes=limit,
+            metadata_policy_limit=policy_limit,
+            block_dangerous=block_dangerous,
+            reviewed=(reviewed_metadata.series, reviewed_metadata.issue)
+            if reviewed_metadata
+            else None,
+            primary_identity=reviewed_metadata.primary if reviewed_metadata else None,
+            expected_source=reviewed_metadata.target.fingerprint if reviewed_metadata else None,
+            check_control=check_control,
+            progress=progress,
+        ) as plan:
+            if check_control is not None:
+                await check_control()
             await record_conversion(session, plan, operation_id)
             await finish_short_mutation(asyncio.create_task(session.commit()))
+            if check_control is not None:
+                await check_control()
             await publish_conversion(session, operation_id)
             await finish_short_mutation(asyncio.create_task(session.commit()))
             state = await recover_conversion(session, operation_id)
@@ -119,7 +224,7 @@ async def convert_library_file(
         return LibraryConvertOutcome("file", str(source), str(target), str(backup))
     except BaseException as exc:
         await session.rollback()
-        if isinstance(exc, ValidationError) or not isinstance(exc, Exception):
+        if isinstance(exc, (ValidationError, JobCancelledError)) or not isinstance(exc, Exception):
             raise
         logger.warning(
             "library_conversion_interrupted", operation_id=str(operation_id), exc_info=True

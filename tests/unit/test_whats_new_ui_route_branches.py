@@ -81,6 +81,7 @@ def _release(
 
 def _row(payload: dict[str, Any], *, store_date: date | None = None) -> SimpleNamespace:
     return SimpleNamespace(
+        id=1 if store_date is not None else 2,
         payload=payload,
         store_date=store_date,
         publisher=None,

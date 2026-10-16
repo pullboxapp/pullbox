@@ -22,6 +22,7 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import ImportProviderDegradedError, JobPausedError
+from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import (
     ImportedFile,
@@ -1408,6 +1409,7 @@ async def run_import_file_matching(
                 and _file_has_deferred_archive_metadata(imp_file)
                 and (
                     imp_series.cv_match_method == "mylar3_cv_id"
+                    or bool((imp_file.diagnostics or {}).get("nested_repair"))
                     or (
                         (release := parse_release_title(imp_file.file_name)) is not None
                         and release.issue_type.value in {"annual", "volume"}
@@ -2017,7 +2019,11 @@ def _persist_deferred_source_evidence(
 ) -> None:
     """Persist local archive evidence without replacing Mylar row authority."""
     diagnostics = dict(imp_file.diagnostics or {})
+    nested = dict(diagnostics.get("source_metadata") or {}).get("nested_comic")
     diagnostics["source_metadata"] = dict(metadata.diagnostics)
+    if isinstance(nested, dict):
+        # Archive extraction refreshes identity signals, not the scan's repair contract.
+        diagnostics["source_metadata"]["nested_comic"] = nested
     diagnostics["metadata_signals"] = {
         key: signal.value for key, signal in metadata.signals.items()
     }
@@ -2072,6 +2078,27 @@ def _evaluate_file_match_candidate(
     metadata_conflict: dict[str, Any] | None = None
 
     if match_candidate is not None:
+        cached_issue = target_index.cached_issue_metadata.get(imp_file.comicvine_issue_id or 0)
+        source_number = file_metadata.issue_number_text or file_metadata.issue_number
+        if (
+            cached_issue is not None
+            and source_number is not None
+            and normalize_issue_number_text(source_number)
+            != normalize_issue_number_text(
+                cached_issue.issue_number_text or cached_issue.issue_number
+            )
+        ):
+            return None, {
+                "kind": "metadata_conflict",
+                "conflict_type": "comicinfo_issue_number_mismatch",
+                "preserve_series_match": True,
+                "source_issue_number": source_number,
+                "target_issue_number": cached_issue.issue_number_text or cached_issue.issue_number,
+                "target_issue_cv_id": match_candidate.matched_issue_cv_id,
+                "rejection_reason": (
+                    "ComicInfo issue ID and issue number disagree. Review this file's issue match."
+                ),
+            }
         metadata_conflict = corroborated_import_title_conflict(
             file_metadata, imp_series.cv_title or imp_series.raw_series_name
         )

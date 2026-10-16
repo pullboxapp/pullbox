@@ -23,7 +23,7 @@ from pullbox.composition.events import build_domain_event_bus
 from pullbox.composition.providers import register_download_clients
 from pullbox.core.sqlite_lock import run_sqlite_transaction_with_retry
 from pullbox.database import get_session_factory
-from pullbox.models.download import DownloadClientType
+from pullbox.models.download import DownloadClientType, DownloadHistory
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
 from pullbox.providers.base import ProviderRegistry
@@ -64,6 +64,7 @@ from pullbox.tasks.download_post_processing_destination import (
     find_existing_destination_file,
     register_existing_destination_file,
 )
+from pullbox.tasks.download_post_processing_metadata import finish_download_metadata
 from pullbox.tasks.download_post_processing_runtime import PostProcessingRuntime
 from pullbox.tasks.download_post_processing_source_validation import (
     ResolveLocalPath,
@@ -100,11 +101,10 @@ from pullbox.tasks.post_processing_progress import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncSession
-
-    from pullbox.models.download import DownloadHistory
 
 logger = structlog.get_logger(__name__)
 
@@ -425,6 +425,10 @@ async def _run_post_processing(
     resolve_local_path: ResolveLocalPath | None = None,
     cleanup_source: bool = True,
     allow_resource_safety_exception: bool = False,
+    metadata_finisher: Callable[
+        [AsyncSession, DownloadHistory, PostProcessingRuntime], Awaitable[Path]
+    ]
+    | None = None,
 ) -> None:
     """Transfer the downloaded file to the library and update all records.
 
@@ -474,7 +478,27 @@ async def _run_post_processing(
     runtime.enter_phase(PostProcessingPhase.RESOLVING_SOURCE)
 
     try:
+        from pullbox.config import get_settings
         from pullbox.core.library_policy import load_library_ingest_policy
+
+        ingest_policy = await load_library_ingest_policy(session)
+        # The paired writer owns persisted queue claims, not the direct
+        # acquisition adapter's separate lifecycle and transaction.
+        paired_metadata = (
+            metadata_finisher is not None
+            or (
+                isinstance(download, DownloadHistory)
+                and get_settings().metadata_paired_download_writer_enabled
+            )
+        ) and ingest_policy.update_embedded_comicinfo_from_match
+        finish_metadata = metadata_finisher or finish_download_metadata
+        if paired_metadata and download.final_path is not None:
+            dest_path = await finish_metadata(session, download, runtime)
+            download.final_path = str(dest_path)
+            trace.final_path = str(dest_path)
+            trace.finalize_current_phase()
+            runtime.emit_summary(outcome="success")
+            return
 
         source_validation = await resolve_and_validate_source(
             session=session,
@@ -507,7 +531,6 @@ async def _run_post_processing(
         # Check skip_existing_files — if enabled, skip issues that already have a file
         from pullbox.core.file_ops import register_library_file, resolve_library_destination
 
-        ingest_policy = await load_library_ingest_policy(session)
         trace.configured_transfer_method = ingest_policy.post_processing_method
         trace.effective_transfer_method = ingest_policy.post_processing_method
         trace.transfer_method = ingest_policy.post_processing_method
@@ -518,6 +541,18 @@ async def _run_post_processing(
             download.download_client.is_torrent and trace.torrent_import_strategy == "seed_safe"
         )
         replacing_existing_file = bool(getattr(download, "replace_existing_file", False))
+        if paired_metadata and replacing_existing_file and issue.library_file is not None:
+            from pullbox.core.exceptions import ValidationError
+            from pullbox.services.archive_metadata_binding import (
+                ArchiveMetadataBindingError,
+                require_unowned_metadata_file,
+            )
+            from pullbox.services.issue_file_metadata import file_metadata_error
+
+            try:
+                await require_unowned_metadata_file(session, issue.library_file.id)
+            except ArchiveMetadataBindingError as exc:
+                raise ValidationError(file_metadata_error(exc)) from exc
         if (
             ingest_policy.skip_existing_files
             and issue.library_file is not None
@@ -560,6 +595,16 @@ async def _run_post_processing(
         )
         dest_path = destination_plan.dest_path
         dest_dir = destination_plan.dest_dir
+        if (
+            paired_metadata
+            and comic_file is not None
+            and comic_file.resolve() == dest_path.resolve()
+        ):
+            raise RuntimeError(
+                "This download is already at the library destination. "
+                "Choose a separate managed copy before writing metadata; "
+                "the original was not changed."
+            )
 
         existing_destination = None
         if not replacing_existing_file:
@@ -570,6 +615,11 @@ async def _run_post_processing(
                 log=log,
             )
         if existing_destination is not None:
+            if paired_metadata:
+                raise RuntimeError(
+                    "An existing file already occupies this download's destination. "
+                    "Review the existing library file before retrying; it was not changed."
+                )
             await register_existing_destination_file(
                 session=session,
                 existing_destination=existing_destination,
@@ -636,12 +686,21 @@ async def _run_post_processing(
             replacement_trash_dir=await resolve_configured_utility_trash_dir(session)
             if replacing_existing_file
             else None,
+            paired_metadata=paired_metadata,
         )
+
+        if paired_metadata:
+            download.final_path = str(dest_path)
+            dest_path = await finish_metadata(session, download, runtime)
 
         # 5b. Clean up empty source directory for usenet downloads (SABnzbd/NZBGet).
         # Torrent clients manage their own files (seeding), so we never touch those.
         # Only clean up when using "move" — copy/hardlink/symlink should preserve.
-        if cleanup_source and should_cleanup_source_dir(method, download.download_client):
+        if (
+            not paired_metadata
+            and cleanup_source
+            and should_cleanup_source_dir(method, download.download_client)
+        ):
             cleanup_start = _time.monotonic()
             cleanup_root = await _resolve_local_download_root(session, download)
             cleanup_dir = probe_root if probe_root != comic_file else comic_file.parent
@@ -684,6 +743,7 @@ async def _run_post_processing(
             "post_processing_complete",
             final_path=str(dest_path),
         )
+        trace.finalize_current_phase()
         runtime.emit_summary(outcome="success")
     except Exception as exc:
         trace.finalize_current_phase()

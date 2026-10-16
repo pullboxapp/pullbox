@@ -13,7 +13,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.blocklist import BlocklistEntry, BlocklistReason
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
@@ -35,6 +34,7 @@ from pullbox.services.direct_download_history_adapter import (
     sync_direct_download_history,
 )
 from pullbox.tasks.direct_acquisition_task import DirectAcquisitionRunner
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -47,7 +47,7 @@ async def session_factory(
 ) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'direct-runner.db'}")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         session.add(

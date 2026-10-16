@@ -13,8 +13,10 @@ from sqlalchemy.orm import joinedload
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.config import get_settings
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series
+from pullbox.services.series_interest import active_watches
 
 router = APIRouter()
 
@@ -344,6 +346,10 @@ async def pull_list(
         search_query=search_query,
         sort=sort_value,
         pull_list_return_url=pull_list_return_url,
+        watching=await active_watches(session)
+        if get_settings().metadata_whats_new_actions_enabled
+        else [],
+        whats_new_actions_enabled=get_settings().metadata_whats_new_actions_enabled,
     )
 
     if request.headers.get("HX-Request"):

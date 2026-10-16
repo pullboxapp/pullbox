@@ -5,11 +5,20 @@ from __future__ import annotations
 import os
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+import pullbox
+from pullbox.models.user import User
+
+if TYPE_CHECKING:
+    from httpx import AsyncClient
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -35,6 +44,27 @@ SETTINGS_ICON_PATH = (
     "l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869"
     'l.214-1.28zM15 12a3 3 0 11-6 0 3 3 0 016 0z"'
 )
+
+
+class _ShellLabelParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.user_menus: list[dict[str, str | None]] = []
+        self.logo_links: list[dict[str, str | None]] = []
+        self.text: list[str] = []
+        self.has_injected_markup = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "button" and (values.get("aria-label") or "").startswith("User menu"):
+            self.user_menus.append(values)
+        if tag == "a" and values.get("data-testid") == "sidebar-logo-link":
+            self.logo_links.append(values)
+        if "data-label-x" in values:
+            self.has_injected_markup = True
+
+    def handle_data(self, data: str) -> None:
+        self.text.append(data)
 
 
 @pytest.mark.asyncio
@@ -175,7 +205,7 @@ class TestSidebarShellRouteContracts:
             "justify-center rounded-lg p-0"
         ) in response.text
         assert re.search(
-            r'aria-label="User menu"[^>]*font-sans[^>]*font-medium',
+            r'aria-label="User menu for testuser"[^>]*font-sans[^>]*font-medium',
             response.text,
         )
         assert (
@@ -195,6 +225,39 @@ class TestSidebarShellRouteContracts:
         assert SETTINGS_ICON_PATH in response.text
         assert "window.__autoSearching" not in response.text
         assert 'x-data="{ sidebarOpen:' not in response.text
+
+    @pytest.mark.parametrize(
+        "username",
+        ["testuser", 'reader" onfocus="alert(1)"><i data-label-x>&'],
+        ids=["normal", "escaped"],
+    )
+    async def test_shell_accessible_labels_include_rendered_text_and_escape_attributes(
+        self,
+        authenticated_client: AsyncClient,
+        sec_db: async_sessionmaker[AsyncSession],
+        sec_user: User,
+        username: str,
+    ) -> None:
+        async with sec_db() as session:
+            stored_user = await session.get(User, sec_user.id)
+            assert stored_user is not None
+            stored_user.username = username
+            await session.commit()
+
+        response = await authenticated_client.get("/series")
+        assert response.status_code == 200
+        parsed = _ShellLabelParser()
+        parsed.feed(response.text)
+        parsed.close()
+
+        assert len(parsed.user_menus) == 1
+        assert len(parsed.logo_links) == 1
+        assert parsed.user_menus[0]["aria-label"] == f"User menu for {username}"
+        assert parsed.logo_links[0]["aria-label"] == f"Pullbox v{pullbox.__version__} — home"
+        assert username in parsed.text
+        assert f"v{pullbox.__version__}" in parsed.text
+        assert "onfocus" not in parsed.user_menus[0]
+        assert not parsed.has_injected_markup
 
     async def test_reader_gate_hides_reading_sidebar_entry(
         self,

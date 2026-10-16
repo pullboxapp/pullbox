@@ -25,6 +25,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.schemas.import_job import ImportProgressEvent
+from pullbox.services import import_file_execution
 from pullbox.services.import_deferred_recovery_execution import save_recovery_state
 from pullbox.services.import_file_execution import process_import_series_files
 from pullbox.services.import_job_actions import record_action
@@ -62,6 +63,16 @@ async def recovery_factory(tmp_path):
 async def test_in_place_workers_serialize_retry_and_preserve_decisions(
     recovery_factory, monkeypatch, tmp_path, source_type, failure
 ):
+    retry_delays: list[float] = []
+    production_delay = import_file_execution.sqlite_lock_retry_delay
+    assert import_file_execution.SQLITE_LOCK_RETRY_ATTEMPTS == 8
+
+    def record_retry_delay(attempt: int) -> float:
+        retry_delays.append(production_delay(attempt))
+        return 0.0
+
+    # Retain real transactions, lock contention and asyncio.sleep's scheduling yield.
+    monkeypatch.setattr(import_file_execution, "sqlite_lock_retry_delay", record_retry_delay)
     async with recovery_factory() as session:
         job, item, files, _, _ = await _setup_full_scenario(session, num_issues=2)
         job.source_type = source_type
@@ -197,6 +208,16 @@ async def test_in_place_workers_serialize_retry_and_preserve_decisions(
             for p in progress
         )
 
+    if failure in {"always", "second"}:
+        assert retry_delays == [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
+        assert attempts == (9 if failure == "second" else 8)
+    elif failure in {"once", "actual_lock", "journal_once", "cancel"}:
+        assert retry_delays == [0.25]
+        if failure == "cancel":
+            assert attempts == 1
+    else:
+        assert retry_delays == []
+
     async with recovery_factory() as session:
         statuses = list(
             (await session.scalars(select(ImportedFile.status).order_by(ImportedFile.id))).all()
@@ -224,6 +245,8 @@ async def test_in_place_workers_serialize_retry_and_preserve_decisions(
     if failure == "second":
         failure = None
         assert await execute() == (1, 0)
+        assert attempts == 10
+        assert retry_delays == [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
         async with recovery_factory() as session:
             assert await session.scalar(select(func.count()).select_from(LibraryFile)) == 2
             assert await session.scalar(select(func.count()).select_from(ImportJobAction)) == 2

@@ -10,11 +10,12 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from sqlalchemy import case, func, inspect, select, update
 from sqlalchemy.orm import contains_eager
 
-from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.api.deps import AuthenticatedUser, DbSession, require_interactive_auth
 from pullbox.config import get_settings
 from pullbox.core.events import IssueWanted, get_event_bus
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.library_policy import load_search_on_add_default
+from pullbox.core.metadata_identity_state import IdentityReviewRequiredError
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
@@ -34,6 +35,7 @@ from pullbox.schemas.series import (
 from pullbox.services.cover_url_service import build_series_cover_url
 from pullbox.services.metadata_catalog_review import approve_catalog_review
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_identity_attachment import IdentityAttachmentConflictError
 from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_series_add import source_series_add_transaction
 from pullbox.services.metadata_series_adoption import (
@@ -44,6 +46,11 @@ from pullbox.services.metadata_service import MetadataService
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.search_targets import load_series_wanted_search_targets
 from pullbox.services.series_service import SeriesService
+from pullbox.services.whats_new_actions import (
+    WhatsNewSelectionError,
+    link_confirmed_release,
+    validate_release_selection,
+)
 from pullbox.tasks.search_task import search_series_issues
 
 logger = structlog.get_logger(__name__)
@@ -386,6 +393,7 @@ async def add_series(
     body: SeriesCreate | SourceSeriesCreate,
     _user: AuthenticatedUser,
     session: DbSession,
+    request: Request,
 ) -> SeriesResponse:
     """Add a source-selected series, retaining the legacy ComicVine request."""
     search_on_add = await load_search_on_add_default(session)
@@ -393,6 +401,15 @@ async def add_series(
         raise ValidationError("Search on add is now controlled by the global import policy.")
 
     if isinstance(body, SourceSeriesCreate):
+        actor_user_id = _user.id
+        if body.whats_new_selection is not None:
+            if not get_settings().metadata_whats_new_actions_enabled:
+                raise HTTPException(404, "Release discovery actions are not enabled.")
+            await require_interactive_auth(request, _user)
+            try:
+                await validate_release_selection(session, body.whats_new_selection)
+            except WhatsNewSelectionError as exc:
+                raise HTTPException(409, str(exc)) from exc
         gcd_enabled = get_settings().metadata_gcd_api_v2_enabled
         runtime = await load_source_runtime(session, gcd_api_enabled=gcd_enabled)
         await session.rollback()
@@ -418,9 +435,19 @@ async def add_series(
                 search_on_add=search_on_add,
                 event_bus=get_event_bus(),
             ) as result:
+                if body.whats_new_selection is not None:
+                    await link_confirmed_release(
+                        session, body.whats_new_selection, result.series.id, actor_user_id
+                    )
                 response = await _load_series_response(session, result.series.id)
             return response
         except SeriesAdoptionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (
+            WhatsNewSelectionError,
+            IdentityAttachmentConflictError,
+            IdentityReviewRequiredError,
+        ) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     series_svc = await _build_series_service(session)

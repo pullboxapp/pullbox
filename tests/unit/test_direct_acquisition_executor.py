@@ -16,7 +16,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import pullbox.services.direct_acquisition_executor as direct_executor_module
-from pullbox.models import Base
 from pullbox.models.blocklist import BlocklistEntry
 from pullbox.models.config import SystemConfig
 from pullbox.models.direct_acquisition import (
@@ -82,6 +81,7 @@ from pullbox.services.direct_artifact_post_processing import DirectPostProcessin
 from pullbox.services.direct_artifact_quarantine import DirectArtifactQuarantine
 from pullbox.services.direct_configuration_service import update_host_credentials
 from pullbox.services.operation_progress_dispatch import drain_operation_progress_updates
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -138,7 +138,7 @@ def test_slow_source_tracker_uses_recovery_hysteresis() -> None:
 async def session(tmp_path: Path) -> AsyncGenerator[AsyncSession, None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db_session:
         series = Series(

@@ -52,6 +52,7 @@ _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS = (
     "issue_count_hint",
     "metadata_signals",
     "source_metadata",
+    "safety_exception",
     "mylar3_cross_folder_reconciliation",
     "mylar3_path_reconciliation",
     "provisional_target_reconciliation",

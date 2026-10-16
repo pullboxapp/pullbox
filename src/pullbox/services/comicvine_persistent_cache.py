@@ -322,6 +322,37 @@ class PersistentComicVineCacheProvider:
             provider_id: found[provider_id] for provider_id in provider_ids if provider_id in found
         }
 
+    async def get_issue_batch_cached(
+        self, issue_provider_ids: list[str]
+    ) -> dict[str, IssueMetadata]:
+        """Return fresh exact issue identities in bounded reads, never fetching misses."""
+        provider_ids = _ordered_provider_ids(issue_provider_ids)
+        found: dict[str, IssueMetadata] = {}
+        for offset in range(0, len(provider_ids), 200):
+            keys = {
+                _cache_key({"issue_provider_id": value}): value
+                for value in provider_ids[offset : offset + 200]
+            }
+            try:
+                async with self._session_factory() as session:
+                    rows = await session.execute(
+                        select(
+                            MetadataProviderCacheEntry.cache_key, MetadataProviderCacheEntry.payload
+                        ).where(
+                            MetadataProviderCacheEntry.provider_name == _PROVIDER_NAME,
+                            MetadataProviderCacheEntry.cache_kind == "get_issue",
+                            MetadataProviderCacheEntry.cache_key.in_(keys),
+                            MetadataProviderCacheEntry.expires_at > self._now(),
+                        )
+                    )
+                    for key, payload in rows:
+                        found[keys[key]] = _issue_metadata_from_payload(payload)
+                        self._stats.hits["get_issue"] += 1
+            except SQLAlchemyError:
+                # Cache availability must not turn a local-only scan into a provider fetch.
+                return {}
+        return found
+
     async def get_issues_for_series(self, series_provider_id: str) -> list[IssueSummary]:
         request = {"series_provider_id": str(series_provider_id)}
         return await self._get_or_fetch(

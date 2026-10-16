@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from dataclasses import replace
+from html.parser import HTMLParser
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
@@ -15,14 +16,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.story_arc import IssueStoryArc, StoryArc
 from pullbox.providers.metadata.comicvine import ComicVineError
+from pullbox.providers.story_arcs import StoryArcSearchResult
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from pullbox.services.story_arc_catalog import StoryArcCatalogService
+from tests.sqlite_schema import create_test_schema
 from tests.story_arc_catalog_fixtures import CatalogProvider
 
 if TYPE_CHECKING:
@@ -34,6 +36,19 @@ if TYPE_CHECKING:
 pytest_plugins = ["conftest_security"]
 
 
+class _CatalogLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.nodes: list[tuple[str, dict[str, str | None]]] = []
+        self.text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.nodes.append((tag, dict(attrs)))
+
+    def handle_data(self, data: str) -> None:
+        self.text.append(data)
+
+
 @pytest.fixture
 async def sec_db(tmp_path_factory):
     # Cache/account sessions must not invalidate the request's shared StaticPool connection.
@@ -41,7 +56,7 @@ async def sec_db(tmp_path_factory):
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await create_test_schema(connection)
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()
@@ -210,6 +225,42 @@ async def test_catalog_search_renders_provider_cover_and_missing_cover_fallback(
     assert 'alt="Numbering Event"' in response.text
     assert 'loading="lazy"' in response.text
     assert response.text.count('class="add-series-result-cover-empty"') == 1
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Numbering Event", 'Event" onfocus="alert(1)"><i data-label-x>&'],
+    ids=["normal", "escaped"],
+)
+async def test_catalog_preview_link_name_includes_visible_label_and_escapes_title(
+    authenticated_client: AsyncClient,
+    catalog_provider: CatalogProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    title: str,
+) -> None:
+    monkeypatch.setattr(
+        catalog_provider,
+        "search_story_arcs_page",
+        AsyncMock(return_value=([StoryArcSearchResult(provider_id="42", title=title)], 1)),
+    )
+    response = await authenticated_client.get(
+        "/story-arcs/add?q=event", headers={"HX-Request": "true"}
+    )
+
+    assert response.status_code == 200
+    parser = _CatalogLinkParser()
+    parser.feed(response.text)
+    links = [
+        attrs
+        for tag, attrs in parser.nodes
+        if tag == "a" and "add-series-result-add" in (attrs.get("class") or "").split()
+    ]
+    assert len(links) == 1
+    assert links[0]["aria-label"] == f"Preview members of {title}"
+    assert links[0]["href"] == "/story-arcs/catalog/comicvine_api/42"
+    assert "Preview members" in parser.text
+    assert "onfocus" not in links[0]
+    assert not any("data-label-x" in attrs for _, attrs in parser.nodes)
 
 
 async def test_catalog_preview_uses_review_workspace_and_separate_canonical_root(

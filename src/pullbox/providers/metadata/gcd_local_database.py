@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from sqlalchemy.sql import Select
+    from sqlalchemy.sql.selectable import TableClause
 
 
 class GcdDatabaseError(ValueError):
@@ -89,6 +90,25 @@ _READ_SLOTS = threading.BoundedSemaphore(2)
 _VALIDATION_SLOT = threading.BoundedSemaphore(1)
 
 
+def optional_profile(db: sqlite3.Connection, tables: tuple[TableClause, ...]) -> bool:
+    """Older minimal dumps remain readable; present enrichment tables must be real."""
+    found = [
+        db.execute("SELECT type,sql FROM sqlite_schema WHERE name=?", (expected.name,)).fetchone()
+        for expected in tables
+    ]
+    for expected, kind in zip(tables, found, strict=True):
+        if kind is None:
+            continue
+        if kind[0] != "table" or not kind[1] or "VIRTUAL TABLE" in kind[1].upper():
+            raise GcdDatabaseError("The optional GCD schema is incompatible.")
+        actual = {
+            row[0] for row in db.execute("SELECT name FROM pragma_table_info(?)", (expected.name,))
+        }
+        if not set(expected.c.keys()) <= actual:
+            raise GcdDatabaseError("The optional GCD schema is incompatible.")
+    return all(kind is not None for kind in found)
+
+
 def signature(path: Path) -> tuple[int, int, int, int, int]:
     if not path.is_absolute() or ".." in path.parts or any(ord(c) < 32 for c in str(path)):
         raise GcdDatabaseError("Enter an absolute path to a GCD SQLite dump.")
@@ -129,7 +149,9 @@ def open_readonly(
 def rows(db: sqlite3.Connection, query: Select[Any]) -> list[sqlite3.Row]:
     # SQLAlchemy Core owns the query and binds; sqlite3 is confined to the
     # off-loop, read-only external-file boundary rather than the app database.
-    compiled = query.compile(dialect=dialect(paramstyle="named"))
+    compiled = query.compile(
+        dialect=dialect(paramstyle="named"), compile_kwargs={"render_postcompile": True}
+    )
     return db.execute(str(compiled), compiled.params).fetchall()
 
 

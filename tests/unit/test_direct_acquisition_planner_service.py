@@ -10,7 +10,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
     DirectAcquisitionState,
@@ -44,6 +43,7 @@ from pullbox.services.direct_acquisition_planner_service import (
     resolve_planned_artifact_source,
 )
 from pullbox.services.direct_resolver_service import ProviderResolverOption
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -215,7 +215,7 @@ async def test_transfer_recovery_skips_the_already_failed_primary_provider(
 async def session() -> AsyncGenerator[AsyncSession, None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db_session:
         series = Series(

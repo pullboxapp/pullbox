@@ -15,6 +15,7 @@ from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_entity_values import apply_issue_metadata_values
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
+from pullbox.services.metadata_locg_enrichment import IssueReleaseFacts, enrich_issue_snapshot
 from pullbox.services.metadata_series_adoption import (
     SourceIssueBatch as SourceIssueBatch,
 )
@@ -41,6 +42,7 @@ async def apply_issue_batch(
     *,
     complete: bool = False,
     replace_managed: bool = False,
+    release_facts: tuple[IssueReleaseFacts, ...] = (),
 ) -> tuple[int, ...]:
     """Apply to a locked, revalidated read set; return exactly the created IDs.
 
@@ -79,6 +81,7 @@ async def apply_issue_batch(
         )
     by_number = {item.values.issue_number_text: item for item in state.issues}
     prepared = []
+    release_by_issue = {item.local_id: item for item in release_facts}
     for metadata, (number, text) in zip(batch.issues, numbers, strict=True):
         identity = ExternalIdentityRef(
             source.identity_namespace, MetadataEntityKind.ISSUE, metadata.external_id
@@ -105,6 +108,10 @@ async def apply_issue_batch(
             replace_managed=replace_managed,
             fields=ISSUE_FIELDS,
         )
+        if existing is not None:
+            snapshot = enrich_issue_snapshot(
+                snapshot, release_by_issue.get(existing.local_id), now=now
+            )
         prepared.append((existing, metadata, number, text, snapshot))
     new_metadata = tuple(metadata for old, metadata, *_rest in prepared if old is None)
     if new_metadata:

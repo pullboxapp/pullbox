@@ -244,8 +244,11 @@ def test_ci_and_local_full_ci_enforce_v1_coverage_gate() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     ci_local_match = re.search(r"^ci-local:.*?(?=^\S|\Z)", makefile, re.MULTILINE | re.DOTALL)
 
-    test_job = ci_config["jobs"]["test"]
-    matrix_rows = test_job["strategy"]["matrix"]["include"]
+    matrix_rows = [
+        row
+        for name in ("test", "test-production")
+        for row in ci_config["jobs"][name]["strategy"]["matrix"]["include"]
+    ]
     assert matrix_rows == [
         {"python-version": "3.12", "coverage_fail_under": 0},
         {"python-version": "3.13", "coverage_fail_under": 0},
@@ -398,8 +401,10 @@ def test_release_sync_fast_path_is_wired_to_required_aggregate_workflows() -> No
                 "typecheck",
                 "alembic-check",
                 "test",
+                "test-production",
                 "accessibility",
                 "e2e",
+                "e2e-firefox",
             ],
             "message": "heavyweight CI jobs intentionally skipped",
         },
@@ -495,7 +500,15 @@ def test_self_hosted_jobs_separate_heavy_ci_from_lightweight_checks() -> None:
     """Keep matrix tests off runners used by accessibility and security checks."""
     expected_labels = {
         "ci.yml": {
-            "ci": ["quality-gate", "typecheck", "test", "alembic-check", "e2e"],
+            "ci": [
+                "quality-gate",
+                "typecheck",
+                "test",
+                "test-production",
+                "alembic-check",
+                "e2e",
+                "e2e-firefox",
+            ],
             "checks": ["accessibility"],
         },
         "security.yml": {
@@ -582,6 +595,7 @@ def test_ci_video_and_trace_capture_are_manual_diagnostics_only() -> None:
     for job_name, step_name in [
         ("accessibility", "Run accessibility browser tests"),
         ("e2e", "Run E2E tests"),
+        ("e2e-firefox", "Run E2E tests"),
     ]:
         job = jobs.get(job_name)
         assert isinstance(job, dict)
@@ -640,7 +654,10 @@ def test_dependency_audit_policy_is_shared_and_retains_raw_ci_evidence() -> None
         step for step in job["steps"] if step.get("name") == "Upload dependency audit report"
     )
     assert upload["if"] == "always()"
-    assert upload["with"]["path"] == "dependency-audit-report.json"
+    assert upload["with"]["path"].splitlines() == [
+        "dependency-audit-report.json",
+        "dependency-audit-report-provenance.json",
+    ]
 
 
 def test_environment_bootstrap_uses_current_packaging_tool_floor() -> None:
@@ -1012,6 +1029,7 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         ("libexpat1-dev", "2.8.3-1~deb13u1+dhi2", "deb"),
         ("libexpat1", "2.8.3-1~deb13u1+dhi3", "deb"),
         ("libexpat1", "2.8.3-1~deb13u1+dhi4", "deb"),
+        ("^libexpat1$", "2.8.3-1~deb13u1+dhi5", "deb"),
     }
 
     current_expat_exceptions = [
@@ -1019,7 +1037,7 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         for entry in config["ignore"]
         if entry.get("vulnerability") in {"CVE-2026-76956", "CVE-2026-76957"}
     ]
-    assert "Re-review by 2026-10-07" in config_text
+    assert "Re-review by 2026-10-14 or the next base-image refresh" in config_text
     assert {
         (
             entry["vulnerability"],
@@ -1036,6 +1054,9 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
             "2.8.3-1~deb13u1+dhi3",
             "2.8.3-1~deb13u1+dhi4",
         )
+    } | {
+        (cve, "^libexpat1$", "2.8.3-1~deb13u1+dhi5", "deb")
+        for cve in {"CVE-2026-76956", "CVE-2026-76957"}
     }
 
     utf16_injection_exceptions = [
@@ -1045,11 +1066,19 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         {
             "vulnerability": "CVE-2026-93990",
             "package": {
+                "name": "^libexpat1$",
+                "version": "2.8.3-1~deb13u1+dhi5",
+                "type": "deb",
+            },
+        },
+        {
+            "vulnerability": "CVE-2026-93990",
+            "package": {
                 "name": "libexpat1",
                 "version": "2.8.3-1~deb13u1+dhi4",
                 "type": "deb",
             },
-        }
+        },
     ]
 
 
@@ -1065,7 +1094,7 @@ def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() 
     }
     entries = [entry for entry in config["ignore"] if entry.get("vulnerability") in reviewed_cves]
 
-    assert "Re-review by 2026-10-04" in config_text
+    assert "Re-review by 2026-10-14" in config_text
     assert {
         (
             entry["vulnerability"],
@@ -1083,12 +1112,34 @@ def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() 
         )
         for package in ("zlib1g", "zlib1g-dev")
     } | {
-        ("CVE-2026-85091", "zlib1g", "1:1.3.dfsg+really1.3.1-1+dhi4", "deb"),
+        ("CVE-2026-85091", "^zlib1g$", "1:1.3.dfsg+really1.3.1-1+dhi4", "deb"),
     } | {
-        (cve, "libuuid1", version, "deb")
+        (cve, package, version, "deb")
         for cve in reviewed_cves - {"CVE-2026-85091"}
-        for version in ("2.41.5-0+deb13u1+dhi2", "2.41.5-0+deb13u1+dhi3")
+        for package, version in (
+            ("libuuid1", "2.41.5-0+deb13u1+dhi2"),
+            ("^libuuid1$", "2.41.5-0+deb13u1+dhi3"),
+        )
     }
+
+
+def test_grype_reviewed_gcc_exceptions_are_exact() -> None:
+    config = _load_yaml(GRYPE_CONFIG)
+    reviewed_cves = {"CVE-2026-102010", "CVE-2026-95619"}
+    entries = [entry for entry in config["ignore"] if entry.get("vulnerability") in reviewed_cves]
+    packages = {"^gcc-14-base$", "^libgcc-s1$", r"^libstdc\+\+6$"}
+
+    assert {
+        (
+            entry["vulnerability"],
+            entry["package"]["name"],
+            entry["package"]["version"],
+            entry["package"]["type"],
+        )
+        for entry in entries
+    } == {
+        (cve, package, "14.2.0-19+dhi5", "deb") for cve in reviewed_cves for package in packages
+    } | {("CVE-2026-102010", package, "14.2.0-19+dhi3", "deb") for package in packages}
 
 
 def test_docker_workflow_signs_and_verifies_published_images() -> None:

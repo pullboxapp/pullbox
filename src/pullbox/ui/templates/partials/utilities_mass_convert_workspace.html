@@ -18,7 +18,7 @@
           <span class="utility-step-num">01</span>
           <span class="utility-step-name">Convert to CBZ</span>
           <span class="utility-step-tag">Required</span>
-          <input type="checkbox" checked disabled class="checkbox-pb utility-step-check opacity-60" />
+          <input type="checkbox" checked disabled aria-label="Convert to CBZ (required)" class="checkbox-pb utility-step-check opacity-60" />
         </div>
 
         <label
@@ -26,9 +26,9 @@
           class="utility-step-card utility-step-card-inline cursor-pointer transition-colors hover:border-pb-border-strong"
         >
           <span class="utility-step-num">02</span>
-          <span class="utility-step-name">Embed ComicInfo.xml</span>
+          <span class="utility-step-name">{{ "Embed paired metadata" if paired_metadata_enabled else "Embed ComicInfo.xml" }}</span>
           <span class="utility-step-tag">Optional</span>
-          <input x-model="steps.metadata" type="checkbox" class="checkbox-pb utility-step-check" />
+          <input x-model="steps.metadata" type="checkbox" class="checkbox-pb utility-step-check"{% if paired_metadata_enabled %} aria-describedby="utilities-mass-convert-metadata-help"{% endif %} />
         </label>
 
         <label
@@ -41,6 +41,11 @@
           <input x-model="steps.verify" type="checkbox" class="checkbox-pb utility-step-check" />
         </label>
       </div>
+      {% if paired_metadata_enabled %}
+      <p id="utilities-mass-convert-metadata-help" x-show="steps.metadata" x-cloak class="text-sm text-pb-text-sec">
+        Writes reconciled ComicInfo.xml and MetronInfo.xml. Existing managed CBZ files stay at the same path with an original backup.
+      </p>
+      {% endif %}
     {% endcall %}
   </section>
 

@@ -14,6 +14,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from pullbox.models import Base
 from tests.fixtures.metadata_identity_persistence import build_identity_schema_probe
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -54,7 +55,10 @@ async def identity_probe_db(
     probe = build_identity_schema_probe()
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            if backend == "sqlite":
+                await create_test_schema(connection)
+            else:
+                await connection.run_sync(Base.metadata.create_all)
             await connection.run_sync(probe.series.create)
             await connection.run_sync(probe.issue.create)
             if probe.arc_index is not None:

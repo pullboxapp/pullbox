@@ -22,7 +22,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from pullbox.models.base import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
@@ -54,6 +53,7 @@ from pullbox.utilities.models import (
     UtilityJobItem,
     UtilityJobLog,
 )
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -66,7 +66,7 @@ async def async_engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
     """Use independent connections for concurrent dispatch and control readers."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'queue.db'}")
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await create_test_schema(connection)
     try:
         yield engine
     finally:

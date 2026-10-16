@@ -4,6 +4,7 @@ import hashlib
 import os
 import sqlite3
 import sys
+from contextlib import closing
 
 import pytest
 from sqlalchemy import func, select
@@ -20,7 +21,7 @@ URL = "/api/v1/metadata/sources/gcd_local"
 
 def gcd_dump(path):
     # Required columns use the 2026-09-29 official dump's names and semantics.
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.executescript("""
             CREATE TABLE gcd_publisher (id INTEGER PRIMARY KEY, name TEXT, deleted INTEGER);
             CREATE TABLE stddata_language (id INTEGER PRIMARY KEY, code TEXT);
@@ -141,7 +142,7 @@ async def test_gcd_search_preview_and_add_are_readonly_and_repeat_safe(
 async def test_changed_dump_requires_validation_before_queries(authenticated_client, tmp_path):
     path = gcd_dump(tmp_path / "gcd.db")
     assert (await activate(authenticated_client, path)).status_code == 200
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE gcd_series SET name='Replaced' WHERE id=2999")
     result = await search(authenticated_client)
     assert result.json()["sources"][0]["status"] == "invalid_configuration"
@@ -163,6 +164,54 @@ async def test_cross_series_variant_stays_represented(authenticated_client, tmp_
     assert result.json()["issues"]["data"]["results"][0]["external_id"] == "15"
 
 
+async def test_gcd_preview_and_add_expose_structured_credits(
+    authenticated_client, sec_db, monkeypatch, tmp_path
+):
+    from pullbox.models.creator import Creator
+    from pullbox.utilities.comicinfo_creators import load_comicinfo_creator_fields
+    from tests.unit.test_gcd_local_credits import EXPECTED, credited_dump
+
+    path = credited_dump(tmp_path / "gcd.db")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert (await activate(authenticated_client, path)).status_code == 200
+    preview = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "gcd_local", "external_id": "2999"},
+        headers=csrf(authenticated_client),
+    )
+    assert preview.status_code == 200
+    issues = preview.json()["issues"]["data"]["results"]
+    assert issues[0]["credits"] == EXPECTED
+    assert issues[2]["credits"] is None
+    root_path = tmp_path / "library"
+    root_path.mkdir()
+    async with sec_db.begin() as session:
+        root = LibraryRoot(name="Test", path=str(root_path), allow_managed_writes=True)
+        session.add(root)
+        await session.flush()
+        root_id = root.id
+    monkeypatch.setattr("pullbox.api.v1.series.get_event_bus", EventBus)
+    result = await authenticated_client.post(
+        "/api/v1/series",
+        json={
+            "source": "gcd_local",
+            "external_id": "2999",
+            "source_revision": 1,
+            "library_root_id": root_id,
+        },
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 201, result.text
+    async with sec_db() as session:
+        issue_id = await session.scalar(select(Issue.id).order_by(Issue.id))
+        assert (await load_comicinfo_creator_fields(session, issue_id))["Writer"] == "Alan Moore"
+        assert all(item.comicvine_id is None for item in await session.scalars(select(Creator)))
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    assert not [item for item in root_path.rglob("*") if item.is_file()], (
+        "Metadata Add may create its series directory, but must not create comic files"
+    )
+
+
 @pytest.mark.parametrize("kind", ["missing", "symlink", "incompatible"])
 async def test_invalid_gcd_candidates_fail_without_leaking_paths(
     authenticated_client, tmp_path, kind
@@ -171,7 +220,7 @@ async def test_invalid_gcd_candidates_fail_without_leaking_paths(
     if kind == "symlink":
         path.symlink_to(gcd_dump(tmp_path / "source.db"))
     elif kind == "incompatible":
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db, db:
             db.execute("CREATE TABLE unrelated (id INTEGER)")
     response = await activate(authenticated_client, path)
     assert response.status_code == 400
@@ -181,7 +230,7 @@ async def test_invalid_gcd_candidates_fail_without_leaking_paths(
 @pytest.fixture
 async def watchmen_catalog(authenticated_client, sec_db, monkeypatch, tmp_path):
     path = gcd_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute(
             "INSERT INTO gcd_series VALUES "
             "(3172, 'Watchmen', 'Watchmen', 1986, 1987, 1, 1, 13, 0, 0, 1, '')"
@@ -281,7 +330,7 @@ async def test_stale_or_forged_catalog_review_cannot_create_library(
             headers=csrf(authenticated_client),
         )
         assert result.status_code == 409
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE gcd_issue SET number='1 [3rd Printing]' WHERE id=647784")
     assert (await activate(authenticated_client, path, revision=1)).status_code == 200
     result = await authenticated_client.post(
@@ -299,7 +348,7 @@ async def test_gcd_review_includes_exceptions_after_the_first_page(
     authenticated_client, watchmen_catalog
 ):
     path, _, body = watchmen_catalog
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("UPDATE gcd_issue SET sort_code=500 WHERE id=647784")
         db.executemany(
             "INSERT INTO gcd_issue VALUES (?,3172,?,'',?,0,NULL,'','','',32)",
@@ -336,7 +385,7 @@ async def test_refresh_rejects_unreviewed_changes_without_changing_owned_files(
         issue = await session.scalar(select(Issue).order_by(Issue.id))
         issue.status = IssueStatus.OWNED
         issue_id = issue.id
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         if change == "changed_exception":
             db.execute("UPDATE gcd_issue SET number='1 [3rd Printing]' WHERE id=647784")
         else:
@@ -360,7 +409,7 @@ async def test_refresh_rejects_unreviewed_changes_without_changing_owned_files(
 
 async def test_all_unsupported_catalog_cannot_be_added(authenticated_client, watchmen_catalog):
     path, root, body = watchmen_catalog
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("DELETE FROM gcd_issue WHERE series_id=3172 AND id != 647784")
     assert (await activate(authenticated_client, path, revision=1)).status_code == 200
     body["source_revision"] = 2

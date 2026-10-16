@@ -21,17 +21,19 @@ from pullbox.models.issue import Issue, IssueType
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 from pullbox.providers.base import IssueSummary
+from pullbox.services.catalog.contract import CatalogError
 from pullbox.services.import_embedded_title_match import embedded_issue_number_title_match
 from pullbox.services.import_file_issue_signals import (
     candidate_issue_number,
     candidate_issue_number_text,
 )
+from pullbox.services.import_known_cv_match import explicit_provider_method
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.models.import_job import ImportedFile, ImportedSeries
-    from pullbox.providers.base import MetadataProvider
+    from pullbox.providers.base import IssueMetadata, MetadataProvider
 
 
 FileMatchTargetEntry = tuple[int | None, int | None, bool, Issue | None, str | None]
@@ -58,6 +60,7 @@ class FileMatchTargetIndex:
     provisional_exact_types: dict[str, IssueType] = field(default_factory=dict)
     existing_series: Series | None = None
     issue_entries: list[tuple[Issue, bool]] = field(default_factory=list)
+    cached_issue_metadata: dict[int, IssueMetadata] = field(default_factory=dict)
 
     @property
     def has_targets(self) -> bool:
@@ -106,6 +109,16 @@ async def load_file_match_target_index(
                 continue
             target_index.number_map[issue.issue_number] = entry
         return target_index
+
+    parent_proof = (imp_series.diagnostics or {}).get("embedded_issue_parent")
+    if (
+        isinstance(parent_proof, dict)
+        and parent_proof.get("series_id") == imp_series.cv_id
+        and imp_series.cv_match_method == "comicinfo_cv_id"
+    ):
+        # The archive supplied an issue ID, not a volume ID. Re-read exact cached
+        # targets rather than pretending the original tags supplied both IDs.
+        return await _cached_embedded_issue_target_index(imp_series, files or [], metadata_provider)
 
     trusted_source_index = _trusted_source_issue_target_index(imp_series, files or [])
     if trusted_source_index is not None:
@@ -161,6 +174,38 @@ async def load_file_match_target_index(
             if exact_text == format_issue_number(summary.issue_number):
                 target_index.number_map[summary.issue_number] = entry
 
+    return target_index
+
+
+async def _cached_embedded_issue_target_index(
+    imp_series: ImportedSeries,
+    files: list[ImportedFile],
+    provider: MetadataProvider | None,
+) -> FileMatchTargetIndex:
+    target_index = FileMatchTargetIndex()
+    lookup = explicit_provider_method(provider, "get_issue_batch_cached")
+    if lookup is None:
+        return target_index
+    ids = list(
+        dict.fromkeys(
+            str(file.comicvine_issue_id) for file in files if _has_trusted_issue_identity(file)
+        )
+    )
+    try:
+        metadata = await lookup(ids) if ids else {}
+    except (CatalogError, ValueError, TypeError, KeyError):
+        return target_index
+    for issue_id in ids:
+        issue = metadata.get(issue_id)
+        if (
+            issue is None
+            or str(issue.provider_id) != issue_id
+            or str(issue.series_provider_id) != str(imp_series.cv_id)
+        ):
+            continue
+        cv_id = int(issue_id)
+        target_index.cv_id_map[cv_id] = (None, cv_id, False, None, issue.title)
+        target_index.cached_issue_metadata[cv_id] = issue
     return target_index
 
 

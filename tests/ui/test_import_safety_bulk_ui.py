@@ -56,6 +56,54 @@ def _safety_block(
     return diagnostics
 
 
+async def test_nested_repair_preview_explains_copy_and_preservation(
+    authenticated_client: AsyncClient, sec_db: async_sessionmaker[AsyncSession], monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "pullbox.ui.import_routes.trigger_import_safety_bulk_rematch", lambda _: None
+    )
+    seeded = await _seed_bulk_safety_job(sec_db)
+    async with sec_db() as session:
+        file = await session.get(ImportedFile, seeded["file_ids"][0])
+        file.source_signature = {"schema_version": 1}
+        file.diagnostics = {
+            "safety_block": _safety_block(
+                ImportSafetyCategory.NESTED_COMIC_ARCHIVE, overrideable=False
+            ),
+            "source_metadata": {
+                "nested_comic": {
+                    "eligible": True,
+                    "inner_name": "nested.cbr",
+                    "inner_format": "cbr",
+                    "page_count": 35,
+                    "metadata_sources": ["outer"],
+                }
+            },
+        }
+        await session.commit()
+    response = await authenticated_client.get(
+        f"/import/{seeded['job_id']}/nested-comics/preview?status=fix_source&reason=nested_comic_archive"
+    )
+    assert response.status_code == 200
+    assert "Repair nested comics" in response.text
+    assert "Original files will not be changed or deleted" in response.text
+    assert 'name="preview_token"' in response.text
+    token = re.search(r'name="preview_token" value="([^"]+)"', response.text).group(1)
+    denied = await authenticated_client.post(
+        f"/import/{seeded['job_id']}/nested-comics/approve", data={"preview_token": token}
+    )
+    assert denied.status_code == 403
+    approved = await authenticated_client.post(
+        f"/import/{seeded['job_id']}/nested-comics/approve",
+        data={"preview_token": token},
+        headers=_csrf_header_for(authenticated_client),
+    )
+    assert approved.status_code == 200
+    async with sec_db() as session:
+        file = await session.get(ImportedFile, seeded["file_ids"][0])
+        assert file.diagnostics["nested_repair"]["approved"] is True
+
+
 async def _seed_bulk_safety_job(
     factory: async_sessionmaker[AsyncSession],
     *,

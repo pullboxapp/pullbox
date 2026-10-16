@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
@@ -289,7 +290,7 @@ async def test_comicvine_window_rejects_wrong_membership_without_partial_success
 
 async def test_local_window_sorts_and_limits_real_rows_without_including_other_series(tmp_path):
     reader = installed_reader(tmp_path)
-    with sqlite3.connect(reader.root / "bases/20260913T050000Z.db") as db:
+    with closing(sqlite3.connect(reader.root / "bases/20260913T050000Z.db")) as db, db:
         db.execute("DELETE FROM issues")
         db.execute("INSERT INTO series VALUES (11,'Other',2024,1,1,NULL)")
         db.execute("INSERT INTO series_fts(rowid,series_id,name,aliases) VALUES (11,11,'Other','')")

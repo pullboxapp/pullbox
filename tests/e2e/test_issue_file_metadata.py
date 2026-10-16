@@ -9,6 +9,46 @@ pytestmark = pytest.mark.e2e
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
+def test_native_metadata_review_requires_explicit_conversion(
+    authed_page, seeded_server, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 1000})
+    endpoint = "**/api/v1/issues/1/file-metadata"
+    page.route(endpoint + "/job", lambda route: route.fulfill(json={"job": None}))
+    page.route(
+        endpoint + "/preview",
+        lambda route: route.fulfill(
+            json={
+                "file_id": 1,
+                "file_name": "Batman 001.cb7",
+                "review_key": "a" * 64,
+                "unchanged": False,
+                "ready": True,
+                "changes": [],
+                "converts_to_cbz": True,
+            }
+        ),
+    )
+    page.goto(f"{seeded_server}/issues/1")
+    page.evaluate("theme => applyTheme(theme)", theme)
+    trigger = page.get_by_role("button", name="Write file metadata", exact=True)
+    trigger.click()
+    dialog = page.get_by_role("dialog", name="Write file metadata", exact=True)
+    expect(
+        dialog.get_by_text("This does not rename or move the file.", exact=False)
+    ).not_to_be_visible()
+    expect(dialog.get_by_text("Its original is saved", exact=False)).to_be_visible()
+    expect(dialog.get_by_role("button", name="Convert to CBZ and write metadata")).to_be_enabled()
+    expect(dialog.get_by_role("button", name="Write both metadata files")).not_to_be_visible()
+    assert_no_axe_violations(
+        page, name=f"native-metadata-{theme}", include=['[aria-labelledby="file-metadata-title"]']
+    )
+    dialog.get_by_role("button", name="Close", exact=True).click()
+    expect(trigger).to_be_focused()
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
 def test_file_metadata_preview_write_progress_and_focus(authed_page, seeded_server, theme, width):
     page = authed_page
     page.set_viewport_size({"width": width, "height": 1000})

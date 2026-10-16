@@ -127,7 +127,12 @@ async def test_changed_approval_and_cancel_never_replace_original(
                 check_control=control,
                 progress=noop,
             )
-        assert (path.read_bytes(), path.stat()) == original
+        actual = path.read_bytes(), path.stat()
+        assert actual[0] == original[0]
+        # Reading may update atime; identity, ownership, mode and size must not change.
+        assert actual[1][:7] == original[1][:7]
+        assert actual[1].st_mtime_ns == original[1].st_mtime_ns
+        assert actual[1].st_ctime_ns == original[1].st_ctime_ns
 
 
 async def test_restart_recovers_published_result_without_repacking(identity_probe_db, tmp_path):

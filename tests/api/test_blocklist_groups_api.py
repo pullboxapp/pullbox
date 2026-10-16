@@ -17,9 +17,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.user import APIKey, User
-from pullbox.services.auth_service import AuthService
+from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -34,20 +33,22 @@ pytestmark = pytest.mark.slow
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
 
 
 @pytest.fixture()
-async def _api_key_header(_db_factory: async_sessionmaker[AsyncSession]) -> str:
+async def _api_key_header(
+    _db_factory: async_sessionmaker[AsyncSession], seeded_user_password_hash: str
+) -> str:
     raw_key = "pb_k1_" + "d" * 64
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     async with _db_factory() as session:
         user = User(
             username="grpuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

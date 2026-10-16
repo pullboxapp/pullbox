@@ -2,6 +2,7 @@
 
 import hashlib
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -63,7 +64,7 @@ def test_snapshot_validation_reports_actual_records(tmp_path):
 def test_rejects_invalid_snapshot(tmp_path, sql):
     path = tmp_path / "base.db"
     build_snapshot(path)
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute(sql)
     with pytest.raises(CatalogError):
         validate_snapshot(path, "20260913T050000Z")
@@ -89,7 +90,7 @@ def test_daily_updates_rebuild_from_base_including_reverted_changes(tmp_path):
         apply_catalog_patch(base, patch, output, "20260913T050000Z", version)
         assert output.exists()
     assert validate_snapshot(output, "20260915T050000Z") == expected
-    with sqlite3.connect(output) as db:
+    with closing(sqlite3.connect(output)) as db, db:
         assert db.execute("SELECT name FROM series").fetchone()[0] == "Batman"
         assert db.execute("SELECT COUNT(*) FROM issues").fetchone()[0] == 1
 

@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from contextlib import closing
 
 import httpx
 import pytest
@@ -167,7 +168,7 @@ async def test_local_reads_are_offline_and_preserve_original_designation(tmp_pat
 async def test_local_issue_page_pins_one_generation_and_bounds_rows(tmp_path, monkeypatch):
     reader = installed_reader(tmp_path)
     await reader.series(10)
-    with sqlite3.connect(reader.root / "bases/20260913T050000Z.db") as db:
+    with closing(sqlite3.connect(reader.root / "bases/20260913T050000Z.db")) as db, db:
         db.executemany(
             "INSERT INTO issues VALUES (?,10,?,?,?,NULL,NULL,NULL,NULL)",
             [(i, str(i), str(i), str(i)) for i in range(101, 301)],

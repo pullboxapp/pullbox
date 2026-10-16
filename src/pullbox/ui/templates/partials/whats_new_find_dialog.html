@@ -1,0 +1,71 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+<div x-show="findOpen" x-cloak class="modal-shell !mt-0" @keydown.escape.window="closeFind()">
+  <div class="modal-backdrop" @click="closeFind()"></div>
+  <div class="modal-panel max-w-3xl max-h-[calc(100dvh-5rem)]" role="dialog" aria-modal="true"
+       aria-labelledby="whats-new-find-title" tabindex="-1" x-ref="findDialog"
+       data-testid="whats-new-find-dialog" @keydown.tab="trapFindFocus($event)">
+    <div class="modal-header">
+      <h3 id="whats-new-find-title" class="modal-title">Find &amp; Add series</h3>
+      <button type="button" class="icon-btn" @click="closeFind()" aria-label="Close Find & Add">
+        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>
+      </button>
+    </div>
+    <div class="modal-body p-5 space-y-4">
+      <p class="text-sm text-pb-text-sec">Choose the series this release belongs to, then review the Add preview. This uses your normal Add Series and Search on Add settings.</p>
+      <p x-show="releaseContext && !releaseContext.can_link" class="inline-alert inline-alert-warning">This release has no stable series ID. You can add a series, but this release will not be marked Tracked.</p>
+      <form hx-boost="false" @submit.prevent="searchReleaseSeries()" class="space-y-3">
+        <label for="whats-new-find-query" class="text-sm font-medium">Series title</label>
+        <input id="whats-new-find-query" x-ref="findQuery" class="input-pb w-full" x-model="findQuery" maxlength="512" autocomplete="off">
+        <div class="flex flex-wrap items-end gap-3">
+          <div class="min-w-0 flex-1">
+            <label for="whats-new-find-source" class="text-sm font-medium">Metadata source</label>
+            {{ dropdown_select(name="find_source", trigger_id="whats-new-find-source", value="all",
+                options=[("all", "All enabled sources")], options_expression="findSources",
+                local_model="findSource", disabled_expression="findBusy", class_name="w-full") }}
+          </div>
+          <button type="submit" class="btn-primary" :disabled="findBusy || !releaseContext || findQuery.trim().length < 2">Search</button>
+        </div>
+      </form>
+      <div x-show="findBusy" role="status" aria-live="polite" class="flex items-center gap-2 text-sm text-pb-text-sec">
+        <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"/><path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+        Searching metadata sources...
+      </div>
+      <div x-show="findError" x-cloak class="inline-alert inline-alert-danger" role="alert" x-text="findError"></div>
+      <template x-for="message in findMessages" :key="message"><p class="text-sm text-pb-text-sec" x-text="message"></p></template>
+      <div class="add-series-results-list" :aria-busy="findBusy">
+        <template x-for="result in findResults" :key="result.source + ':' + result.external_id">
+          <article class="add-series-result-card" data-comicvine-result-card-contract="v1">
+            <div class="add-series-result-cover shrink-0" aria-hidden="true" x-data="discoverySeriesCover(result, findRevisions[result.source])">
+              <img :src="coverUrl || null" x-show="coverUrl" alt="" class="h-full w-full object-cover" @error="coverUrl = ''">
+            </div>
+            <div class="min-w-0 flex-1 add-series-result-main">
+              <div class="min-w-0 flex-1">
+                <h4 class="add-series-result-title" x-text="result.title + (result.year_start ? ' (' + result.year_start + ')' : '')"></h4>
+                <div class="add-series-result-meta">
+                  <span x-text="result.publisher_name || 'Unknown publisher'"></span>
+                  <span x-text="result.issue_count ? result.issue_count + ' issues' : ''"></span>
+                  <span class="pill pill-info" x-text="result.source_label"></span>
+                  <span class="break-all" x-text="result.external_id"></span>
+                  <span x-show="result.already_added" class="pill pill-success">In Library</span>
+                </div>
+              </div>
+              <div class="add-series-result-actions">
+                <button type="button" class="btn-primary btn-sm" @click="selectDiscoveryResult(result, $el)" :disabled="findBusy || Boolean(result.identity_needs_review)">Select</button>
+                <span x-show="result.identity_needs_review" class="text-sm text-pb-text-sec">Review this series' identity in your library first.</span>
+              </div>
+            </div>
+          </article>
+        </template>
+      </div>
+      <p x-show="releaseContext && !findBusy && !findError && !findResults.length" class="text-sm text-pb-text-sec">No matches. Edit the title or choose another source, then search again.</p>
+    </div>
+    <div class="modal-footer flex-wrap gap-3">
+      <div class="flex flex-wrap items-center gap-2" x-show="findTotal">
+        <button type="button" class="btn-ghost btn-sm" @click="searchReleaseSeries(findPage - 1)" :disabled="findBusy || findPage <= 1">Previous results</button>
+        <span role="status" class="text-sm text-pb-text-sec" x-text="findPage + ' / ' + findPages + ' - ' + findTotal + ' matches'"></span>
+        <button type="button" class="btn-ghost btn-sm" @click="searchReleaseSeries(findPage + 1)" :disabled="findBusy || findPage >= findPages">Next results</button>
+      </div>
+      <button type="button" class="btn-ghost ml-auto" @click="closeFind()">Cancel</button>
+    </div>
+  </div>
+</div>

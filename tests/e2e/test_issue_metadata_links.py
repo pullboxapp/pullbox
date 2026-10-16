@@ -9,6 +9,91 @@ pytestmark = pytest.mark.e2e
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
+def test_issue_field_sources_distinguish_passive_release_context(
+    authed_page, seeded_server, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 1000})
+    provider_fields = [
+        ("title", "comicvine_local", "ComicVine Local"),
+        ("description", "comicvine_api", "ComicVine API"),
+        ("cover_date", "metron_api", "Metron"),
+        ("page_count", "gcd_local", "GCD Local"),
+        ("language", "gcd_api_v2", "GCD API v2"),
+    ]
+    origins = [
+        {"field": field, "source": source, "user_override": False, "passive_release": None}
+        for field, source, _label in provider_fields
+    ]
+    origins.extend(
+        [
+            {
+                "field": "store_date",
+                "source": None,
+                "user_override": False,
+                "passive_release": {
+                    "locg_series_id": "77",
+                    "release_ids": ["1001", "1002"],
+                    "fetched_at": "2026-10-04T00:00:00Z",
+                    "issue_identity": {
+                        "namespace": "metron",
+                        "entity_kind": "issue",
+                        "external_id": "123",
+                    },
+                    "issue_number_text": "1",
+                    "matched_store_date": "2026-09-30",
+                    "match_kind": "exact_issue",
+                },
+            },
+            {"field": "credits", "source": None, "user_override": True},
+            {"field": "issue_number_text", "source": None, "user_override": False},
+        ]
+    )
+    page.route(
+        "**/api/v1/issues/1/metadata-links",
+        lambda route: route.fulfill(
+            json={
+                "current": {"title": "Library title"},
+                "identities": [],
+                "sources": [],
+                "can_refresh": False,
+                "origins": origins,
+            }
+        ),
+    )
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(f"{seeded_server}/issues/1")
+    page.evaluate("theme => applyTheme(theme)", theme)
+    panel = page.get_by_test_id("issue-metadata-links")
+    summary = panel.get_by_text("Field sources", exact=True)
+    expect(summary).to_be_visible()
+    expect(panel.locator("dl")).to_be_hidden()
+    summary.focus()
+    summary.press("Enter")
+    expect(summary).to_be_focused()
+    for field, label in [
+        *((field, label) for field, _source, label in provider_fields),
+        ("store_date", "LOCG release context"),
+        ("credits", "Your edit"),
+        ("issue_number_text", "Existing library metadata"),
+    ]:
+        row = panel.locator("dl > div").filter(
+            has=page.locator("dt").get_by_text(field.replace("_", " "), exact=True)
+        )
+        expect(row.locator("dd")).to_have_text(label)
+    assert_no_axe_violations(
+        page,
+        name=f"issue-field-sources-{theme}-{width}",
+        include=['[data-testid="issue-metadata-links"]'],
+    )
+    summary.press("Enter")
+    expect(panel.locator("dl")).to_be_hidden()
+    expect(summary).to_be_focused()
+    assert not errors
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
 @pytest.mark.parametrize("remote_page", [False, True])
 def test_issue_provider_review_and_refresh_without_page_reload(
     authed_page, seeded_server, theme, width, remote_page

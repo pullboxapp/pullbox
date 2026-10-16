@@ -27,8 +27,29 @@ requirements.
 - CI runs the complete test suite and uploads coverage for Python 3.12, 3.13,
   and 3.14. The blocking 90% coverage gate applies to the production/default
   Python 3.14 runtime and local full CI.
-- Self-hosted Python matrix jobs use five pytest workers per Python version.
-- Self-hosted functional E2E jobs use three isolated pytest workers per browser.
+- Self-hosted Python matrix jobs use six pytest workers per Python version;
+  GitHub-hosted jobs retain five. Manual dispatch can explicitly select five
+  or six workers instead of the runner-specific default.
+- Python 3.12/3.13 CI jobs default to coverage.py's `sysmon` engine on both
+  hosted and self-hosted runners. Manual dispatch can select `auto` (coverage.py's
+  default), `ctrace` (the previous compatibility engine), or `sysmon` with
+  `compatibility_coverage_core`; omitting the input uses `sysmon`. Production
+  Python 3.14 always keeps `auto`. Every Python job uploads collector evidence
+  for the controller and each worker; explicit engines, including the normal
+  compatibility default, fail if coverage is missing or the engine falls back.
+  Test selection, worker counts, and coverage gates do not change.
+- This `sysmon` configuration measures statement coverage, without coverage
+  plugins, dynamic contexts, or concurrency overrides. Python 3.12/3.13 do not
+  support branch coverage with `sysmon`; revisit the engine choice before
+  enabling those features rather than suppressing a fallback warning. Engine
+  changes can change line attribution, so compare statement inventories and
+  covered lines, not percentages alone.
+- Functional E2E jobs default to four isolated pytest workers for Chromium and
+  five for Firefox. Manual dispatch retains Chromium 3/4 and Firefox 3/4/5 choices.
+- Firefox starts after the independent production Python 3.14 job succeeds;
+  Chromium waits for all Python versions. The compatibility matrix and both
+  browsers remain blocking dependencies of `CI Required`. Shared YAML steps
+  keep test commands, artifact names, and browser setup identical across lanes.
 - Normal PR E2E runs disable video encoding; manual CI dispatches can enable
   retained failure video and tracing with the `e2e_diagnostics` input.
 - Python 3.14 is the production container runtime.
@@ -98,6 +119,9 @@ tests/e2e/
 ### 1.3 Current repo nuances
 
 - Tests outside `tests/unit/` are treated as slower coverage.
+- Shared security fixtures reuse one production-cost bcrypt seed hash per
+  worker. User objects and databases remain fresh per test; password hashing,
+  password changes, and login verification still use the real auth service.
 - E2E tests run a live app and seed through API-style setup rather than relying
   on broad seed scripts.
 - Each parallel E2E worker creates its own temporary database, data directories,

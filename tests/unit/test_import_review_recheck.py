@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -419,10 +420,12 @@ async def test_completed_recheck_skips_file_completed_during_inspection(
     assert changed.diagnostics == {"concurrent_import": {"completed": True}}
 
 
+@pytest.mark.parametrize("unbounded_control", [False, True], ids=["bounded", "unbounded-control"])
 async def test_completed_recheck_keeps_loaded_file_rows_bounded(
     db_session,
     tmp_path,
     monkeypatch,
+    unbounded_control,
 ):
     from pullbox.services import import_review_recheck
 
@@ -469,12 +472,32 @@ async def test_completed_recheck_keeps_loaded_file_rows_bounded(
     db_session.expunge_all()
 
     loaded_file_counts: list[int] = []
+    collections = 0
+
+    if unbounded_control:
+        original_execute = db_session.execute
+
+        async def execute_without_page_limit(statement, *args, **kwargs):
+            entities = [entry.get("entity") for entry in statement.column_descriptions]
+            if entities == [ImportedFile, ImportedSeries]:
+                statement = statement.limit(None)
+            return await original_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db_session, "execute", execute_without_page_limit)
 
     async def tracked_to_thread(function, *args, **kwargs):  # type: ignore[no-untyped-def]
-        gc.collect()
-        loaded_file_counts.append(
-            sum(isinstance(value, ImportedFile) for value in db_session.identity_map.values())
-        )
+        nonlocal collections
+        loaded = sum(isinstance(value, ImportedFile) for value in db_session.identity_map.values())
+        if loaded > 250:
+            # Collect unreachable ORM cycles only when they could obscure the
+            # bound. Live rows retained by a broken batch remain after GC.
+            collections += 1
+            gc.collect()
+            loaded = sum(
+                isinstance(value, ImportedFile) for value in db_session.identity_map.values()
+            )
+        loaded_file_counts.append(loaded)
+        assert loaded_file_counts[-1] <= 250, "file rows exceed the bounded page"
         return function(*args, **kwargs)
 
     def inspect_without_io(path, base, _signature, **_kwargs):  # type: ignore[no-untyped-def]
@@ -486,16 +509,24 @@ async def test_completed_recheck_keeps_loaded_file_rows_bounded(
         import_review_recheck, "_apply_completed_file_recheck", lambda *a, **k: True
     )
 
-    report = await prepare_completed_import_file_recheck(
-        db_session,
-        job_id,
-        source_roots=[tmp_path],
-        apply=True,
-        accept_replaced_files=True,
+    expectation = (
+        pytest.raises(AssertionError, match="file rows exceed the bounded page")
+        if unbounded_control
+        else nullcontext()
     )
-
-    assert report["files_checked"] == 251
-    assert max(loaded_file_counts) <= 250
+    with expectation:
+        report = await prepare_completed_import_file_recheck(
+            db_session,
+            job_id,
+            source_roots=[tmp_path],
+            apply=True,
+            accept_replaced_files=True,
+        )
+        assert report["files_checked"] == 251
+        assert max(loaded_file_counts) <= 250
+    # Measuring a two-page bound must not collect the entire test process heap
+    # hundreds of times. The control above proves retained rows are still caught.
+    assert collections <= 2
 
 
 async def test_completed_recheck_keeps_missing_source_blocked(db_session, tmp_path):

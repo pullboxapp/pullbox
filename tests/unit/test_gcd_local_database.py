@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import threading
 import time
+from contextlib import closing
 
 import pytest
 
@@ -18,13 +19,26 @@ from pullbox.schemas.metadata_sources import SeriesDiscoveryQuery
 from tests.api.test_gcd_local import gcd_dump
 
 
+def test_external_read_compiles_bound_in_parameters(tmp_path):
+    from sqlalchemy import select
+
+    from pullbox.providers.metadata.gcd_local_database import ISSUE, rows
+
+    path = gcd_dump(tmp_path / "gcd.db")
+    with open_readonly(path, threading.Event(), time.monotonic() + 1) as db:
+        assert [row[0] for row in rows(db, select(ISSUE.c.id).where(ISSUE.c.id.in_([10, 12])))] == [
+            10,
+            12,
+        ]
+
+
 def test_series_count_uses_series_index_not_low_selectivity_deleted_index(tmp_path):
     from sqlalchemy.dialects.sqlite import dialect
 
     from pullbox.providers.metadata.gcd_local import SERIES, series_query
 
     path = gcd_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("CREATE INDEX idx_gcd_issue_deleted ON gcd_issue(deleted)")
         query = (
             series_query().where(SERIES.c.id == 2999).compile(dialect=dialect(paramstyle="named"))
@@ -36,7 +50,7 @@ def test_series_count_uses_series_index_not_low_selectivity_deleted_index(tmp_pa
 
 async def test_validated_connection_cannot_write_and_new_columns_are_allowed(tmp_path):
     path = gcd_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("ALTER TABLE gcd_series ADD COLUMN future_column TEXT")
     snapshot = await validate_candidate(str(path))
     assert snapshot.signature[2] == path.stat().st_size
@@ -48,7 +62,7 @@ async def test_validated_connection_cannot_write_and_new_columns_are_allowed(tmp
 
 async def test_gcd_pages_are_complete_stable_and_search_input_is_bound(tmp_path):
     path = gcd_dump(tmp_path / "gcd.db")
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.executemany(
             "INSERT INTO gcd_issue VALUES (?,2999,?,'',?,0,NULL,'','','',32)",
             [(1000 + n, str(100 + n), 100 + n) for n in range(201)],

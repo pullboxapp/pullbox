@@ -87,6 +87,17 @@ class SourcePolicyRead(BaseModel):
     configuration_status: SourceStatus | None = None
 
 
+class GcdSignInRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=0, lt=2**63, strict=True)
+    username: SecretStr = Field(min_length=1, max_length=1024, exclude=True)
+    password: SecretStr = Field(min_length=1, max_length=4096, exclude=True)
+
+    def clear_credentials(self) -> None:
+        self.username = SecretStr("")
+        self.password = SecretStr("")
+
+
 class SourcePriorityWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
     order: list[MetadataSource] = Field(min_length=5, max_length=5)

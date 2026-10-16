@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 from zipfile import ZipFile
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pullbox.core.archive_metadata import MAX_METADATA_BYTES, read_archive_metadata
@@ -17,7 +17,7 @@ from pullbox.core.file_safety import (
     is_resource_safety_exception_allowed,
 )
 from pullbox.core.metadata_identity import MetadataSource
-from pullbox.models import LibraryFile
+from pullbox.models import Issue, LibraryFile, Series
 from pullbox.models.import_job import (
     ImportControlRequest,
     ImportedFile,
@@ -26,9 +26,12 @@ from pullbox.models.import_job import (
     ImportJobStatus,
 )
 from pullbox.models.library import FileFormat
+from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
+from pullbox.models.series import IssueCatalogState
 from pullbox.providers.base import IssueMetadata
 from pullbox.providers.metadata.comicvine_normalization import issue as normalize_comicvine_issue
 from pullbox.services.archive_metadata_binding import (
+    ArchiveMetadataBindingError,
     archive_primary_identity,
     assemble_bound_archive_metadata,
     inspect_archive_metadata_target,
@@ -68,9 +71,45 @@ async def write_imported_archive_metadata(
         library = await session.get(LibraryFile, file.library_file_id)
         if library is not None and library.file_format is not FileFormat.CBZ:
             return False
-        binding = await read_archive_metadata_binding(
-            session, file.library_file_id, expected_issue_id=file.matched_issue_id
-        )
+        try:
+            binding = await read_archive_metadata_binding(
+                session, file.library_file_id, expected_issue_id=file.matched_issue_id
+            )
+        except ArchiveMetadataBindingError as exc:
+            if exc.code == "identity_requires_review" and library is not None:
+                provisional = await session.scalar(
+                    select(Issue.id)
+                    .join(Series, Series.id == Issue.series_id)
+                    .where(
+                        Issue.id == library.issue_id,
+                        Issue.id == file.matched_issue_id,
+                        Issue.comicvine_id.is_(None),
+                        Series.comicvine_id.is_not(None),
+                        Series.issue_catalog_state == IssueCatalogState.HYDRATING,
+                        select(SeriesExternalIdentity.id)
+                        .where(
+                            SeriesExternalIdentity.series_id == Series.id,
+                            SeriesExternalIdentity.identity_namespace == "comicvine",
+                            SeriesExternalIdentity.external_id == cast(Series.comicvine_id, String),
+                            SeriesExternalIdentity.verification_state == "verified",
+                        )
+                        .exists(),
+                        ~select(SeriesExternalIdentity.id)
+                        .where(
+                            SeriesExternalIdentity.series_id == Series.id,
+                            SeriesExternalIdentity.verification_state != "verified",
+                        )
+                        .exists(),
+                        ~select(IssueExternalIdentity.id)
+                        .where(IssueExternalIdentity.issue_id == Issue.id)
+                        .exists(),
+                    )
+                )
+                if provisional is not None:
+                    # Catalog completion will requeue this pending file. Never
+                    # fall back to the legacy writer for an unverified target.
+                    return True
+            raise
         job_id = file.import_job_id
         details = file.diagnostics.get("comicinfo_enrichment", {})
         action_id = details.get("action_id") if isinstance(details, dict) else None

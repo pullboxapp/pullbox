@@ -43,6 +43,7 @@ REASONS = {
     "outside_approved_root": ("Library access needs attention", "View details", "fix_source"),
     "zero_byte": ("File is empty", "View details", "fix_source"),
     "archive_no_pages": ("Archive has no comic pages", "View details", "fix_source"),
+    "nested_comic_archive": ("Comic inside another archive", "Review repair", "fix_source"),
     "failed": ("File needs another inspection", "View details", "fix_source"),
     "dangerous_path_or_payload": ("Unsafe archive content", "View details", "blocked"),
     "unsupported_file_type": ("Unsupported file type", "View details", "blocked"),

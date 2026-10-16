@@ -19,6 +19,7 @@ class PostProcessingPhase(enum.StrEnum):
     PREPARING_DESTINATION = "preparing_destination"
     TRANSFERRING_FILE = "transferring_file"
     REGISTERING_LIBRARY_FILE = "registering_library_file"
+    WRITING_METADATA = "writing_metadata"
     IMPORT_COMPLETE = "import_complete"
 
     @property
@@ -29,6 +30,7 @@ class PostProcessingPhase(enum.StrEnum):
             PostProcessingPhase.PREPARING_DESTINATION: "Preparing destination",
             PostProcessingPhase.TRANSFERRING_FILE: "Transferring file",
             PostProcessingPhase.REGISTERING_LIBRARY_FILE: "Registering library file",
+            PostProcessingPhase.WRITING_METADATA: "Writing file metadata",
             PostProcessingPhase.IMPORT_COMPLETE: "Import complete",
         }[self]
 
@@ -111,6 +113,7 @@ class PostProcessingRunTrace:
             "destination_prep_ms": self.phase_timings_ms.get("destination_prep_ms"),
             "transfer_ms": self.phase_timings_ms.get("transfer_ms"),
             "register_ms": self.phase_timings_ms.get("register_ms"),
+            "metadata_ms": self.phase_timings_ms.get("metadata_ms"),
             "cleanup_ms": self.cleanup_ms,
             "post_processing_duration_ms": round(
                 (_time.monotonic() - self.started_monotonic) * 1000,
@@ -125,6 +128,7 @@ _POST_PROCESSING_PHASE_TIMING_KEYS: dict[PostProcessingPhase, str | None] = {
     PostProcessingPhase.PREPARING_DESTINATION: "destination_prep_ms",
     PostProcessingPhase.TRANSFERRING_FILE: "transfer_ms",
     PostProcessingPhase.REGISTERING_LIBRARY_FILE: "register_ms",
+    PostProcessingPhase.WRITING_METADATA: "metadata_ms",
     PostProcessingPhase.IMPORT_COMPLETE: None,
 }
 

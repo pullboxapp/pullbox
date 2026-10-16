@@ -1,6 +1,7 @@
 """Optional Mylar schema version is diagnostic evidence, not an admission gate."""
 
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -28,7 +29,7 @@ async def test_optional_mylar_version_is_read_only_and_capability_based(
 ):
     source = tmp_path / "mylar.db"
     create_mylar3_db(source)
-    with sqlite3.connect(source) as conn:
+    with closing(sqlite3.connect(source)) as conn, conn:
         if variant == "value":
             conn.execute("CREATE TABLE mylar_info (DatabaseVersion)")
             conn.execute("INSERT INTO mylar_info VALUES (?)", (value,))
@@ -48,7 +49,7 @@ async def test_optional_mylar_version_is_read_only_and_capability_based(
 async def test_mylar_source_version_is_in_durable_import_diagnostics(db_session, tmp_path):
     source = tmp_path / "mylar.db"
     create_mylar3_db(source)
-    with sqlite3.connect(source) as conn:
+    with closing(sqlite3.connect(source)) as conn, conn:
         conn.execute("CREATE TABLE mylar_info (DatabaseVersion)")
         conn.execute("INSERT INTO mylar_info VALUES (11)")
     job = ImportJob(

@@ -94,6 +94,11 @@ def test_maintain_reindexes_then_optimizes_and_verifies(tmp_path: Path) -> None:
             return self._row
 
     class RecordingConnection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
         def __enter__(self) -> RecordingConnection:
             return self
 
@@ -109,7 +114,8 @@ def test_maintain_reindexes_then_optimizes_and_verifies(tmp_path: Path) -> None:
             return RecordingCursor()
 
     service = DatabaseOptimizationService(db_path)
-    service._connect = lambda *, read_only: RecordingConnection()  # type: ignore[method-assign]
+    connection = RecordingConnection()
+    service._connect = lambda *, read_only: connection  # type: ignore[method-assign]
 
     result = service.maintain()
 
@@ -122,6 +128,7 @@ def test_maintain_reindexes_then_optimizes_and_verifies(tmp_path: Path) -> None:
         "PRAGMA quick_check",
     ]
     assert result.integrity_result == "ok"
+    assert connection.closed
 
 
 def test_maintain_refreshes_planner_statistics_on_real_database(tmp_path: Path) -> None:

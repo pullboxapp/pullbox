@@ -1,7 +1,9 @@
 """Provider account failures are durable and shared, without hiding healthy sources."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import event, select, update
@@ -296,14 +298,160 @@ async def test_missing_admission_database_fails_closed_without_provider_io(accou
     adapter = ReadAdapter()
     instance = await reader(factory, adapter)
     gate = instance.runtime[adapter.source].account_admission
+    logged = Mock()
+    monkeypatch.setattr("pullbox.services.metadata_account_admission.logger", logged)
+    attempts = 0
 
     def unavailable():
+        nonlocal attempts
+        attempts += 1
         raise SQLAlchemyError("private-database-detail")
 
     monkeypatch.setattr(gate.factory, "begin", unavailable)
     result = await instance.series(adapter.source, "42")
     assert result.status is SourceStatus.UNAVAILABLE and result.retry_after_seconds == 5
-    assert adapter.calls == []
+    assert attempts == 1 and adapter.calls == []
+    assert logged.warning.call_args.kwargs["failure_kind"] == "database"
+    assert logged.warning.call_args.kwargs["error_type"] == "SQLAlchemyError"
+    assert "private-database-detail" not in str(logged.mock_calls)
+
+
+async def test_transient_admission_timeout_rechecks_before_provider_io(accounts, monkeypatch):
+    _, factory = accounts
+    adapter = ReadAdapter()
+    instance = await reader(factory, adapter)
+    gate = instance.runtime[adapter.source].account_admission
+    begin = gate.factory.begin
+    attempts = 0
+
+    @asynccontextmanager
+    async def stalled_once():
+        nonlocal attempts
+        attempts += 1
+        async with begin() as session:
+            await session.scalar(select(Account.id))
+            if attempts == 1:
+                await asyncio.sleep(3)
+            yield session
+
+    monkeypatch.setattr(gate.factory, "begin", stalled_once)
+    result = await instance.series(adapter.source, "42")
+    assert result.status is SourceStatus.OK, "A transient local stall is not a provider outage"
+    assert attempts == 2 and len(adapter.calls) == 1
+
+
+async def test_admission_retry_remains_inside_the_request_deadline(accounts, monkeypatch):
+    _, factory = accounts
+    adapter = ReadAdapter()
+    instance = await reader(factory, adapter)
+    instance.total_timeout = 1
+    gate = instance.runtime[adapter.source].account_admission
+    begin = gate.factory.begin
+    entered = asyncio.Event()
+    attempts = 0
+
+    @asynccontextmanager
+    async def stalled():
+        nonlocal attempts
+        attempts += 1
+        async with begin() as session:
+            entered.set()
+            await asyncio.Event().wait()
+            yield session
+
+    monkeypatch.setattr(gate.factory, "begin", stalled)
+    result = await asyncio.wait_for(instance.series(adapter.source, "42"), 5)
+    assert entered.is_set() and result.status is SourceStatus.TIMEOUT
+    assert attempts == 1 and adapter.calls == []
+
+
+async def test_admission_retry_revalidates_a_changed_credential(accounts, monkeypatch):
+    _, factory = accounts
+    adapter = ReadAdapter()
+    instance = await reader(factory, adapter)
+    gate = instance.runtime[adapter.source].account_admission
+    begin = gate.factory.begin
+    attempts = 0
+
+    @asynccontextmanager
+    async def changed_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            async with factory.begin() as session:
+                await session.execute(
+                    update(MetadataSourceConfig)
+                    .where(MetadataSourceConfig.source == adapter.source.value)
+                    .values(credential_secret=encrypt_secret("changed-during-local-stall"))
+                )
+        async with begin() as session:
+            if attempts == 1:
+                await asyncio.sleep(3)
+            yield session
+
+    monkeypatch.setattr(gate.factory, "begin", changed_once)
+    result = await instance.series(adapter.source, "42")
+    assert attempts == 2, "A local timeout should allow exactly one revalidated attempt"
+    assert result.status is SourceStatus.UNAVAILABLE and adapter.calls == []
+
+
+async def test_persistent_admission_timeout_stops_after_one_retry(accounts, monkeypatch):
+    engine, factory = accounts
+    adapter = ReadAdapter()
+    instance = await reader(factory, adapter)
+    gate = instance.runtime[adapter.source].account_admission
+    begin = gate.factory.begin
+    logged = Mock()
+    monkeypatch.setattr("pullbox.services.metadata_account_admission.logger", logged)
+    attempts = 0
+
+    @asynccontextmanager
+    async def stalled():
+        nonlocal attempts
+        attempts += 1
+        async with begin() as session:
+            await session.scalar(select(Account.id))
+            await asyncio.Event().wait()
+            yield session
+
+    monkeypatch.setattr(gate.factory, "begin", stalled)
+    result = await instance.series(adapter.source, "42")
+    assert result.status is SourceStatus.UNAVAILABLE and result.retry_after_seconds == 5
+    assert attempts == 2 and adapter.calls == []
+    assert engine.pool.checkedout() == 0
+    assert logged.debug.call_count == 1 and logged.warning.call_count == 1
+    assert logged.warning.call_args.kwargs["failure_kind"] == "timeout"
+
+
+async def test_cancelled_admission_does_not_retry_or_call_provider(accounts, monkeypatch):
+    _, factory = accounts
+    adapter = ReadAdapter()
+    instance = await reader(factory, adapter)
+    gate = instance.runtime[adapter.source].account_admission
+    begin = gate.factory.begin
+    entered = asyncio.Event()
+    attempts = 0
+
+    @asynccontextmanager
+    async def stalled():
+        nonlocal attempts
+        attempts += 1
+        async with begin() as session:
+            entered.set()
+            await asyncio.Event().wait()
+            yield session
+
+    monkeypatch.setattr(gate.factory, "begin", stalled)
+    task = asyncio.create_task(instance.series(adapter.source, "42"))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert attempts == 1 and adapter.calls == []
 
 
 async def test_fresh_cached_metadata_remains_readable_without_bypassing_http_hold(accounts):

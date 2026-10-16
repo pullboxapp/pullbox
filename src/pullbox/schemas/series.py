@@ -12,6 +12,7 @@ from pullbox.models.series import (
     SeriesType,
 )
 from pullbox.schemas.metadata_sources import CatalogExcludedIssue
+from pullbox.schemas.whats_new import WhatsNewSeriesSelection
 
 
 class SeriesCreate(BaseModel):
@@ -50,6 +51,7 @@ class SourceSeriesCreate(BaseModel):
     library_root_id: int | None = Field(None, gt=0)
     search_on_add: bool | None = None
     catalog_review_token: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    whats_new_selection: WhatsNewSeriesSelection | None = None
 
     @model_validator(mode="after")
     def canonical_identity(self) -> "SourceSeriesCreate":

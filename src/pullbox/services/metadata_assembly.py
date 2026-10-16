@@ -216,6 +216,7 @@ def assemble_metadata(
                     and prior is not None
                     and (
                         prior.derivation is not None
+                        or prior.passive_release is not None
                         or (
                             prior.source is not None
                             and rank(source, domain) <= rank(prior.source, domain)

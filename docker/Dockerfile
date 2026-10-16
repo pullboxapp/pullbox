@@ -9,7 +9,6 @@ RUN apt-get update \
         cmake \
         curl \
         g++ \
-        git \
         gzip \
         libcrypto++-dev \
         libcurl4-openssl-dev \
@@ -81,10 +80,11 @@ ENV VIRTUAL_ENV=/opt/venv \
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
-        build-essential \
         ca-certificates \
         curl \
+        g++ \
         gzip \
+        make \
         poppler-utils \
         p7zip-full \
         tzdata \

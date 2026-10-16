@@ -200,7 +200,9 @@ function metadataEntityLinks(kind, localId) {
       finally { if (!this.disposed) this.refreshing = false; }
     },
     originLabel: function (origin) {
-      return origin.user_override ? "Your edit" : ({ comicvine_local: "ComicVine Local", comicvine_api: "ComicVine API", metron_api: "Metron", gcd_local: "GCD Local", gcd_api_v2: "GCD API v2" }[origin.source] || "Existing library metadata");
+      if (origin.user_override) return "Your edit";
+      if (origin.passive_release) return "LOCG release context";
+      return { comicvine_local: "ComicVine Local", comicvine_api: "ComicVine API", metron_api: "Metron", gcd_local: "GCD Local", gcd_api_v2: "GCD API v2" }[origin.source] || "Existing library metadata";
     },
     trapFocus: function (event) {
       if (!this.open) return;

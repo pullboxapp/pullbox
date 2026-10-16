@@ -28,13 +28,16 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import structlog
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
+from pullbox.core.library_file_ownership import ReferencedFileValidationError
 
 if TYPE_CHECKING:
     from types import FrameType
 
 ControlCheck = Callable[[], Awaitable[None]]
 ProgressCallback = Callable[[str, int, int, str], Awaitable[None] | None]
-_ArchiveOperation = Literal["convert", "transfer", "embed", "materialize_embed", "paired_stage"]
+_ArchiveOperation = Literal[
+    "convert", "transfer", "embed", "materialize_embed", "paired_stage", "nested_repair"
+]
 logger = structlog.get_logger(__name__)
 
 _CONTROL_POLL_INTERVAL_SECONDS = 0.2
@@ -86,6 +89,38 @@ async def convert_file_interruptible(
         progress_callback=progress_callback,
         cleanup_paths=[target_path],
     )
+    return Path(str(result["target_path"]))
+
+
+async def repair_nested_comic_interruptible(
+    source: Path,
+    target: Path,
+    *,
+    max_bytes: int,
+    expected_signature: dict[str, Any],
+    expected_report: dict[str, Any],
+    cancellation_check: ControlCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
+    """Run approved wrapper normalization in an isolated, killable process."""
+    if cancellation_check is not None:
+        await cancellation_check()
+    progress_state_path = _create_progress_state_path(target.parent)
+    async with asyncio.timeout(180):
+        result = await _run_archive_operation(
+            "nested_repair",
+            {
+                "source": str(source),
+                "target": str(target),
+                "max_bytes": max_bytes,
+                "expected_signature": expected_signature,
+                "expected_report": expected_report,
+                "progress_path": str(progress_state_path),
+            },
+            cancellation_check=cancellation_check,
+            progress_state_path=progress_state_path,
+            progress_callback=progress_callback,
+        )
     return Path(str(result["target_path"]))
 
 
@@ -260,7 +295,7 @@ async def _run_archive_operation(
 ) -> dict[str, Any]:
     stdout: bytes = b""
     stderr: bytes = b""
-    isolated_group = operation == "paired_stage" and os.name != "nt"
+    isolated_group = operation in {"paired_stage", "nested_repair"} and os.name != "nt"
     spawn_task = asyncio.create_task(
         asyncio.create_subprocess_exec(
             sys.executable,
@@ -535,6 +570,15 @@ def _raise_worker_error(
         raise FileNotFoundError(message)
     if exc_type == "FileExistsError":
         raise FileExistsError(message)
+    if exc_type == "ReferencedFileValidationError":
+        reason = str((details or {}).get("reason") or "")
+        if reason not in {
+            "source_changed",
+            "source_signature_missing",
+            "source_signature_unsupported",
+        }:
+            raise RuntimeError("Archive worker returned an invalid source-validation reason.")
+        raise ReferencedFileValidationError(reason, message)
     if exc_type == "ValueError":
         raise ValueError(message)
     if operation == "convert" and _is_corrupt_archive_error(exc_type, message):
@@ -598,7 +642,7 @@ def _worker_main(argv: list[str]) -> int:
     payload = json.loads(argv[2])
     previous_handler = (
         signal.signal(signal.SIGTERM, _cancel_paired_worker)
-        if operation == "paired_stage" and os.name != "nt"
+        if operation in {"paired_stage", "nested_repair"} and os.name != "nt"
         else None
     )
 
@@ -615,17 +659,44 @@ def _worker_main(argv: list[str]) -> int:
             from pullbox.utilities.executors.archive_metadata_staging import worker_stage_metadata
 
             result = worker_stage_metadata(payload)
+        elif operation == "nested_repair":
+            from pullbox.core.library_file_ownership import (
+                build_file_identity_signature,
+                validate_file_identity_signature,
+            )
+            from pullbox.core.nested_comics import inspect_nested_comic, normalize_nested_comic
+
+            source, target = Path(payload["source"]), Path(payload["target"])
+            _write_progress_state(Path(payload["progress_path"]), "extracting", 0, 1, "archives")
+            expected = dict(payload["expected_signature"])
+            validate_file_identity_signature(expected, build_file_identity_signature(source))
+            if (
+                inspect_nested_comic(
+                    source, max_bytes=int(payload["max_bytes"]), scratch_parent=target.parent
+                )
+                != payload["expected_report"]
+            ):
+                raise ReferencedFileValidationError(
+                    "source_changed", "Nested comic changed after review. Recheck the source."
+                )
+            _write_progress_state(Path(payload["progress_path"]), "extracting", 1, 1, "archives")
+            normalize_nested_comic(
+                source,
+                target,
+                max_bytes=int(payload["max_bytes"]),
+                progress=lambda current, total: _write_progress_state(
+                    Path(payload["progress_path"]), "packing", current, total, "entries"
+                ),
+            )
+            validate_file_identity_signature(expected, build_file_identity_signature(source))
+            result = {"target_path": str(target)}
         else:
             raise ValueError(f"Unsupported archive worker operation: {operation}")
     except Exception as exc:  # pragma: no cover - exercised via parent wrapper
-        sys.stderr.write(
-            json.dumps(
-                {
-                    "type": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
-        )
+        error = {"type": type(exc).__name__, "message": str(exc)}
+        if isinstance(exc, ReferencedFileValidationError):
+            error["reason"] = exc.reason
+        sys.stderr.write(json.dumps(error))
         return 1
     finally:
         if previous_handler is not None:

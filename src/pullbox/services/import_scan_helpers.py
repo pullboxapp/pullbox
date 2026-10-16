@@ -95,6 +95,7 @@ async def _inspection_results(
     workers: int,
 ) -> AsyncIterator[AsyncIterator[InspectionResult]]:
     if check_file_safety is not None:
+        max_archive_size = await get_archive_size_limit_bytes(session)
 
         async def serial_results() -> AsyncGenerator[InspectionResult, None]:
             # Injected checkers may use the caller's database session.
@@ -102,7 +103,12 @@ async def _inspection_results(
                 try:
                     inspection = await check_file_safety(session, Path(path))
                     content = (
-                        await asyncio.to_thread(inspect_import_content, Path(path), inspection)
+                        await asyncio.to_thread(
+                            inspect_import_content,
+                            Path(path),
+                            inspection,
+                            max_archive_size=max_archive_size,
+                        )
                         if inspection is not None
                         else {}
                     )
@@ -128,7 +134,9 @@ async def _inspection_results(
                 max_archive_size=max_archive_size,
             )
             content = (
-                inspect_import_content(Path(path), inspection) if inspection is not None else {}
+                inspect_import_content(Path(path), inspection, max_archive_size=max_archive_size)
+                if inspection is not None
+                else {}
             )
             return path, inspection, content, None
         except FileSafetyError as exc:

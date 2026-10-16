@@ -28,7 +28,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
     DirectAcquisitionState,
@@ -43,7 +42,6 @@ from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
 from pullbox.providers.base import ReleaseResult
 from pullbox.providers.direct.contract import DirectCandidate, DirectParsedCandidate
-from pullbox.services.auth_service import AuthService
 from pullbox.services.direct_acquisition_planner_service import DirectAcquisitionPlanningError
 from pullbox.services.direct_search_coordinator import (
     DirectSearchDiscovery,
@@ -53,6 +51,7 @@ from pullbox.services.direct_search_coordinator import (
 )
 from pullbox.services.release_validator import ReleaseValidator
 from pullbox.services.search_service import IssueSearchTarget
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -97,7 +96,7 @@ def _make_release(
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
@@ -106,6 +105,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "d" * 64
@@ -113,7 +113,7 @@ async def _api_key_header(
     async with _db_factory() as session:
         user = User(
             username="searchuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()

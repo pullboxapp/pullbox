@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from datetime import date
 from typing import TYPE_CHECKING, Any
@@ -138,6 +139,34 @@ async def test_prepare_source_artifact_cleans_temp_dir_when_converter_fails(
         )
 
     assert not temp_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_manual_conversion_cancel_removes_only_private_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.cb7"
+    source.write_bytes(b"original")
+    temp_dir = tmp_path / "private-stage"
+    temp_dir.mkdir()
+    unrelated = tmp_path / "unrelated.cbz"
+    unrelated.write_bytes(b"unrelated")
+    monkeypatch.setattr(library_comicinfo.tempfile, "mkdtemp", lambda prefix: str(temp_dir))
+
+    async def cancelled_converter(*_args: Any, **_kwargs: Any) -> Path:
+        (temp_dir / "partial.cbz").write_bytes(b"partial")
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await prepare_source_artifact(
+            source,
+            normalize_to_cbz=True,
+            update_embedded_comicinfo_from_match=False,
+            converter=cancelled_converter,
+        )
+    assert not temp_dir.exists()
+    assert source.read_bytes() == b"original"
+    assert unrelated.read_bytes() == b"unrelated"
 
 
 @pytest.mark.asyncio

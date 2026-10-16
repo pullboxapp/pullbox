@@ -33,13 +33,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.schemas.issue import ManualFileImportProgressResponse
-from pullbox.services.auth_service import AuthService
+from tests.sqlite_schema import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -57,7 +56,7 @@ os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-import-file")
 async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await create_test_schema(conn)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
@@ -66,6 +65,7 @@ async def _db_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None
 @pytest.fixture
 async def _api_key_header(
     _db_factory: async_sessionmaker[AsyncSession],
+    seeded_user_password_hash: str,
 ) -> str:
     """Create a test user + API key, return the raw key string."""
     raw_key = "pb_k1_" + "a" * 64
@@ -75,7 +75,7 @@ async def _api_key_header(
 
         user = User(
             username="importfileuser",
-            password_hash=AuthService.hash_password("Test@1234"),
+            password_hash=seeded_user_password_hash,
         )
         session.add(user)
         await session.flush()
@@ -242,7 +242,7 @@ async def test_import_file_success_move_to_library(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ) as mock_register:
@@ -288,7 +288,7 @@ async def test_import_file_leave_in_place(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ) as mock_register:
@@ -411,7 +411,7 @@ async def test_import_file_replaces_already_owned_issue(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ) as mock_register:
@@ -503,7 +503,7 @@ async def test_import_file_all_supported_formats(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ):
@@ -565,7 +565,7 @@ async def test_import_file_uppercase_extension(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ):
@@ -598,7 +598,7 @@ async def test_import_file_mixed_case_extension(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ):
@@ -643,7 +643,7 @@ async def test_import_file_from_various_statuses(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ):
@@ -679,7 +679,7 @@ async def test_import_file_response_shape(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ):
@@ -717,7 +717,7 @@ async def test_import_file_register_raises_file_not_found(
     comic_file.write_bytes(b"PK" + b"\x00" * 100)
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         side_effect=FileNotFoundError("Source file vanished"),
     ):
@@ -744,7 +744,7 @@ async def test_import_file_register_raises_config_error(
     from pullbox.core.exceptions import ConfigurationError
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         side_effect=ConfigurationError("No comics directory configured"),
     ):
@@ -781,7 +781,7 @@ async def test_import_file_default_move_to_library_true(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ) as mock_register:
@@ -837,7 +837,7 @@ async def test_import_file_symlink(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ):
@@ -873,7 +873,7 @@ async def test_import_file_double_extension(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ):
@@ -925,7 +925,7 @@ async def test_import_file_hidden_file(
     mock_lf.match_confidence = MatchConfidence.MANUAL
 
     with patch(
-        "pullbox.api.v1.issues.register_library_file",
+        "pullbox.services.issue_import_service.register_library_file",
         new_callable=AsyncMock,
         return_value=mock_lf,
     ):

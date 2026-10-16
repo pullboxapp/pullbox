@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pullbox.core.archive import ArchiveReader
 from pullbox.core.file_safety import (
     DEFAULT_ALLOWED_EXTENSIONS,
     FileSafetyError,
@@ -18,6 +19,7 @@ from pullbox.core.file_safety import (
     is_dangerous_file_blocking_enabled,
     run_safety_checks,
 )
+from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.models.direct_acquisition import DirectArtifactFailureClass
 from pullbox.services.direct_artifact_pack import is_separable_issue_pack
 from pullbox.utilities.executors.integrity_checker import check_file_integrity
@@ -144,6 +146,8 @@ class DirectArtifactQuarantine:
 async def validate_direct_artifact(
     session: AsyncSession,
     path: Path,
+    *,
+    allow_resource_safety_exception: bool = False,
 ) -> DirectArtifactValidationResult:
     """Run Pullbox's existing safety and integrity engines before handoff."""
     allowed_extensions = await get_allowed_extensions(session)
@@ -151,6 +155,18 @@ async def validate_direct_artifact(
         raise _unsupported_type_error()
     block_dangerous = await is_dangerous_file_blocking_enabled(session)
     max_archive_size = await get_archive_size_limit_bytes(session)
+    if allow_resource_safety_exception:
+        members = await asyncio.to_thread(ArchiveReader(path).list_members)
+        max_archive_size = max(max_archive_size, sum(member.size for member in members))
+    try:
+        source_signature = await asyncio.to_thread(build_file_identity_signature, path)
+    except OSError as exc:
+        raise DirectArtifactValidationError(
+            code="artifact_quarantine_unreadable",
+            message="Pullbox could not read the quarantined artifact.",
+            retryable=True,
+            intervention=False,
+        ) from exc
     try:
         await asyncio.to_thread(
             run_safety_checks,
@@ -161,13 +177,23 @@ async def validate_direct_artifact(
     except FileSafetyError as exc:
         safety_block = classify_resource_safety_exception(exc)
         if safety_block is not None:
+            if await asyncio.to_thread(build_file_identity_signature, path) != source_signature:
+                raise DirectArtifactValidationError(
+                    code="artifact_changed_during_inspection",
+                    message=(
+                        "The downloaded artifact changed during inspection. Retry the download."
+                    ),
+                ) from exc
             raise DirectArtifactValidationError(
                 code="artifact_resource_safety_review",
                 message=(
                     "The downloaded artifact exceeds configured resource safety limits "
                     "and requires an explicit allow-once review."
                 ),
-                safety_block=safety_block.to_diagnostics(),
+                safety_block={
+                    **safety_block.to_diagnostics(),
+                    "source_signature": source_signature,
+                },
             ) from exc
         raise DirectArtifactValidationError(
             code="artifact_safety_rejected",

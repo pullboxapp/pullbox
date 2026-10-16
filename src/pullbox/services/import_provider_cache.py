@@ -236,6 +236,26 @@ class CachedImportMetadataProvider:
             lambda: self._provider.get_issue(issue_provider_id),
         )
 
+    async def get_issue_batch_cached(self, issue_provider_ids: Sequence[str]) -> dict[str, Any]:
+        """Read completed memory entries/local cache only, without growing the job cache."""
+        found: dict[str, Any] = {}
+        missing: list[str] = []
+        for key in dict.fromkeys(issue_provider_ids):
+            task = self._issue_cache.get(key)
+            if (
+                task is not None
+                and task.done()
+                and not task.cancelled()
+                and task.exception() is None
+            ):
+                found[key] = task.result()
+            else:
+                missing.append(key)
+        lookup = _declared_provider_method(self._provider, "get_issue_batch_cached")
+        if missing and lookup is not None:
+            found.update(await lookup(missing))
+        return found
+
     async def get_issues_for_series(self, series_provider_id: str) -> Any:
         key = str(series_provider_id)
         return await self._memoize(

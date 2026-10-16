@@ -15,6 +15,7 @@
     seriesTitle: {{ issue.series.title|tojson|forceescape }},
     seriesYear: {{ (issue.series.year_start or '')|string|tojson|forceescape }},
     hasLibraryFile: {{ (issue.library_file is not none)|tojson }},
+    pairedImportMetadata: {{ paired_import_metadata_enabled|default(false)|tojson }},
     csrfToken: {{ csrf_token|tojson|forceescape }},
     searchUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/download')|tojson|forceescape }},
     deleteFileUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/file')|tojson|forceescape }},

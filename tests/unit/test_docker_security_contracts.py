@@ -61,6 +61,19 @@ def test_runtime_user_is_non_root_before_runtime_entrypoints() -> None:
     assert user_index < healthcheck_index < entrypoint_index < cmd_index
 
 
+def test_production_builder_uses_compilers_without_debian_packaging_tools() -> None:
+    """Source builds need C/C++ and Make, not dpkg-dev's Perl dependency chain."""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    builder = text.split(" AS builder\n", maxsplit=1)[1].split("\nFROM ", maxsplit=1)[0]
+    packages = set(
+        builder.split("apt-get install", maxsplit=1)[1].split("&&", maxsplit=1)[0].split()
+    )
+
+    assert "build-essential" not in packages
+    assert "dpkg-dev" not in packages
+    assert {"g++", "make"} <= packages
+
+
 def test_entrypoint_and_healthcheck_use_python_modules() -> None:
     """Shell-less DHI runtime should launch through explicit Python modules."""
     text = DOCKERFILE.read_text(encoding="utf-8")

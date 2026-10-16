@@ -58,7 +58,8 @@ def describe_source_policies(
         elif registration is None:
             availability = SourceStatus.NOT_IMPLEMENTED
         elif (
-            policy.source in {MetadataSource.COMICVINE_API, MetadataSource.METRON_API}
+            policy.source
+            in {MetadataSource.COMICVINE_API, MetadataSource.METRON_API, MetadataSource.GCD_API_V2}
             and not policy.credential_configured
         ):
             availability = SourceStatus.UNCONFIGURED

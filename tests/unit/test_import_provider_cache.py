@@ -185,3 +185,21 @@ async def test_cached_import_metadata_provider_cached_only_series_lookup_does_no
     assert fetched == "series:1234"
     assert cached_only == "series:1234"
     assert provider.series_calls == 1
+
+
+async def test_cached_only_issue_batch_never_falls_back_to_remote_fetch() -> None:
+    provider = AsyncMock()
+    cached = CachedImportMetadataProvider(provider)
+    assert await cached.get_issue_batch_cached(["100"]) == {}
+    provider.get_issue.assert_not_awaited()
+    provider.get_issue_batch.assert_not_awaited()
+    provider.get_issue_batch_cached.assert_not_awaited()
+
+
+async def test_cached_only_issue_batch_reuses_completed_memory_entries() -> None:
+    provider = AsyncMock()
+    provider.get_issue.return_value = "known issue"
+    cached = CachedImportMetadataProvider(provider)
+    await cached.get_issue("100")
+    assert await cached.get_issue_batch_cached(["100", "101"]) == {"100": "known issue"}
+    provider.get_issue.assert_awaited_once_with("100")

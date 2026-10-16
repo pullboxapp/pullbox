@@ -39,9 +39,12 @@ def creator_roles_to_comicinfo_fields(
             continue
 
         for field, tokens in _CREATOR_ROLE_FIELD_RULES:
-            if field == "Penciller" and "cover" in normalized_role:
-                continue
-            if any(token in normalized_role for token in tokens):
+            eligible_role = (
+                ", ".join(role for role in normalized_role.split(",") if "cover" not in role)
+                if field == "Penciller"
+                else normalized_role
+            )
+            if any(token in eligible_role for token in tokens):
                 dedupe_key = normalized_name.casefold()
                 if dedupe_key not in seen[field]:
                     grouped[field].append(normalized_name)

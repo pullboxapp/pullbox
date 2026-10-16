@@ -19,14 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.core.archive_metadata import read_archive_metadata
 from pullbox.core.metadata_identity import MetadataEntityKind
-from pullbox.models import Issue, LibraryFile, LibraryRoot, Series
 from pullbox.models.archive_metadata_publication import ArchiveMetadataPublication, PublicationState
-from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.schemas.archive_publication_owner import ImportArchiveOwner
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_binding import (
     ArchiveMetadataTarget,
     FileFingerprint,
+    lock_archive_metadata_binding,
     revalidate_archive_metadata_target,
 )
 from pullbox.services.archive_metadata_rendering import (
@@ -246,19 +245,7 @@ async def _lock_binding(session: AsyncSession, plan: ArchivePublicationPlan) -> 
     from pullbox.services.import_archive_publication import lock_import_archive_owner
 
     await lock_import_archive_owner(session, plan.import_owner)
-    bound = plan.target.binding
-    await session.execute(
-        select(MetadataSourceConfig.id)
-        .order_by(MetadataSourceConfig.source)
-        .with_for_update(read=True)
-    )
-    for model, local_id in (
-        (Series, bound.metadata.series.local_id),
-        (Issue, bound.metadata.issues[0].local_id),
-        (LibraryRoot, bound.library_root_id),
-        (LibraryFile, bound.library_file_id),
-    ):
-        await session.execute(select(model.id).where(model.id == local_id).with_for_update())
+    await lock_archive_metadata_binding(session, plan.target.binding)
 
 
 async def record_archive_publication(

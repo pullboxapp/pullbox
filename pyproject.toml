@@ -66,9 +66,9 @@ dev = [
     "pip-audit~=2.7",
     "bandit~=1.9",
     "factory-boy~=3.3",
-    "safety~=3.0",
+    # Merged upstream NLTK removal (PR #913); retain until a fixed release is verified.
+    "safety @ https://github.com/pyupio/safety/archive/ac505430fc55403af338ece39489f3e3b01a7d97.tar.gz#sha256=01ec8c456a52a8b2605cf87ba0f422c62af815dbe02728dc9251a7ac72e0820a",
     "authlib>=1.6.11",  # transitive via safety — floor for GHSA-jj8c-mmj3-mmgv
-    "nltk>=3.10.0",  # transitive via safety — floors for 2026 SSRF/path traversal/ReDoS CVEs
     "types-defusedxml~=0.7",
     "types-psutil~=7.2",
     "requests>=2.33.0",  # transitive (pip-audit, safety) — floor for CVE-2026-25645

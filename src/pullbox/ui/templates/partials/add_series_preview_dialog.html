@@ -1,0 +1,140 @@
+  <div
+    x-show="showModal"
+    x-cloak
+    class="modal-shell !mt-0"
+    @keydown.escape.window="closeModal()"
+  >
+    <div
+      class="modal-backdrop"
+      @click="closeModal()"
+      x-transition:enter="transition ease-out duration-200"
+      x-transition:enter-start="opacity-0"
+      x-transition:enter-end="opacity-100"
+      x-transition:leave="transition ease-in duration-150"
+      x-transition:leave-start="opacity-100"
+      x-transition:leave-end="opacity-0"
+    ></div>
+
+    <div
+      class="modal-panel max-w-2xl max-h-[calc(100dvh-5rem)]"
+      role="dialog"
+      data-testid="add-series-dialog"
+      aria-modal="true"
+      aria-labelledby="add-series-dialog-title"
+      tabindex="-1"
+      x-ref="dialog"
+      @keydown.tab="trapFocus($event)"
+      x-transition:enter="transition ease-out duration-200"
+      x-transition:enter-start="opacity-0 scale-95"
+      x-transition:enter-end="opacity-100 scale-100"
+      x-transition:leave="transition ease-in duration-150"
+      x-transition:leave-start="opacity-100 scale-100"
+      x-transition:leave-end="opacity-0 scale-95"
+    >
+      <div class="modal-header shrink-0 gap-4">
+        <div class="add-series-result-cover shrink-0" aria-hidden="true">
+          <img :src="selectedCoverUrl || null" :alt="selectedTitle" class="h-full w-full object-cover"
+            data-testid="add-series-preview-cover" x-show="selectedCoverUrl" x-cloak
+            @error="selectedCoverUrl = ''">
+        </div>
+        <div class="min-w-0 flex-1 space-y-1">
+          <h3 id="add-series-dialog-title" class="add-series-modal-title" x-text="selectedTitle + (selectedYear ? ' (' + selectedYear + ')' : '')"></h3>
+          <p class="add-series-modal-subtitle">
+            <span x-text="selectedPublisher || 'Unknown publisher'"></span>
+            <template x-if="selectedIssueCount">
+              <span x-text="' · ' + selectedIssueCount + ' issues'"></span>
+            </template>
+          </p>
+          <p class="text-sm text-pb-text-sec" x-text="sourceLabel()"></p>
+        </div>
+        <button @click="closeModal()" :disabled="adding" class="icon-btn" aria-label="Close add series dialog">
+          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body min-h-0 p-5 sm:p-6 space-y-5">
+        <div x-show="previewLoading" data-testid="add-series-preview-status" role="status" aria-live="polite" class="flex items-center gap-2 text-sm text-pb-text-sec">
+          <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          </svg>
+          <span>Loading preview...</span>
+        </div>
+        <section x-show="catalogReview" x-cloak class="space-y-3" aria-label="Catalog review">
+          <p class="text-sm font-medium" role="status" x-text="catalogReview ? catalogReview.supported_count + ' issues will be added; ' + catalogReview.excluded.length + ' left out.' : ''"></p>
+          <p class="text-sm text-pb-text-sec">Pullbox cannot represent these issue numbers yet. Adding the supported issues keeps this list on Series Details. No files are changed and no printings are merged.</p>
+          <ul class="space-y-2 text-sm">
+            <template x-for="entry in (catalogReview?.excluded || []).slice(reviewPage * 10, (reviewPage + 1) * 10)" :key="entry.external_id">
+              <li class="flex items-center justify-between gap-3">
+                <span class="min-w-0 break-words" x-text="entry.issue_number_text || '(no issue number)'"></span>
+                <a class="btn-ghost btn-sm shrink-0" :href="'https://www.comics.org/issue/' + encodeURIComponent(entry.external_id) + '/'" target="_blank" rel="noopener noreferrer" :aria-label="'View GCD issue ' + entry.external_id">View GCD</a>
+              </li>
+            </template>
+          </ul>
+          <div x-show="catalogReview && catalogReview.excluded.length > 10" class="flex items-center justify-between gap-2">
+            <button type="button" class="btn-ghost btn-sm" @click="reviewPage--" :disabled="reviewPage === 0 || adding">Previous entries</button>
+            <span class="text-sm text-pb-text-sec" x-text="catalogReview ? (reviewPage + 1) + ' / ' + Math.ceil(catalogReview.excluded.length / 10) : ''"></span>
+            <button type="button" class="btn-ghost btn-sm" @click="reviewPage++" :disabled="!catalogReview || (reviewPage + 1) * 10 >= catalogReview.excluded.length || adding">Next entries</button>
+          </div>
+          <p x-show="catalogReview && !catalogReview.supported_count" class="text-sm text-pb-text-sec">No supported issues can be added. Cancel and try another provider.</p>
+        </section>
+
+        <section class="space-y-3">
+          <p class="add-series-modal-section-label">Library settings</p>
+
+          <div class="add-series-modal-row">
+            <label for="add-series-root" class="add-series-modal-row-label">Library root</label>
+            <div class="min-w-0 flex-1">
+              <input id="add-series-root" data-testid="add-series-root-display"
+                type="text" :value="rootLabel" x-show="libraryRootId" readonly disabled
+                class="input-pb w-full add-series-root-display">
+              <div x-show="!libraryRootId" class="inline-alert inline-alert-warning">
+                <span>No available default managed destination is configured. Review Library roots in Settings.</span>
+              </div>
+            </div>
+          </div>
+
+        </section>
+
+        <section class="space-y-3">
+          <p class="add-series-modal-section-label">Folder preview</p>
+          <div
+            data-testid="add-series-folder-preview"
+            class="add-series-modal-preview"
+            x-text="folderPreview || 'Folder preview unavailable until a root is selected.'"
+          ></div>
+        </section>
+
+        <div x-show="addError" x-cloak role="alert" class="inline-alert inline-alert-danger">
+          <svg class="inline-alert-icon h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m0 3.75h.008v.008H12v-.008z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+          </svg>
+          <span x-text="addError"></span>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <div class="settings-footer-actions ml-auto">
+          <button @click="loadPreview()" x-show="previewFailed" :disabled="previewLoading || adding" class="btn-ghost">Retry preview</button>
+          <button @click="closeModal()" :disabled="adding" class="btn-ghost">Cancel</button>
+          <button
+            @click="addSeriesToLibrary()"
+            :disabled="adding || !previewReady || !libraryRootId || (catalogReview && !catalogReview.supported_count)"
+            class="btn-primary gap-2"
+          >
+            <span x-show="!adding" x-text="catalogReview ? 'Add ' + catalogReview.supported_count + ' supported issues' : 'Add series'">Add series</span>
+            <span x-show="adding" class="flex items-center gap-2">
+              <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              </svg>
+              Adding...
+            </span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>

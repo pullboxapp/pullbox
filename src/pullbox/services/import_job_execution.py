@@ -1044,16 +1044,19 @@ async def _load_duplicate_import_series(
     confirmed_ids: set[int],
 ) -> list[ImportedSeries]:
     duplicate_result = await session.execute(
-        sa_select(ImportedSeries)
-        .join(ImportedFile, ImportedFile.import_series_id == ImportedSeries.id)
-        .where(
+        sa_select(ImportedSeries).where(
             ImportedSeries.import_job_id == job_id,
             ImportedSeries.status == ImportSeriesStatus.DUPLICATE,
             ImportedSeries.series_id.is_not(None),
-            ImportedFile.include_in_import.is_(True),
-            ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
+            ImportedSeries.id.in_(
+                sa_select(ImportedFile.import_series_id).where(
+                    ImportedFile.include_in_import.is_(True),
+                    ImportedFile.status.in_(
+                        [ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]
+                    ),
+                )
+            ),
         )
-        .distinct()
     )
     return [item for item in duplicate_result.scalars().all() if item.id not in confirmed_ids]
 
