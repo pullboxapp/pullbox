@@ -3,6 +3,7 @@
 from xml.etree import ElementTree as ET
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
+from pullbox.core.archive_metadata_fields import normalize_comicinfo_aliases
 from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
 
@@ -84,6 +85,7 @@ def preserved_roots(files: ArchiveMetadataFiles) -> tuple[ET.Element, ET.Element
                 else ET.Element(name)
             )
             if name == "ComicInfo":
+                normalize_comicinfo_aliases(root)
                 _validate_comicinfo(root)
             elif member.payload is not None:
                 if root.get("version") not in {None, "1.0", "1.1"}:

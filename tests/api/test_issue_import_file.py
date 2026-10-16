@@ -123,6 +123,67 @@ async def client(
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
+async def test_manual_import_metadata_preview_and_approval(
+    client, _db_factory, tmp_path, monkeypatch
+):
+    from pullbox.config import get_settings
+    from tests.integration.metadata_identity.test_manual_import_metadata_review import gargoyle_case
+
+    monkeypatch.setenv("PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED", "true")
+    get_settings.cache_clear()
+    try:
+        issue_id, source = await gargoyle_case(_db_factory, tmp_path)
+        original = source.read_bytes()
+        endpoint = f"/api/v1/issues/{issue_id}/import-file"
+        response = await client.post(
+            endpoint + "/metadata-preview", json={"file_path": str(source)}
+        )
+        assert response.status_code == 200, response.text
+        assert not response.json()["ready"]
+        choices = {item["key"]: "library" for item in response.json()["conflicts"]}
+        response = await client.post(
+            endpoint + "/metadata-preview", json={"file_path": str(source), "choices": choices}
+        )
+        assert response.status_code == 200 and response.json()["ready"], response.text
+        assert source.read_bytes() == original
+        response = await client.post(
+            endpoint,
+            json={
+                "file_path": str(source),
+                "metadata_approval": {
+                    "review_key": response.json()["review_key"],
+                    "choices": choices,
+                },
+            },
+        )
+        assert response.status_code == 201, response.text
+        assert source.read_bytes() == original
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_manual_metadata_preview_reports_unreadable_archive(
+    client, _db_factory, tmp_path, monkeypatch
+):
+    from pullbox.config import get_settings
+    from tests.integration.metadata_identity.test_manual_import_metadata_review import gargoyle_case
+
+    monkeypatch.setenv("PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED", "true")
+    get_settings.cache_clear()
+    try:
+        issue_id, source = await gargoyle_case(_db_factory, tmp_path)
+        source.write_bytes(b"broken zip")
+        response = await client.post(
+            f"/api/v1/issues/{issue_id}/import-file/metadata-preview",
+            json={"file_path": str(source)},
+        )
+        assert response.status_code == 409, response.text
+        assert "cannot be read" in response.json()["detail"]
+        assert source.read_bytes() == b"broken zip"
+    finally:
+        get_settings.cache_clear()
+
+
 async def _create_series_and_issue(
     factory: async_sessionmaker[AsyncSession],
     *,

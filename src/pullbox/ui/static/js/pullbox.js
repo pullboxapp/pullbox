@@ -19187,6 +19187,9 @@ function issueDetailPage(config) {
     importing: false,
     cancellingImport: false,
     importReplacementConfirmed: false,
+    importMetadataPreview: null,
+    importMetadataChoices: {},
+    importPreviewController: null,
     importModalOpen: false,
     importPollTimer: null,
     importState: "idle",
@@ -19281,11 +19284,26 @@ function issueDetailPage(config) {
       this.form.file_size = selection.size || 0;
       this.form.file_ext = selection.ext || "";
       this.importReplacementConfirmed = false;
+      this.importMetadataPreview = null;
+      this.importMetadataChoices = {};
       this.submitImport();
     },
 
     showImportModal: function () {
       return this.importModalOpen;
+    },
+
+    trapImportFocus: function (event) {
+      var dialog = event.currentTarget;
+      var elements = Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), a[href], [tabindex="0"]'))
+        .filter(function (element) { return element.getClientRects().length > 0; });
+      var first = elements[0], last = elements[elements.length - 1];
+      if (!first) { event.preventDefault(); return; }
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialog)) {
+        event.preventDefault(); first.focus();
+      }
     },
 
     closeImportModal: function () {
@@ -19303,6 +19321,8 @@ function issueDetailPage(config) {
         completed: "Complete",
         failed: "Needs attention",
         safety_blocked: "Safety review",
+        metadata_review: "Metadata review",
+        checking: "Checking metadata",
         cancelled: "Cancelled",
       };
       return labels[this.importState] || "Importing";
@@ -19488,6 +19508,14 @@ function issueDetailPage(config) {
 
     cancelIssueImport: async function () {
       if (this.cancellingImport || this.importState === "completed") return;
+      if (this.importState === "checking") {
+        if (this.importPreviewController) this.importPreviewController.abort();
+        return;
+      }
+      if (this.importState === "metadata_review") {
+        this.closeImportModal();
+        return;
+      }
       if (this.importState === "failed" || this.importState === "safety_blocked" || this.importState === "cancelled") {
         this.closeImportModal();
         return;
@@ -19531,7 +19559,17 @@ function issueDetailPage(config) {
       return (bytes / 1048576).toFixed(1) + " MB";
     },
 
-    submitImport: async function () {
+    canImportReviewedMetadata: function () {
+      var self = this;
+      return !self.importing && self.importMetadataPreview &&
+        self.importMetadataPreview.conflicts.every(function (conflict) {
+          return conflict.options.some(function (option) {
+            return option.selectable && self.importMetadataChoices[conflict.key] === option.source;
+          });
+        });
+    },
+
+    submitImport: async function (approveMetadata) {
       if (!this.form.file_path || this.importing) return;
 
       if (cfg.hasLibraryFile && !this.importReplacementConfirmed) {
@@ -19564,17 +19602,45 @@ function issueDetailPage(config) {
       });
 
       try {
+        var approval = null;
+        if (cfg.pairedImportMetadata && cfg.importMetadataPreviewUrl) {
+          this.importState = "checking";
+          this.importMessage = "Checking file metadata...";
+          this.importPreviewController = new AbortController();
+          var previewResponse = await fetch(cfg.importMetadataPreviewUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": this.csrfToken() },
+            signal: this.importPreviewController.signal,
+            body: JSON.stringify({ file_path: this.form.file_path, move_to_library: this.form.move_to_library, choices: this.importMetadataChoices }),
+          });
+          var preview = await previewResponse.json();
+          if (!previewResponse.ok) throw new Error(preview.detail || "Unable to review file metadata.");
+          var changed = preview && this.importMetadataPreview &&
+            preview.context_key !== this.importMetadataPreview.context_key;
+          if (changed) this.importMetadataChoices = {};
+          this.importMetadataPreview = preview;
+          if (preview && (changed || (preview.conflicts.length && (!approveMetadata || !preview.ready)))) {
+            this.importState = "metadata_review";
+            this.importMessage = changed ? "File or catalog changed. Review the current values." : "Review file metadata";
+            this.importing = false;
+            return;
+          }
+          if (preview) approval = { review_key: preview.review_key, choices: this.importMetadataChoices };
+        }
+        this.importState = "running";
+        var requestBody = {
+          file_path: this.form.file_path,
+          move_to_library: this.form.move_to_library,
+          allow_resource_safety_exception: allowSafetyException,
+        };
+        if (approval) requestBody.metadata_approval = approval;
         var response = await fetch(cfg.importStartUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-CSRF-Token": this.csrfToken(),
           },
-          body: JSON.stringify({
-            file_path: this.form.file_path,
-            move_to_library: this.form.move_to_library,
-            allow_resource_safety_exception: allowSafetyException,
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         if (!response.ok) {
@@ -19594,18 +19660,25 @@ function issueDetailPage(config) {
       } catch (error) {
         this.stopImportPolling();
         this.importing = false;
+        if (error.name === "AbortError") {
+          this.importState = "cancelled";
+          this.importModalOpen = false;
+          return;
+        }
         this.importState = "failed";
         this.importMessage = "Import failed.";
         this.importErrorMessage =
           error.message || "An error occurred during import";
         this.dispatchToast(this.importErrorMessage, "error");
+      } finally {
+        this.importPreviewController = null;
       }
     },
 
     retryImportWithSafetyException: function () {
       if (!this.form.file_path || this.importing) return;
       this.importAllowSafetyException = true;
-      this.submitImport();
+      this.submitImport(Boolean(this.importMetadataPreview));
     },
 
     deleteIssueFile: async function () {

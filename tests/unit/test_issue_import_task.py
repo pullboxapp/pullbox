@@ -136,6 +136,7 @@ async def test_run_issue_import_accepts_positional_progress_callbacks(monkeypatc
         prepared_arg,
         *,
         allow_resource_safety_exception=False,
+        metadata_approval=None,
         preparation_progress_callback=None,
         transfer_progress_callback=None,
         comicinfo_progress_callback=None,
@@ -143,6 +144,7 @@ async def test_run_issue_import_accepts_positional_progress_callbacks(monkeypatc
     ):
         assert prepared_arg is prepared
         assert allow_resource_safety_exception is True
+        assert metadata_approval is None
         assert preparation_progress_callback is not None
         assert transfer_progress_callback is not None
         assert comicinfo_progress_callback is not None
@@ -218,12 +220,15 @@ async def test_run_issue_import_accepts_worker_thread_progress_callbacks(monkeyp
         prepared_arg,
         *,
         allow_resource_safety_exception=False,
+        metadata_approval=None,
         preparation_progress_callback=None,
         transfer_progress_callback=None,
         comicinfo_progress_callback=None,
         cancellation_check=None,
     ):
         assert prepared_arg is prepared
+        assert metadata_approval.review_key == "b" * 64
+        assert metadata_approval.choices == {"issue.page_count": "ComicInfo.xml"}
         assert comicinfo_progress_callback is not None
 
         def emit_from_worker_thread() -> None:
@@ -272,6 +277,10 @@ async def test_run_issue_import_accepts_worker_thread_progress_callbacks(monkeyp
             "file_path": "/tmp/imports/Aliens Epic Collection.cbz",
             "move_to_library": True,
             "allow_resource_safety_exception": False,
+            "metadata_approval": {
+                "review_key": "b" * 64,
+                "choices": {"issue.page_count": "ComicInfo.xml"},
+            },
         },
     )
 

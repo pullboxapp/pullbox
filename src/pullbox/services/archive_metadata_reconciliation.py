@@ -13,6 +13,7 @@ from pullbox.core.archive_metadata_fields import (
     COMICINFO_ROLES,
     canonical_archive_format,
     comicinfo_credits,
+    normalize_comicinfo_aliases,
 )
 from pullbox.core.comicinfo_sanitizer import references_stale_retailer
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -179,6 +180,7 @@ def _read_document(member: MetadataFile, document: str) -> EmbeddedMetadataValue
     except MetadataXmlError as exc:
         diagnostics.append(ArchiveMetadataDiagnostic(document, exc.code, "ComicInfo"))
         return EmbeddedMetadataValues(diagnostics=tuple(diagnostics))
+    normalize_comicinfo_aliases(root)
     return _ComicInfoReader(root, diagnostics).read()
 
 

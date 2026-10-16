@@ -27,6 +27,7 @@ from pullbox.models.library import LibraryFile, MatchConfidence
 from pullbox.models.series import Series
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
 from pullbox.services.issue_file_service import resolve_configured_utility_trash_dir
+from pullbox.services.manual_import_metadata_review import preview_manual_import_metadata
 from pullbox.services.manual_paired_metadata import (
     materialize_manual_metadata,
     read_manual_metadata_plan,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.schemas.issue_file_metadata import FileMetadataApproval
     from pullbox.services.direct_pack_paired_metadata import StagedPackMember
 
 
@@ -158,6 +160,7 @@ async def execute_manual_issue_import(
     prepared: PreparedManualIssueImport,
     *,
     use_paired_metadata: bool = True,
+    metadata_approval: FileMetadataApproval | None = None,
     staged_pack_member: StagedPackMember | None = None,
     allow_resource_safety_exception: bool = False,
     preparation_progress_callback: Callable[[str, int, int, str], Any] | None = None,
@@ -177,7 +180,12 @@ async def execute_manual_issue_import(
         else None
     )
     plan = None
+    reviewed = None
     source_signature = None
+    if metadata_approval is not None and (not paired or staged_pack_member is not None):
+        raise ManualIssueImportError(
+            status_code=409, detail="Import settings changed; preview metadata again."
+        )
     if staged_pack_member is not None:
         prepared = await prepare_manual_issue_import(
             session,
@@ -223,6 +231,23 @@ async def execute_manual_issue_import(
         source_signature = await asyncio.to_thread(
             build_file_identity_signature, prepared.source_path
         )
+        if metadata_approval is not None:
+            try:
+                reviewed = await preview_manual_import_metadata(
+                    plan, prepared.source_path, metadata_approval.choices
+                )
+                if (
+                    not reviewed.preview.ready
+                    or reviewed.preview.review_key != metadata_approval.review_key
+                ):
+                    raise ValueError("Approval changed")
+            except ValueError:
+                raise ManualIssueImportError(
+                    status_code=409,
+                    detail=(
+                        "The file, metadata or choices changed. Preview and review metadata again."
+                    ),
+                ) from None
 
     async def converter_with_progress(
         source: Path,
@@ -286,6 +311,7 @@ async def execute_manual_issue_import(
                     allow_resource_safety_exception=allow_resource_safety_exception,
                     cancellation_check=cancellation_check,
                     progress_callback=paired_progress,
+                    reviewed=reviewed,
                 )
             except (ArchiveMetadataStagingError, ValueError) as exc:
                 if isinstance(exc, ArchiveMetadataStagingError) and str(exc) != "metadata_conflict":

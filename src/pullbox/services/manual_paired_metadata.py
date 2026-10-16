@@ -27,6 +27,7 @@ from pullbox.core.library_file_ownership import (
     require_mutable_library_target,
 )
 from pullbox.core.library_policy import (
+    LibraryIngestPolicy,
     load_effective_library_ingest_policy,
     load_library_ingest_policy,
 )
@@ -43,7 +44,10 @@ from pullbox.services.archive_metadata_binding import (
     require_unowned_metadata_file,
     require_verified_archive_metadata,
 )
-from pullbox.services.metadata_series_refresh_state import read_series_refresh_state
+from pullbox.services.metadata_series_refresh_state import (
+    SeriesRefreshState,
+    read_series_refresh_state,
+)
 from pullbox.utilities.executors.archive_metadata_staging import stage_cbz_metadata_interruptible
 
 if TYPE_CHECKING:
@@ -51,8 +55,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-    from pullbox.core.library_policy import LibraryIngestPolicy
-    from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
+    from pullbox.services.manual_import_metadata_review import ReviewedManualMetadata
     from pullbox.utilities.executors.archive_metadata_staging import StagedArchiveMetadata
     from pullbox.utilities.executors.archive_subprocess import ControlCheck, ProgressCallback
 
@@ -168,6 +171,7 @@ async def materialize_manual_metadata(
     allow_resource_safety_exception: bool = False,
     cancellation_check: ControlCheck | None = None,
     progress_callback: ProgressCallback | None = None,
+    reviewed: ReviewedManualMetadata | None = None,
 ) -> bool:
     """Stage both XML files privately, revalidate, then publish without overwrite."""
     directories = await asyncio.to_thread(_directories, target, Path(plan.root_path))
@@ -179,6 +183,7 @@ async def materialize_manual_metadata(
             allow_resource_safety_exception=allow_resource_safety_exception,
             cancellation_check=cancellation_check,
             progress_callback=progress_callback,
+            reviewed=reviewed,
         ) as staged,
         factory() as reader,
     ):
@@ -208,6 +213,7 @@ async def stage_manual_metadata(
     allow_resource_safety_exception: bool = False,
     cancellation_check: ControlCheck | None = None,
     progress_callback: ProgressCallback | None = None,
+    reviewed: ReviewedManualMetadata | None = None,
 ) -> AsyncIterator[StagedArchiveMetadata]:
     """Reuse the verified reconciler before an existing owner registers a batch."""
     limit = plan.limit
@@ -216,7 +222,10 @@ async def stage_manual_metadata(
     if allow_resource_safety_exception:
         members = await asyncio.to_thread(ArchiveReader(source).list_members)
         limit = max(limit, sum(member.size for member in members) + 2 * MAX_METADATA_BYTES)
-    series, issue = assemble_archive_metadata_state(plan.metadata, None, now=datetime.now(UTC))
+    if reviewed is None:
+        series, issue = assemble_archive_metadata_state(plan.metadata, None, now=datetime.now(UTC))
+    else:
+        series, issue = reviewed.series, reviewed.issue
     async with stage_cbz_metadata_interruptible(
         source,
         staging_parent,
@@ -224,7 +233,10 @@ async def stage_manual_metadata(
         issue,
         max_uncompressed_bytes=limit,
         block_dangerous=plan.block_dangerous,
-        metadata_state=plan.metadata,
+        metadata_state=plan.metadata if reviewed is None else None,
+        primary_identity=reviewed.primary if reviewed is not None else None,
+        previous_series=plan.metadata.series.baseline,
+        previous_issue=plan.metadata.issues[0].baseline,
         cancellation_check=cancellation_check,
         progress_callback=progress_callback,
     ) as staged:

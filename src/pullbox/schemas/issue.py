@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from pullbox.models.issue import IssueStatus
+from pullbox.schemas.issue_file_metadata import FileMetadataApproval, FileMetadataReview
 
 
 class IssueUpdate(BaseModel):
@@ -54,6 +55,11 @@ class ManualFileImportRequest(BaseModel):
         False,
         description="Allow one explicit resource safety exception for this manual import attempt.",
     )
+    metadata_approval: FileMetadataApproval | None = None
+
+
+class ManualFileImportPreviewRequest(ManualFileImportRequest, FileMetadataReview):
+    """Inspect the selected file and choose only values read from that file or library."""
 
 
 class ManualFileImportResponse(BaseModel):

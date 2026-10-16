@@ -17,6 +17,7 @@ from pullbox.services.archive_metadata_binding import ArchiveMetadataBinding
 from pullbox.services.archive_metadata_preservation import ArchiveMetadataRenderError
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
 from pullbox.services.archive_metadata_rendering import _series_separator_key
+from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
 
 _FIELDS = {
     "series": (
@@ -51,7 +52,7 @@ def _equal(field: str, source: FileMetadataSource, old: object, new: object) -> 
 
 
 def review_metadata_fields(
-    binding: ArchiveMetadataBinding,
+    binding: ArchiveMetadataBinding | SeriesRefreshState,
     archive: ArchiveMetadataReconciliation,
     series: MetadataSnapshot,
     issue: MetadataSnapshot,
@@ -61,8 +62,9 @@ def review_metadata_fields(
     conflicts: list[FileMetadataConflict] = []
     snapshots = {"series": series, "issue": issue}
     seen: set[str] = set()
+    metadata = binding.metadata if isinstance(binding, ArchiveMetadataBinding) else binding
     for kind, fields in _FIELDS.items():
-        current = binding.metadata.series if kind == "series" else binding.metadata.issues[0]
+        current = metadata.series if kind == "series" else metadata.issues[0]
         snapshot = snapshots[kind]
         values = snapshot.values.model_dump()
         origins = {item.field: item for item in snapshot.origins}

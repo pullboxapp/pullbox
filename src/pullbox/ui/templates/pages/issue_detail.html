@@ -20,6 +20,7 @@
     searchUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/download')|tojson|forceescape }},
     deleteFileUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/file')|tojson|forceescape }},
     importStartUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/start')|tojson|forceescape }},
+    importMetadataPreviewUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/metadata-preview')|tojson|forceescape }},
     importCancelUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/cancel')|tojson|forceescape }},
     importProgressUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/progress')|tojson|forceescape }},
     readerManifestUrl: {{ ('/api/v1/reader/issues/' ~ issue.id ~ '/manifest')|tojson|forceescape }},

@@ -241,6 +241,7 @@ async def _run_issue_import(issue_id: int, request_payload: dict[str, Any]) -> N
                 session,
                 prepared,
                 allow_resource_safety_exception=request.allow_resource_safety_exception,
+                metadata_approval=request.metadata_approval,
                 preparation_progress_callback=emit_stage_progress,
                 transfer_progress_callback=lambda current, total: emit_stage_progress(
                     stage="transferring",
