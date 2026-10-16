@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -38,10 +38,10 @@ async def migrate_covers_to_dotcovers(
 
     async with session_factory() as session:
         # Check if already migrated
-        result = await session.execute(
+        migration_result = await session.execute(
             select(SystemConfig.value).where(SystemConfig.key == _MIGRATION_KEY)
         )
-        if result.scalar_one_or_none() == "true":
+        if migration_result.scalar_one_or_none() == "true":
             return 0
 
         # Resolve target covers directory
@@ -62,7 +62,8 @@ async def migrate_covers_to_dotcovers(
 
     moved = 0
     for series_id, series_path_str in series_rows:
-        series_path = Path(series_path_str)
+        # The query excludes NULL paths; SQL predicates do not narrow row types.
+        series_path = Path(cast("str", series_path_str))
         if not series_path.is_dir():
             continue
 

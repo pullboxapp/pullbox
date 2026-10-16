@@ -97,7 +97,13 @@ async def load_file_match_target_index(
         for issue, library_file_id in issues_result.all():
             has_library_file = library_file_id is not None
             target_index.issue_entries.append((issue, has_library_file))
-            entry = (issue.id, issue.comicvine_id, has_library_file, issue, issue.title)
+            entry: FileMatchTargetEntry = (
+                issue.id,
+                issue.comicvine_id,
+                has_library_file,
+                issue,
+                issue.title,
+            )
             if issue.comicvine_id is not None:
                 target_index.cv_id_map[issue.comicvine_id] = entry
             target_index.exact_number_map[issue.effective_issue_number_text] = entry

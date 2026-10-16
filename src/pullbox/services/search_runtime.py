@@ -139,7 +139,7 @@ async def build_search_runtime(
             )
         )
     )
-    cfg: dict[str, str] = dict(cfg_rows.all())  # type: ignore[arg-type]
+    cfg: dict[str, str] = dict(cfg_rows.all())
 
     try:
         source_priority_raw = json.loads(cfg.get("source_priority", "[]"))

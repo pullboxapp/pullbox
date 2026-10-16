@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def pending_file_ids(job_id: int) -> Select[tuple[int]]:
+def pending_file_ids(job_id: int) -> Select[int]:
     """Only already-confirmed targets, never unresolved or unselected siblings."""
     return (
         select(ImportedFile.id)

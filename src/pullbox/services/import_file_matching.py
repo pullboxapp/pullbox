@@ -78,6 +78,7 @@ from pullbox.services.import_progress_runtime import (
     scan_review_file_target_weight,
     scan_review_progress_pct,
 )
+from pullbox.services.import_provider_cache import is_in_memory_sqlite_engine
 from pullbox.services.import_provisional_targets import reconcile_provisional_targets
 from pullbox.services.import_source_metadata import (
     corroborated_import_title_conflict,
@@ -588,9 +589,8 @@ async def _spool_grouped_cohort_rows(
         await session.commit()
         await raise_if_cancelled(session, job_id)
         bind = session.bind
-        bind_url = str(bind.sync_engine.url) if bind is not None else ""
         execution_options = {"pullbox_cohort_scan": scan_name}
-        if bind is None or ":memory:" in bind_url:
+        if bind is None or is_in_memory_sqlite_engine(bind):
             result = await session.execute(query.execution_options(**execution_options))
             for rows in result.partitions(size):
                 await raise_if_cancelled(session, job_id)

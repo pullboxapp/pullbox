@@ -123,7 +123,7 @@ def _follow_up_job_filter() -> ColumnElement[bool]:
     )
 
 
-def _follow_up_jobs_statement() -> Select[tuple[ImportJob]]:
+def _follow_up_jobs_statement() -> Select[ImportJob]:
     return select(ImportJob).where(
         ImportJob.status.in_(_FOLLOW_UP_JOB_STATUSES),
         ImportJob.archived_at.is_(None),

@@ -155,12 +155,14 @@ async def read_legacy_identity_page(
                     "Story arc identity row budget exceeded. Smaller pages may help; "
                     "an arc that exceeds the budget alone needs a separate inspection."
                 )
-            for row_id, local_id, source, value in arc_rows:
+            for row_id, local_id, source, external_id in arc_rows:
                 storage = LegacyIdentityStorage.STORY_ARC_RELATION
                 try:
                     if source == IdentityNamespace.COMICVINE:
-                        value = normalize_comicvine_arc_id(value)
-                    identity = ExternalIdentityRef(IdentityNamespace(source), entity_kind, value)
+                        external_id = normalize_comicvine_arc_id(external_id)
+                    identity = ExternalIdentityRef(
+                        IdentityNamespace(source), entity_kind, external_id
+                    )
                 except ValueError:
                     problems.append(
                         LegacyIdentityProblem(local_id, storage, row_id, "invalid_external_id")

@@ -429,16 +429,14 @@ async def _load_existing_name_candidate_page(
 
 
 def _existing_series_candidate_select() -> Select[
-    tuple[
-        int,
-        int | None,
-        str,
-        int | None,
-        SeriesType,
-        str,
-        int,
-        str | None,
-    ]
+    int,
+    int | None,
+    str,
+    int | None,
+    SeriesType,
+    str | None,
+    int,
+    str | None,
 ]:
     return sa_select(
         Series.id,

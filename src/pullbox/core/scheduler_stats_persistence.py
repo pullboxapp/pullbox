@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, make_url, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import DatabaseError, OperationalError
+from sqlalchemy.exc import ArgumentError, DatabaseError, OperationalError
 
 from pullbox.core.scheduler_error_helpers import (
     is_locked_error,
@@ -190,15 +190,21 @@ def resolve_runtime_db_url(default_db_url: str, session_factory: Any) -> str:
 
 def resolve_legacy_task_stats_sidecar_path(db_url: str) -> Path | None:
     """Return the retired JSON sidecar path for one-time import."""
-    if "sqlite" not in db_url or ":memory:" in db_url:
+    try:
+        url = make_url(db_url)
+    except ArgumentError:
         return None
-    if ":///" in db_url:
-        raw_path = db_url.split(":///", 1)[1]
-    elif "://" in db_url:
-        raw_path = db_url.split("://", 1)[1]
-    else:
+    if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
         return None
-    db_path = Path(raw_path.split("?", 1)[0])
+    uri = url.query.get("uri")
+    if (
+        url.database.startswith("file:")
+        and isinstance(uri, str)
+        and uri.strip().lower() in {"true", "1", "yes", "on", "y", "t"}
+        and (url.database == "file::memory:" or url.query.get("mode") == "memory")
+    ):
+        return None
+    db_path = Path(url.database)
     return db_path.with_name("scheduled_task_stats.json")
 
 

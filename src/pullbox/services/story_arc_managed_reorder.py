@@ -1113,7 +1113,7 @@ class StoryArcManagedReorderService:
 
 def _pending_coordinator_statement(
     story_arc_id: int,
-) -> Select[tuple[StoryArcPlacement]]:
+) -> Select[StoryArcPlacement]:
     """Return the bounded, portable durable-reorder discovery query."""
     return (
         select(StoryArcPlacement)

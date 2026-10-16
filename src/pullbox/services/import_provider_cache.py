@@ -24,20 +24,33 @@ from pullbox.services.comicvine_persistent_cache import PersistentComicVineCache
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
 
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 _T = TypeVar("_T")
 
 
-def is_in_memory_sqlite_engine(engine: AsyncEngine) -> bool:
+def is_in_memory_sqlite_engine(engine: AsyncEngine | AsyncConnection) -> bool:
     """Return True when separate sessions would share one SQLite memory connection."""
-    url = engine.url
+    url = engine.sync_engine.url
     if url.get_backend_name() != "sqlite":
         return False
     database = url.database
     if database in {None, "", ":memory:"}:
         return True
-    return str(database).startswith("file:") and "mode=memory" in str(url.query)
+    uri = url.query.get("uri", "false")
+    uri_enabled = isinstance(uri, str) and uri.strip().lower() in {
+        "true",
+        "yes",
+        "on",
+        "y",
+        "t",
+        "1",
+    }
+    return (
+        uri_enabled
+        and database.startswith("file:")
+        and (database == "file::memory:" or url.query.get("mode") == "memory")
+    )
 
 
 def build_import_scan_metadata_provider(

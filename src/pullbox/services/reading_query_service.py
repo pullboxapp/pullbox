@@ -576,7 +576,7 @@ def _adjacent_statement(
     series_id: int,
     boundary: ColumnElement[bool],
     descending: bool,
-) -> Select[tuple[int, float, str | None]]:
+) -> Select[int, float, str | None]:
     issue_order = Issue.issue_number.desc() if descending else Issue.issue_number.asc()
     id_order = Issue.id.desc() if descending else Issue.id.asc()
     return (
@@ -599,7 +599,7 @@ def _adjacent_statement(
 
 
 def _adjacent_reference(
-    row: Row[tuple[int, float, str | None]] | None,
+    row: Row[int, float, str | None] | None,
 ) -> AdjacentIssueReference | None:
     if row is None:
         return None

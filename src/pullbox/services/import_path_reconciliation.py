@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import aliased
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 def _candidate_query(
     job_id: int,
-) -> tuple[Select[tuple[ImportedFile, ImportedFile, ImportedSeries]], type[ImportedFile]]:
+) -> tuple[Select[ImportedFile, ImportedFile, ImportedSeries], type[ImportedFile]]:
     # Count all same-folder copies, including blocked ones, before choosing a match.
     folder = func.substr(
         ImportedFile.file_path,
@@ -241,7 +241,8 @@ async def reconcile_saved_mylar_paths(
                     **reconciliation_evidence(
                         record.file_path,
                         actual.file_path,
-                        record.comicvine_issue_id,
+                        # Both candidate CTEs exclude NULL provider IDs.
+                        cast("int", record.comicvine_issue_id),
                         recorded_series_name=base.series_name,
                         actual_series_name=metadata.series_name,
                     ),
@@ -271,13 +272,13 @@ async def reconcile_saved_mylar_paths(
     if apply and report["references_reconciled"]:
         await recompute_file_counters(session, job)
         for series_id in changed_series:
-            series = await session.get(ImportedSeries, series_id)
-            if series is not None:
-                series.file_count = series.files_total
-                series.sample_paths = list(
+            changed_series_row = await session.get(ImportedSeries, series_id)
+            if changed_series_row is not None:
+                changed_series_row.file_count = changed_series_row.files_total
+                changed_series_row.sample_paths = list(
                     await session.scalars(
                         select(ImportedFile.file_path)
-                        .where(ImportedFile.import_series_id == series.id)
+                        .where(ImportedFile.import_series_id == changed_series_row.id)
                         .order_by(ImportedFile.id)
                         .limit(5)
                     )

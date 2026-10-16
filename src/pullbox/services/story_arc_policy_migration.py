@@ -72,6 +72,21 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.sql import Select
 
+    _MembershipScopeValues = tuple[IssueStoryArc, Issue | None, Series | None, Publisher | None]
+    _TerminalSyncWorkValues = tuple[
+        int,
+        object,
+        int | None,
+        int | None,
+        int,
+        str,
+        int | None,
+        ImportJobStatus | None,
+        int | None,
+        int | None,
+        ImportJobActionStatus | None,
+    ]
+
 STORY_ARC_POLICY_MIGRATION_CONFIRMATION = "CHANGE STORY ARC PLACEMENT POLICY"
 
 _TOKEN_SALT = "pullbox-story-arc-policy-migration-v1"
@@ -787,7 +802,7 @@ def _membership_scope_statement(
     *,
     after_membership_id: int,
     limit: int,
-) -> Select[tuple[IssueStoryArc, Issue, Series, Publisher]]:
+) -> Select[*_MembershipScopeValues]:
     """Portable, bounded keyset query used by every membership digest pass."""
     return (
         select(IssueStoryArc, Issue, Series, Publisher)
@@ -808,7 +823,7 @@ def _placement_scope_statement(
     *,
     after_placement_id: int,
     limit: int,
-) -> Select[tuple[StoryArcPlacement]]:
+) -> Select[StoryArcPlacement]:
     """Portable, bounded keyset query for the exact placement scope."""
     return (
         select(StoryArcPlacement)
@@ -822,7 +837,7 @@ def _placement_scope_statement(
     )
 
 
-def _active_operation_statement(story_arc_id: int) -> Select[tuple[int]]:
+def _active_operation_statement(story_arc_id: int) -> Select[int]:
     """Fail closed on both durable tokens and malformed recovery status rows."""
     return (
         select(StoryArcPlacement.id)
@@ -839,7 +854,7 @@ def _active_operation_statement(story_arc_id: int) -> Select[tuple[int]]:
     )
 
 
-def _active_sync_work_statement(story_arc_id: int) -> Select[tuple[int]]:
+def _active_sync_work_statement(story_arc_id: int) -> Select[int]:
     return (
         select(StoryArcSyncWork.id)
         .join(IssueStoryArc, StoryArcSyncWork.issue_story_arc_id == IssueStoryArc.id)
@@ -860,7 +875,7 @@ def _terminal_sync_work_statement(
     *,
     after_work_id: int,
     limit: int,
-) -> Select[tuple[object, ...]]:
+) -> Select[*_TerminalSyncWorkValues]:
     """Bound terminal work so Python can validate nested rollback markers exactly."""
     return (
         select(
@@ -921,7 +936,7 @@ async def _active_sync_recovery_exists(
         await asyncio.sleep(0)
 
 
-def _terminal_sync_scope(row: Row[tuple[object, ...]]) -> _TerminalSyncWorkScope:
+def _terminal_sync_scope(row: Row[*_TerminalSyncWorkValues]) -> _TerminalSyncWorkScope:
     (
         work_id,
         last_result,
@@ -936,17 +951,17 @@ def _terminal_sync_scope(row: Row[tuple[object, ...]]) -> _TerminalSyncWorkScope
         action_status,
     ) = row
     return _TerminalSyncWorkScope(
-        id=cast("int", work_id),
+        id=work_id,
         last_result=last_result,
-        origin_import_job_id=cast("int | None", origin_import_job_id),
-        origin_import_action_id=cast("int | None", origin_import_action_id),
-        issue_story_arc_id=cast("int", membership_id),
-        desired_generation=cast("str", desired_generation),
-        job_id=cast("int | None", job_id),
-        job_status=cast("ImportJobStatus | None", job_status),
-        action_id=cast("int | None", action_id),
-        action_import_job_id=cast("int | None", action_import_job_id),
-        action_status=cast("ImportJobActionStatus | None", action_status),
+        origin_import_job_id=origin_import_job_id,
+        origin_import_action_id=origin_import_action_id,
+        issue_story_arc_id=membership_id,
+        desired_generation=desired_generation,
+        job_id=job_id,
+        job_status=job_status,
+        action_id=action_id,
+        action_import_job_id=action_import_job_id,
+        action_status=action_status,
     )
 
 
@@ -1225,7 +1240,7 @@ async def _membership_scopes_from_rows(
     session: AsyncSession,
     *,
     arc_name: str,
-    rows: Sequence[Row[tuple[IssueStoryArc, Issue, Series, Publisher]]],
+    rows: Sequence[Row[*_MembershipScopeValues]],
 ) -> tuple[_MembershipScope, ...]:
     issue_ids = tuple(issue.id for _membership, issue, _series, _publisher in rows if issue)
     files_by_issue: dict[int, LibraryFile] = {}
