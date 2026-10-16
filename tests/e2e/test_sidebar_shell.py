@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -12,11 +15,72 @@ from tests.e2e.pages.app_shell import AppShellPage
 from tests.e2e.pages.import_page import ImportPage
 from tests.e2e.pages.series_list import SeriesListPage
 
+if TYPE_CHECKING:
+    from playwright.sync_api import Page
+
 pytestmark = pytest.mark.e2e
 
 
 class TestSidebarShell:
     """Behavior-first E2E checks for the persistent sidebar shell."""
+
+    @pytest.mark.parametrize("theme", ["light", "dark"])
+    def test_shell_accessible_names_survive_collapsed_and_mobile_layouts(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+        theme: str,
+    ) -> None:
+        authed_page.set_viewport_size({"width": 1280, "height": 800})
+        authed_page.add_init_script(
+            f"localStorage.setItem('pullbox-theme', {json.dumps(theme)});"
+            "localStorage.setItem('sidebarOpen', 'true');"
+        )
+        shell = AppShellPage(authed_page, seeded_server)
+        shell.goto("/series")
+        expect(authed_page.locator("html")).to_have_attribute("data-theme", theme)
+
+        user_menu = authed_page.get_by_role("button", name=re.compile(r"^User menu"))
+        username = user_menu.locator("span")
+        logo_copy = authed_page.locator("[data-sidebar-logo-label]")
+        version = authed_page.locator("[data-testid='sidebar-brand-version']")
+        expect(username).to_be_visible()
+        expect(username).to_have_text("admin")
+        expect(logo_copy).to_be_visible()
+        expect(version).to_be_visible()
+        version_text = version.inner_text().strip()
+        assert version_text.startswith("v")
+        logo_name = f"Pullbox {version_text} — home"
+        expect(user_menu).to_have_accessible_name("User menu for admin")
+        expect(shell.logo_link).to_have_accessible_name(logo_name)
+
+        shell.collapse_toggle.click()
+        expect(logo_copy).to_be_hidden()
+        expect(shell.logo_link).to_be_visible()
+        expect(shell.logo_link).to_have_accessible_name(logo_name)
+        expect(user_menu).to_have_accessible_name("User menu for admin")
+        shell.collapse_toggle.click()
+        expect(logo_copy).to_be_visible()
+
+        authed_page.set_viewport_size({"width": 390, "height": 844})
+        authed_page.get_by_role("button", name="Open navigation menu", exact=True).click()
+        expect(shell.mobile_backdrop).to_be_visible()
+        expect(logo_copy).to_be_visible()
+        expect(version).to_be_visible()
+        expect(shell.logo_link).to_have_accessible_name(logo_name)
+        expect(username).to_be_hidden()
+        expect(user_menu).to_have_accessible_name("User menu for admin")
+
+        shell.mobile_backdrop.click(position={"x": 380, "y": 400})
+        expect(shell.mobile_backdrop).to_be_hidden()
+        sign_out = authed_page.get_by_role("button", name="Sign out", exact=True)
+        user_menu.focus()
+        expect(user_menu).to_be_focused()
+        user_menu.press("Enter")
+        expect(sign_out).to_be_visible()
+        user_menu.press("Enter")
+        expect(sign_out).to_be_hidden()
+        expect(user_menu).to_be_focused()
 
     def test_sidebar_shell_recovers_when_initial_stylesheet_request_fails(
         self,

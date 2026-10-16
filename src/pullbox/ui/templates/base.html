@@ -536,7 +536,7 @@
       {#- User dropdown -#}
       {% if user %}
       <div x-data="{ open: false }" class="relative">
-        <button @click="open = !open" @click.outside="open = false" aria-label="User menu"
+        <button @click="open = !open" @click.outside="open = false" aria-label="User menu for {{ user.username }}"
                 class="flex items-center gap-2 px-3 py-2 rounded-lg font-sans font-medium text-sm text-pb-text-sec hover:bg-pb-card-hover hover:text-pb-text transition-colors">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path stroke-linecap="round" stroke-linejoin="round"

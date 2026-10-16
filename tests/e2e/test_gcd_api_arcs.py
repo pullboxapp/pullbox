@@ -70,7 +70,7 @@ def test_gcd_api_search_review_reorder_skip_and_accessibility(
     expect(page.locator("html")).to_have_attribute(
         "data-theme", os_scheme if theme == "system" else theme
     )
-    link = page.get_by_role("link", name="Preview Civil War", exact=True)
+    link = page.get_by_role("link", name="Preview members of Civil War", exact=True)
     expect(link).to_be_visible()
     assert_no_axe_violations(page, name=f"gcd-api-arc-search-{theme}-{width}", include=["#content"])
     link.click()
