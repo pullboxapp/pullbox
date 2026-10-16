@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,6 +22,9 @@ from pullbox.core.scheduler_stats_persistence import (
     upsert_task_stat_row,
 )
 from pullbox.models.scheduler_task_stat import ScheduledTaskStat
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 @pytest.mark.asyncio
@@ -155,7 +160,12 @@ async def test_legacy_sidecar_uses_structured_runtime_database(
     driver: str, database: str | None, expected_directory: str | None
 ) -> None:
     """A rendered engine URL must not become an encoded or imaginary file path."""
-    engine = create_async_engine(URL.create(driver, database=database))
+    url = URL.create(driver, database=database)
+    if driver == "postgresql+asyncpg":
+        # URL resolution does not require a connection or the optional database driver.
+        engine = cast("AsyncEngine", SimpleNamespace(url=url))
+    else:
+        engine = create_async_engine(url)
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         runtime_url = resolve_runtime_db_url("sqlite+aiosqlite:////unused/default.db", factory)
@@ -166,7 +176,8 @@ async def test_legacy_sidecar_uses_structured_runtime_database(
         )
         assert resolve_legacy_task_stats_sidecar_path(runtime_url) == expected
     finally:
-        await engine.dispose()
+        if driver == "sqlite+aiosqlite":
+            await engine.dispose()
 
 
 @pytest.mark.parametrize("db_url", ["", "not-a-sqlite-url", "https://sqlite.example/database"])

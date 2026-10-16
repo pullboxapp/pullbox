@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from sqlalchemy import URL, event, literal, select
@@ -19,6 +20,8 @@ from pullbox.services.import_provider_cache import is_in_memory_sqlite_engine
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 @pytest.mark.parametrize(
@@ -47,7 +50,10 @@ async def test_memory_classifier_uses_structured_url(
     driver: str, database: str | None, query: dict[str, str], expected: bool
 ) -> None:
     url = URL.create(driver, database=database, query=query)
-    if (
+    if driver == "postgresql+asyncpg":
+        # Backend classification needs the real URL, not the optional database driver.
+        engine = cast("AsyncEngine", SimpleNamespace(sync_engine=SimpleNamespace(url=url)))
+    elif (
         driver == "sqlite+aiosqlite"
         and query.get("mode") == "memory"
         and query.get("uri")
@@ -63,7 +69,8 @@ async def test_memory_classifier_uses_structured_url(
     try:
         assert is_in_memory_sqlite_engine(engine) is expected
     finally:
-        await engine.dispose()
+        if driver == "sqlite+aiosqlite":
+            await engine.dispose()
 
 
 def _test_url(kind: str, tmp_path: Path) -> URL:
