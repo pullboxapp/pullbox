@@ -115,6 +115,22 @@ async def test_new_add_returns_canonical_snapshots_matching_persisted_metadata(i
             assert item.values.issue_number_text == issue.issue_number_text
 
 
+async def test_stale_summary_adopts_complete_catalog_and_derives_saved_count(identity_probe_db):
+    _, factory, _ = identity_probe_db
+    data = bundle(numbers=("1", "2"))
+    data.series.issue_count = 1
+    async with factory.begin() as session:
+        try:
+            result = await adopt_source_series_bundle(session, data)
+        except SeriesAdoptionError as exc:
+            pytest.fail(f"A stale summary cannot veto the complete catalog: {exc}")
+        assert result.series.issue_count == result.snapshot.values.issue_count == 2
+        origin = next(item for item in result.snapshot.origins if item.field == "issue_count")
+        assert origin.derivation == "catalog"
+        assert await session.scalar(select(func.count()).select_from(Issue)) == 2
+        assert data.series.issue_count == 1
+
+
 async def test_representative_metron_cover_survives_add_and_session_reload(identity_probe_db):
     _, factory, _ = identity_probe_db
     adapter = CatalogAdapter(1)

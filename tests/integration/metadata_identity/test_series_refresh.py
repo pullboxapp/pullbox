@@ -841,7 +841,7 @@ async def comicvine_count_disagreement(identity_probe_db):
     return factory, series_id, original, adapters, instance
 
 
-async def test_refresh_falls_back_from_stale_local_count_to_exact_api_catalog(
+async def test_refresh_accepts_complete_catalog_with_stale_summary_without_fallback(
     comicvine_count_disagreement,
 ):
     from pullbox.services.metadata_series_refresh import refresh_series_catalog_from_sources
@@ -853,9 +853,7 @@ async def test_refresh_falls_back_from_stale_local_count_to_exact_api_catalog(
         assert result.series.issue_count == 5
         assert result.created_issue_ids == ()
         assert result.series.path == "/reference/Civil War - Unmasked"
-        assert [(o.source, o.status) for o in result.outcomes] == [
-            (Source.COMICVINE_LOCAL, SourceStatus.INCOMPATIBLE_RESPONSE)
-        ]
+        assert result.outcomes == ()
         await session.commit()
     async with factory() as session:
         issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
@@ -863,14 +861,37 @@ async def test_refresh_falls_back_from_stale_local_count_to_exact_api_catalog(
         assert set(await session.scalars(select(IssueExternalIdentity.identity_namespace))) == {
             Namespace.COMICVINE
         }
-    assert ("issues", "42", 1) in adapters[Source.COMICVINE_API].calls
+    assert not any(call[0] == "issues" for call in adapters[Source.COMICVINE_API].calls)
 
 
 @pytest.mark.parametrize("fallback", ["disabled", "rate_limited"])
-async def test_count_mismatch_without_consistent_fallback_is_actionable_and_atomic(
+async def test_changing_page_total_without_consistent_fallback_is_actionable_and_atomic(
     comicvine_count_disagreement, fallback
 ):
     factory, series_id, original, adapters, instance = comicvine_count_disagreement
+    local = adapters[Source.COMICVINE_LOCAL]
+
+    async def changing_pages(external_id, *, page=1, validator=None):
+        start, stop = (0, 100) if page == 1 else (100, 102)
+        return MetadataFetch(
+            status=SourceStatus.OK,
+            data=MetadataPage(
+                results=[
+                    local.data.issues[0].model_copy(
+                        update={
+                            "external_id": str(1000 + index),
+                            "issue_number_text": str(index + 1),
+                            "issue_number_key": str(index + 1),
+                        }
+                    )
+                    for index in range(start, stop)
+                ],
+                total=101 if page == 1 else 102,
+                next_page=2 if page == 1 else None,
+            ),
+        )
+
+    local.issues = changing_pages
     if fallback == "disabled":
         instance.runtime[Source.COMICVINE_API].policy.enabled = False
     else:

@@ -163,8 +163,6 @@ async def fetch_source_series_bundle(
                 raise SeriesAdoptionError(
                     "The series profile belongs to a different source identity."
                 )
-            if profile.issue_count is not None and profile.issue_count > max_issues:
-                raise SeriesAdoptionError("The issue catalog exceeds the interactive add limit.")
             issues: list[ProviderIssueRead] = []
             seen: set[str] = set()
             page = 1
@@ -181,9 +179,8 @@ async def fetch_source_series_bundle(
                 current = result.data
                 if total is None:
                     total = current.total
-                if current.total != total or (
-                    profile.issue_count is not None and profile.issue_count != total
-                ):
+                # Summary counts can lag; completeness comes from the paginated catalog.
+                if current.total != total:
                     raise SeriesCatalogCountError(
                         "The provider catalog count changed. Retry the add."
                     )
@@ -208,6 +205,14 @@ async def fetch_source_series_bundle(
                 if current.next_page is None:
                     if len(issues) != total:
                         raise SeriesAdoptionError("The issue catalog is incomplete. Retry the add.")
+                    if profile.issue_count is not None and profile.issue_count != total:
+                        logger.info(
+                            "metadata_series_summary_count_disagreement",
+                            source=source.value,
+                            external_id=identifier,
+                            summary_count=profile.issue_count,
+                            catalog_count=total,
+                        )
                     return SourceSeriesBundle(
                         profile, tuple(issues), source_revision, total, started_at
                     )
@@ -285,7 +290,6 @@ def _validate_bundle(bundle: SourceSeriesBundle) -> list[tuple[float, str]]:
         or len(catalog) > 10000
         or type(bundle.catalog_total) is not int
         or bundle.catalog_total != len(catalog)
-        or (profile.issue_count is not None and profile.issue_count != len(catalog))
     ):
         raise SeriesAdoptionError("The series profile or issue catalog is incomplete.")
     if bundle.excluded_issues:
