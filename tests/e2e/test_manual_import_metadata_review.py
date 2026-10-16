@@ -117,3 +117,83 @@ def test_manual_import_reviews_fields_before_start(authed_page, seeded_server, t
             },
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "theme,width,height", [("light", 1280, 720), ("dark", 390, 844), ("light", 844, 390)]
+)
+def test_long_manual_review_scrolls_between_visible_header_and_actions(
+    authed_page, seeded_server, theme, width, height
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": height})
+    conflicts = [
+        {
+            "key": "issue.cover_date",
+            "label": "Issue cover date",
+            "options": [
+                {"source": "library", "value": "2025-02-01", "selectable": True},
+                {"source": "ComicInfo.xml", "value": "2024-12-?", "selectable": False},
+            ],
+        },
+        {
+            "key": "issue.page_count",
+            "label": "Issue page count",
+            "options": [
+                {"source": "library", "value": "48", "selectable": True},
+                {"source": "ComicInfo.xml", "value": "54", "selectable": True},
+            ],
+        },
+        {
+            "key": "issue.credits",
+            "label": "Issue credits",
+            "options": [
+                {
+                    "source": "library",
+                    "value": "\n".join(f"Catalog creator {index} (artist)" for index in range(13)),
+                    "selectable": True,
+                },
+                {"source": "ComicInfo.xml", "value": "Rafael Grampa (writer)", "selectable": True},
+            ],
+        },
+    ]
+    page.route(
+        "**/api/v1/issues/2/import-file/metadata-preview",
+        lambda route: route.fulfill(
+            json={
+                "ready": False,
+                "review_key": "a" * 64,
+                "context_key": "b" * 64,
+                "conflicts": conflicts,
+            }
+        ),
+    )
+    page.goto(f"{seeded_server}/issues/2")
+    page.evaluate("theme => applyTheme(theme)", theme)
+    shell_scroll = page.locator("#content").evaluate("el => el.scrollTop")
+    page.evaluate("""() => Alpine.$data(document.querySelector('[data-testid="issue-detail-page"]'))
+        .applyImportFileSelection({path:'/imports/gargoyle-003.cbz', name:'gargoyle-003.cbz', size:183465435})""")
+    modal = page.get_by_test_id("issue-import-modal")
+    expect(modal.get_by_text("Issue credits", exact=True)).to_be_visible()
+    panel = modal.get_by_role("dialog")
+    expect(panel).to_be_in_viewport(ratio=1)
+    header = panel.locator(":scope > .modal-header")
+    footer = panel.locator(":scope > .modal-footer")
+    body = panel.locator(":scope > .modal-body")
+    expect(header).to_be_in_viewport(ratio=1)
+    expect(footer).to_be_in_viewport(ratio=1)
+    assert body.evaluate("el => el.scrollHeight > el.clientHeight && el.clientHeight > 40")
+    header_before, footer_before = header.bounding_box(), footer.bounding_box()
+    modal.get_by_role("radio", name="library: 2025-02-01", exact=True).check()
+    modal.get_by_role("radio", name="ComicInfo.xml: 54", exact=True).check()
+    modal.get_by_role("radio", name="library: Catalog creator 0", exact=False).check()
+    assert body.evaluate("el => el.scrollTop > 0")
+    assert header.bounding_box() == header_before
+    assert footer.bounding_box() == footer_before
+    assert page.locator("#content").evaluate("el => el.scrollTop") == shell_scroll
+    button = footer.get_by_role("button", name="Import reviewed file", exact=True)
+    expect(button).to_be_enabled()
+    expect(button).to_be_in_viewport(ratio=1)
+    page.screenshot(path=f"/private/tmp/bug8-scroll-{theme}-{width}x{height}.png")
+    footer.get_by_role("button", name="Close", exact=True).click()
+    expect(modal).not_to_be_visible()

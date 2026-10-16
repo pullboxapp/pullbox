@@ -1,3 +1,4 @@
+<template x-teleport="body">
 <div
   class="modal-shell"
   x-cloak
@@ -15,7 +16,7 @@
   ></div>
 
   <div
-    class="modal-panel max-w-3xl"
+    class="modal-panel max-w-3xl max-h-[calc(100dvh-5rem)] min-h-0"
     x-ref="importDialog" tabindex="-1"
     role="dialog" aria-modal="true" aria-labelledby="issue-import-title"
     @keydown.tab="trapImportFocus($event)"
@@ -23,7 +24,7 @@
     x-transition:enter-start="opacity-0 translate-y-2 scale-95"
     x-transition:enter-end="opacity-100 translate-y-0 scale-100"
   >
-    <div class="modal-header">
+    <div class="modal-header shrink-0">
       <div class="space-y-1">
         <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-brand">Import file</p>
         <h3 id="issue-import-title" class="text-base font-semibold text-pb-text" data-testid="issue-import-modal-title">
@@ -40,7 +41,7 @@
       </div>
     </div>
 
-    <div class="modal-body">
+    <div class="modal-body min-h-0">
       <div class="space-y-4 px-5 py-5">
         <div class="grid gap-3 md:grid-cols-3">
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
@@ -119,32 +120,33 @@
             x-text="importErrorMessage"
           ></p>
         </div>
-
-        <div class="modal-footer">
-          <button
-            type="button"
-            class="btn-warning btn-sm"
-            x-cloak
-            x-show="importState === 'safety_blocked'"
-            @click="retryImportWithSafetyException()"
-            x-bind:disabled="importing"
-          >
-            Allow once and retry import
-          </button>
-          <button
-            type="button"
-            class="btn-danger btn-sm"
-            data-testid="issue-import-cancel"
-            @click="cancelIssueImport()"
-            x-bind:disabled="cancellingImport || importState === 'completed'"
-            x-bind:aria-disabled="(cancellingImport || importState === 'completed') ? 'true' : 'false'"
-          >
-            <span x-show="!cancellingImport" x-text="['failed', 'safety_blocked', 'cancelled', 'metadata_review'].includes(importState) ? 'Close' : 'Cancel import'">Cancel import</span>
-            <span x-show="cancellingImport">Cancelling…</span>
-          </button>
-          <button type="button" class="btn-primary btn-sm" x-show="importState === 'metadata_review'" x-cloak :disabled="!canImportReviewedMetadata()" @click="submitImport(true)">Import reviewed file</button>
-        </div>
       </div>
+    </div>
+
+    <div class="modal-footer">
+      <button
+        type="button"
+        class="btn-warning btn-sm"
+        x-cloak
+        x-show="importState === 'safety_blocked'"
+        @click="retryImportWithSafetyException()"
+        x-bind:disabled="importing"
+      >
+        Allow once and retry import
+      </button>
+      <button
+        type="button"
+        class="btn-danger btn-sm"
+        data-testid="issue-import-cancel"
+        @click="cancelIssueImport()"
+        x-bind:disabled="cancellingImport || importState === 'completed'"
+        x-bind:aria-disabled="(cancellingImport || importState === 'completed') ? 'true' : 'false'"
+      >
+        <span x-show="!cancellingImport" x-text="['failed', 'safety_blocked', 'cancelled', 'metadata_review'].includes(importState) ? 'Close' : 'Cancel import'">Cancel import</span>
+        <span x-show="cancellingImport">Cancelling…</span>
+      </button>
+      <button type="button" class="btn-primary btn-sm" x-show="importState === 'metadata_review'" x-cloak :disabled="!canImportReviewedMetadata()" @click="submitImport(true)">Import reviewed file</button>
     </div>
   </div>
 </div>
+</template>
