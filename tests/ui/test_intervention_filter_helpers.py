@@ -106,6 +106,7 @@ def test_build_intervention_item_meta_formats_protocol_outcome_and_source() -> N
         "rejection_reason": "Wrong year",
         "lane": "review",
         "recovery_summary": "",
+        "metadata_recovery": False,
     }
 
 
@@ -178,3 +179,24 @@ def test_build_intervention_item_meta_identifies_direct_acquisition_recovery() -
 
     assert meta["lane"] == "recovery"
     assert meta["recovery_summary"] == "TeraBox authentication required"
+
+
+def test_metadata_recovery_is_not_described_as_a_broken_download_route():
+    from pullbox.ui.intervention_filter_helpers import build_intervention_item_meta
+
+    pending = SimpleNamespace(
+        is_torrent=False,
+        status="pending",
+        indexer=None,
+        match_details={
+            "source_kind": "direct",
+            "failure_class": "post_process",
+            "failure_code": "direct_metadata_review_required",
+        },
+    )
+    meta = build_intervention_item_meta(pending)
+    assert (
+        meta["recovery_summary"]
+        == "Downloaded file needs metadata review; no new download is needed"
+    )
+    assert meta["metadata_recovery"] is True

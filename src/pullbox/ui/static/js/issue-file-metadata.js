@@ -1,10 +1,11 @@
 /* Preview and approve one managed comic; native conversion is explicit. */
 function issueFileMetadata(issueId) {
-  var endpoint = "/api/v1/issues/" + issueId + "/file-metadata";
+  var endpoint = issueId ? "/api/v1/issues/" + issueId + "/file-metadata" : "";
   return {
+    recovery: !issueId, resolved: false,
     open: false, busy: false, error: "", preview: null, job: null, choices: {}, choicesDirty: false,
     timer: null, disposed: false, trigger: null, generation: 0, jobGeneration: 0,
-    init: function () { this.loadJob(); },
+    init: function () { if (endpoint) this.loadJob(); },
     destroy: function () { this.disposed = true; this.generation += 1; clearTimeout(this.timer); },
     request: async function (url, body) {
       var response = await fetch(url, body === undefined ? { cache: "no-store" } : {
@@ -23,13 +24,29 @@ function issueFileMetadata(issueId) {
         var data = await this.request(endpoint + "/job");
         if (this.disposed || generation !== this.jobGeneration) return;
         this.job = data.job;
+        if (this.recovery) this.resolved = !!data.resolved;
         if (wasActive && this.job && this.job.state === "COMPLETED") {
+          if (this.recovery) return;
           window.dispatchEvent(new CustomEvent("issue-file-metadata-complete"));
           var target = document.getElementById("issue-metadata-content");
           if (target) await htmx.ajax("GET", "/htmx/issues/" + issueId + "/metadata", { target: target, swap: "morph:outerHTML" });
         }
       } catch (error) { if (!this.disposed) this.error = error.message; }
       if (!this.disposed && this.active()) this.timer = setTimeout(() => this.loadJob(), 1000);
+    },
+    showRecovery: async function (pendingId) {
+      if (!this.recovery || this.busy || !Number.isSafeInteger(pendingId) || pendingId <= 0) return;
+      clearTimeout(this.timer);
+      this.jobGeneration += 1;
+      this.generation += 1;
+      endpoint = "/api/v1/intervention/" + pendingId + "/file-metadata";
+      this.preview = null; this.job = null; this.choices = {}; this.error = ""; this.resolved = false;
+      this.trigger = document.activeElement;
+      this.open = true; this.busy = true;
+      this.$nextTick(() => this.$refs.dialog.focus({ preventScroll: true }));
+      await this.loadJob();
+      this.busy = false;
+      if (this.open && !this.active() && !this.resolved && !(this.job && this.job.state === "PAUSED")) await this.loadPreview();
     },
     show: async function () {
       this.trigger = document.activeElement;
@@ -41,6 +58,7 @@ function issueFileMetadata(issueId) {
       this.open = false;
       this.generation += 1;
       if (this.trigger && this.trigger.isConnected) this.trigger.focus({ preventScroll: true });
+      if (this.recovery && this.resolved) htmx.trigger(document.body, "intervention:refresh");
     },
     choose: function (key, source) {
       this.choices[key] = source;

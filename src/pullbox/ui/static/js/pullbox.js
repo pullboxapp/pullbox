@@ -20804,6 +20804,10 @@ function interventionQueueRefreshEnabled() {
     return false;
   }
 
+  if (document.querySelector("[data-metadata-recovery-open='true']")) {
+    return false;
+  }
+
   if (document.querySelector("[data-intervention-queue-expanded='true']")) {
     return false;
   }

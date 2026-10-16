@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -262,7 +263,9 @@ async def execute_manual_issue_import(
 
             async def conversion_progress(stage: str, current: int, total: int, unit: str) -> None:
                 if preparation_progress_callback is not None:
-                    preparation_progress_callback(stage, current, total, unit)
+                    reported = preparation_progress_callback(stage, current, total, unit)
+                    if inspect.isawaitable(reported):
+                        await reported
 
             return await convert_file_interruptible(
                 source,
@@ -298,7 +301,9 @@ async def execute_manual_issue_import(
 
             async def paired_progress(stage: str, current: int, total: int, unit: str) -> None:
                 if progress_callback is not None:
-                    progress_callback(stage, current, total, unit)
+                    reported = progress_callback(stage, current, total, unit)
+                    if inspect.isawaitable(reported):
+                        await reported
 
             try:
                 return await materialize_manual_metadata(

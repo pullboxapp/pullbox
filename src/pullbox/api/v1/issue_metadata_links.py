@@ -180,6 +180,11 @@ async def file_job(
     )
     if job is None:
         return {"job": None}
+    return await file_job_status(session, job)
+
+
+async def file_job_status(session: DbSession, job: UtilityJob) -> dict[str, object]:
+    """One progress projection for both issue writes and retained-download recovery."""
     item = await session.scalar(
         select(UtilityJobItem).where(UtilityJobItem.job_id == job.id).limit(1)
     )

@@ -527,6 +527,10 @@ class InterventionService:
         prior = await session.get(DirectAcquisitionAttempt, attempt_id)
         if prior is None or prior.issue_id != pending_match.issue_id:
             raise ValueError("Pending match has an invalid direct attempt reference")
+        if prior.failure_code == "direct_metadata_review_required":
+            raise ValueError(
+                "Review the retained file metadata instead of refreshing download routes."
+            )
 
         fresh = DirectAcquisitionAttempt(
             request_key=f"direct-recovery:{uuid4().hex}",

@@ -29,8 +29,16 @@ class FileMetadataExecutor(JobExecutor):
     execution_mode = ExecutionMode.ASYNC
 
     def validate_config(self, job_config: dict[str, Any]) -> list[str]:
+        metadata_config = {
+            key: value for key, value in job_config.items() if key != "recovery_pending_id"
+        }
+        if "recovery_pending_id" in job_config and (
+            type(job_config["recovery_pending_id"]) is not int
+            or job_config["recovery_pending_id"] <= 0
+        ):
+            return ["Choose a pending metadata recovery."]
         if (
-            set(job_config)
+            set(metadata_config)
             not in ({"issue_id", "review_key"}, {"issue_id", "review_key", "choices"})
             or type(job_config.get("issue_id")) is not int
             or job_config["issue_id"] <= 0
@@ -128,9 +136,18 @@ class FileMetadataExecutor(JobExecutor):
                 )
 
         try:
-            outcome = await write_file_metadata(
+            from pullbox.services.direct_metadata_recovery import (
+                DirectMetadataRecoveryError,
+                run_direct_metadata_recovery,
+            )
+
+            recovery_id = job_config.get("recovery_pending_id")
+            writer = (
+                run_direct_metadata_recovery if recovery_id is not None else write_file_metadata
+            )
+            outcome = await writer(
                 factory,
-                job_config["issue_id"],
+                recovery_id if recovery_id is not None else job_config["issue_id"],
                 job_config["review_key"],
                 UUID(item_data["id"]),
                 limit=context["limit"],
@@ -155,7 +172,11 @@ class FileMetadataExecutor(JobExecutor):
             return ProcessedItem(item_data["id"], ItemResult.CANCELLED)
         except Exception as exc:
             return ProcessedItem(
-                item_data["id"], ItemResult.FAILED, error_message=file_metadata_error(exc)
+                item_data["id"],
+                ItemResult.FAILED,
+                error_message=str(exc)
+                if isinstance(exc, DirectMetadataRecoveryError)
+                else file_metadata_error(exc),
             )
 
     def rollback_item(

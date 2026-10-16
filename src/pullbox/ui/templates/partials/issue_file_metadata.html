@@ -1,14 +1,21 @@
-<div x-data="issueFileMetadata({{ issue.id }})" class="mt-3 space-y-2" data-testid="issue-file-metadata">
+<div x-data="issueFileMetadata({{ 'null' if recovery_mode|default(false) else issue.id }})" class="mt-3 space-y-2" data-testid="issue-file-metadata"
+  {% if recovery_mode|default(false) %}@review-direct-metadata.window="showRecovery($event.detail.pendingId)" :data-metadata-recovery-open="open ? 'true' : 'false'"{% endif %}>
+  {% if not recovery_mode|default(false) %}
   <button type="button" class="btn-ghost btn-sm" @click="show()">Write file metadata</button>
   <p class="text-sm text-pb-text-sec" x-show="active()" x-cloak>File metadata is being written in the background.</p>
+  {% endif %}
   <template x-teleport="body">
     <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window="if (open) close()" @keydown.tab.window="trapFocus($event)">
       <div class="modal-backdrop" @click="close()"></div>
-      <section class="modal-panel max-w-2xl max-h-[90vh]" role="dialog" aria-modal="true" aria-labelledby="file-metadata-title" tabindex="-1" x-ref="dialog">
-        <header class="modal-header"><h2 id="file-metadata-title" class="modal-title">Write file metadata</h2></header>
-        <div class="modal-body space-y-4 p-5" :aria-busy="busy">
-          <p class="text-sm text-pb-text-sec" x-show="!preview || !preview.converts_to_cbz">ComicInfo.xml and MetronInfo.xml will use the same reconciled metadata. Comic pages and your edits are preserved. This does not rename or move the file.</p>
-          <p class="text-sm text-pb-text-sec" x-show="preview && preview.converts_to_cbz" x-cloak>This managed file will be converted to CBZ with both reconciled XML files. Reading order and your metadata choices are preserved. Its original is saved in your configured library trash directory. Download originals are not changed. After completion, retry the failed download in Post-processing.</p>
+      <section class="modal-panel max-w-2xl max-h-[calc(100dvh-5rem)] min-h-0" role="dialog" aria-modal="true" aria-labelledby="file-metadata-title" tabindex="-1" x-ref="dialog">
+        <header class="modal-header shrink-0"><h2 id="file-metadata-title" class="modal-title" x-text="recovery ? 'Recover downloaded file' : 'Write file metadata'">Write file metadata</h2></header>
+        <div class="modal-body min-h-0 space-y-4 p-5" :aria-busy="busy">
+          <p class="text-sm text-pb-text-sec" x-show="!recovery && (!preview || !preview.converts_to_cbz)">ComicInfo.xml and MetronInfo.xml will use the same reconciled metadata. Comic pages and your edits are preserved. This does not rename or move the file.</p>
+          <p class="text-sm text-pb-text-sec" x-show="!recovery && preview && preview.converts_to_cbz" x-cloak>This managed file will be converted to CBZ with both reconciled XML files. Reading order and your metadata choices are preserved. Its original is saved in your configured library trash directory. Download originals are not changed. After completion, retry the failed download in Post-processing.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery">Review the retained file and reconcile its metadata. No new download is requested, and the original download is preserved. The recovery entry clears only after verified completion.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.restores_copy" x-cloak>The library copy is no longer registered. Your approval will restore a managed copy from the retained download, without replacing an existing library file.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.converts_to_cbz" x-cloak>The managed copy will be converted to CBZ with reconciled ComicInfo.xml and MetronInfo.xml. Comic pages are preserved.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.superseded" x-cloak>A different, verified library copy now owns this issue. This closes the obsolete recovery entry without changing that copy or marking the earlier transfer successful.</p>
           <p class="text-sm text-pb-error" role="alert" x-show="error || (job && job.error)" x-text="error || (job && job.error)"></p>
           <p class="text-sm text-pb-text-sec" role="status" x-show="busy && !job">Preparing metadata preview...</p>
           <div x-show="preview && !job" class="space-y-3">
@@ -40,7 +47,7 @@
             </div>
           </div>
           <div x-show="job" class="space-y-3">
-            <p class="text-sm text-pb-text" role="status" x-text="job && (job.state === 'COMPLETED' ? 'Both metadata files are up to date.' : job.message)"></p>
+            <p class="text-sm text-pb-text" role="status" x-text="job && (job.state === 'COMPLETED' ? (recovery ? (resolved ? 'Recovery complete. The queue entry has been resolved.' : 'The file job completed. Preview again to verify and finish the remaining recovery.') : 'Both metadata files are up to date.') : job.message)"></p>
             <div class="app-progress">
               <div class="app-progress-track"><div class="app-progress-fill app-progress-fill--interactive" :class="{ 'is-indeterminate': job && job.percent === null }" :style="job && job.percent !== null ? 'width: ' + job.percent + '%' : ''" role="progressbar" aria-label="File metadata progress" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="job ? job.percent : null"></div></div>
               <span class="app-progress-value" x-text="job && job.percent !== null ? Math.round(job.percent) + '%' : ''"></span>
@@ -49,12 +56,12 @@
             <a class="btn-ghost btn-sm" href="/utilities?tab=queue" x-show="job && job.state === 'PAUSED'">Resume in Utilities</a>
           </div>
         </div>
-        <footer class="modal-footer">
+        <footer class="modal-footer shrink-0">
           <button type="button" class="btn-ghost" @click="close()">Close</button>
           <button type="button" class="btn-ghost" @click="cancel()" x-show="active()" :disabled="busy || (job && job.state === 'CANCELLING')">Cancel write</button>
-          <button type="button" class="btn-primary" @click="loadPreview()" x-show="!active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy">Preview again</button>
+          <button type="button" class="btn-primary" @click="loadPreview()" x-show="!resolved && !active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy">Preview again</button>
           <button type="button" class="btn-ghost" @click="loadPreview(false)" x-show="preview && !job && ((preview.conflicts || []).length || choicesDirty)" :disabled="busy || !choicesDirty">Update preview</button>
-          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job && !preview.unchanged" :disabled="busy || !canWrite()" x-text="preview && preview.converts_to_cbz ? 'Convert to CBZ and write metadata' : 'Write both metadata files'">Write both metadata files</button>
+          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job && (!preview.unchanged || recovery)" :disabled="busy || !canWrite()" x-text="recovery ? (preview && preview.restores_copy ? 'Restore and finish recovery' : 'Finish recovery') : (preview && preview.converts_to_cbz ? 'Convert to CBZ and write metadata' : 'Write both metadata files')">Write both metadata files</button>
         </footer>
       </section>
     </div>

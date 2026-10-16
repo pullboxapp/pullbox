@@ -328,6 +328,8 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
         "rejection_reason": str(details.get("rejection_reason") or "").strip(),
         "lane": lane,
         "recovery_summary": _direct_recovery_summary(details) if lane == "recovery" else "",
+        "metadata_recovery": lane == "recovery"
+        and details.get("failure_code") == "direct_metadata_review_required",
     }
 
 
@@ -349,6 +351,8 @@ def _direct_source_label(details: dict[str, object]) -> str:
 
 def _direct_recovery_summary(details: dict[str, object]) -> str:
     """Describe the acquisition failure without implying the semantic match was wrong."""
+    if details.get("failure_code") == "direct_metadata_review_required":
+        return "Downloaded file needs metadata review; no new download is needed"
     host = _DIRECT_ARTIFACT_HOST_LABELS.get(
         str(details.get("artifact_host_kind") or "").strip(),
         "Artifact host",

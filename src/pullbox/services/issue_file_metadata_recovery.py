@@ -89,6 +89,14 @@ async def _recover_native_metadata_jobs(factory: async_sessionmaker[AsyncSession
                 if type(issue_id) is not int or issue_id <= 0:
                     continue
                 operation = UUID(item_id)
+                if payload.get("recovery_pending_id") is not None:
+                    from pullbox.services.direct_metadata_recovery import (
+                        recover_direct_metadata_operation,
+                    )
+
+                    if await recover_direct_metadata_operation(factory, operation, job_id):
+                        await _complete_metadata_item(factory, operation, job_id)
+                    continue
                 if await recover_native_file_metadata(factory, issue_id, operation) is None:
                     continue
                 await _complete_metadata_item(factory, operation, job_id)
@@ -137,6 +145,24 @@ async def recover_file_metadata_jobs(factory: async_sessionmaker[AsyncSession]) 
                 continue
             try:
                 state = await recover_file_metadata(factory, receipt.operation_id)
+                if state is not PublicationState.FINALIZED:
+                    continue
+                async with factory() as session:
+                    job = await session.get(UtilityJob, receipt.plan.metadata_job_id)
+                    is_recovery = (
+                        job is not None
+                        and json.loads(job.config).get("recovery_pending_id") is not None
+                    )
+                if is_recovery:
+                    # A settled archive alone does not resolve its download recovery entry.
+                    from pullbox.services.direct_metadata_recovery import (
+                        recover_direct_metadata_operation,
+                    )
+
+                    if not await recover_direct_metadata_operation(
+                        factory, receipt.operation_id, receipt.plan.metadata_job_id
+                    ):
+                        continue
             except (ValueError, OSError) as exc:
                 logger.warning(
                     "file_metadata_recovery_needs_review",
@@ -149,8 +175,6 @@ async def recover_file_metadata_jobs(factory: async_sessionmaker[AsyncSession]) 
                         job.state = JobState.FAILED
                         job.error_message = file_metadata_error(exc)
                         await project_utility_operation_progress(session, job)
-                continue
-            if state is not PublicationState.FINALIZED:
                 continue
             await _complete_metadata_item(
                 factory, receipt.operation_id, receipt.plan.metadata_job_id

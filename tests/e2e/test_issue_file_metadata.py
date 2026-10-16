@@ -9,6 +9,88 @@ pytestmark = pytest.mark.e2e
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
+def test_recovery_review_scrolls_and_finishes_without_reacquisition(
+    authed_page, seeded_server, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 600})
+    endpoint = "**/api/v1/intervention/100/file-metadata"
+    state = {"job": None, "resolved": False}
+    page.route(endpoint + "/job", lambda route: route.fulfill(json=state))
+
+    def preview(route):
+        selected = route.request.post_data_json.get("choices", {}).get("series.issue_count")
+        route.fulfill(
+            json={
+                "issue_id": 1,
+                "file_name": "Nice House 002.cbz",
+                "review_key": "a" * 64,
+                "ready": bool(selected),
+                "unchanged": bool(selected),
+                "changes": [],
+                "conflicts": [
+                    {
+                        "key": "series.issue_count",
+                        "label": "Issue count",
+                        "selected": selected,
+                        "options": [
+                            {"source": source, "value": value, "selectable": True}
+                            for source, value in [("library", "12"), ("ComicInfo.xml", "8")]
+                        ],
+                    }
+                ],
+            }
+        )
+
+    page.route(endpoint + "/preview", preview)
+
+    def write(route):
+        assert route.request.post_data_json == {
+            "review_key": "a" * 64,
+            "choices": {"series.issue_count": "library"},
+        }
+        state.update(
+            job={
+                "id": "recovery",
+                "state": "COMPLETED",
+                "percent": 100,
+                "message": "Complete",
+                "error": None,
+            },
+            resolved=True,
+        )
+        route.fulfill(status=202, json={"job_id": "recovery", "state": "COMPLETED"})
+
+    page.route(endpoint + "/write", write)
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(f"{seeded_server}/intervention?tab=recovery")
+    page.evaluate("theme => applyTheme(theme)", theme)
+    page.evaluate(
+        "window.dispatchEvent(new CustomEvent('review-direct-metadata', {detail: {pendingId: 100}}))"
+    )
+    dialog = page.get_by_role("dialog", name="Recover downloaded file", exact=True)
+    expect(dialog).to_be_visible()
+    expect(dialog.get_by_role("button", name="Finish recovery")).to_be_disabled()
+    dialog.get_by_role("radio", name="Library 12").check()
+    dialog.get_by_role("button", name="Update preview", exact=True).click()
+    expect(dialog.get_by_role("button", name="Finish recovery")).to_be_enabled()
+    box = dialog.bounding_box()
+    assert box["y"] >= 0 and box["y"] + box["height"] <= 600
+    assert dialog.locator(".modal-body").evaluate("el => getComputedStyle(el).overflowY") == "auto"
+    assert_no_axe_violations(
+        page, name=f"recovery-metadata-{theme}", include=['[aria-labelledby="file-metadata-title"]']
+    )
+    dialog.get_by_role("button", name="Finish recovery").click()
+    expect(
+        dialog.get_by_text("Recovery complete. The queue entry has been resolved.")
+    ).to_be_visible()
+    dialog.get_by_role("button", name="Close", exact=True).click()
+    expect(dialog).not_to_be_visible()
+    assert not errors
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
 def test_native_metadata_review_requires_explicit_conversion(
     authed_page, seeded_server, theme, width
 ):
