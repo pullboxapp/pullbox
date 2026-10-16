@@ -228,17 +228,17 @@ async def refresh_series_catalog_from_sources(
                 for item in fetched.outcomes
                 if item.status not in {SourceStatus.OK, SourceStatus.NOT_QUERIED}
             }
-            bundle = await _catalog(registry, before, profiles, failed)
+            bundles = await _catalogs(registry, before, profiles, failed)
+            profiles.update((item.series.source, item.series) for item in bundles)
             profile = profiles.get(MetadataSource.METRON_API)
             if (
                 profile is not None
                 and not profile.image_url
-                and bundle.series.source is not profile.source
+                and not any(item.series.source is profile.source for item in bundles)
             ):
                 page = await registry.issues(profile.source, profile.external_id)
                 if page.status is SourceStatus.OK and page.data is not None:
                     profiles[profile.source] = with_representative_cover(profile, page.data.results)
-        profiles[bundle.series.source] = bundle.series
         snapshot = assemble_metadata(
             MetadataEntityKind.SERIES,
             before.series.identities,
@@ -287,13 +287,15 @@ async def refresh_series_catalog_from_sources(
             result = await _apply(
                 session,
                 current,
-                bundle,
+                bundles,
                 snapshot,
                 now,
                 replace_managed=replace_managed,
                 release_facts=rechecked_issues,
             )
-            if bundle.catalog_started_at is not None:
+            for bundle in bundles:
+                if bundle.catalog_started_at is None:
+                    continue
                 checkpoint = next(
                     (item for item in current.checkpoints if item.source is bundle.series.source),
                     None,
@@ -319,8 +321,8 @@ async def refresh_series_catalog_from_sources(
         logger.info(
             "metadata_series_source_refreshed",
             series_id=series_id,
-            source=bundle.series.source.value,
-            catalog_count=bundle.catalog_total,
+            sources=[item.series.source.value for item in bundles],
+            catalog_count=result.series.issue_count,
         )
         return replace(result, outcomes=tuple(failed.values()))
     except SeriesRefreshError:
@@ -341,17 +343,19 @@ async def refresh_series_catalog_from_sources(
         ) from exc
 
 
-async def _catalog(
+async def _catalogs(
     registry: MetadataSourceRegistry,
     state: SeriesRefreshState,
     profiles: dict[MetadataSource, ProviderSeriesRead],
     failed: dict[MetadataSource, SourceOutcome],
-) -> SourceSeriesBundle:
+) -> tuple[SourceSeriesBundle, ...]:
     known = {item.namespace: item.external_id for item in state.series.identities}
     inconsistent_counts = False
     catalog_namespaces = {
         identity.namespace for issue in state.issues for identity in issue.identities
     }
+    bundles: list[SourceSeriesBundle] = []
+    loaded_namespaces = set()
     sources = sorted(
         registry.runtime,
         key=lambda source: (
@@ -362,11 +366,20 @@ async def _catalog(
         ),
     )
     for source in sources:
+        profile = profiles.get(source)
+        linked_parent = profile is not None and any(
+            identity in state.series.identities for identity in profile.cross_identities
+        )
         if (
             source in failed
             or source.identity_namespace not in known
-            # A series link authorizes descriptive enrichment, not issue rematching.
-            or (catalog_namespaces and source.identity_namespace not in catalog_namespaces)
+            or source.identity_namespace in loaded_namespaces
+            # A manual series link alone cannot authorize automatic issue matching.
+            or (
+                catalog_namespaces
+                and source.identity_namespace not in catalog_namespaces
+                and not linked_parent
+            )
             or registry._unavailable(source, capability=SourceCapability.ISSUE_LIST)
         ):
             continue
@@ -380,10 +393,11 @@ async def _catalog(
             )
             bundle = apply_catalog_exclusions(bundle, state.catalog_exclusions)
             _validate_bundle(bundle)
-            return bundle
+            bundles.append(bundle)
+            loaded_namespaces.add(source.identity_namespace)
         except SeriesCatalogCountError:
-            # Do not accept an incomplete catalog or mistake a stale summary for
-            # an identity dispute. Another eligible source must pass every check.
+            # Changing page totals cannot establish completeness. Another eligible
+            # source must still pass every catalog and identity check.
             inconsistent_counts = True
             failed[source] = SourceOutcome(source=source, status=SourceStatus.INCOMPATIBLE_RESPONSE)
             logger.info(
@@ -403,6 +417,8 @@ async def _catalog(
             failed[source] = SourceOutcome(
                 source=source, status=exc.status, retry_after_seconds=exc.retry_after_seconds
             )
+    if bundles:
+        return tuple(bundles)
     if inconsistent_counts:
         raise SeriesRefreshError(
             "A metadata source reported inconsistent issue counts, and no configured source "
@@ -441,7 +457,7 @@ def _with_derived(
 async def _apply(
     session: AsyncSession,
     state: SeriesRefreshState,
-    bundle: SourceSeriesBundle,
+    bundles: tuple[SourceSeriesBundle, ...],
     snapshot: MetadataSnapshot,
     now: datetime,
     *,
@@ -451,17 +467,26 @@ async def _apply(
     series = await session.get(Series, state.series.local_id)
     assert series is not None
     await apply_series_metadata_values(session, series, snapshot.values)
-    created = await apply_issue_batch(
-        session,
-        state,
-        SourceIssueBatch(
-            bundle.series.source, bundle.series.external_id, bundle.issues, bundle.source_revision
-        ),
-        now,
-        complete=True,
-        replace_managed=replace_managed,
-        release_facts=release_facts,
-    )
+    created: tuple[int, ...] = ()
+    current = state
+    for index, bundle in enumerate(bundles):
+        if index:
+            current = await read_series_refresh_state(session, series.id)
+        created += await apply_issue_batch(
+            session,
+            current,
+            SourceIssueBatch(
+                bundle.series.source,
+                bundle.series.external_id,
+                bundle.issues,
+                bundle.source_revision,
+            ),
+            now,
+            complete=True,
+            reconcile_crosswalks=True,
+            replace_managed=replace_managed,
+            release_facts=release_facts,
+        )
     series.issue_count = len(state.issues) + len(created)
     snapshot = _with_derived(snapshot, "issue_count", series.issue_count, now)
     origins = {item.field: item for item in snapshot.origins}
