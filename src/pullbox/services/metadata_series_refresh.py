@@ -30,6 +30,7 @@ from pullbox.services.cover_resolver import resolve_covers_dir
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
 from pullbox.services.metadata_catalog_checkpoints import save_full_catalog_checkpoint
+from pullbox.services.metadata_catalog_crosswalks import hydrate_metron_catalog_crosswalks
 from pullbox.services.metadata_catalog_review import apply_catalog_exclusions
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_entity_values import apply_series_metadata_values
@@ -229,6 +230,7 @@ async def refresh_series_catalog_from_sources(
                 if item.status not in {SourceStatus.OK, SourceStatus.NOT_QUERIED}
             }
             bundles = await _catalogs(registry, before, profiles, failed)
+            bundles = await hydrate_metron_catalog_crosswalks(registry, before, bundles)
             profiles.update((item.series.source, item.series) for item in bundles)
             profile = profiles.get(MetadataSource.METRON_API)
             if (
@@ -366,30 +368,44 @@ async def _catalogs(
         ),
     )
     for source in sources:
-        profile = profiles.get(source)
-        linked_parent = profile is not None and any(
-            identity in state.series.identities for identity in profile.cross_identities
-        )
         if (
             source in failed
             or source.identity_namespace not in known
             or source.identity_namespace in loaded_namespaces
-            # A manual series link alone cannot authorize automatic issue matching.
-            or (
-                catalog_namespaces
-                and source.identity_namespace not in catalog_namespaces
-                and not linked_parent
-            )
             or registry._unavailable(source, capability=SourceCapability.ISSUE_LIST)
         ):
+            if source in failed:
+                logger.info(
+                    "metadata_series_catalog_unavailable",
+                    series_id=state.series.local_id,
+                    source=source.value,
+                    status=failed[source].status.value,
+                )
             continue
         try:
+            profile = profiles.get(source)
+            if catalog_namespaces and source.identity_namespace not in catalog_namespaces:
+                # Descriptive fields may already be complete. Catalog eligibility
+                # still needs the linked source's independently verified parent.
+                if profile is None:
+                    fetched = await registry.series(source, known[source.identity_namespace])
+                    if fetched.status is not SourceStatus.OK or fetched.data is None:
+                        raise SeriesAdoptionError(
+                            "The linked series identity could not be checked.",
+                            status=fetched.status,
+                            retry_after_seconds=fetched.retry_after_seconds,
+                        )
+                    profile = profiles[source] = fetched.data
+                if not any(
+                    identity in state.series.identities for identity in profile.cross_identities
+                ):
+                    continue
             bundle = await fetch_source_series_bundle(
                 registry,
                 source,
                 known[source.identity_namespace],
                 source_revision=registry.runtime[source].policy.revision,
-                profile=profiles.get(source),
+                profile=profile,
             )
             bundle = apply_catalog_exclusions(bundle, state.catalog_exclusions)
             _validate_bundle(bundle)

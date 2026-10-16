@@ -22,8 +22,8 @@ from pullbox.models.metadata_identity import (
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.user import User
-from pullbox.schemas.metadata_sources import SourceCapability
-from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.schemas.metadata_sources import MetadataFetch, SourceCapability, SourceStatus
+from pullbox.services.metadata_discovery import MetadataSourceError, MetadataSourceRegistry
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
 from pullbox.services.metadata_series_adoption import _request, adopt_source_series_bundle
@@ -41,15 +41,16 @@ from tests.unit.test_metadata_discovery import registration, runtime
 
 
 @pytest.fixture
-async def linked_catalog(identity_probe_db, tmp_path):
+async def linked_catalog(identity_probe_db, tmp_path, request):
     _, factory, _ = identity_probe_db
+    existing_count = getattr(request, "param", 5)
     metron = bundle(numbers=tuple(str(i) for i in range(1, 8)))
     metron.series.cross_identities = [ExternalIdentityRef(Namespace.COMICVINE, Kind.SERIES, "500")]
     metron.series.description = "Secondary description"
     for index, issue in enumerate(metron.issues):
         issue.external_id = str(200 + index)
         issue.title = f"Secondary issue {index + 1}"
-        if index < 5:
+        if index < existing_count:
             issue.cross_identities = [
                 ExternalIdentityRef(Namespace.COMICVINE, Kind.ISSUE, str(100 + index))
             ]
@@ -61,7 +62,7 @@ async def linked_catalog(identity_probe_db, tmp_path):
                 "source": Source.COMICVINE_API,
                 "identity_namespace": Namespace.COMICVINE,
                 "external_id": "500",
-                "issue_count": 5,
+                "issue_count": existing_count,
                 "cross_identities": [],
                 "description": "Preferred description",
             }
@@ -77,9 +78,9 @@ async def linked_catalog(identity_probe_db, tmp_path):
                     "title": f"Preferred issue {index + 1}",
                 }
             )
-            for index, issue in enumerate(metron.issues[:5])
+            for index, issue in enumerate(metron.issues[:existing_count])
         ),
-        catalog_total=5,
+        catalog_total=existing_count,
     )
     artifact = tmp_path / "owned.cbz"
     artifact.write_bytes(b"owned comic must remain untouched")
@@ -139,6 +140,210 @@ async def linked_catalog(identity_probe_db, tmp_path):
         },
     )
     return factory, series_id, original, artifact, adapters, registry
+
+
+class ThinMetronCatalog(RefreshAdapter):
+    """Metron's list omits crosswalks that its native issue details provide."""
+
+    def __init__(self, data):
+        super().__init__(
+            replace(
+                data,
+                issues=tuple(i.model_copy(update={"cross_identities": []}) for i in data.issues),
+            )
+        )
+        self.details = {i.external_id: i.model_copy(deep=True) for i in data.issues}
+        self.detail_failure = None
+
+    async def issue(self, external_id, *, validator=None):
+        self.calls.append(("issue", external_id))
+        if self.detail_failure:
+            raise MetadataSourceError(self.detail_failure, retry_after_seconds=60)
+        return MetadataFetch(status=SourceStatus.OK, data=self.details[external_id])
+
+
+@pytest.mark.parametrize("linked_catalog", [6], indirect=True)
+async def test_thin_linked_catalog_adds_seventh_issue_using_native_detail_proof(linked_catalog):
+    factory, series_id, original, artifact, adapters, registry = linked_catalog
+    adapter = ThinMetronCatalog(adapters[Source.METRON_API].data)
+    registry.factories = {
+        **registry.factories,
+        Source.METRON_API: registration(adapter, capabilities=list(SourceCapability)),
+    }
+    async with factory() as session:
+        result = await refresh_series_catalog_from_sources(session, series_id, registry=registry)
+        assert result.series.issue_count == 7
+        assert len(result.created_issue_ids) == 1
+        await session.commit()
+    async with factory() as session:
+        issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
+        assert [(i.id, i.comicvine_id, i.status, i.manual_skip) for i in issues[:6]] == original
+        assert issues[1].title == "My issue title"
+        assert issues[-1].issue_number_text == "7" and issues[-1].comicvine_id is None
+        assert issues[-1].store_date == adapter.details["206"].store_date
+        assert (await session.scalar(select(IssueReaderState))).last_page_index == 17
+        assert (await session.scalar(select(LibraryFile))).file_path == str(artifact)
+    assert [c for c in adapter.calls if c[0] == "issue"] == [
+        ("issue", str(200 + i)) for i in range(6)
+    ]
+    adapter.calls.clear()
+    async with factory() as session:
+        result = await refresh_series_catalog_from_sources(session, series_id, registry=registry)
+        assert result.created_issue_ids == () and result.series.issue_count == 7
+        await session.commit()
+    assert not [c for c in adapter.calls if c[0] == "issue"]
+    assert artifact.read_bytes() == b"owned comic must remain untouched"
+
+
+async def test_thin_catalog_checks_overlap_added_by_another_catalog_in_the_same_refresh(
+    linked_catalog,
+):
+    factory, series_id, original, _, adapters, registry = linked_catalog
+    metron = adapters[Source.METRON_API].data
+    metron.issues[5].cross_identities = [
+        ExternalIdentityRef(Namespace.COMICVINE, Kind.ISSUE, "105")
+    ]
+    cv = adapters[Source.COMICVINE_API]
+    cv.data = replace(
+        cv.data,
+        catalog_total=6,
+        issues=(
+            *cv.data.issues,
+            metron.issues[5].model_copy(
+                update={
+                    "source": Source.COMICVINE_API,
+                    "identity_namespace": Namespace.COMICVINE,
+                    "series_external_id": "500",
+                    "external_id": "105",
+                    "cross_identities": [],
+                }
+            ),
+        ),
+    )
+    adapter = ThinMetronCatalog(metron)
+    registry.factories = {
+        **registry.factories,
+        Source.METRON_API: registration(adapter, capabilities=list(SourceCapability)),
+    }
+    async with factory() as session:
+        result = await refresh_series_catalog_from_sources(session, series_id, registry=registry)
+        assert result.series.issue_count == 7 and len(result.created_issue_ids) == 2
+        await session.commit()
+    async with factory() as session:
+        issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
+        assert [(i.id, i.comicvine_id, i.status, i.manual_skip) for i in issues[:5]] == original
+        assert issues[5].comicvine_id == 105
+        assert issues[6].comicvine_id is None
+        assert await session.scalar(select(func.count()).select_from(IssueExternalIdentity)) == 13
+    assert [c for c in adapter.calls if c[0] == "issue"] == [
+        ("issue", str(200 + i)) for i in range(6)
+    ]
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["number_only", "wrong_parent", "wrong_id", "renumbered", "wrong_crosswalk", "rate_limited"],
+)
+async def test_thin_catalog_requires_consistent_detail_identity_and_keeps_atomicity(
+    linked_catalog, problem
+):
+    factory, series_id, original, artifact, adapters, registry = linked_catalog
+    adapter = ThinMetronCatalog(adapters[Source.METRON_API].data)
+    detail = adapter.details["200"]
+    if problem == "number_only":
+        detail.cross_identities = []
+    elif problem == "wrong_parent":
+        detail.series_external_id = "999"
+    elif problem == "wrong_id":
+        detail.external_id = "999"
+    elif problem == "renumbered":
+        detail.issue_number_text = detail.issue_number_key = "99"
+    elif problem == "wrong_crosswalk":
+        detail.cross_identities = [ExternalIdentityRef(Namespace.COMICVINE, Kind.ISSUE, "999")]
+    else:
+        adapter.detail_failure = SourceStatus.RATE_LIMITED
+    registry.factories = {
+        **registry.factories,
+        Source.METRON_API: registration(adapter, capabilities=list(SourceCapability)),
+    }
+    async with factory() as session:
+        with pytest.raises(SeriesRefreshError):
+            await refresh_series_catalog_from_sources(session, series_id, registry=registry)
+        await session.commit()
+    async with factory() as session:
+        assert (await session.get(Series, series_id)).issue_count == 5
+        issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
+        assert [(i.id, i.comicvine_id, i.status, i.manual_skip) for i in issues] == original
+        assert await session.scalar(select(func.count()).select_from(IssueExternalIdentity)) == 5
+    if problem == "rate_limited":
+        assert [c for c in adapter.calls if c[0] == "issue"] == [("issue", "200")]
+    assert artifact.read_bytes() == b"owned comic must remain untouched"
+
+
+async def test_thin_catalog_detail_budget_is_checked_before_requests(linked_catalog):
+    factory, series_id, original, _, adapters, registry = linked_catalog
+    data = adapters[Source.METRON_API].data
+    issues = tuple(
+        data.issues[0].model_copy(
+            update={
+                "external_id": str(200 + i),
+                "issue_number_text": str(i + 1),
+                "issue_number_key": str(i + 1),
+                "cross_identities": [],
+            }
+        )
+        for i in range(26)
+    )
+    adapter = ThinMetronCatalog(replace(data, issues=issues, catalog_total=26))
+    cv = adapters[Source.COMICVINE_API]
+    cv.data = replace(
+        cv.data,
+        issues=tuple(
+            issue.model_copy(
+                update={
+                    "source": Source.COMICVINE_API,
+                    "identity_namespace": Namespace.COMICVINE,
+                    "series_external_id": "500",
+                    "external_id": str(100 + i),
+                }
+            )
+            for i, issue in enumerate(issues)
+        ),
+        catalog_total=26,
+    )
+    registry.factories = {
+        **registry.factories,
+        Source.METRON_API: registration(adapter, capabilities=list(SourceCapability)),
+    }
+    async with factory() as session:
+        with pytest.raises(SeriesRefreshError, match="more issue identity checks"):
+            await refresh_series_catalog_from_sources(session, series_id, registry=registry)
+        await session.commit()
+    assert not [c for c in adapter.calls if c[0] == "issue"]
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Issue)) == len(original)
+
+
+async def test_linked_catalog_is_checked_even_when_preferred_profile_fills_every_field(
+    linked_catalog,
+):
+    factory, series_id, _, _, adapters, registry = linked_catalog
+    profile = adapters[Source.COMICVINE_API].data.series
+    profile.sort_title = profile.title
+    profile.publisher = "DC"
+    profile.year_start = 2025
+    profile.year_end = 2026
+    profile.series_type = "standard"
+    profile.status = "ended"
+    profile.image_url = "https://comicvine.gamespot.com/cover.jpg"
+    profile.volume = "1"
+    profile.language = "en"
+    async with factory() as session:
+        result = await refresh_series_catalog_from_sources(session, series_id, registry=registry)
+        assert result.series.issue_count == 7, "Catalog extension cannot depend on missing fields"
+        assert len(result.created_issue_ids) == 2
+    assert ("series", "42") in adapters[Source.METRON_API].calls
+    assert ("issues", "42", 1) in adapters[Source.METRON_API].calls
 
 
 @pytest.mark.parametrize("replace_managed", [False, True])
