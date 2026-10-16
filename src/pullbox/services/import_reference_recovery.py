@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from pullbox.services.metadata_service import MetadataService
 
 
-def reference_candidate_ids(job_id: int) -> Select[tuple[int]]:
+def reference_candidate_ids(job_id: int) -> Select[int]:
     """Bound the existing recheck preview to potentially misplaced references."""
     return (
         select(ImportedFile.id)

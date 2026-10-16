@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 async def prune_unstarted_direct_discoveries(
     session: AsyncSession,
-    search_log_ids: Select[tuple[int]] | Sequence[int],
+    search_log_ids: Select[int] | Sequence[int],
 ) -> int:
     """Delete only discoveries that never progressed beyond search results."""
     result = await session.execute(

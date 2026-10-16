@@ -16,6 +16,7 @@ from pullbox.core.sqlite_lock import (
     sqlite_lock_retry_delay,
 )
 from pullbox.models.import_job import ImportControlRequest, ImportJob, ImportJobStatus
+from pullbox.services.import_provider_cache import is_in_memory_sqlite_engine
 from pullbox.services.import_workflow_state import (
     initialize_progress_snapshot,
     paused_message_for_mode,
@@ -100,8 +101,7 @@ async def raise_if_job_cancelled_immediately(
             await raise_if_cancelled(session, job_id)
         return
 
-    bind_url = str(bind.sync_engine.url)
-    if ":memory:" in bind_url:
+    if is_in_memory_sqlite_engine(bind):
         with session.no_autoflush:
             await raise_if_cancelled(session, job_id)
         return

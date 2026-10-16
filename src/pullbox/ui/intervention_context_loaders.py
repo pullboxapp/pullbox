@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from typing import cast as typing_cast
 
 from sqlalchemy import ColumnElement, String, cast, func, or_, select
 from sqlalchemy.orm import joinedload
@@ -144,8 +143,7 @@ async def load_intervention_queue_context(
         .group_by(PendingMatch.confidence)
     )
     confidence_counts = {
-        (typing_cast("str", confidence_value) or "").lower(): count
-        for confidence_value, count in summary_result.all()
+        (confidence_value or "").lower(): count for confidence_value, count in summary_result.all()
     }
     pending_count = sum(confidence_counts.values())
 
@@ -278,8 +276,7 @@ async def load_intervention_history_context(
         .group_by(PendingMatch.status)
     )
     status_counts = {
-        (typing_cast("str", status_value) or "").lower(): count
-        for status_value, count in summary_result.all()
+        (status_value or "").lower(): count for status_value, count in summary_result.all()
     }
 
     filtered_count: int = (
@@ -376,8 +373,7 @@ async def load_intervention_context(
         .group_by(PendingMatch.confidence)
     )
     confidence_counts = {
-        (typing_cast("str", confidence_value) or "").lower(): count
-        for confidence_value, count in summary_result.all()
+        (confidence_value or "").lower(): count for confidence_value, count in summary_result.all()
     }
     active_pending_count = sum(confidence_counts.values())
     match_review_count: int = (

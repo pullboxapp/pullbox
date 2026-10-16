@@ -329,8 +329,8 @@ async def plan_deferred_recovery(
                 continue
         elif provider_id is None and item.series_id in series_by_id:
             series = series_by_id[item.series_id]
-            issue = strict_filename_target(file, item, series, issues_by_series[series.id])
-            target = (issue, series) if issue is not None else None
+            filename_issue = strict_filename_target(file, item, series, issues_by_series[series.id])
+            target = (filename_issue, series) if filename_issue is not None else None
 
         registered_file = registered.get(path)
         if registered_file is not None:
@@ -633,7 +633,7 @@ async def refresh_recovered_groups(
     await recompute_series_counters(session, job)
 
 
-def empty_stale_series_query(job_id: int) -> Select[tuple[ImportedSeries]]:
+def empty_stale_series_query(job_id: int) -> Select[ImportedSeries]:
     """Return empty missing-location rows eligible for follow-up archival."""
     return select(ImportedSeries).where(
         ImportedSeries.import_job_id == job_id,

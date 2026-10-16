@@ -36,6 +36,7 @@ from pullbox.services.import_progress_runtime import (
     import_group_progress_plan,
     import_work_progress,
 )
+from pullbox.services.import_provider_cache import is_in_memory_sqlite_engine
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -151,8 +152,7 @@ def progress_session_factory_for_runtime(
     bind = session.bind
     if bind is None:
         return None
-    bind_url = str(bind.sync_engine.url)
-    if ":memory:" in bind_url:
+    if is_in_memory_sqlite_engine(bind):
         return None
     return async_sessionmaker(
         bind,

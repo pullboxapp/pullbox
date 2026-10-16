@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import URL, select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullbox.core.scheduler_stats import TaskStats
 from pullbox.core.scheduler_stats_persistence import (
@@ -134,3 +135,61 @@ def test_resolve_legacy_task_stats_sidecar_path_uses_sqlite_db_neighbor() -> Non
     assert str(sidecar) == "/config/pullbox/scheduled_task_stats.json"
     assert resolve_legacy_task_stats_sidecar_path("sqlite+aiosqlite:///:memory:") is None
     assert resolve_legacy_task_stats_sidecar_path("postgresql://example") is None
+
+
+@pytest.mark.parametrize(
+    ("driver", "database", "expected_directory"),
+    [
+        ("sqlite+aiosqlite", ":memory:", None),
+        ("sqlite+aiosqlite", None, None),
+        ("sqlite+aiosqlite", "", None),
+        ("sqlite+aiosqlite", "/tmp/ordinary/pullbox.db", "/tmp/ordinary"),
+        ("sqlite+aiosqlite", "/tmp/library:one/pullbox.db", "/tmp/library:one"),
+        ("sqlite+aiosqlite", "/tmp/library:memory:/pullbox.db", "/tmp/library:memory:"),
+        ("sqlite+aiosqlite", "/tmp/library?one/pullbox.db", "/tmp/library?one"),
+        ("sqlite+aiosqlite", "/tmp/library%3Aone/pullbox.db", "/tmp/library%3Aone"),
+        ("postgresql+asyncpg", "sqlite:memory:", None),
+    ],
+)
+async def test_legacy_sidecar_uses_structured_runtime_database(
+    driver: str, database: str | None, expected_directory: str | None
+) -> None:
+    """A rendered engine URL must not become an encoded or imaginary file path."""
+    engine = create_async_engine(URL.create(driver, database=database))
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        runtime_url = resolve_runtime_db_url("sqlite+aiosqlite:////unused/default.db", factory)
+        expected = (
+            Path(expected_directory) / "scheduled_task_stats.json"
+            if expected_directory is not None
+            else None
+        )
+        assert resolve_legacy_task_stats_sidecar_path(runtime_url) == expected
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("db_url", ["", "not-a-sqlite-url", "https://sqlite.example/database"])
+def test_legacy_sidecar_rejects_non_database_urls(db_url: str) -> None:
+    assert resolve_legacy_task_stats_sidecar_path(db_url) is None
+
+
+@pytest.mark.parametrize(
+    ("database", "query", "is_memory"),
+    [
+        ("file::memory:", {"uri": "true"}, True),
+        ("file:sidecar", {"uri": "true", "mode": "memory"}, True),
+        ("file:sidecar", {"uri": " YES ", "mode": "memory"}, True),
+        ("file::memory:", {"uri": "t"}, True),
+        ("file:sidecar", {"uri": "false", "mode": "memory"}, False),
+        ("file:sidecar", {"uri": "true", "mode": "rwc"}, False),
+        ("file:sidecar", {"uri": "true", "cache": "mode=memory"}, False),
+        ("file:sidecar", {"mode": "memory"}, False),
+    ],
+)
+def test_legacy_sidecar_classifies_uri_memory_without_query_substrings(
+    database: str, query: dict[str, str], is_memory: bool
+) -> None:
+    url = URL.create("sqlite+aiosqlite", database=database, query=query)
+    expected = None if is_memory else Path("scheduled_task_stats.json")
+    assert resolve_legacy_task_stats_sidecar_path(str(url)) == expected

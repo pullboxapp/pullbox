@@ -565,7 +565,7 @@ async def recover_orphan(
     return recovery_summary
 
 
-def _orphaned_series_query(*, job_id: int | None = None) -> Select[tuple[ImportedSeries]]:
+def _orphaned_series_query(*, job_id: int | None = None) -> Select[ImportedSeries]:
     """Build the shared unresolved-orphan filter used by list and count queries."""
     query = (
         sa_select(ImportedSeries)

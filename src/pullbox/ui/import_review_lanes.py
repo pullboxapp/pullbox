@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import func, select
 
@@ -286,8 +286,9 @@ async def _identity_conflict_series_ids(session: AsyncSession, job_id: int) -> s
         .distinct()
     )
     for group_id, series_id, title, year, content_hash, file_name in records:
+        # The query excludes NULL group IDs; retain that fact at the typed boundary.
         series, titles, saved_titles, years, hashes = groups.setdefault(
-            group_id, (set(), set(), set(), set(), set())
+            cast("int", group_id), (set(), set(), set(), set(), set())
         )
         series.add(series_id)
         if title:
