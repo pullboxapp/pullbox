@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from playwright.sync_api import expect
 
-from tests.e2e.conftest import wait_for_htmx
+from tests.e2e.conftest import _run_async_blocking, wait_for_htmx
 from tests.e2e.pages.app_shell import AppShellPage
 from tests.e2e.pages.import_page import ImportPage
 from tests.e2e.pages.series_list import SeriesListPage
@@ -23,6 +23,143 @@ pytestmark = pytest.mark.e2e
 
 class TestSidebarShell:
     """Behavior-first E2E checks for the persistent sidebar shell."""
+
+    @pytest.mark.parametrize("theme", ["light", "dark"])
+    @pytest.mark.parametrize("username", ["admin", "reader" + "x" * 94], ids=["normal", "long"])
+    def test_header_controls_fit_and_remain_reachable_at_narrow_widths(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+        theme: str,
+        username: str,
+    ) -> None:
+        from sqlalchemy import select
+
+        from pullbox.database import get_session_factory
+        from pullbox.models.user import User
+
+        async def rename_user(after: str, user_id: int | None = None) -> int:
+            async with get_session_factory()() as session:
+                user = (
+                    await session.get(User, user_id)
+                    if user_id is not None
+                    else await session.scalar(select(User).where(User.username == "admin"))
+                )
+                assert user is not None
+                user.username = after
+                await session.commit()
+                return user.id
+
+        # Exercise real rendered user text without leaking changes to the worker's seed.
+        user_id = _run_async_blocking(rename_user(username))
+        try:
+            authed_page.add_init_script(
+                f"localStorage.setItem('pullbox-theme', {json.dumps(theme)});"
+                "localStorage.setItem('sidebarOpen', 'true');"
+            )
+            shell = AppShellPage(authed_page, seeded_server)
+            shell.goto("/series")
+            expect(authed_page.locator("html")).to_have_attribute("data-theme", theme)
+            authed_page.evaluate("document.fonts.ready")
+
+            hamburger = authed_page.get_by_role("button", name="Open navigation menu", exact=True)
+            add = authed_page.get_by_test_id("header-add-action")
+            trigger = authed_page.get_by_test_id("header-add-menu-trigger")
+            activity = authed_page.get_by_role("button", name="Background activity", exact=True)
+            user_menu = authed_page.get_by_role(
+                "button", name=f"User menu for {username}", exact=True
+            )
+            controls = [
+                add,
+                trigger,
+                activity,
+                authed_page.get_by_test_id("header-theme-toggle"),
+                authed_page.get_by_test_id("header-donations-button"),
+                user_menu,
+                authed_page.get_by_test_id("header-support-link"),
+            ]
+
+            # 320/640 also exercise the effective widths of desktop zoom/reflow.
+            for width in (320, 390, 639, 640, 768, 1024, 1280):
+                authed_page.set_viewport_size({"width": width, "height": 844})
+                visible_controls = [hamburger, *controls] if width < 1024 else controls
+                header_box = shell.header.bounding_box()
+                assert header_box is not None
+                boxes = []
+                for control in visible_controls:
+                    expect(control).to_be_visible()
+                    box = control.bounding_box()
+                    assert box is not None
+                    label = control.get_attribute("aria-label") or control.inner_text()
+                    assert box["width"] >= 24 and box["height"] >= 24, (width, label, box)
+                    assert header_box["x"] <= box["x"], (width, label, box)
+                    assert box["x"] + box["width"] <= width, (width, label, box)
+                    assert header_box["y"] <= box["y"], (width, label, box)
+                    assert box["y"] + box["height"] <= header_box["y"] + header_box["height"], (
+                        width,
+                        label,
+                        box,
+                        header_box,
+                    )
+                    assert control.evaluate(
+                        """node => {
+                            const box = node.getBoundingClientRect();
+                            return node.contains(document.elementFromPoint(
+                                box.x + box.width / 2, box.y + box.height / 2
+                            ));
+                        }"""
+                    ), (width, label, "control is obscured")
+                    for previous in boxes:
+                        assert (
+                            box["x"] >= previous["x"] + previous["width"] - 0.5
+                            or box["y"] >= previous["y"] + previous["height"] - 0.5
+                        ), (width, label, box, previous)
+                    boxes.append(box)
+                assert header_box["height"] <= (96 if width < 640 else 48), header_box
+                assert authed_page.evaluate("document.documentElement.scrollWidth") == width
+                content_box = authed_page.locator("#content").bounding_box()
+                assert content_box is not None
+                assert content_box["y"] >= header_box["y"] + header_box["height"]
+                expect(user_menu.locator("span")).to_have_text(username)
+                for icon, expected_width in zip(
+                    user_menu.locator("svg").all(), (20, 16), strict=True
+                ):
+                    icon_box = icon.bounding_box()
+                    assert icon_box is not None and icon_box["width"] == expected_width
+
+                visible_controls[0].focus()
+                for control in visible_controls[1:]:
+                    authed_page.keyboard.press("Tab")
+                    expect(control).to_be_focused()
+
+                trigger.press("ArrowDown")
+                add_panel = authed_page.get_by_test_id("header-add-menu-panel")
+                expect(add_panel).to_be_in_viewport(ratio=1)
+                expect(authed_page.get_by_test_id("header-add-menu-series")).to_be_focused()
+                authed_page.keyboard.press("ArrowDown")
+                authed_page.keyboard.press("Enter")
+                expect(add).to_have_accessible_name("Add Story Arc")
+                expect(add).to_have_attribute("data-add-target", "/story-arcs/add")
+                expect(trigger).to_contain_text("Story Arc")
+                expect(add_panel).to_be_hidden()
+                expect(add).to_be_focused()
+
+                activity.press("Enter")
+                expect(authed_page.get_by_test_id("header-activity-popover")).to_be_in_viewport(
+                    ratio=1
+                )
+                authed_page.keyboard.press("Escape")
+                expect(authed_page.get_by_test_id("header-activity-popover")).to_be_hidden()
+                user_menu.press("Enter")
+                expect(
+                    authed_page.get_by_role("button", name="Sign out", exact=True)
+                ).to_be_in_viewport(ratio=1)
+                user_menu.press("Enter")
+                expect(
+                    authed_page.get_by_role("button", name="Sign out", exact=True)
+                ).to_be_hidden()
+        finally:
+            _run_async_blocking(rename_user("admin", user_id))
 
     @pytest.mark.parametrize("theme", ["light", "dark"])
     def test_shell_accessible_names_survive_collapsed_and_mobile_layouts(
