@@ -841,12 +841,15 @@ async def comicvine_count_disagreement(identity_probe_db):
     return factory, series_id, original, adapters, instance
 
 
+@pytest.mark.parametrize("summary_count", [4, 1000001, 1000000000])
 async def test_refresh_accepts_complete_catalog_with_stale_summary_without_fallback(
-    comicvine_count_disagreement,
+    comicvine_count_disagreement, summary_count
 ):
     from pullbox.services.metadata_series_refresh import refresh_series_catalog_from_sources
 
     factory, series_id, original, adapters, instance = comicvine_count_disagreement
+    for adapter in adapters.values():
+        adapter.data.series.issue_count = summary_count
     async with factory() as session:
         result = await refresh_series_catalog_from_sources(session, series_id, registry=instance)
         assert result.series.description == "Updated description"
@@ -862,6 +865,7 @@ async def test_refresh_accepts_complete_catalog_with_stale_summary_without_fallb
             Namespace.COMICVINE
         }
     assert not any(call[0] == "issues" for call in adapters[Source.COMICVINE_API].calls)
+    assert all(adapter.data.series.issue_count == summary_count for adapter in adapters.values())
 
 
 @pytest.mark.parametrize("fallback", ["disabled", "rate_limited"])

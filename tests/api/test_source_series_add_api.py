@@ -137,11 +137,12 @@ async def test_add_native_series_uses_full_server_catalog_and_is_repeat_safe(
 
 
 @pytest.mark.parametrize("invalid_after_preview", [False, True])
+@pytest.mark.parametrize("summary_count", [1, 1000001, 1000000000])
 async def test_stale_summary_preview_and_final_add_revalidate_the_catalog(
-    authenticated_client, source_add_setup, sec_db, invalid_after_preview
+    authenticated_client, source_add_setup, sec_db, invalid_after_preview, summary_count
 ):
     fixture = source_add_setup
-    fixture["profile"]["issue_count"] = 1
+    fixture["profile"]["issue_count"] = summary_count
     complete = envelope([issue_row(100, "1"), issue_row(101, "2")])
     fixture["responses"].append(httpx.Response(200, json=complete))
     preview = await authenticated_client.post(
@@ -151,7 +152,7 @@ async def test_stale_summary_preview_and_final_add_revalidate_the_catalog(
     )
     assert preview.status_code == 200, preview.text
     assert preview.json()["issues"]["data"]["total"] == 2
-    assert preview.json()["series"]["data"]["issue_count"] == 1
+    assert preview.json()["series"]["data"]["issue_count"] == summary_count
     assert not list(fixture["root"].iterdir())
     latest = {**complete, "count": 3} if invalid_after_preview else complete
     fixture["responses"].append(httpx.Response(200, json=latest))
