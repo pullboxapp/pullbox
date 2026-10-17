@@ -10,6 +10,7 @@ from sqlalchemy import ColumnElement, and_, case, func, or_, true
 from pullbox.models.indexer import IndexerConfig
 from pullbox.models.issue import Issue
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
+from pullbox.services.direct_artifact_pack import RECOVERABLE_PACK_FAILURES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -319,6 +320,9 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
     safety_block = details.get("safety_block")
     safety_block = safety_block if isinstance(safety_block, dict) else {}
     return {
+        "pack_recovery": lane == "recovery"
+        and details.get("failure_code") in RECOVERABLE_PACK_FAILURES,
+        "pack_review_reason": str(details.get("pack_review_reason") or ""),
         "size_recovery": size_recovery,
         "safety_recovery": lane == "recovery" and details.get("failure_class") == "safety",
         "size_review_reason": str(safety_block.get("reason") or "") if size_recovery else "",
@@ -362,6 +366,8 @@ def _direct_source_label(details: dict[str, object]) -> str:
 
 def _direct_recovery_summary(details: dict[str, object]) -> str:
     """Describe the acquisition failure without implying the semantic match was wrong."""
+    if details.get("failure_code") in RECOVERABLE_PACK_FAILURES:
+        return "Downloaded pack needs issue review; no new download is needed"
     if details.get("failure_code") == "direct_metadata_review_required":
         return "Downloaded file needs metadata review; no new download is needed"
     if details.get("failure_code") == "artifact_resource_safety_review":

@@ -591,6 +591,56 @@ class TestApproveMatch:
             assert pending.match_details["resolution_reason"] == "recovery_replanned"
             runner.dispatch.assert_awaited_once_with(fresh_attempt.id, 77, initial_source=None)
 
+    @pytest.mark.parametrize("present", [True, False])
+    async def test_pack_recovery_resumes_existing_artifact_without_replanning(
+        self, db_factory, tmp_path, present
+    ):
+        from pullbox.services.direct_artifact_quarantine import DirectArtifactValidationError
+        from pullbox.services.intervention_service import InterventionService
+
+        planner = AsyncMock(side_effect=AssertionError("Do not resolve another download"))
+        runner = SimpleNamespace(dispatch=AsyncMock(return_value=True))
+        svc = InterventionService(direct_planner=planner, direct_runner_getter=lambda: runner)
+        retained = tmp_path / "pack.cbz"
+        if present:
+            retained.write_bytes(b"Executor revalidates retained bytes before import")
+        async with db_factory() as session:
+            issue = await _seed_issue(session)
+            attempt = await _seed_direct_attempt(session, issue.id)
+            attempt.state = DirectAcquisitionState.INTERVENTION
+            attempt.failure_class = DirectArtifactFailureClass.POST_PROCESS
+            attempt.failure_code = "direct_pack_ambiguous_issue"
+            artifact = DirectArtifactAttempt(
+                acquisition_attempt_id=attempt.id,
+                sequence_no=0,
+                artifact_identity="pack",
+                route_kind=DirectArtifactRouteKind.DIRECT,
+                host_kind=DirectArtifactHostKind.GENERIC_HTTPS,
+                state=DirectArtifactState.INTERVENTION,
+                is_selected=True,
+                quarantine_path=str(retained),
+            )
+            session.add(artifact)
+            pending = _make_direct_pending(issue.id, attempt.id)
+            pending.match_details.update(
+                {"failure_class": "post_process", "failure_code": attempt.failure_code}
+            )
+            session.add(pending)
+            await session.commit()
+            with pytest.raises(ValueError, match="Retry import"):
+                await svc.retry_direct_recovery(session, pending.id)
+            if present:
+                await svc.approve_match(session, pending.id)
+                runner.dispatch.assert_awaited_once_with(
+                    attempt.id, artifact.id, initial_source=None
+                )
+            else:
+                with pytest.raises(DirectArtifactValidationError, match="retained pack is missing"):
+                    await svc.approve_match(session, pending.id)
+                assert pending.status == PendingMatchStatus.PENDING
+                runner.dispatch.assert_not_awaited()
+            planner.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_retry_direct_recovery_keeps_review_pending_when_dispatch_fails(
         self, db_factory: async_sessionmaker[AsyncSession]

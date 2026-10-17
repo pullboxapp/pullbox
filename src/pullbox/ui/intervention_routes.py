@@ -672,9 +672,8 @@ async def htmx_intervention_approve(
         return Response(status_code=404)
 
     release_title = pm.release_title
-    is_size_recovery = (pm.match_details or {}).get(
-        "failure_code"
-    ) == "artifact_resource_safety_review"
+    meta = build_intervention_item_meta(pm)
+    is_retained_recovery = bool(meta["size_recovery"] or meta["pack_recovery"])
     is_recovery = bool((pm.match_details or {}).get("failure_class"))
     form_getter = getattr(request, "form", None)
     form = await form_getter() if callable(form_getter) else {}
@@ -791,7 +790,7 @@ async def htmx_intervention_approve(
             else "partials/intervention_content_bundle.html"
         )
         response = _templates().TemplateResponse(request, template_name, ctx)
-        if is_size_recovery:
+        if is_retained_recovery:
             return _toast_response(
                 response,
                 "Continuing with the retained file. No new download was queued.",
@@ -810,7 +809,7 @@ async def htmx_intervention_approve(
             title=release_title,
             message=(
                 "Continuing with the retained file. No new download was queued."
-                if is_size_recovery
+                if is_retained_recovery
                 else "Release sent to the download queue."
             ),
             tone="success",

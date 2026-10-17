@@ -261,3 +261,60 @@ def test_pack_reports_destination_write_failure(tmp_path: Path) -> None:
 
 def test_issue_path_token_falls_back_for_unusual_text() -> None:
     assert _issue_path_token("Special Edition") == "Special Edition"
+
+
+@pytest.mark.parametrize("target", ["3", "7"])
+def test_required_pack_issue_ignores_unneeded_variants_and_missing_siblings(tmp_path, target):
+    pack = tmp_path / "House of M.cbz"
+    _write_nested_pack(
+        pack,
+        "House of M 01 (of 8) (2005) (''Directors Cut'') (Team-DCP).cbr",
+        "House of M #1.cbz",
+        "House of M #1 variant.cbz",
+        "House of M - Secrets (2005).cbr",
+        "House of M #1 variant.jpg",
+        f"House of M #{target}.cbz",
+    )
+    result = extract_same_series_issue_files(
+        pack,
+        destination=tmp_path / "members",
+        expected_issue_numbers=frozenset(str(n) for n in range(1, 9)),
+        expected_series_titles=frozenset({"House of M"}),
+        required_issue_numbers=frozenset({target}),
+    )
+    assert set(result) == {target}
+    assert len(list((tmp_path / "members").iterdir())) == 1
+
+
+@pytest.mark.parametrize(
+    ("extra", "code"),
+    [
+        ("another/House of M #3.cbz", "direct_pack_ambiguous_issue"),
+        ("Other Series #3.cbz", "direct_pack_mixed_series"),
+        ("../House of M #1.cbz", "direct_pack_unsafe_member"),
+    ],
+)
+def test_selected_issue_ambiguity_and_unneeded_unsafe_members_still_block(tmp_path, extra, code):
+    pack = tmp_path / "pack.cbz"
+    _write_nested_pack(pack, "House of M #3.cbz", extra)
+    with pytest.raises(DirectArtifactPackError) as failure:
+        extract_same_series_issue_files(
+            pack,
+            destination=tmp_path / "members",
+            expected_issue_numbers=frozenset({"1", "3"}),
+            expected_series_titles=frozenset({"House of M"}),
+            required_issue_numbers=frozenset({"3"}),
+        )
+    assert failure.value.code == code
+
+
+def test_required_issue_must_be_in_advertised_coverage(tmp_path):
+    with pytest.raises(DirectArtifactPackError) as failure:
+        extract_same_series_issue_files(
+            tmp_path / "missing.cbz",
+            destination=tmp_path / "members",
+            expected_issue_numbers=frozenset({"1", "2"}),
+            expected_series_titles=frozenset({"House of M"}),
+            required_issue_numbers=frozenset({"3"}),
+        )
+    assert failure.value.code == "direct_pack_coverage_invalid"

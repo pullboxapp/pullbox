@@ -11,6 +11,14 @@ from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.release_parser import parse_release_title
 
 _COMIC_FILE_SUFFIXES = frozenset({".cbz", ".cbr", ".cb7", ".cbt", ".pdf"})
+RECOVERABLE_PACK_FAILURES = frozenset(
+    {
+        "direct_pack_mixed_series",
+        "direct_pack_ambiguous_issue",
+        "direct_pack_incomplete",
+        "direct_pack_series_invalid",
+    }
+)
 
 
 class DirectArtifactPackError(RuntimeError):
@@ -24,8 +32,8 @@ class DirectArtifactPackError(RuntimeError):
 def is_separable_issue_pack(source_path: Path) -> bool:
     """Return whether an archive safely presents multiple named comic members.
 
-    This is deliberately structural only. Series identity and complete claimed
-    coverage are enforced by ``extract_same_series_issue_files`` before import.
+    This is deliberately structural only. Series identity and coverage of selected
+    issues are enforced by ``extract_same_series_issue_files`` before import.
     """
     try:
         members = ArchiveReader(source_path).list_members()
@@ -49,16 +57,29 @@ def extract_same_series_issue_files(
     destination: Path,
     expected_issue_numbers: frozenset[str],
     expected_series_titles: frozenset[str],
+    required_issue_numbers: frozenset[str] | None = None,
 ) -> dict[str, Path]:
     """Extract separately packaged issues from one contiguous direct-download pack.
 
     A pack with page images but no nested comic files is one combined comic file.
     Pullbox intentionally will not guess page boundaries or split that file.
+    Required issues may be a subset of advertised coverage, excluding owned/skipped
+    siblings. Unsafe paths still block even when their issue will not be imported.
     """
     if len(expected_issue_numbers) < 2:
         return {}
 
     expected = _normalized_issue_numbers(expected_issue_numbers)
+    required = (
+        expected
+        if required_issue_numbers is None
+        else _normalized_issue_numbers(required_issue_numbers)
+    )
+    if not required or not required <= expected:
+        raise DirectArtifactPackError(
+            code="direct_pack_coverage_invalid",
+            message="The selected issues are not covered by this direct-download pack.",
+        )
     normalized_series_titles = {
         normalized
         for title in expected_series_titles
@@ -108,18 +129,26 @@ def extract_same_series_issue_files(
         if issue_number is None:
             continue
         exact_issue_number = issue_number_text or format_issue_number(issue_number)
-        if exact_issue_number not in expected:
+        if exact_issue_number not in required:
             continue
         parsed_series_title = NameMatcher.normalize(parsed.series_name or "") if parsed else ""
         if parsed_series_title not in normalized_series_titles:
             raise DirectArtifactPackError(
                 code="direct_pack_mixed_series",
-                message="The direct-download pack contains files for a different series.",
+                message=(
+                    f"The direct-download pack contains files for a different series: "
+                    f"{Path(member.name).name}. Review the file for requested issue "
+                    f"{exact_issue_number}; Pullbox has not imported it."
+                ),
             )
         if exact_issue_number in extracted:
             raise DirectArtifactPackError(
                 code="direct_pack_ambiguous_issue",
-                message="The direct-download pack contains more than one file for the same issue.",
+                message=(
+                    "The direct-download pack contains more than one file for the same issue: "
+                    f"{exact_issue_number}. Choose the correct file using manual import "
+                    "on the issue page, or correct the pack and retry import."
+                ),
             )
         suffix = Path(member.name).suffix.lower()
         target = destination / f"issue-{_issue_path_token(exact_issue_number)}{suffix}"
@@ -133,7 +162,7 @@ def extract_same_series_issue_files(
             ) from exc
         extracted[exact_issue_number] = target
 
-    missing = expected - set(extracted)
+    missing = required - set(extracted)
     if missing:
         raise DirectArtifactPackError(
             code="direct_pack_incomplete",

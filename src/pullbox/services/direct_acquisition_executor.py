@@ -64,7 +64,7 @@ from pullbox.services.direct_acquisition_state import (
     transition_acquisition,
     transition_artifact,
 )
-from pullbox.services.direct_artifact_pack import DirectArtifactPackError
+from pullbox.services.direct_artifact_pack import RECOVERABLE_PACK_FAILURES, DirectArtifactPackError
 from pullbox.services.direct_artifact_post_processing import (
     DirectPostProcessingResult,
     run_direct_artifact_pack_post_processing,
@@ -254,6 +254,12 @@ class DirectAcquisitionExecutor:
         try:
             _raise_if_cancelled(cancel_event)
             final_path = _recover_final_path(workspace, artifact)
+            if attempt.failure_code in RECOVERABLE_PACK_FAILURES:
+                if final_path is None:
+                    raise _missing_quarantine_error()
+                # A retained matching failure is never permission to trust changed content.
+                if not _resource_safety_override_allowed(attempt):
+                    await self._validator(session, final_path)
             if (
                 attempt.state is DirectAcquisitionState.INTERVENTION
                 and attempt.failure_class is DirectArtifactFailureClass.POST_PROCESS
@@ -682,10 +688,16 @@ class DirectAcquisitionExecutor:
             artifact.failure_class = DirectArtifactFailureClass.POST_PROCESS
             artifact.failure_code = exc.code
             artifact.error_message = str(exc)
-            transition_artifact(artifact, DirectArtifactState.FAILED, at=self._now())
-            transition_acquisition(attempt, DirectAcquisitionState.FAILED, at=self._now())
-            self._quarantine.cleanup(workspace)
-            await progress.write(stage="failed", force=True)
+            if exc.code in RECOVERABLE_PACK_FAILURES:
+                transition_artifact(artifact, DirectArtifactState.INTERVENTION, at=self._now())
+                transition_acquisition(attempt, DirectAcquisitionState.INTERVENTION, at=self._now())
+                await InterventionService().create_direct_attempt_intervention(session, attempt)
+                await progress.write(stage="intervention", force=True)
+            else:
+                transition_artifact(artifact, DirectArtifactState.FAILED, at=self._now())
+                transition_acquisition(attempt, DirectAcquisitionState.FAILED, at=self._now())
+                self._quarantine.cleanup(workspace)
+                await progress.write(stage="failed", force=True)
             return _result(attempt, artifact)
         except Exception as exc:
             await session.rollback()

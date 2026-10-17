@@ -95,6 +95,8 @@ def test_build_intervention_item_meta_formats_protocol_outcome_and_source() -> N
     )
 
     assert build_intervention_item_meta(pending_match) == {
+        "pack_recovery": False,
+        "pack_review_reason": "",
         "protocol_label": "Torrent",
         "outcome_label": "Rejected",
         "review_reason_codes": ["needs_review"],

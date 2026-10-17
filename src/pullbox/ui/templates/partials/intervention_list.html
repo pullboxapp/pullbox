@@ -95,7 +95,7 @@
                     {% if meta.metadata_recovery %}
                     <button type="button" class="btn-primary btn-sm" data-testid="intervention-review-metadata-{{ pm.id }}"
                       @click="$dispatch('review-direct-metadata', { pendingId: {{ pm.id }} })">Review metadata</button>
-                    {% elif not meta.safety_recovery %}
+                    {% elif not meta.safety_recovery and not meta.pack_recovery %}
                     <form
                       hx-post="/htmx/intervention/{{ pm.id }}/retry-recovery"
                       hx-target="#intervention-queue-results"
@@ -130,6 +130,8 @@
                       <input type="hidden" name="page" value="{{ page }}">
                       {% if meta.can_allow_size %}
                       <button type="submit" class="btn-primary btn-sm" data-testid="intervention-allow-size-{{ pm.id }}">Allow and continue</button>
+                      {% elif meta.pack_recovery %}
+                      <button type="submit" class="btn-primary btn-sm" data-testid="intervention-retry-pack-{{ pm.id }}">Retry import</button>
                       {% elif meta.lane != 'recovery' %}<button
                         type="submit"
                         data-testid="intervention-approve-{{ pm.id }}"
@@ -180,6 +182,10 @@
                       <div class="rounded-2xl border border-pb-border bg-pb-card px-4 py-3">
                         <div class="text-[10px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ 'Recovery needed' if meta.lane == 'recovery' else 'Why it needs review' }}</div>
                         <div class="mt-2 text-sm text-pb-text-sec">{{ meta.recovery_summary if meta.lane == 'recovery' else meta.review_reason_summary }}</div>
+                        {% if meta.pack_recovery %}
+                        <div class="mt-2 text-sm text-pb-text-sec">{{ meta.pack_review_reason }}</div>
+                        <div class="mt-2 text-sm text-pb-text-sec">No new download is needed. After correcting the issue match or pack contents, Retry import rechecks the retained pack. You can also choose the correct file using manual import on the issue page. Existing owned and skipped issues are not replaced automatically.</div>
+                        {% endif %}
                         {% if meta.size_recovery %}
                         <div class="mt-2 text-sm text-pb-text-sec">{{ meta.size_review_reason }}</div>
                         {% if meta.can_allow_size %}

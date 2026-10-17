@@ -37,7 +37,11 @@ from pullbox.services.direct_acquisition_state import (
     transition_acquisition,
     transition_artifact,
 )
-from pullbox.services.direct_artifact_quarantine import validate_direct_resource_approval
+from pullbox.services.direct_artifact_pack import RECOVERABLE_PACK_FAILURES
+from pullbox.services.direct_artifact_quarantine import (
+    DirectArtifactValidationError,
+    validate_direct_resource_approval,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -319,6 +323,8 @@ class InterventionService:
         safety_review = (attempt.plan_snapshot or {}).get("safety_review")
         if isinstance(safety_review, dict):
             details["safety_block"] = dict(safety_review)
+        if attempt.failure_code in RECOVERABLE_PACK_FAILURES:
+            details["pack_review_reason"] = attempt.error_message
         if pending_match is None:
             pending_match = PendingMatch(
                 issue_id=attempt.issue_id,
@@ -440,6 +446,20 @@ class InterventionService:
             raise ValueError("Pending match has an invalid direct attempt reference")
 
         initial_source = None
+        if attempt.failure_code in RECOVERABLE_PACK_FAILURES:
+            selected = [item for item in attempt.artifact_attempts if item.is_selected]
+            if (
+                len(selected) != 1
+                or not selected[0].quarantine_path
+                or not await asyncio.to_thread(Path(selected[0].quarantine_path).is_file)
+            ):
+                raise DirectArtifactValidationError(
+                    code="artifact_quarantine_missing",
+                    message=(
+                        "The retained pack is missing. Restore it or manually import the "
+                        "correct issue file. No new download was started."
+                    ),
+                )
         if not attempt.artifact_attempts:
             if attempt.failure_class is DirectArtifactFailureClass.SAFETY:
                 raise ValueError("Safety recovery requires a retained artifact, not a new download")
@@ -539,6 +559,10 @@ class InterventionService:
         if prior.failure_code == "direct_metadata_review_required":
             raise ValueError(
                 "Review the retained file metadata instead of refreshing download routes."
+            )
+        if prior.failure_code in RECOVERABLE_PACK_FAILURES:
+            raise ValueError(
+                "Use Retry import to recheck the retained pack, not refresh download routes."
             )
         if prior.failure_class is DirectArtifactFailureClass.SAFETY:
             raise ValueError(

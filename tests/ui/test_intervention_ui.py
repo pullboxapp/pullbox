@@ -682,8 +682,39 @@ class TestHandlersDirect:
             assert "No new download" in body
             assert f'hx-post="/htmx/intervention/{pending_id}/approve"' in body
 
+    async def test_retained_pack_recovery_offers_retry_import_not_download_routes(
+        self, _db_factory
+    ):
+        from pullbox.ui.routes import intervention_page
+
+        [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            pending.match_details = {
+                "source_kind": "direct",
+                "failure_class": "post_process",
+                "failure_code": "direct_pack_ambiguous_issue",
+                "pack_review_reason": "More than one file matches issue 3.",
+            }
+            await session.commit()
+            response = await intervention_page(
+                request=_mock_request(), user=MagicMock(), session=session, tab="recovery"
+            )
+        body = response.body.decode()
+        assert "Downloaded pack needs issue review" in body
+        assert "More than one file matches issue 3" in body
+        assert "Retry import" in body and "No new download" in body
+        assert f'hx-post="/htmx/intervention/{pending_id}/approve"' in body
+        assert "Download route needs recovery" not in body
+        assert f"intervention-retry-recovery-{pending_id}" not in body
+
     @pytest.mark.asyncio
-    async def test_size_approval_keeps_recovery_tab_and_truthful_success(self, _db_factory):
+    @pytest.mark.parametrize(
+        "failure", ["artifact_resource_safety_review", "direct_pack_ambiguous_issue"]
+    )
+    async def test_size_approval_keeps_recovery_tab_and_truthful_success(
+        self, _db_factory, failure
+    ):
         from pullbox.ui.routes import htmx_intervention_approve
 
         [pending_id] = await _seed_pending_matches(_db_factory, count=1)
@@ -692,7 +723,7 @@ class TestHandlersDirect:
             pending.match_details = {
                 "source_kind": "direct",
                 "direct_attempt_id": 44,
-                "failure_code": "artifact_resource_safety_review",
+                "failure_code": failure,
                 "failure_class": "safety",
             }
             await session.commit()
