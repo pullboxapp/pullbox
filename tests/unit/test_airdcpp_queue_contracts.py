@@ -60,6 +60,25 @@ def test_queue_mutation_contracts_require_typed_bundle_and_file_identity() -> No
     assert queue_file.target.get_secret_value().startswith("/Downloads/")
 
 
+def test_queue_lookup_accepts_whole_number_bundle_identity() -> None:
+    payload = _queue_file_payload()
+    payload["bundle"] = 91.0
+    parsed = None
+    with suppress(ValidationError):
+        parsed = AirDcppQueueFile.model_validate(payload)
+    assert parsed is not None, "Real AirDC++ queue lookup IDs must be recoverable"
+    assert parsed.bundle_id == 91
+    assert type(parsed.bundle_id) is int
+
+
+@pytest.mark.parametrize("value", [True, "91", 91.5, 0.0, -1.0, float("inf"), 2**64])
+def test_queue_lookup_rejects_invalid_bundle_identity(value) -> None:
+    payload = _queue_file_payload()
+    payload["bundle"] = value
+    with pytest.raises(ValidationError):
+        AirDcppQueueFile.model_validate(payload)
+
+
 @pytest.mark.parametrize("model", [AirDcppQueueBundle, AirDcppQueueFile])
 @pytest.mark.parametrize("eta", [-2, -4.0])
 def test_queue_telemetry_accepts_overshoot_without_claiming_completion(model, eta) -> None:

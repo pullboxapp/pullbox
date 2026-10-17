@@ -92,7 +92,19 @@
                     </button>
 
                     {% if meta.lane == 'recovery' %}
-                    {% if meta.metadata_recovery %}
+                    {% if pm.match_details.get('source_kind') == 'dc' %}
+                    {% for action, label in [('recheck', 'Recheck AirDC++'), ('retry', 'Retry request'), ('cancel', 'Cancel request')] %}
+                    <form hx-post="/htmx/intervention/{{ pm.id }}/airdcpp/{{ action }}"
+                      hx-target="#intervention-queue-results" hx-swap="outerHTML"
+                      hx-sync="#intervention-queue-results:drop" hx-disabled-elt="find button">
+                      <input type="hidden" name="protocol" value="{{ protocol_filter }}">
+                      <input type="hidden" name="search" value="{{ search_query }}">
+                      <input type="hidden" name="page" value="{{ page }}">
+                      <button type="submit" class="{{ 'btn-danger' if action == 'cancel' else 'btn-secondary' }} btn-sm"
+                        data-testid="intervention-airdcpp-{{ action }}-{{ pm.id }}">{{ label }}</button>
+                    </form>
+                    {% endfor %}
+                    {% elif meta.metadata_recovery %}
                     <button type="button" class="btn-primary btn-sm" data-testid="intervention-review-metadata-{{ pm.id }}"
                       @click="$dispatch('review-direct-metadata', { pendingId: {{ pm.id }} })">Review metadata</button>
                     {% elif not meta.safety_recovery and not meta.pack_recovery %}
@@ -146,6 +158,7 @@
                       </button>{% endif %}
                     </form>
 
+                    {% if not (meta.lane == 'recovery' and pm.match_details.get('source_kind') == 'dc') %}
                     <form
                       hx-post="/htmx/intervention/{{ pm.id }}/reject"
                       hx-target="#intervention-queue-results"
@@ -172,6 +185,7 @@
                         </svg>
                       </button>
                     </form>
+                    {% endif %}
                   </span>
                 </td>
               </tr>
@@ -253,7 +267,7 @@
           {% if has_filters %}
             <p class="downloads-empty-copy">No {{ 'downloads needing recovery' if tab == 'recovery' else 'pending matches' }} match the current filters.</p>
           {% else %}
-            <p class="downloads-empty-copy">{{ 'Failed direct downloads will appear here after their automatic source fallbacks are exhausted.' if tab == 'recovery' else 'Ambiguous search results will appear here for manual review.' }}</p>
+            <p class="downloads-empty-copy">{{ 'Downloads that need your attention will appear here with recovery actions.' if tab == 'recovery' else 'Ambiguous search results will appear here for manual review.' }}</p>
           {% endif %}
         </div>
       </div>

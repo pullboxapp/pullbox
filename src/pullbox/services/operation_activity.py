@@ -76,6 +76,7 @@ async def list_operation_activity(
         OperationProgress.completed_at.is_not(None),
         OperationProgress.completed_at > recent_cutoff,
         OperationProgress.visibility != OperationProgressVisibility.QUIET,
+        OperationProgress.acknowledged_at.is_(None),
     )
     visible_clause = or_(active_clause, unacknowledged_attention_clause, recent_terminal_clause)
     attention_rank = case((unacknowledged_attention_clause, 0), else_=1)

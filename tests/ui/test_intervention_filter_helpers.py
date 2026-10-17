@@ -44,6 +44,26 @@ def test_dc_intervention_protocol_label_is_not_usenet() -> None:
     assert intervention_protocol_label(False, "dc") == "Direct Connect"
 
 
+def test_unconfirmed_airdcpp_requests_are_actionable_recovery() -> None:
+    from pullbox.ui.intervention_filter_helpers import build_intervention_item_meta
+
+    pending = SimpleNamespace(
+        is_torrent=False,
+        status="pending",
+        indexer=None,
+        match_details={
+            "source_kind": "dc",
+            "provider_name": "AirDC++",
+            "failure_class": "queue_confirmation",
+            "failure_code": "queue_lookup_failed",
+            "dc_download_id": 27,
+        },
+    )
+    meta = build_intervention_item_meta(pending)
+    assert meta["lane"] == "recovery"
+    assert "AirDC++" in meta["recovery_summary"]
+
+
 def test_intervention_review_reason_labels_and_summaries() -> None:
     """Review reason helpers should preserve the established display contract."""
     from pullbox.ui.intervention_filter_helpers import (

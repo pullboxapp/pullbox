@@ -41,6 +41,94 @@ if TYPE_CHECKING:
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-intervention-ui")
 
 
+@pytest.mark.parametrize("action", ["recheck", "retry", "cancel"])
+async def test_airdcpp_recovery_actions_use_verified_queue_path(
+    client, _db_factory, monkeypatch, action
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from pullbox.models.airdcpp import AirDcppAcquisition
+    from pullbox.models.download import DownloadState
+    from pullbox.providers.airdcpp.contracts import AirDcppQueueFile
+    from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
+    from pullbox.services.airdcpp_recovery import record_queue_recovery
+    from tests.unit.test_airdcpp_queue_contracts import _queue_file_payload
+    from tests.unit.test_airdcpp_reconciliation import _FakeApi, _seed
+
+    cid, _, aid = await _seed(_db_factory, state=DownloadState.QUEUED, bundle_id=None)
+    async with _db_factory() as session:
+        a = await session.get(AirDcppAcquisition, aid)
+        await session.refresh(a, ["download_history"])
+        await record_queue_recovery(session, a, code="queue_lookup_failed", at=datetime.now(UTC))
+        pending = await session.scalar(select(PendingMatch))
+        pid = pending.id
+        await session.commit()
+    api = _FakeApi([[]], files=[AirDcppQueueFile.model_validate(_queue_file_payload())])
+    supervisor = SimpleNamespace(state=AirDcppSupervisorState.READY, api_client=api)
+    monkeypatch.setattr(
+        "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+        lambda: SimpleNamespace(get=lambda config: supervisor if config == cid else None),
+    )
+    response = await client.post(
+        f"/htmx/intervention/{pid}/airdcpp/{action}", data={"protocol": "dc"}
+    )
+    assert response.status_code == 200
+    assert f'data-testid="intervention-airdcpp-recheck-{pid}"' not in response.text
+    async with _db_factory() as session:
+        pending = await session.get(PendingMatch, pid)
+        assert pending.status == (
+            PendingMatchStatus.REJECTED if action == "cancel" else PendingMatchStatus.APPROVED
+        )
+    assert not api.create_calls
+
+
+async def test_airdcpp_recovery_has_recheck_retry_cancel_not_direct_route_refresh(
+    client, _db_factory
+):
+    async with _db_factory() as session:
+        series = Series(
+            title="Queue recovery",
+            sort_title="Queue recovery",
+            year_start=2026,
+            comicvine_id=987321,
+            status=SeriesStatus.CONTINUING,
+            series_type=SeriesType.STANDARD,
+        )
+        session.add(series)
+        await session.flush()
+        issue = Issue(
+            series_id=series.id, comicvine_id=987322, issue_number=1, status=IssueStatus.DOWNLOADING
+        )
+        session.add(issue)
+        await session.flush()
+        pending = PendingMatch(
+            issue_id=issue.id,
+            release_title="Queue recovery 001.cbz",
+            download_url="airdcpp-recovery://download/27",
+            confidence="high",
+            match_details={
+                "source_kind": "dc",
+                "provider_name": "AirDC++",
+                "failure_class": "queue_confirmation",
+                "failure_code": "queue_lookup_failed",
+                "dc_download_id": 27,
+            },
+        )
+        session.add(pending)
+        await session.commit()
+        pid = pending.id
+    response = await client.get("/intervention?tab=recovery&protocol=dc")
+    assert response.status_code == 200
+    assert f"/htmx/intervention/{pid}/airdcpp/recheck" in response.text
+    assert f"/htmx/intervention/{pid}/airdcpp/retry" in response.text
+    assert f"/htmx/intervention/{pid}/airdcpp/cancel" in response.text
+    assert f"/htmx/intervention/{pid}/retry-recovery" not in response.text
+    assert f'data-testid="intervention-reject-{pid}"' not in response.text
+
+
 # ── Fixtures ───────────────────────────────────────────────────────────
 
 

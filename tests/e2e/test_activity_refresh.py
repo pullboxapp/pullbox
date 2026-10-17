@@ -222,3 +222,39 @@ def test_paging_does_not_flash_disabled_during_background_refresh(activity_page)
     assert "offset=20" in page.evaluate("activityRequests[3].url")
     resolve(page, 3, payload(count=27, ids=list(range(21, 28))))
     expect(page.get_by_test_id("header-activity-operation")).to_have_count(7)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+def test_recovery_notification_can_be_dismissed_without_cancel_or_spinner(activity_page, theme):
+    page = activity_page
+    page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+    data = payload(state="failed", count=0, total=1)
+    data["attention_count"] = 1
+    data["operations"][0].update(
+        attention_required=True,
+        acknowledged_at=None,
+        message="AirDC++ could not confirm this request.",
+        detail_url="/intervention?tab=recovery&protocol=dc",
+    )
+    resolve(page, 0, data)
+    page.get_by_role("button", name="Background activity", exact=True).click()
+    resolve(page, 1, data)
+    page.clock.run_for(200)
+    panel = page.get_by_test_id("header-activity-popover")
+    expect(panel.get_by_test_id("header-activity-overall-progress")).to_be_hidden()
+    expect(panel.get_by_test_id("header-activity-view-details")).to_have_attribute(
+        "href", "/intervention?tab=recovery&protocol=dc"
+    )
+    calls = []
+
+    def dismiss(route):
+        calls.append((route.request.method, route.request.url))
+        route.fulfill(json={"acknowledged": True})
+
+    page.route("**/api/v1/activity/1/acknowledge", dismiss)
+    panel.get_by_role("button", name="Dismiss notification", exact=True).click()
+    page.wait_for_function("activityRequests.length === 3")
+    resolve(page, 2, payload(count=0, ids=[]))
+    expect(panel.get_by_test_id("header-activity-operation")).to_have_count(0)
+    expect(panel).to_be_visible()
+    assert len(calls) == 1 and calls[0][0] == "POST"

@@ -71,10 +71,10 @@ def intervention_lane_clause(lane: str) -> ColumnElement[bool]:
     """Separate failed direct acquisition from semantic matching decisions."""
     source_kind = func.coalesce(PendingMatch.match_details["source_kind"].as_string(), "")
     failure_class = PendingMatch.match_details["failure_class"].as_string()
-    recovery = and_(source_kind == "direct", failure_class.is_not(None))
+    recovery = and_(source_kind.in_(("direct", "dc")), failure_class.is_not(None))
     if lane == "recovery":
         return recovery
-    return or_(source_kind != "direct", failure_class.is_(None))
+    return or_(source_kind.not_in(("direct", "dc")), failure_class.is_(None))
 
 
 def normalize_intervention_confidence_filter(confidence: str | None) -> str:
@@ -311,7 +311,7 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
 
     lane = (
         "recovery"
-        if details.get("source_kind") == "direct" and details.get("failure_class")
+        if details.get("source_kind") in {"direct", "dc"} and details.get("failure_class")
         else "review"
     )
     size_recovery = (
@@ -366,6 +366,12 @@ def _direct_source_label(details: dict[str, object]) -> str:
 
 def _direct_recovery_summary(details: dict[str, object]) -> str:
     """Describe the acquisition failure without implying the semantic match was wrong."""
+    if details.get("source_kind") == "dc":
+        from pullbox.services.airdcpp_recovery import RECOVERY_MESSAGES
+
+        return RECOVERY_MESSAGES.get(
+            str(details.get("failure_code")), "AirDC++ request needs review."
+        )
     if details.get("failure_code") in RECOVERABLE_PACK_FAILURES:
         return "Downloaded pack needs issue review; no new download is needed"
     if details.get("failure_code") == "direct_metadata_review_required":

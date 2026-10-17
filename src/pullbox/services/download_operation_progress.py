@@ -12,6 +12,7 @@ from pullbox.models.operation_progress import (
     OperationProgressType,
     OperationProgressVisibility,
 )
+from pullbox.services.airdcpp_recovery import RECOVERY_LINK, RECOVERY_MESSAGES
 from pullbox.services.operation_progress import (
     OperationProgressMeasure,
     OperationProgressUpdate,
@@ -109,6 +110,13 @@ def build_download_operation_update(
         percent = 100.0
 
     client_state = _progress_value(progress, "client_state") if progress is not None else None
+    recovery_required = download.error_message in RECOVERY_MESSAGES.values()
+    if client_state:
+        client_state = {
+            "mutation_pending": "Sending to AirDC++",
+            "retry_mutation_pending": "Sending to AirDC++",
+            "recovery_check_pending": "Checking AirDC++",
+        }.get(str(client_state).lower().replace(" ", "_"), client_state)
     source_slow = (
         bool(_progress_value(progress, "source_slow", False)) if progress is not None else False
     )
@@ -156,7 +164,7 @@ def build_download_operation_update(
         title=download.title,
         message=str(client_state or download.error_message or ""),
         source_label=str(source_label or _default_source_label(download)),
-        detail_url="/downloads",
+        detail_url=RECOVERY_LINK if recovery_required else "/downloads",
         visibility=OperationProgressVisibility.PROMINENT,
         tone=tone,
         attention_required=attention_required,

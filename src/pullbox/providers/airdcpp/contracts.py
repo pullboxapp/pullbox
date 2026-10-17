@@ -204,7 +204,7 @@ class AirDcppQueueFile(AirDcppWireModel):
     name: BoundedString
     target: SecretStr = Field(repr=False)
     type: AirDcppFileItemType
-    bundle_id: PositiveInt = Field(alias="bundle")
+    bundle_id: WholePositiveInt = Field(alias="bundle")
     size: WholePositiveInt
     downloaded_bytes: WholeNonNegativeInt
     priority: AirDcppQueuePriority

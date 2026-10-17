@@ -10,7 +10,7 @@ from pullbox.models.operation_progress import (
     OperationProgressState,
     OperationProgressType,
 )
-from pullbox.services.operation_activity import list_operation_activity
+from pullbox.services.operation_activity import acknowledge_operation, list_operation_activity
 
 
 def operation(key="1", **kwargs):
@@ -95,6 +95,20 @@ async def test_empty_activity_has_no_expiry(db_session):
     assert activity.refresh_after_ms is None
 
 
+async def test_dismiss_notification_hides_recent_failure_immediately(db_session):
+    row = operation(
+        state=OperationProgressState.FAILED, attention_required=True, completed_at=datetime.now(UTC)
+    )
+    db_session.add(row)
+    await db_session.flush()
+    await acknowledge_operation(db_session, row.id)
+    activity = await list_operation_activity(db_session)
+    assert activity.operations == []
+    assert activity.attention_count == activity.total_count == 0
+    assert row.state is OperationProgressState.FAILED
+    assert row.attention_required
+
+
 @pytest.mark.parametrize("acknowledged", [False, True])
 async def test_attention_does_not_expire_until_acknowledged(db_session, acknowledged):
     now = datetime.now(UTC)
@@ -109,6 +123,6 @@ async def test_attention_does_not_expire_until_acknowledged(db_session, acknowle
     await db_session.flush()
     activity = await list_operation_activity(db_session, now=now)
     assert activity.attention_count == (0 if acknowledged else 1)
-    assert activity.refresh_after_ms == (10000 if acknowledged else None)
+    assert activity.refresh_after_ms is None
     later = await list_operation_activity(db_session, now=now + timedelta(seconds=20))
     assert len(later.operations) == (0 if acknowledged else 1)

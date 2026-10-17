@@ -369,6 +369,10 @@ class InterventionService:
             raise ValueError(f"Pending match {pending_id} is not pending (status={pm.status})")
 
         if pm.match_details.get("source_kind") == "dc":
+            if pm.match_details.get("failure_class"):
+                raise ValueError(
+                    "Use the AirDC++ recovery actions to recheck, retry, or cancel this request."
+                )
             from pullbox.services.airdcpp_search_acquisition import (
                 acquire_dc_candidate,
                 dc_review_candidate,
@@ -641,6 +645,8 @@ class InterventionService:
         if pm.status != PendingMatchStatus.PENDING:
             raise ValueError(f"Pending match {pending_id} is not pending (status={pm.status})")
 
+        if pm.match_details.get("source_kind") == "dc" and pm.match_details.get("failure_class"):
+            raise ValueError("Use Cancel request to safely stop this AirDC++ request.")
         direct_attempt_id = _direct_attempt_id(pm)
         should_blocklist_release = True
         if direct_attempt_id is not None:
@@ -779,6 +785,13 @@ class InterventionService:
             select(PendingMatch.id).where(
                 PendingMatch.status == PendingMatchStatus.PENDING,
                 PendingMatch.created_at < cutoff,
+                ~(
+                    (
+                        func.coalesce(PendingMatch.match_details["source_kind"].as_string(), "")
+                        == "dc"
+                    )
+                    & PendingMatch.match_details["failure_class"].as_string().is_not(None)
+                ),
             )
         )
         stale_ids = [row[0] for row in stale.all()]

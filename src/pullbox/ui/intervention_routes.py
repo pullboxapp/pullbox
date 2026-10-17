@@ -901,6 +901,86 @@ async def htmx_intervention_reject(
 
 
 @router.post(
+    "/htmx/intervention/{pending_id}/airdcpp/{action}",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def htmx_intervention_airdcpp_recovery(
+    request: Request,
+    pending_id: int,
+    action: str,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Keep queue recovery on the intervention surface, not the match-review path."""
+    from pullbox.composition.airdcpp import get_airdcpp_supervisor_registry
+    from pullbox.models.airdcpp import AirDcppAcquisition
+    from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
+    from pullbox.services.airdcpp_recovery import act_on_queue_recovery
+
+    pending = await session.get(PendingMatch, pending_id)
+    if pending is None:
+        return Response(status_code=404)
+    details = pending.match_details or {}
+    download_id = details.get("dc_download_id")
+    if (
+        details.get("source_kind") != "dc"
+        or type(download_id) is not int
+        or action not in {"recheck", "retry", "cancel"}
+    ):
+        return Response(status_code=400)
+    acquisition = await session.scalar(
+        select(AirDcppAcquisition).where(AirDcppAcquisition.download_history_id == download_id)
+    )
+    registry = get_airdcpp_supervisor_registry()
+    supervisor = (
+        registry.get(acquisition.client_config_id)
+        if registry and acquisition and acquisition.client_config_id
+        else None
+    )
+    tone = "success"
+    if supervisor is None or supervisor.state is not AirDcppSupervisorState.READY:
+        message = (
+            "AirDC++ is unavailable. The request was not retried or cancelled; "
+            "check the client connection, then recheck."
+        )
+        tone = "error"
+    else:
+        try:
+            message = await act_on_queue_recovery(
+                session, pending_id, action, supervisor.api_client
+            )
+        except ValueError as exc:
+            message = str(exc)
+            tone = "error"
+    form = await request.form()
+    try:
+        page = max(1, int(str(form.get("page", "1"))))
+    except ValueError:
+        page = 1
+    ctx = _ctx(
+        request,
+        user,
+        **await load_intervention_context(
+            session,
+            tab="recovery",
+            protocol_filter=str(form.get("protocol", "")),
+            search_query=str(form.get("search", "")),
+            requested_page=page,
+        ),
+    )
+    return _toast_response(
+        _templates().TemplateResponse(
+            request,
+            "partials/intervention_queue_results_bundle.html",
+            ctx,
+        ),
+        message,
+        tone,
+    )
+
+
+@router.post(
     "/htmx/intervention/{pending_id}/retry-recovery",
     response_class=HTMLResponse,
     include_in_schema=False,
