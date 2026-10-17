@@ -19,10 +19,17 @@ from pullbox.core.archive_metadata import (
     read_archive_metadata,
 )
 from pullbox.core.library_file_ownership import build_file_identity_signature
-from pullbox.schemas.issue_file_metadata import FileMetadataConflict  # noqa: TC001 - Pydantic field
+from pullbox.schemas.issue_file_metadata import (  # noqa: TC001 - Pydantic field
+    FileMetadataConflict,
+    SharedXmlChoices,
+)
 from pullbox.services.archive_metadata_binding import (
     assemble_archive_metadata_state,
     select_archive_primary_identity,
+)
+from pullbox.services.archive_metadata_preservation import (
+    review_preserved_fields,
+    shared_xml_choices,
 )
 from pullbox.services.archive_metadata_reconciliation import reconcile_archive_metadata
 from pullbox.services.archive_metadata_rendering import (
@@ -53,6 +60,7 @@ class ReviewedManualMetadata:
     issue: MetadataSnapshot
     primary: ExternalIdentityRef | None
     preview: ManualImportMetadataPreview
+    shared_choices: SharedXmlChoices | None = None
 
 
 async def preview_manual_import_metadata(
@@ -85,6 +93,8 @@ def _preview(
     series, issue, conflicts = review_metadata_fields(
         plan.metadata, archive, series, issue, choices
     )
+    shared_choices = shared_xml_choices(choices)
+    conflicts.extend(review_preserved_fields(files, shared_choices))
     ready = all(item.selected is not None for item in conflicts)
     try:
         render_archive_metadata(
@@ -94,6 +104,7 @@ def _preview(
             primary_identity=primary,
             previous_series=plan.metadata.series.baseline,
             previous_issue=plan.metadata.issues[0].baseline,
+            shared_choices=shared_choices,
         )
     except ArchiveMetadataRenderError as exc:
         if (
@@ -135,4 +146,5 @@ def _preview(
             context_key=context_key,
             conflicts=conflicts,
         ),
+        shared_choices=shared_choices,
     )

@@ -204,6 +204,7 @@ async def convert_library_file(
             if reviewed_metadata
             else None,
             primary_identity=reviewed_metadata.primary if reviewed_metadata else None,
+            shared_choices=reviewed_metadata.shared_choices if reviewed_metadata else None,
             expected_source=reviewed_metadata.target.fingerprint if reviewed_metadata else None,
             check_control=check_control,
             progress=progress,

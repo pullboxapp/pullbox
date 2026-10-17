@@ -18,6 +18,7 @@ from pullbox.core.metadata_identity import (
 )
 from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
+from pullbox.schemas.issue_file_metadata import SharedXmlChoices
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError as ArchiveMetadataRenderError,
@@ -68,6 +69,7 @@ def render_archive_metadata(
     previous_series: MetadataSnapshot | None = None,
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
+    shared_choices: SharedXmlChoices | None = None,
 ) -> RenderedArchiveMetadata:
     """Render both documents from bound snapshots; this is not write permission.
 
@@ -113,7 +115,7 @@ def render_archive_metadata(
     _render_core(series, issue, ci, mi)
     _render_ids(series, issue, ci, mi, primary)
     _render_credits(issue, archive, ci, mi)
-    coordinate_preserved_fields(ci, mi)
+    coordinate_preserved_fields(ci, mi, shared_choices)
     return _validated_pair(ci, mi)
 
 

@@ -235,6 +235,7 @@ async def stage_manual_metadata(
         block_dangerous=plan.block_dangerous,
         metadata_state=plan.metadata if reviewed is None else None,
         primary_identity=reviewed.primary if reviewed is not None else None,
+        shared_choices=reviewed.shared_choices if reviewed is not None else None,
         previous_series=plan.metadata.series.baseline,
         previous_issue=plan.metadata.issues[0].baseline,
         cancellation_check=cancellation_check,

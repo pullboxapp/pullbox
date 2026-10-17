@@ -5,28 +5,42 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 type FileMetadataSource = Literal["library", "ComicInfo.xml", "MetronInfo.xml"]
-type FileMetadataField = Literal[
-    "series.title",
-    "series.sort_title",
-    "series.publisher",
-    "series.language",
-    "series.year_start",
-    "series.volume",
-    "series.series_type",
-    "series.issue_count",
-    "issue.title",
-    "issue.description",
-    "issue.cover_date",
-    "issue.store_date",
-    "issue.page_count",
-    "issue.credits",
+type SharedXmlField = Literal[
+    "xml.AgeRating",
+    "xml.Genre",
+    "xml.Tags",
+    "xml.Characters",
+    "xml.Teams",
+    "xml.Locations",
+    "xml.Imprint",
+    "xml.StoryArc",
 ]
+type SharedXmlChoices = dict[SharedXmlField, Literal["ComicInfo.xml", "MetronInfo.xml"]]
+type FileMetadataField = (
+    Literal[
+        "series.title",
+        "series.sort_title",
+        "series.publisher",
+        "series.language",
+        "series.year_start",
+        "series.volume",
+        "series.series_type",
+        "series.issue_count",
+        "issue.title",
+        "issue.description",
+        "issue.cover_date",
+        "issue.store_date",
+        "issue.page_count",
+        "issue.credits",
+    ]
+    | SharedXmlField
+)
 type FileMetadataChoices = dict[FileMetadataField, FileMetadataSource]
 
 
 class FileMetadataReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    choices: FileMetadataChoices = Field(default_factory=dict, max_length=14)
+    choices: FileMetadataChoices = Field(default_factory=dict, max_length=22)
 
 
 class FileMetadataOption(BaseModel):

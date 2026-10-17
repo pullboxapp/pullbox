@@ -28,6 +28,7 @@ from pullbox.schemas.issue_file_metadata import (
     FileMetadataChange,
     FileMetadataChoices,
     FileMetadataPreview,
+    SharedXmlChoices,
 )
 from pullbox.services.archive_metadata_binding import (
     ArchiveMetadataBindingError,
@@ -39,6 +40,11 @@ from pullbox.services.archive_metadata_binding import (
     require_unowned_metadata_file,
 )
 from pullbox.services.archive_metadata_finalization import finalize_archive_publication
+from pullbox.services.archive_metadata_preservation import (
+    SHARED_FIELD_LABELS,
+    review_preserved_fields,
+    shared_xml_choices,
+)
 from pullbox.services.archive_metadata_publication import (
     ArchivePublicationError,
     inspect_archive_publication,
@@ -77,8 +83,19 @@ def file_metadata_error(exc: BaseException) -> str:
         return "The available metadata choices changed. Preview again and review each field."
     if code == "archive_unreadable":
         return "This comic archive cannot be read. Replace or repair it, then preview again."
+    if code == "publisher_required":
+        return (
+            "The file contains an imprint but the series has no publisher. "
+            "Set or verify the series publisher, then preview again. The file was left unchanged."
+        )
     if code == "unreconciled_field":
         field = getattr(exc, "field", "metadata")
+        if field in SHARED_FIELD_LABELS:
+            return (
+                f"ComicInfo.xml and MetronInfo.xml disagree about {SHARED_FIELD_LABELS[field]}. "
+                "The file was left unchanged. Choose which embedded values to keep "
+                "and update the preview."
+            )
         label = (
             field.replace("_", " ") if field in {"title", "issue_count", "credits"} else "metadata"
         )
@@ -142,6 +159,7 @@ class PreparedFileMetadata:
     primary: ExternalIdentityRef | None
     preview: FileMetadataPreview
     approved_resource_limit: int | None = None
+    shared_choices: SharedXmlChoices | None = None
 
 
 async def prepare_file_metadata(
@@ -234,6 +252,8 @@ def _prepare(
     series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
     primary = archive_primary_identity(binding, archive)
     series, issue, conflicts = review_metadata_fields(binding, archive, series, issue, choices)
+    shared_choices = shared_xml_choices(choices)
+    conflicts.extend(review_preserved_fields(files, shared_choices))
     ready = all(item.selected is not None for item in conflicts)
     evidence = TypeAdapter(ArchiveMetadataTarget).dump_json(target)
     evidence += json.dumps(choices, sort_keys=True, separators=(",", ":")).encode()
@@ -245,6 +265,7 @@ def _prepare(
             primary_identity=primary,
             previous_series=binding.metadata.series.baseline,
             previous_issue=binding.metadata.issues[0].baseline,
+            shared_choices=shared_choices,
         )
     except ArchiveMetadataRenderError as exc:
         # Only descriptive disagreements enter review; identity/schema guards still fail closed.
@@ -275,6 +296,7 @@ def _prepare(
                 conflicts=conflicts,
                 converts_to_cbz=converts,
             ),
+            shared_choices=shared_choices,
         )
     assert rendered is not None
     changes = []
@@ -321,6 +343,7 @@ def _prepare(
             converts_to_cbz=converts,
             conflicts=conflicts,
         ),
+        shared_choices=shared_choices,
     )
 
 
@@ -412,6 +435,7 @@ async def write_file_metadata(
             previous_issue=target.binding.metadata.issues[0].baseline,
             cancellation_check=check_control,
             progress_callback=progress,
+            shared_choices=prepared.shared_choices,
         ) as staged:
             plan = await prepare_archive_publication(target, staged, series, issue)
             if job_id is not None:

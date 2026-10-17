@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
+from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
 import pytest
@@ -15,6 +16,7 @@ from pullbox.models.direct_acquisition import DirectAcquisitionAttempt, DirectAc
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import IssueStatus
 from pullbox.models.pending_match import PendingMatch
+from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.direct_metadata_recovery import (
     prepare_direct_metadata_recovery,
     run_direct_metadata_recovery,
@@ -26,6 +28,111 @@ from tests.integration.metadata_identity.test_direct_paired_metadata import (
     no_global_sync,  # noqa: F401
     paired_download_setting,  # noqa: F401
 )
+from tests.unit.test_nonzip_metadata_writing import nonzip_archive
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize(
+    "suffix,remove_copy", [(".cbz", False), (".cb7", False), (".cbz", True), (".cb7", True)]
+)
+@pytest.mark.parametrize("rating", ["Unknown", "Mature"])
+async def test_shared_xml_choices_complete_recovery_without_reacquisition(
+    identity_probe_db, tmp_path, suffix, remove_copy, rating
+):
+    _, factory, _ = identity_probe_db
+    attempt_id, artifact_id, issue_id, source = await direct_artifact(
+        factory, tmp_path, conflict=True, suffix=suffix
+    )
+    members = [
+        ("page.jpg", b"page bytes"),
+        (
+            "ComicInfo.xml",
+            b"<ComicInfo><Number>50-X</Number><Count>4</Count>"
+            b"<AgeRating>Teen</AgeRating><Tags>Original tag</Tags></ComicInfo>",
+        ),
+        (
+            "MetronInfo.xml",
+            (
+                "<MetronInfo><Series><Name>Canonical series</Name></Series>"
+                f"<Number>50-X</Number><AgeRating>{rating}</AgeRating>"
+                "<Tags><Tag>Alternate tag</Tag></Tags></MetronInfo>"
+            ).encode(),
+        ),
+    ]
+    if suffix == ".cbz":
+        with ZipFile(source, "w") as archive:
+            for name, value in members:
+                archive.writestr(name, value)
+    else:
+        source.unlink()
+        nonzip_archive(source, members)
+    assert (
+        await execute(factory, tmp_path, attempt_id, artifact_id)
+    ).state is DirectAcquisitionState.INTERVENTION
+    async with factory.begin() as session:
+        pending = await session.scalar(select(PendingMatch))
+        pending_id = pending.id
+        file = await session.scalar(select(LibraryFile))
+        copy = Path(file.file_path)
+        if remove_copy:
+            copy.unlink()
+            await session.delete(file)
+            (await session.get(Issue, issue_id)).status = IssueStatus.WANTED
+    original = source.read_bytes()
+    async with factory() as session:
+        preview = (await prepare_direct_metadata_recovery(session, pending_id)).preview
+        expected = {"series.issue_count", "xml.Tags"}
+        if rating != "Unknown":
+            expected.add("xml.AgeRating")
+        assert {c.key for c in preview.conflicts} == expected
+        choices = {
+            c.key: "ComicInfo.xml" if c.key.startswith("xml.") else "library"
+            for c in preview.conflicts
+        }
+        approved = await prepare_direct_metadata_recovery(session, pending_id, choices=choices)
+        assert approved.preview.ready
+        with pytest.raises(ArchiveMetadataRenderError, match="invalid_choice"):
+            await prepare_direct_metadata_recovery(
+                session, pending_id, choices={**choices, "xml.Tags": "library"}
+            )
+    changed_choices = {**choices, "xml.Tags": "MetronInfo.xml"}
+    with pytest.raises(ValueError, match="changed"):
+        await run_direct_metadata_recovery(
+            factory,
+            pending_id,
+            approved.preview.review_key,
+            uuid4(),
+            choices=changed_choices,
+            limit=10 * 1024**2,
+            check_control=AsyncMock(),
+            progress=AsyncMock(),
+        )
+    assert source.read_bytes() == original
+    await run_direct_metadata_recovery(
+        factory,
+        pending_id,
+        approved.preview.review_key,
+        uuid4(),
+        choices=choices,
+        limit=10 * 1024**2,
+        check_control=AsyncMock(),
+        progress=AsyncMock(),
+    )
+    async with factory() as session:
+        file = await session.scalar(select(LibraryFile))
+        with ZipFile(file.file_path) as archive:
+            ci = ET.fromstring(archive.read("ComicInfo.xml"))
+            mi = ET.fromstring(archive.read("MetronInfo.xml"))
+            assert ci.findtext("AgeRating") == mi.findtext("AgeRating") == "Teen"
+            assert ci.findtext("Tags") == mi.findtext("Tags/Tag") == "Original tag"
+            assert archive.read("page.jpg") == b"page bytes"
+        assert (await session.get(PendingMatch, pending_id)).status == "approved"
+        assert (
+            await session.get(DirectAcquisitionAttempt, attempt_id)
+        ).state is DirectAcquisitionState.COMPLETED
+        assert (await session.scalar(select(DownloadHistory))).state is DownloadState.IMPORTED
+        assert await session.scalar(select(func.count()).select_from(DirectAcquisitionAttempt)) == 1
+    assert source.read_bytes() == original
 
 
 async def _review_case(factory, tmp_path, *, suffix=".cbz", remove_copy=False):

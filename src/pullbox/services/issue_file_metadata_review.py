@@ -167,7 +167,7 @@ def review_metadata_fields(
                 "origins": tuple(origins.values()),
             }
         )
-    if set(choices) - seen:
+    if {key for key in choices if not key.startswith("xml.")} - seen:
         raise ArchiveMetadataRenderError("choices_changed")
     assert snapshots["series"].entity_kind is MetadataEntityKind.SERIES
     return snapshots["series"], snapshots["issue"], conflicts

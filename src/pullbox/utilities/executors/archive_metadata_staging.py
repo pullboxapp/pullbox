@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pullbox.core.file_safety import FileSafetyError
 from pullbox.core.metadata_identity import ExternalIdentityRef
 from pullbox.core.metadata_pdf_source import PdfQuality
+from pullbox.schemas.issue_file_metadata import SharedXmlChoices
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.archive_metadata_writing import write_cbz_metadata
@@ -50,6 +51,7 @@ class _StagingRequest(BaseModel):
     replace_managed: bool = Field(default=False, strict=True)
     pdf_quality: PdfQuality = "medium"
     metadata_state: SeriesRefreshState | None = None
+    shared_choices: SharedXmlChoices | None = None
 
 
 class _StagingResult(BaseModel):
@@ -94,6 +96,7 @@ async def stage_cbz_metadata_interruptible(
     replace_managed: bool = False,
     pdf_quality: PdfQuality = "medium",
     metadata_state: SeriesRefreshState | None = None,
+    shared_choices: SharedXmlChoices | None = None,
 ) -> AsyncIterator[StagedArchiveMetadata]:
     """Stage a verified pair, then yield to the independently authorized owner.
 
@@ -120,6 +123,7 @@ async def stage_cbz_metadata_interruptible(
         replace_managed=replace_managed,
         pdf_quality=pdf_quality,
         metadata_state=metadata_state,
+        shared_choices=shared_choices,
     )
     encoded = request.model_dump_json().encode("utf-8")
     if len(encoded) > _MAX_REQUEST_BYTES:
@@ -256,6 +260,7 @@ def worker_stage_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             replace_managed=request.replace_managed,
             pdf_quality=request.pdf_quality,
             metadata_state=request.metadata_state,
+            shared_choices=request.shared_choices,
         )
         _check_fingerprint(request.source_path, request.source_fingerprint)
     except (ArchiveMetadataRenderError, MetadataAssemblyError):

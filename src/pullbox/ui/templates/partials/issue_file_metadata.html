@@ -21,7 +21,7 @@
           <div x-show="preview && !job" class="space-y-3">
             <p class="text-sm font-semibold text-pb-text break-all" x-text="preview && preview.file_name"></p>
             <div x-show="preview && (preview.conflicts || []).length" class="space-y-3" data-testid="file-metadata-conflicts">
-              <p class="text-sm text-pb-text-sec">Choose which values to keep, then update the preview. Your choices will update the library and both XML files.</p>
+              <p class="text-sm text-pb-text-sec">Choose which values to keep, then update the preview. Shared XML choices update both documents; catalog field choices also update the library.</p>
               <template x-for="conflict in (preview ? (preview.conflicts || []) : [])" :key="conflict.key">
                 <fieldset class="rounded-lg border border-pb-border p-3 space-y-2">
                   <legend class="text-sm font-semibold text-pb-text px-1" x-text="conflict.label"></legend>
