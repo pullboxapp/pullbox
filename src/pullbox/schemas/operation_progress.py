@@ -64,6 +64,8 @@ class OperationActivityRead(BaseModel):
     active_count: int
     spinner_count: int
     attention_count: int
+    total_count: int
+    refresh_after_ms: int | None
 
 
 class OperationAcknowledgementRead(BaseModel):

@@ -260,7 +260,6 @@
 
 <body class="h-full bg-pb-base text-pb-text font-sans" data-shell-pending hx-ext="morph"
       x-data="appShell()"
-      x-init="init()"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token|default("", true) }}"}'>
 
   {#- Skip to main content (WCAG) -#}
@@ -309,7 +308,7 @@
           :data-tip="activityButtonLabel()"
           data-tip-pos="bottom"
           data-tip-size="narrow"
-          @click="activityOpen = !activityOpen"
+          @click="toggleActivity()"
         >
           <svg
             x-show="activitySpinnerCount > 0 && activityAttentionCount === 0"
@@ -383,12 +382,12 @@
           x-transition:leave-end="opacity-0 translate-y-1"
           @keydown.escape.window="activityOpen = false"
           data-testid="header-activity-popover"
-          class="absolute right-4 sm:right-6 top-full z-50 mt-2 w-96 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-pb-border-hover bg-pb-card shadow-xl"
+          class="absolute right-4 sm:right-6 top-full z-50 mt-2 flex max-h-[calc(100dvh-8rem)] w-96 max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-xl border border-pb-border-hover bg-pb-card shadow-xl"
           role="region"
           aria-label="Background activity details"
           aria-live="polite"
         >
-          <div class="flex items-center justify-between gap-3 border-b border-pb-border px-4 py-3">
+          <div class="flex shrink-0 items-center justify-between gap-3 border-b border-pb-border px-4 py-3">
             <div>
               <p class="text-[10px] font-semibold uppercase tracking-[0.14em] text-pb-text-dim">Background work</p>
               <h2 class="mt-1 text-sm font-semibold text-pb-text">Activity</h2>
@@ -396,7 +395,7 @@
             <span class="text-xs text-pb-text-dim" x-text="activitySummaryLabel()"></span>
           </div>
 
-          <div class="max-h-[70vh] overflow-y-auto p-2">
+          <div class="min-h-0 overflow-y-auto p-2">
             <div x-show="activityOperations.length === 0" class="px-3 py-6 text-center">
               <p class="text-sm font-medium text-pb-text">No background work</p>
               <p class="mt-1 text-xs text-pb-text-dim">Active operations and recent completions will appear here.</p>
@@ -493,6 +492,18 @@
                 </div>
               </article>
             </template>
+          </div>
+          <div x-show="activityTotalCount > activityPageSize" x-cloak
+               class="flex shrink-0 items-center justify-between gap-2 border-t border-pb-border px-4 py-3">
+            <span class="text-xs text-pb-text-dim" x-text="activityPageLabel()"></span>
+            <div class="flex items-center gap-2">
+              <button type="button" class="btn-ghost btn-sm" aria-label="Previous activity page"
+                      :disabled="activityOffset !== activityPageOffset || activityPageOffset === 0"
+                      @click="changeActivityPage(-1)">Previous</button>
+              <button type="button" class="btn-ghost btn-sm" aria-label="Next activity page"
+                      :disabled="activityOffset !== activityPageOffset || activityPageOffset + activityPageSize >= activityTotalCount"
+                      @click="changeActivityPage(1)">Next</button>
+            </div>
           </div>
         </section>
       </div>

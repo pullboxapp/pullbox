@@ -74,10 +74,24 @@ async def test_activity_api_returns_shared_progress_contract(
     assert data["active_count"] == 1
     assert data["spinner_count"] == 1
     assert data["attention_count"] == 0
+    assert data["total_count"] == 1
+    assert data["refresh_after_ms"] is None
     assert data["operations"][0]["operation_type"] == "download"
     assert data["operations"][0]["operation_key"] == "17"
     assert data["operations"][0]["overall"]["indeterminate"] is True
     assert data["operations"][0]["item"] is None
+
+
+async def test_activity_api_page_preserves_total(authenticated_client, sec_db):
+    await _seed_operation(sec_db)
+    response = await authenticated_client.get("/api/v1/activity?limit=1&offset=1")
+    assert response.status_code == 200
+    assert response.json()["operations"] == []
+    assert response.json()["total_count"] == 1
+    assert response.json()["active_count"] == 1
+    for query in ("limit=0", "limit=101", "offset=-1"):
+        response = await authenticated_client.get("/api/v1/activity?" + query)
+        assert response.status_code == 422
 
 
 async def test_activity_api_acknowledges_attention_item(

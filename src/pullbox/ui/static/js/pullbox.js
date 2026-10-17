@@ -13450,9 +13450,18 @@ function appShell() {
     activityActiveCount: 0,
     activitySpinnerCount: 0,
     activityAttentionCount: 0,
+    activityTotalCount: 0,
+    activityOffset: 0,
+    activityPageOffset: 0,
+    activityPageSize: 20,
     activitySource: null,
     activityPollTimer: null,
     activityRefreshTimer: null,
+    activityExpiryTimer: null,
+    activityRequestController: null,
+    activityRequestTimer: null,
+    activityRefreshQueued: false,
+    activityDestroyed: false,
     activityStreamOpen: false,
     activityRefreshing: false,
 
@@ -13493,6 +13502,12 @@ function appShell() {
     },
 
     destroy: function () {
+      this.activityDestroyed = true;
+      if (this.activityRequestController) {
+        this.activityRequestController.abort();
+      }
+      window.clearTimeout(this.activityRequestTimer);
+      window.clearTimeout(this.activityExpiryTimer);
       if (this.resizeHandler) {
         window.removeEventListener("resize", this.resizeHandler);
       }
@@ -13513,6 +13528,7 @@ function appShell() {
 
     scheduleActivityPoll: function (delayMs) {
       var self = this;
+      if (self.activityDestroyed) return;
       self.clearActivityTimer();
       self.activityPollTimer = window.setTimeout(function () {
         self.activityPollTimer = null;
@@ -13529,7 +13545,8 @@ function appShell() {
 
     scheduleActivityRefresh: function (delayMs) {
       var self = this;
-      self.clearActivityRefreshTimer();
+      // Coalesce bursts without postponing the first pending refresh indefinitely.
+      if (self.activityDestroyed || self.activityRefreshTimer) return;
       self.activityRefreshTimer = window.setTimeout(function () {
         self.activityRefreshTimer = null;
         self.refreshActivity();
@@ -13541,14 +13558,59 @@ function appShell() {
       this.refreshActivity();
     },
 
+    toggleActivity: function () {
+      this.activityOpen = !this.activityOpen;
+      if (this.activityOpen) this.refreshActivity();
+    },
+
+    changeActivityPage: function (direction) {
+      if (this.activityOffset !== this.activityPageOffset) return;
+      var offset = this.activityPageOffset + direction * this.activityPageSize;
+      if (offset < 0 || offset >= this.activityTotalCount) return;
+      this.activityOffset = offset;
+      this.refreshActivity();
+    },
+
+    activityPageLabel: function () {
+      if (!this.activityTotalCount) return "0 items";
+      return (this.activityPageOffset + 1) + "-" +
+        (this.activityPageOffset + this.activityOperations.length) +
+        " of " + this.activityTotalCount;
+    },
+
+    scheduleActivityExpiry: function (delayMs, elapsedMs) {
+      var self = this;
+      window.clearTimeout(self.activityExpiryTimer);
+      self.activityExpiryTimer = null;
+      if (delayMs == null || !Number.isFinite(Number(delayMs))) return;
+      self.activityExpiryTimer = window.setTimeout(function () {
+        self.activityExpiryTimer = null;
+        self.refreshActivity();
+      }, Math.max(100, Number(delayMs) - elapsedMs));
+    },
+
     refreshActivity: function () {
       var self = this;
+      if (self.activityDestroyed) return;
       if (self.activityRefreshing) {
+        self.activityRefreshQueued = true;
         return;
       }
+      self.clearActivityRefreshTimer();
+      self.clearActivityTimer();
       self.activityRefreshing = true;
-      fetch("/api/v1/activity", {
+      self.activityRefreshQueued = false;
+      var offset = self.activityOffset;
+      var startedAt = Date.now();
+      var requestFailed = false;
+      var controller = new AbortController();
+      self.activityRequestController = controller;
+      self.activityRequestTimer = window.setTimeout(function () {
+        controller.abort();
+      }, 15000);
+      fetch("/api/v1/activity" + (offset ? "?offset=" + offset : ""), {
         headers: { Accept: "application/json" },
+        signal: controller.signal,
       })
         .then(function (response) {
           if (!response.ok) {
@@ -13557,8 +13619,19 @@ function appShell() {
           return response.json();
         })
         .then(function (payload) {
+          if (self.activityDestroyed) return;
+          var operations = payload && Array.isArray(payload.operations) ? payload.operations : [];
+          var total = Math.max(0, Number(payload && payload.total_count) || operations.length);
+          var lastOffset = Math.max(0, Math.ceil(total / self.activityPageSize) - 1) * self.activityPageSize;
+          if (offset !== self.activityOffset || offset > lastOffset) {
+            self.activityOffset = Math.min(self.activityOffset, lastOffset);
+            self.activityRefreshQueued = true;
+            return;
+          }
           self.activityOperations =
-            payload && Array.isArray(payload.operations) ? payload.operations : [];
+            operations;
+          self.activityTotalCount = total;
+          self.activityPageOffset = offset;
           self.activityActiveCount = Math.max(
             0,
             Number(payload && payload.active_count) || 0,
@@ -13571,13 +13644,24 @@ function appShell() {
             0,
             Number(payload && payload.attention_count) || 0,
           );
+          self.scheduleActivityExpiry(payload.refresh_after_ms, Date.now() - startedAt);
         })
         .catch(function () {
           // Activity is supplemental; a transient failure must not interrupt the page.
+          requestFailed = true;
         })
         .finally(function () {
+          window.clearTimeout(self.activityRequestTimer);
+          self.activityRequestController = null;
           self.activityRefreshing = false;
+          if (self.activityDestroyed) return;
+          if (self.activityRefreshQueued) {
+            self.refreshActivity();
+            return;
+          }
           if (!self.activityStreamOpen) {
+            self.scheduleActivityPoll(3000);
+          } else if (requestFailed) {
             self.scheduleActivityPoll(3000);
           }
           if (!self.activitySource) {
@@ -13588,7 +13672,7 @@ function appShell() {
 
     connectActivityStream: function () {
       var self = this;
-      if (self.activitySource) {
+      if (self.activityDestroyed || self.activitySource) {
         return;
       }
       var source = new EventSource("/api/v1/activity/stream");
@@ -13689,7 +13773,8 @@ function appShell() {
 
     activitySummaryLabel: function () {
       if (this.activityAttentionCount > 0) {
-        return this.activityAttentionCount + " need attention";
+        return this.activityAttentionCount + " need attention" +
+          (this.activityActiveCount > 0 ? " / " + this.activityActiveCount + " active" : "");
       }
       if (this.activityActiveCount > 0) {
         return this.activityActiveCount + " active";
