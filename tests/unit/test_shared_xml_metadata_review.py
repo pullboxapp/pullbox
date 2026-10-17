@@ -75,6 +75,17 @@ def test_shared_conflict_error_names_the_actual_xml_field():
     assert "ComicInfo.xml" in message and "MetronInfo.xml" in message
 
 
+@pytest.mark.parametrize("code", ["unsupported_content", "resource_metadata_change"])
+def test_credit_render_error_explains_the_field_and_preserved_file(code):
+    from pullbox.services.issue_file_metadata import file_metadata_error
+
+    message = file_metadata_error(ArchiveMetadataRenderError(code, "credits"))
+    assert "creator credits" in message.lower()
+    assert "unchanged" in message.lower()
+    assert "preview" in message.lower()
+    assert "provider matches" not in message
+
+
 @pytest.mark.parametrize("field,ci,mi", SHARED_CASES)
 @pytest.mark.parametrize("source", ["ComicInfo.xml", "MetronInfo.xml"])
 def test_each_choice_renders_an_agreeing_pair_and_round_trips(field, ci, mi, source):

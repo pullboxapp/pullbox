@@ -244,8 +244,13 @@ def _guard_values(
                     and snapshot.entity_kind is MetadataEntityKind.SERIES
                     and isinstance(old, str)
                     and isinstance(new, str)
-                    and _series_separator_key(old) == _series_separator_key(new)
-                    and any(item.identity in issue.identities for item in archive.evidence)
+                    and (
+                        old.strip() == new.strip()
+                        or (
+                            _series_separator_key(old) == _series_separator_key(new)
+                            and any(item.identity in issue.identities for item in archive.evidence)
+                        )
+                    )
                 ):
                     # Only a proven exact issue can reconcile filesystem-safe subtitle separators.
                     continue
@@ -436,12 +441,6 @@ def _render_credits(
             for tag in COMICINFO_ROLES:
                 set_text(ci, tag, None)
         return
-    if any(
-        "," in credit.name
-        for credit in credits
-        if any(role in COMICINFO_ROLES.values() for role in credit.role.split(", "))
-    ):
-        raise ArchiveMetadataRenderError("unsupported_content", "credits")
     for tag, role in COMICINFO_ROLES.items():
         names = [credit.name for credit in credits if role in credit.role.split(", ")]
         set_text(ci, tag, ", ".join(names))

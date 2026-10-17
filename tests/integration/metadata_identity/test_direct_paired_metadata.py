@@ -13,6 +13,8 @@ from defusedxml import ElementTree
 from sqlalchemy import delete, select
 
 from pullbox.config import get_settings
+from pullbox.core.archive_metadata import read_archive_metadata
+from pullbox.models import Creator, Issue, IssueCreator, Series
 from pullbox.models.config import SystemConfig
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
@@ -23,6 +25,7 @@ from pullbox.models.download import DownloadHistory
 from pullbox.models.library import LibraryFile
 from pullbox.models.pending_match import PendingMatch
 from pullbox.services import direct_acquisition_executor, direct_paired_metadata
+from pullbox.services.archive_metadata_reconciliation import reconcile_archive_metadata
 from pullbox.services.direct_artifact_post_processing import run_direct_artifact_post_processing
 from pullbox.services.direct_artifact_quarantine import DirectArtifactQuarantine
 from pullbox.services.intervention_service import InterventionService
@@ -218,6 +221,82 @@ async def test_direct_conflict_keeps_copy_for_review_and_retry(
         assert attempt.library_file_id == prepared.preview.file_id
         assert history.imported_at is not None and history.final_path == str(path)
     assert (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns) == reviewed
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+async def test_oversized_comma_credit_review_reuses_retained_file(identity_probe_db, tmp_path):
+    _, factory, _ = identity_probe_db
+    attempt_id, artifact_id, issue_id, source = await direct_artifact(factory, tmp_path, large=True)
+    with ZipFile(source) as archive:
+        page = archive.read("page.jpg")
+    with ZipFile(source, "w") as archive:
+        archive.writestr("page.jpg", page)
+        archive.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Canonical series</Series>"
+            "<Number>50-X</Number><Writer>Old Writer</Writer></ComicInfo>",
+        )
+    original = source.read_bytes()
+    async with factory.begin() as session:
+        issue = await session.get(Issue, issue_id)
+        series = await session.get(Series, issue.series_id)
+        series.title = "Canonical series "
+        creator = Creator(name="Mike Deodato, Jr.")
+        session.add(creator)
+        await session.flush()
+        session.add(IssueCreator(issue_id=issue_id, creator_id=creator.id, role="penciller"))
+    assert (
+        await execute(factory, tmp_path, attempt_id, artifact_id)
+    ).state is DirectAcquisitionState.INTERVENTION
+    await approve_size(factory)
+    assert (
+        await execute(factory, tmp_path, attempt_id, artifact_id)
+    ).state is DirectAcquisitionState.INTERVENTION
+    choices = {"issue.credits": "library"}
+    async with factory() as session:
+        history = await session.scalar(select(DownloadHistory))
+        path = Path(history.final_path)
+        assert path.read_bytes() == source.read_bytes() == original
+        initial = await prepare_file_metadata(session, issue_id)
+        assert [c.key for c in initial.preview.conflicts] == ["issue.credits"]
+        reviewed = await prepare_file_metadata(session, issue_id, choices=choices)
+        assert reviewed.preview.ready
+        assert reviewed.approved_resource_limit > 1024**2
+
+    async def noop(*args):
+        pass
+
+    await write_file_metadata(
+        factory,
+        issue_id,
+        reviewed.preview.review_key,
+        uuid4(),
+        limit=1024**2,
+        choices=choices,
+        check_control=noop,
+        progress=noop,
+    )
+    with ZipFile(path) as archive:
+        assert archive.read("page.jpg") == b"page bytes" * 220000
+    metadata = reconcile_archive_metadata(
+        read_archive_metadata(path, "cbz", max_solid_scan_bytes=4 * 1024**2)
+    )
+    assert not metadata.requires_review
+    assert [(c.name, c.role) for c in metadata.issue.credits] == [
+        ("Mike Deodato, Jr.", "penciller")
+    ]
+    written = path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns
+    async with factory() as session:
+        again = await prepare_file_metadata(session, issue_id)
+        assert again.preview.ready and again.preview.unchanged
+        assert not again.preview.conflicts
+    assert (
+        await execute(factory, tmp_path, attempt_id, artifact_id)
+    ).state is DirectAcquisitionState.COMPLETED
+    async with factory() as session:
+        assert (await session.scalar(select(DownloadHistory))).imported_at is not None
+        assert (await session.get(SystemConfig, "archive_size_limit_mb")).value == "1"
+    assert (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns) == written
 
 
 @pytest.mark.usefixtures("paired_download_setting")

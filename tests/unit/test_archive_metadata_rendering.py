@@ -102,6 +102,40 @@ def test_paired_core_output_uses_one_snapshot_and_validates_offline():
     assert "[cv_vol_id:42]" in ci.findtext("Notes")
 
 
+def test_comma_containing_creator_names_round_trip_without_invented_people():
+    series, issue = snapshots(
+        credits=(
+            {"name": "Mike Deodato, Jr.", "role": "penciller, cover"},
+            {"name": "Another Artist", "role": "penciller"},
+            {"name": "Doe, Jane", "role": "writer, translator"},
+        )
+    )
+    result = render_archive_metadata(series, issue, files())
+    ci = ET.fromstring(result.comicinfo)
+    assert ci.findtext("Penciller") == "Another Artist, Mike Deodato, Jr."
+    assert ci.findtext("CoverArtist") == "Mike Deodato, Jr."
+    incoming = files(result.comicinfo.decode(), result.metroninfo.decode())
+    reconciled = reconcile_archive_metadata(incoming)
+    assert reconciled.comicinfo.issue.credits == issue.values.credits
+    assert reconciled.metroninfo.issue.credits == issue.values.credits
+    assert reconciled.issue.credits == issue.values.credits
+    assert not reconciled.requires_review
+    assert render_archive_metadata(series, issue, incoming) == result
+
+
+@pytest.mark.parametrize("canonical", ["Example & Friends ", " Example & Friends"])
+def test_series_outer_whitespace_does_not_require_an_override_or_identity_anchor(canonical):
+    series, issue = snapshots()
+    series = series.model_copy(
+        update={"values": series.values.model_copy(update={"title": canonical})}
+    )
+    result = render_archive_metadata(
+        series, issue, files(ci="<ComicInfo><Series>Example &amp; Friends</Series></ComicInfo>")
+    )
+    assert ET.fromstring(result.comicinfo).findtext("Series").strip() == canonical.strip()
+    assert parse_metroninfo(result.metroninfo).series.strip() == canonical.strip()
+
+
 def test_passive_release_store_date_writes_metron_date_without_inventing_comicinfo_cover_date():
     series, issue = snapshots(store_date=date(2026, 9, 25))
     issue = MetadataSnapshot.model_validate(

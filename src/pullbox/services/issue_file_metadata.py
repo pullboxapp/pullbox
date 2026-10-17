@@ -88,6 +88,19 @@ def file_metadata_error(exc: BaseException) -> str:
             "The file contains an imprint but the series has no publisher. "
             "Set or verify the series publisher, then preview again. The file was left unchanged."
         )
+    if getattr(exc, "field", "") == "credits":
+        if code == "resource_metadata_change":
+            return (
+                "Updating creator credits would discard existing creator or role identifiers "
+                "or unsupported XML content. The file was left unchanged. Keep the existing "
+                "MetronInfo.xml credits or correct their resource metadata, then preview again."
+            )
+        if code == "unsupported_content":
+            return (
+                "The selected creator credits cannot be written safely to both ComicInfo.xml "
+                "and MetronInfo.xml. Review the creator names and roles, then preview again. "
+                "The file was left unchanged."
+            )
     if code == "unreconciled_field":
         field = getattr(exc, "field", "metadata")
         if field in SHARED_FIELD_LABELS:

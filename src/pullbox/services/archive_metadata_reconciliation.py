@@ -28,6 +28,7 @@ from pullbox.core.metadata_identity import (
 )
 from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo import MetronInfoData, parse_metroninfo
+from pullbox.schemas.metadata_credits import MetadataCredit
 from pullbox.schemas.metadata_snapshot import MetadataValues
 
 _CI_ROLES = COMICINFO_ROLES
@@ -84,8 +85,8 @@ class ArchiveMetadataReconciliation:
 
 def reconcile_archive_metadata(files: ArchiveMetadataFiles) -> ArchiveMetadataReconciliation:
     """Return shared values and explicit disagreements, never authority or write permission."""
-    comic = _read_document(files.comicinfo, "ComicInfo.xml")
     metron = _read_document(files.metroninfo, "MetronInfo.xml")
+    comic = _read_document(files.comicinfo, "ComicInfo.xml", metron.issue.credits)
     differences: list[ArchiveMetadataDifference] = []
     series = _shared_values(comic.series, metron.series, "series", differences)
     issue = _shared_values(comic.issue, metron.issue, "issue", differences)
@@ -163,7 +164,11 @@ def _values(
     return MetadataValues.model_validate(values)
 
 
-def _read_document(member: MetadataFile, document: str) -> EmbeddedMetadataValues:
+def _read_document(
+    member: MetadataFile,
+    document: str,
+    structured_credits: tuple[MetadataCredit, ...] | None = None,
+) -> EmbeddedMetadataValues:
     diagnostics = [
         ArchiveMetadataDiagnostic(document, item.value, document) for item in member.diagnostics
     ]
@@ -181,7 +186,7 @@ def _read_document(member: MetadataFile, document: str) -> EmbeddedMetadataValue
         diagnostics.append(ArchiveMetadataDiagnostic(document, exc.code, "ComicInfo"))
         return EmbeddedMetadataValues(diagnostics=tuple(diagnostics))
     normalize_comicinfo_aliases(root)
-    return _ComicInfoReader(root, diagnostics).read()
+    return _ComicInfoReader(root, diagnostics, structured_credits).read()
 
 
 def _metron_values(
@@ -232,12 +237,41 @@ def _metron_values(
 
 class _ComicInfoReader:
     def __init__(
-        self, root: ElementTree.Element, diagnostics: list[ArchiveMetadataDiagnostic]
+        self,
+        root: ElementTree.Element,
+        diagnostics: list[ArchiveMetadataDiagnostic],
+        structured_credits: tuple[MetadataCredit, ...] | None = None,
     ) -> None:
         self.root = root
         self.diagnostics = diagnostics
         self.seen = {root}
         self.evidence: list[ExactIdentityEvidence] = []
+        self.structured_credits = structured_credits
+
+    def credit_names(self, value: str, role: str) -> list[str]:
+        parts = [part.strip() for part in value.split(",")]
+        names = [
+            credit.name
+            for credit in self.structured_credits or ()
+            if role in credit.role.split(", ")
+        ]
+        # ComicInfo has no name boundaries. Match complete paired names per role,
+        # longest first (e.g. John and John, Jr.), never unordered name fragments.
+        remaining = sorted(
+            ([part.strip() for part in name.split(",")] for name in names),
+            key=len,
+            reverse=True,
+        )
+        offset = 0
+        while remaining:
+            match = next(
+                (name for name in remaining if parts[offset : offset + len(name)] == name), None
+            )
+            if match is None:
+                return parts
+            offset += len(match)
+            remaining.remove(match)
+        return names if names and offset == len(parts) else parts
 
     def diagnostic(self, code: str, locator: str) -> None:
         item = ArchiveMetadataDiagnostic("ComicInfo.xml", code, locator)
@@ -345,7 +379,9 @@ class _ComicInfoReader:
             credits_present = credits_present or bool(self.root.findall(tag))
             value = self.read_field(tag)
             if value:
-                credits.extend({"name": name.strip(), "role": role} for name in value.split(","))
+                credits.extend(
+                    {"name": name, "role": role} for name in self.credit_names(value, role)
+                )
         invalid_credits = any(item.locator in _CI_ROLES for item in self.diagnostics)
         issue = _values(
             {

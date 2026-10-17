@@ -107,10 +107,15 @@ def review_metadata_fields(
                 kind == "series"
                 and field == "title"
                 and isinstance(proposed, str)
-                and any(item.identity in issue.identities for item in archive.evidence)
                 and all(
                     isinstance(old, str)
-                    and _series_separator_key(old) == _series_separator_key(proposed)
+                    and (
+                        old.strip() == proposed.strip()
+                        or (
+                            any(item.identity in issue.identities for item in archive.evidence)
+                            and _series_separator_key(old) == _series_separator_key(proposed)
+                        )
+                    )
                     for source, old in options.items()
                     if source != "library"
                 )
