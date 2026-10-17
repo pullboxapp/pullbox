@@ -45,6 +45,11 @@ async def _complete_metadata_item(
             .select_from(UtilityJobItem)
             .where(UtilityJobItem.job_id == job.id, UtilityJobItem.state == ItemState.COMPLETED)
         )
+        job.failed_items = await session.scalar(
+            select(func.count())
+            .select_from(UtilityJobItem)
+            .where(UtilityJobItem.job_id == job.id, UtilityJobItem.state == ItemState.FAILED)
+        )
         if job.completed_items == job.total_items and job.state not in {
             JobState.CANCELLING,
             JobState.CANCELLED,

@@ -25,6 +25,7 @@ from pullbox.services.archive_metadata_publication import (
     _stat_fingerprint,
     load_archive_publication,
 )
+from pullbox.services.archive_series_metadata import project_archive_series
 from pullbox.services.import_archive_publication import (
     acknowledge_import_archive_publication,
     require_import_archive_owner,
@@ -46,6 +47,7 @@ async def apply_bound_archive_metadata(
 ) -> None:
     """Apply a proven publication's descriptive values without changing identities/counts."""
     bound = binding.metadata
+    series_snapshot = project_archive_series(series_snapshot, bound.series.values)
     if (
         not series_snapshot.values.title
         or not series_snapshot.values.sort_title

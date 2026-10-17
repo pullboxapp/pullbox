@@ -77,6 +77,11 @@ def render_archive_metadata(
     metadata into these snapshots, and authorize the eventual file operation.
     Previous managed baselines authorize refresh only while XML is unchanged.
     """
+    from pullbox.services.archive_series_metadata import archive_render_series
+
+    series = archive_render_series(series)
+    if previous_series is not None:
+        previous_series = archive_render_series(previous_series)
     if (
         series.entity_kind is not MetadataEntityKind.SERIES
         or issue.entity_kind is not MetadataEntityKind.ISSUE

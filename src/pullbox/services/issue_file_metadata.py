@@ -145,6 +145,11 @@ def file_metadata_error(exc: BaseException) -> str:
         "directories_changed",
     }:
         return "The file or metadata changed after preview. Preview again before writing."
+    if code == "invalid_database_metadata":
+        return (
+            "The selected metadata cannot be stored in the library. "
+            "Choose a supported series classification or status, then preview again."
+        )
     return (
         "The embedded metadata could not be safely reconciled. "
         "Check the file and provider matches, then preview again."

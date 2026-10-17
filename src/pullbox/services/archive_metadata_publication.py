@@ -32,6 +32,7 @@ from pullbox.services.archive_metadata_rendering import (
     ArchiveMetadataRenderError,
     render_archive_metadata,
 )
+from pullbox.services.archive_series_metadata import project_archive_series
 from pullbox.services.library_mutation_coordination import lock_file_mutation_admission
 from pullbox.services.metadata_writer_identity import metadata_write_scope
 from pullbox.utilities.executors.archive_metadata_staging import StagedArchiveMetadata
@@ -161,6 +162,7 @@ def _prepare(
 ) -> ArchivePublicationPlan:
     _check_cancelled(stop)
     bound = target.binding.metadata
+    series = project_archive_series(series, bound.series.values)
     if (
         series.entity_kind is not MetadataEntityKind.SERIES
         or issue.entity_kind is not MetadataEntityKind.ISSUE
