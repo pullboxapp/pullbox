@@ -217,6 +217,20 @@ async def plan_direct_acquisition(
             pinned_route_identity=pinned_route_identity,
         )
         if not plan.selected or not plan.complete:
+            known_coverage = frozenset().union(
+                *(route.option.coverage for route in resolved_routes)
+            )
+            if (
+                any(route.route.eligible for route in resolved_routes)
+                and not plan.requested <= known_coverage
+            ):
+                raise DirectAcquisitionPlanningError(
+                    "artifact_coverage_unverified",
+                    "Download links are available, but the provider's file details do not "
+                    "establish coverage of the requested issue. No download was started. "
+                    "Update the provider and retry, or choose a result with explicit "
+                    "issue coverage.",
+                )
             raise DirectAcquisitionPlanningError(
                 "no_eligible_complete_plan",
                 "No enabled artifact route completely covers this issue.",

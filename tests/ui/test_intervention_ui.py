@@ -1063,9 +1063,18 @@ class TestHandlersDirect:
         assert "Failed to queue" not in body
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("code", "fragment"),
+        [
+            ("no_eligible_complete_plan", "complete, eligible download route"),
+            ("artifact_coverage_unverified", "which issues are included"),
+        ],
+    )
     async def test_htmx_direct_incomplete_plan_does_not_blame_provider_configuration(
         self,
         _db_factory: async_sessionmaker[AsyncSession],
+        code: str,
+        fragment: str,
     ) -> None:
         """Incomplete artifact coverage reports the safe-planning failure accurately."""
         from pullbox.services.direct_acquisition_planner_service import (
@@ -1090,7 +1099,7 @@ class TestHandlersDirect:
                 "pullbox.services.intervention_service.InterventionService.approve_match",
                 new_callable=AsyncMock,
                 side_effect=DirectAcquisitionPlanningError(
-                    "no_eligible_complete_plan",
+                    code,
                     "No enabled artifact route completely covers this issue.",
                 ),
             ):
@@ -1102,8 +1111,11 @@ class TestHandlersDirect:
                 )
 
         body = response.body.decode()
-        assert "complete, eligible download route" in body
+        assert fragment in body
         assert "provider configuration" not in body
+        if code == "artifact_coverage_unverified":
+            assert "artifact-host settings" not in body
+            assert "No download was started" in body
 
     @pytest.mark.asyncio
     async def test_htmx_approve_service_error(

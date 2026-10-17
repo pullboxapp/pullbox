@@ -640,6 +640,13 @@ def _direct_approval_failure_message(
         return f"{provider_name} authentication needs attention before this result can download."
     if error.retryable or error.code in {"source_unavailable", "provider_timed_out"}:
         return f"{provider_name} is temporarily unavailable. Try approving this result again soon."
+    if error.code == "artifact_coverage_unverified":
+        return (
+            f"{provider_name} returned download links, but Pullbox could not verify "
+            "which issues are included in those files. No download was started. "
+            "Update the provider and retry, or choose a result that explicitly includes "
+            "the requested issue."
+        )
     if error.code == "no_eligible_complete_plan":
         return (
             "Pullbox could not verify a complete, eligible download route for the requested "

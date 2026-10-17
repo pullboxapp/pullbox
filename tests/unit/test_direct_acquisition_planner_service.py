@@ -507,6 +507,100 @@ async def test_planning_persists_selected_contiguous_pack_coverage(
     assert result.attempt.plan_snapshot["coverage"]["selected_content_issue_numbers"] == ["5", "6"]
 
 
+@pytest.mark.parametrize(
+    ("coverage", "enabled", "expected"),
+    [
+        ([], True, "artifact_coverage_unverified"),
+        (["2"], True, "artifact_coverage_unverified"),
+        ([], False, "no_eligible_complete_plan"),
+        (["1"], False, "no_eligible_complete_plan"),
+    ],
+)
+async def test_planning_distinguishes_missing_coverage_from_disabled_routes(
+    session: AsyncSession,
+    coverage: list[str],
+    enabled: bool,
+    expected: str,
+) -> None:
+    response = _generic_response()
+    response.artifacts[0].coverage = DirectArtifactCoverage(issue_numbers=coverage)
+    config = await session.scalar(
+        select(DirectHostConfig).where(
+            DirectHostConfig.host_kind == DirectArtifactHostKind.GENERIC_HTTPS
+        )
+    )
+    config.enabled = enabled
+    with pytest.raises(DirectAcquisitionPlanningError) as failure:
+        await plan_direct_acquisition(
+            session,
+            acquisition_id=1,
+            provider_client_factory=lambda **_kwargs: _ResolveClient(response),
+            provider_secret_loader=lambda _config: _provider_material(),
+            now=lambda: NOW,
+        )
+    assert failure.value.code == expected
+    attempt = await session.get(DirectAcquisitionAttempt, 1)
+    assert attempt.state is DirectAcquisitionState.INTERVENTION
+    assert attempt.failure_code == expected
+    assert not attempt.artifact_attempts
+
+
+async def test_ineligible_covering_route_is_not_reported_as_missing_provider_coverage(
+    session: AsyncSession,
+) -> None:
+    response = _generic_response()
+    wrong = response.artifacts[0].model_copy(deep=True)
+    wrong.artifact_id = "unrelated-artifact"
+    wrong.coverage = DirectArtifactCoverage(issue_numbers=["2"])
+    response.artifacts[0].mirrors = [
+        DirectMirror(
+            mirror_id="disabled-covering-route",
+            host_kind="terabox",
+            share_url="https://terabox.com/s/disabled",
+        )
+    ]
+    response.artifacts.append(wrong)
+    with pytest.raises(DirectAcquisitionPlanningError) as failure:
+        await plan_direct_acquisition(
+            session,
+            acquisition_id=1,
+            provider_client_factory=lambda **_kwargs: _ResolveClient(response),
+            provider_secret_loader=lambda _config: _provider_material(),
+            now=lambda: NOW,
+        )
+    assert failure.value.code == "no_eligible_complete_plan"
+
+
+@pytest.mark.parametrize(("count", "target"), [(8, 3), (8, 7), (4, 1), (4, 2), (4, 3), (4, 4)])
+async def test_house_of_m_corrected_pack_coverage_plans_each_requested_issue(
+    session: AsyncSession,
+    count: int,
+    target: int,
+) -> None:
+    attempt = await session.get(DirectAcquisitionAttempt, 1)
+    attempt.state = DirectAcquisitionState.INTERVENTION
+    attempt.failure_code = "no_eligible_complete_plan"
+    attempt.requested_coverage = {"issue_numbers": [str(target)], "issue_type": "issue"}
+    response = _generic_response()
+    numbers = [str(n) for n in range(1, count + 1)]
+    response.artifacts[0].coverage = DirectArtifactCoverage(
+        issue_numbers=numbers,
+        description="House of M" if count == 8 else "House of M - Masters of Evil",
+    )
+    result = await plan_direct_acquisition(
+        session,
+        acquisition_id=1,
+        provider_client_factory=lambda **_kwargs: _ResolveClient(response),
+        provider_secret_loader=lambda _config: _provider_material(),
+        now=lambda: NOW,
+    )
+    assert result.plan.complete
+    assert result.plan.requested == frozenset({str(target)})
+    assert result.attempt.plan_snapshot["coverage"]["selected_content_issue_numbers"] == numbers
+    assert result.attempt.failure_code is None
+    assert result.attempt.state is DirectAcquisitionState.PLANNED
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("requested_coverage", "artifact_volume"),
@@ -539,7 +633,7 @@ async def test_planning_rejects_unsafe_volume_only_coverage(
             now=lambda: NOW,
         )
 
-    assert error.value.code == "no_eligible_complete_plan"
+    assert error.value.code == "artifact_coverage_unverified"
 
 
 @pytest.mark.asyncio
@@ -681,7 +775,7 @@ async def test_planning_rejects_title_only_alternatives_with_mixed_collection_ti
             now=lambda: NOW,
         )
 
-    assert error.value.code == "no_eligible_complete_plan"
+    assert error.value.code == "artifact_coverage_unverified"
 
 
 @pytest.mark.asyncio
@@ -744,7 +838,7 @@ async def test_planning_rejects_unsafe_title_only_coverage(
             now=lambda: NOW,
         )
 
-    assert error.value.code == "no_eligible_complete_plan"
+    assert error.value.code == "artifact_coverage_unverified"
 
 
 @pytest.mark.asyncio
