@@ -77,6 +77,12 @@ if TYPE_CHECKING:
 
 def file_metadata_error(exc: BaseException) -> str:
     code = getattr(exc, "code", "")
+    if code == "snapshot_disagrees":
+        return (
+            "Pullbox's final verification did not match the approved metadata preview. "
+            "The comic was left unchanged; there is no need to download it again. "
+            "Please report this error before retrying."
+        )
     if code == "unresolved_conflicts":
         return "Choose a value for each conflicting field and update the preview before writing."
     if code in {"invalid_choice", "choices_changed"}:

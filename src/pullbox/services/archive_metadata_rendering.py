@@ -240,19 +240,20 @@ def _guard_values(
                         _format_text(snapshot.values.series_type),
                     )
                 if (
-                    field == "title"
+                    field in {"title", "sort_title"}
                     and snapshot.entity_kind is MetadataEntityKind.SERIES
                     and isinstance(old, str)
                     and isinstance(new, str)
                     and (
                         old.strip() == new.strip()
                         or (
-                            _series_separator_key(old) == _series_separator_key(new)
+                            field == "title"
+                            and _series_separator_key(old) == _series_separator_key(new)
                             and any(item.identity in issue.identities for item in archive.evidence)
                         )
                     )
                 ):
-                    # Only a proven exact issue can reconcile filesystem-safe subtitle separators.
+                    # XML readers trim both names; only verified titles may change separators.
                     continue
                 if old != new and not _authorized(
                     snapshot,

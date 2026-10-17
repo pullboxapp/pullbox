@@ -124,16 +124,52 @@ def test_comma_containing_creator_names_round_trip_without_invented_people():
 
 
 @pytest.mark.parametrize("canonical", ["Example & Friends ", " Example & Friends"])
-def test_series_outer_whitespace_does_not_require_an_override_or_identity_anchor(canonical):
+@pytest.mark.parametrize("field", ["title", "sort_title"])
+def test_series_outer_whitespace_does_not_require_an_override_or_identity_anchor(canonical, field):
     series, issue = snapshots()
     series = series.model_copy(
-        update={"values": series.values.model_copy(update={"title": canonical})}
+        update={"values": series.values.model_copy(update={field: canonical})}
     )
     result = render_archive_metadata(
         series, issue, files(ci="<ComicInfo><Series>Example &amp; Friends</Series></ComicInfo>")
     )
     assert ET.fromstring(result.comicinfo).findtext("Series").strip() == canonical.strip()
     assert parse_metroninfo(result.metroninfo).series.strip() == canonical.strip()
+    rendered = files(result.comicinfo.decode(), result.metroninfo.decode())
+    assert render_archive_metadata(series, issue, rendered) == result
+
+
+@pytest.mark.parametrize("canonical", ["Example &  Friends", "Example: Friends", "Other series"])
+def test_sort_title_content_changes_still_require_review(canonical):
+    series, issue = snapshots()
+    series = series.model_copy(
+        update={"values": series.values.model_copy(update={"sort_title": canonical})}
+    )
+    incoming = files(
+        mi=metron(
+            "<Number>50-X</Number>",
+            series="<Name>Example &amp; Friends</Name><SortName>Example &amp; Friends</SortName>",
+        )
+    )
+    with pytest.raises(ArchiveMetadataRenderError) as failure:
+        render_archive_metadata(series, issue, incoming)
+    assert failure.value.code == "unreconciled_field"
+    assert failure.value.field == "sort_title"
+
+
+def test_verified_issue_does_not_authorize_sort_title_separator_changes():
+    series, issue = snapshots()
+    series = series.model_copy(
+        update={"values": series.values.model_copy(update={"sort_title": "Example: Friends"})}
+    )
+    pair = render_archive_metadata(series, issue, files())
+    mi = ET.fromstring(pair.metroninfo)
+    mi.find("Series/SortName").text = "Example - Friends"
+    incoming = files(pair.comicinfo.decode(), ET.tostring(mi, encoding="unicode"))
+    with pytest.raises(ArchiveMetadataRenderError) as failure:
+        render_archive_metadata(series, issue, incoming)
+    assert failure.value.code == "unreconciled_field"
+    assert failure.value.field == "sort_title"
 
 
 def test_passive_release_store_date_writes_metron_date_without_inventing_comicinfo_cover_date():

@@ -105,14 +105,15 @@ def review_metadata_fields(
                 )
             if (
                 kind == "series"
-                and field == "title"
+                and field in {"title", "sort_title"}
                 and isinstance(proposed, str)
                 and all(
                     isinstance(old, str)
                     and (
                         old.strip() == proposed.strip()
                         or (
-                            any(item.identity in issue.identities for item in archive.evidence)
+                            field == "title"
+                            and any(item.identity in issue.identities for item in archive.evidence)
                             and _series_separator_key(old) == _series_separator_key(proposed)
                         )
                     )

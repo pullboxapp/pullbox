@@ -241,6 +241,7 @@ async def test_oversized_comma_credit_review_reuses_retained_file(identity_probe
         issue = await session.get(Issue, issue_id)
         series = await session.get(Series, issue.series_id)
         series.title = "Canonical series "
+        series.sort_title = " Canonical series "
         creator = Creator(name="Mike Deodato, Jr.")
         session.add(creator)
         await session.flush()
