@@ -287,6 +287,21 @@ async def monitor_downloads() -> None:
     recovery_due = recovery_checked_at - _last_recovery_check >= _RECOVERY_CHECK_INTERVAL
     direct_retried = 0
     if recovery_due:
+        from pullbox.services.download_operation_reconciliation import reconcile_download_operations
+
+        async with factory() as repair_session:
+
+            async def repair_activity() -> int:
+                return await reconcile_download_operations(repair_session)
+
+            repaired = await run_sqlite_transaction_with_retry(
+                repair_session,
+                repair_activity,
+                event_name="download_activity_reconciliation",
+                logger=logger,
+            )
+        if repaired:
+            logger.info("download_activity_reconciled", repaired=repaired)
         direct_retried = await _process_direct_retry_pending()
 
     # ── Phase 1: Read — load active downloads and build registry ──

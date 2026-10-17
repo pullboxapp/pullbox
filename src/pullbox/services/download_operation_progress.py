@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
     from pullbox.models.download import DownloadHistory
 
+CANCELLED_DOWNLOAD_MESSAGES = ("Cancelled by user", "Cancelled: series deleted")
+
 
 def _progress_value(progress: Any, name: str, default: object = None) -> object:
     if isinstance(progress, Mapping):
@@ -69,12 +71,23 @@ def _default_source_label(download: DownloadHistory) -> str:
     return download.download_client.value.replace("_", " ").title()
 
 
+def download_was_cancelled(download: DownloadHistory) -> bool:
+    """Cancellation uses FAILED in the legacy download model, but is not an alert."""
+    return (
+        download.state == DownloadState.FAILED
+        and download.error_message in CANCELLED_DOWNLOAD_MESSAGES
+    )
+
+
 def build_download_operation_update(
     download: DownloadHistory,
     progress: Any | None = None,
 ) -> OperationProgressUpdate:
     """Build a truthful download projection from durable state and client metrics."""
     shared_state = _shared_state(DownloadState(download.state))
+    source_label = _progress_value(progress, "source_label") if progress is not None else None
+    if download_was_cancelled(download):
+        shared_state = OperationProgressState.CANCELLED
     size_bytes = _int_value(
         _progress_value(progress, "size_bytes") if progress is not None else None
     )
@@ -96,10 +109,12 @@ def build_download_operation_update(
         percent = 100.0
 
     client_state = _progress_value(progress, "client_state") if progress is not None else None
-    source_label = _progress_value(progress, "source_label") if progress is not None else None
     source_slow = (
         bool(_progress_value(progress, "source_slow", False)) if progress is not None else False
     )
+    if shared_state.is_terminal:
+        client_state = None
+        source_slow = False
     rate = _float_value(_progress_value(progress, "speed_bytes")) if progress is not None else None
     eta_seconds = (
         _int_value(_progress_value(progress, "eta_seconds")) if progress is not None else None
@@ -128,7 +143,16 @@ def build_download_operation_update(
         group_key="downloads",
         revision=None,
         state=shared_state,
-        phase=str(client_state or download.state.value).lower().replace(" ", "_"),
+        phase=str(
+            client_state
+            or (
+                "cancelled"
+                if shared_state is OperationProgressState.CANCELLED
+                else download.state.value
+            )
+        )
+        .lower()
+        .replace(" ", "_"),
         title=download.title,
         message=str(client_state or download.error_message or ""),
         source_label=str(source_label or _default_source_label(download)),

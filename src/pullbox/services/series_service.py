@@ -1127,6 +1127,13 @@ class SeriesService:
                 )
 
         # ── 3. Delete series record (cascades to issues) ────────────
+        from pullbox.services.download_operation_reconciliation import retire_download_operations
+
+        download_ids = await session.scalars(
+            select(DownloadHistory.id).where(DownloadHistory.issue_id.in_(issue_ids_subq))
+        )
+        for download_id in download_ids:
+            await retire_download_operations(session, download_id)
         await purge_series_cover_cache(session, series_id)
         await session.delete(series)
         logger.info(

@@ -73,7 +73,13 @@ async def _flush_operation_progress(identity: tuple[Hashable, str]) -> None:
             factory = get_session_factory()
             async with factory() as session:
                 try:
-                    await publish_operation_progress(session, update)
+                    from pullbox.services.download_operation_reconciliation import (
+                        guard_download_progress,
+                    )
+
+                    guarded = await guard_download_progress(session, update)
+                    if guarded is not None:
+                        await publish_operation_progress(session, guarded)
                     await session.commit()
                 except Exception:
                     await session.rollback()

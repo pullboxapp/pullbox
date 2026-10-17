@@ -920,7 +920,16 @@ async def cancel_download(
 
         download.state = DownloadState.FAILED
         download.error_message = "Cancelled by user"
+        download.next_retry_at = None
+        from pullbox.services.download_operation_progress import project_download_operation_progress
+        from pullbox.services.download_operation_reconciliation import retire_download_operations
+
+        await retire_download_operations(session, download_id)
+        await project_download_operation_progress(session, download)
         logger.info("download_cancelled", download_id=download_id)
     else:
+        from pullbox.services.download_operation_reconciliation import retire_download_operations
+
+        await retire_download_operations(session, download_id)
         await session.delete(download)
         logger.info("download_history_removed", download_id=download_id)
