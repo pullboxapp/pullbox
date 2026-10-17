@@ -665,6 +665,10 @@ async def htmx_intervention_approve(
         return Response(status_code=404)
 
     release_title = pm.release_title
+    is_size_recovery = (pm.match_details or {}).get(
+        "failure_code"
+    ) == "artifact_resource_safety_review"
+    is_recovery = bool((pm.match_details or {}).get("failure_class"))
     form_getter = getattr(request, "form", None)
     form = await form_getter() if callable(form_getter) else {}
     reason = str(form.get("reason", "") or "")
@@ -702,8 +706,24 @@ async def htmx_intervention_approve(
         download_svc, _configs = built
         svc = InterventionService(download_service=download_svc)
 
+    from pullbox.services.direct_artifact_quarantine import DirectArtifactValidationError
+
     try:
         await svc.approve_match(session, pending_id)
+    except DirectArtifactValidationError as exc:
+        return _templates().TemplateResponse(
+            request,
+            "partials/intervention_action_result.html",
+            _ctx(
+                request,
+                user,
+                pending_id=pending_id,
+                heading="Could Not Approve",
+                title=release_title,
+                message=str(exc),
+                tone="error",
+            ),
+        )
     except DirectAcquisitionPlanningError as exc:
         logger.warning(
             "htmx_direct_intervention_approve_unavailable",
@@ -750,7 +770,7 @@ async def htmx_intervention_approve(
             user,
             **await load_intervention_context(
                 session,
-                tab="queue",
+                tab="recovery" if is_recovery else "queue",
                 reason_filter=reason,
                 confidence_filter=confidence,
                 protocol_filter=protocol,
@@ -763,7 +783,14 @@ async def htmx_intervention_approve(
             if request.headers.get("HX-Target") == "intervention-queue-results"
             else "partials/intervention_content_bundle.html"
         )
-        return _templates().TemplateResponse(request, template_name, ctx)
+        response = _templates().TemplateResponse(request, template_name, ctx)
+        if is_size_recovery:
+            return _toast_response(
+                response,
+                "Continuing with the retained file. No new download was queued.",
+                "success",
+            )
+        return response
 
     return _templates().TemplateResponse(
         request,
@@ -774,7 +801,11 @@ async def htmx_intervention_approve(
             pending_id=pending_id,
             heading="Approved",
             title=release_title,
-            message="Release sent to the download queue.",
+            message=(
+                "Continuing with the retained file. No new download was queued."
+                if is_size_recovery
+                else "Release sent to the download queue."
+            ),
             tone="success",
         ),
     )

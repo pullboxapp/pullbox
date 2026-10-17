@@ -8,8 +8,10 @@ operations for pending matches.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
@@ -35,6 +37,7 @@ from pullbox.services.direct_acquisition_state import (
     transition_acquisition,
     transition_artifact,
 )
+from pullbox.services.direct_artifact_quarantine import validate_direct_resource_approval
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -438,6 +441,8 @@ class InterventionService:
 
         initial_source = None
         if not attempt.artifact_attempts:
+            if attempt.failure_class is DirectArtifactFailureClass.SAFETY:
+                raise ValueError("Safety recovery requires a retained artifact, not a new download")
             try:
                 planned = await self._direct_planner(session, acquisition_id=attempt_id)
             except DirectAcquisitionPlanningError as exc:
@@ -473,6 +478,10 @@ class InterventionService:
         )
         if can_override_safety_once:
             assert isinstance(safety_review, dict)
+            assert artifact.quarantine_path is not None
+            await asyncio.to_thread(
+                validate_direct_resource_approval, Path(artifact.quarantine_path), safety_review
+            )
             transition_acquisition(attempt, DirectAcquisitionState.POST_PROCESSING)
             transition_artifact(artifact, DirectArtifactState.VALIDATING)
             plan_snapshot = dict(attempt.plan_snapshot or {})
@@ -530,6 +539,11 @@ class InterventionService:
         if prior.failure_code == "direct_metadata_review_required":
             raise ValueError(
                 "Review the retained file metadata instead of refreshing download routes."
+            )
+        if prior.failure_class is DirectArtifactFailureClass.SAFETY:
+            raise ValueError(
+                "Review the retained file for size approval or other safety findings "
+                "instead of refreshing download routes."
             )
 
         fresh = DirectAcquisitionAttempt(

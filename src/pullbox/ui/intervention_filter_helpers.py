@@ -313,7 +313,18 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
         if details.get("source_kind") == "direct" and details.get("failure_class")
         else "review"
     )
+    size_recovery = (
+        lane == "recovery" and details.get("failure_code") == "artifact_resource_safety_review"
+    )
+    safety_block = details.get("safety_block")
+    safety_block = safety_block if isinstance(safety_block, dict) else {}
     return {
+        "size_recovery": size_recovery,
+        "safety_recovery": lane == "recovery" and details.get("failure_class") == "safety",
+        "size_review_reason": str(safety_block.get("reason") or "") if size_recovery else "",
+        "can_allow_size": size_recovery
+        and safety_block.get("kind") == "archive_decompressed_size"
+        and safety_block.get("overrideable") is True,
         "protocol_label": intervention_protocol_label(
             bool(pending_match.is_torrent),
             str(details.get("source_kind") or ""),
@@ -353,6 +364,10 @@ def _direct_recovery_summary(details: dict[str, object]) -> str:
     """Describe the acquisition failure without implying the semantic match was wrong."""
     if details.get("failure_code") == "direct_metadata_review_required":
         return "Downloaded file needs metadata review; no new download is needed"
+    if details.get("failure_code") == "artifact_resource_safety_review":
+        return "Downloaded file needs size approval"
+    if details.get("failure_class") == "safety":
+        return "Downloaded file needs safety review"
     host = _DIRECT_ARTIFACT_HOST_LABELS.get(
         str(details.get("artifact_host_kind") or "").strip(),
         "Artifact host",

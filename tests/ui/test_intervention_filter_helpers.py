@@ -107,6 +107,10 @@ def test_build_intervention_item_meta_formats_protocol_outcome_and_source() -> N
         "lane": "review",
         "recovery_summary": "",
         "metadata_recovery": False,
+        "size_recovery": False,
+        "safety_recovery": False,
+        "can_allow_size": False,
+        "size_review_reason": "",
     }
 
 

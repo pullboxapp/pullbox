@@ -95,7 +95,7 @@
                     {% if meta.metadata_recovery %}
                     <button type="button" class="btn-primary btn-sm" data-testid="intervention-review-metadata-{{ pm.id }}"
                       @click="$dispatch('review-direct-metadata', { pendingId: {{ pm.id }} })">Review metadata</button>
-                    {% else %}
+                    {% elif not meta.safety_recovery %}
                     <form
                       hx-post="/htmx/intervention/{{ pm.id }}/retry-recovery"
                       hx-target="#intervention-queue-results"
@@ -116,6 +116,7 @@
                     {% endif %}
                     <form
                       hx-post="/htmx/intervention/{{ pm.id }}/approve"
+                      hx-disabled-elt="find button"
                       hx-target="#intervention-queue-results"
                       hx-swap="outerHTML"
                       hx-sync="#intervention-queue-results:replace"
@@ -127,7 +128,9 @@
                       <input type="hidden" name="protocol" value="{{ protocol_filter }}">
                       <input type="hidden" name="search" value="{{ search_query }}">
                       <input type="hidden" name="page" value="{{ page }}">
-                      {% if meta.lane != 'recovery' %}<button
+                      {% if meta.can_allow_size %}
+                      <button type="submit" class="btn-primary btn-sm" data-testid="intervention-allow-size-{{ pm.id }}">Allow and continue</button>
+                      {% elif meta.lane != 'recovery' %}<button
                         type="submit"
                         data-testid="intervention-approve-{{ pm.id }}"
                         class="downloads-action-btn"
@@ -177,6 +180,14 @@
                       <div class="rounded-2xl border border-pb-border bg-pb-card px-4 py-3">
                         <div class="text-[10px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ 'Recovery needed' if meta.lane == 'recovery' else 'Why it needs review' }}</div>
                         <div class="mt-2 text-sm text-pb-text-sec">{{ meta.recovery_summary if meta.lane == 'recovery' else meta.review_reason_summary }}</div>
+                        {% if meta.size_recovery %}
+                        <div class="mt-2 text-sm text-pb-text-sec">{{ meta.size_review_reason }}</div>
+                        {% if meta.can_allow_size %}
+                        <div class="mt-2 text-sm text-pb-text-sec">No new download is needed. Allow and continue uses the retained file and approves only its size limit for this attempt. Other safety checks and your global limits remain unchanged.</div>
+                        {% else %}
+                        <div class="mt-2 text-sm text-pb-text-sec">This safety finding cannot be approved. Review or replace the file before continuing.</div>
+                        {% endif %}
+                        {% endif %}
                         {% if meta.similarity_pct is not none %}
                           <div class="mt-1 text-xs text-pb-text-dim">Similarity {{ meta.similarity_pct }}%</div>
                         {% endif %}

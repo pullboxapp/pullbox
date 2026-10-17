@@ -645,6 +645,100 @@ class TestHandlersDirect:
             r'data-testid="intervention-select-mode-toggle"[^>]*\sdisabled(?:\s|>|=)', body
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("overrideable", [True, False])
+    async def test_retained_size_recovery_offers_approval_not_another_download(
+        self, _db_factory, overrideable
+    ) -> None:
+        from pullbox.ui.routes import intervention_page
+
+        [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            pending.match_details = {
+                "source_kind": "direct",
+                "failure_class": "safety",
+                "failure_code": "artifact_resource_safety_review",
+                "safety_block": {
+                    "kind": "archive_decompressed_size",
+                    "overrideable": overrideable,
+                    "reason": (
+                        "Archive decompressed size (3,340,633,597 bytes) "
+                        "exceeds limit (2,097,152,000 bytes)"
+                    ),
+                },
+            }
+            await session.commit()
+            response = await intervention_page(
+                request=_mock_request(), user=MagicMock(), session=session, tab="recovery"
+            )
+        body = response.body.decode()
+        assert "Downloaded file needs size approval" in body
+        assert "3,340,633,597 bytes" in body and "2,097,152,000 bytes" in body
+        assert "Download route needs recovery" not in body
+        assert f"intervention-retry-recovery-{pending_id}" not in body
+        assert ("Allow and continue" in body) is overrideable
+        if overrideable:
+            assert "No new download" in body
+            assert f'hx-post="/htmx/intervention/{pending_id}/approve"' in body
+
+    @pytest.mark.asyncio
+    async def test_size_approval_keeps_recovery_tab_and_truthful_success(self, _db_factory):
+        from pullbox.ui.routes import htmx_intervention_approve
+
+        [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            pending.match_details = {
+                "source_kind": "direct",
+                "direct_attempt_id": 44,
+                "failure_code": "artifact_resource_safety_review",
+                "failure_class": "safety",
+            }
+            await session.commit()
+            request = _mock_request()
+            request.headers = {"HX-Target": "intervention-queue-results"}
+            with patch(
+                "pullbox.services.intervention_service.InterventionService.approve_match",
+                new_callable=AsyncMock,
+            ):
+                response = await htmx_intervention_approve(
+                    request=request, pending_id=pending_id, user=MagicMock(), session=session
+                )
+        body = response.body.decode()
+        assert 'value="recovery"' in body
+        assert "retained file" in response.headers.get("HX-Trigger", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_size_approval_reports_missing_file_without_download_error(self, _db_factory):
+        from pullbox.services.direct_artifact_quarantine import DirectArtifactValidationError
+        from pullbox.ui.routes import htmx_intervention_approve
+
+        [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            pending.match_details = {
+                "source_kind": "direct",
+                "direct_attempt_id": 44,
+                "failure_code": "artifact_resource_safety_review",
+            }
+            await session.commit()
+            with patch(
+                "pullbox.services.intervention_service.InterventionService.approve_match",
+                side_effect=DirectArtifactValidationError(
+                    code="artifact_quarantine_missing",
+                    message="The retained file is missing. Restore it before approving.",
+                ),
+            ):
+                response = await htmx_intervention_approve(
+                    request=_mock_request(),
+                    pending_id=pending_id,
+                    user=MagicMock(),
+                    session=session,
+                )
+        assert "The retained file is missing" in response.body.decode()
+        assert "Failed to queue" not in response.body.decode()
+
     def test_intervention_selection_controller_respects_recovery_bulk_action_lock(self) -> None:
         """Recovery rows must never enter the generic approve/reject bulk flow."""
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text(encoding="utf-8")

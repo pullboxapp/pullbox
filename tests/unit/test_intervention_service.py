@@ -827,10 +827,14 @@ class TestApproveMatch:
 
     @pytest.mark.asyncio
     async def test_approve_direct_resource_safety_review_reuses_quarantined_artifact(
-        self, db_factory: async_sessionmaker[AsyncSession]
+        self, db_factory: async_sessionmaker[AsyncSession], tmp_path
     ) -> None:
         """Allow-once approval skips a second transfer and resumes post-processing."""
+        from pullbox.core.library_file_ownership import build_file_identity_signature
         from pullbox.services.intervention_service import InterventionService
+
+        retained = tmp_path / "artifact-1.cbz"
+        retained.write_bytes(b"retained transfer; archive validation occurs in the worker")
 
         planner = AsyncMock()
         runner = SimpleNamespace(dispatch=AsyncMock(return_value=True))
@@ -848,6 +852,7 @@ class TestApproveMatch:
                 "safety_review": {
                     "kind": "archive_decompressed_size",
                     "overrideable": True,
+                    "source_signature": build_file_identity_signature(retained),
                 }
             }
             artifact = DirectArtifactAttempt(
@@ -858,7 +863,7 @@ class TestApproveMatch:
                 host_kind=DirectArtifactHostKind.DATANODES,
                 state=DirectArtifactState.INTERVENTION,
                 is_selected=True,
-                quarantine_path="/quarantine/artifact-1.cbz",
+                quarantine_path=str(retained),
             )
             session.add(artifact)
             await session.flush()

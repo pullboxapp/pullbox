@@ -143,6 +143,47 @@ class DirectArtifactQuarantine:
             return
 
 
+def validate_direct_resource_approval(path: Path, review: object) -> None:
+    """Bind a resource exception to the unchanged file that originally failed inspection."""
+    if (
+        not isinstance(review, dict)
+        or review.get("kind") != "archive_decompressed_size"
+        or review.get("overrideable") is not True
+        or not isinstance(review.get("source_signature"), dict)
+    ):
+        raise DirectArtifactValidationError(
+            code="artifact_size_approval_unverified",
+            message="The retained file has no verified size review. Reinspect it before approving.",
+        )
+    try:
+        if path.is_symlink():
+            raise DirectArtifactValidationError(
+                code="artifact_size_approval_changed",
+                message=(
+                    "The retained file changed since inspection. Reinspect it before approving."
+                ),
+            )
+        if not path.is_file():
+            raise FileNotFoundError
+        signature = build_file_identity_signature(path)
+    except OSError as exc:
+        raise DirectArtifactValidationError(
+            code="artifact_size_approval_missing",
+            message=(
+                "The retained file is missing or unreadable. Restore it before approving. "
+                "No new download was started."
+            ),
+        ) from exc
+    if signature != review["source_signature"]:
+        raise DirectArtifactValidationError(
+            code="artifact_size_approval_changed",
+            message=(
+                "The retained file changed since inspection. Reinspect it before approving. "
+                "No new download was started."
+            ),
+        )
+
+
 async def validate_direct_artifact(
     session: AsyncSession,
     path: Path,

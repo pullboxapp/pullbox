@@ -1427,6 +1427,8 @@ async def test_executor_applies_approved_resource_exception_without_redownload(
     session: AsyncSession,
     tmp_path: Path,
 ) -> None:
+    from pullbox.core.library_file_ownership import build_file_identity_signature
+
     attempt = _attempt()
     attempt.state = DirectAcquisitionState.POST_PROCESSING
     attempt.plan_snapshot = {
@@ -1443,7 +1445,14 @@ async def test_executor_applies_approved_resource_exception_without_redownload(
     quarantine = DirectArtifactQuarantine(tmp_path / "quarantine")
     workspace = quarantine.prepare(acquisition_id=attempt.id, artifact_id=artifact.id)
     final_path = workspace.directory / f"artifact-{artifact.id}.cbz"
-    final_path.write_bytes(b"completed transfer")
+    with zipfile.ZipFile(final_path, "w") as archive:
+        archive.writestr("001.jpg", b"synthetic fixture")
+    attempt.plan_snapshot = {
+        "safety_review": {
+            **attempt.plan_snapshot["safety_review"],
+            "source_signature": build_file_identity_signature(final_path),
+        }
+    }
     artifact.quarantine_path = str(final_path)
     await session.commit()
     observed: dict[str, object] = {}

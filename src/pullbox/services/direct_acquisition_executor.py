@@ -76,6 +76,7 @@ from pullbox.services.direct_artifact_quarantine import (
     DirectArtifactValidationResult,
     DirectQuarantineWorkspace,
     validate_direct_artifact,
+    validate_direct_resource_approval,
 )
 from pullbox.services.direct_configuration_service import load_host_credential_material
 from pullbox.services.direct_download_history_adapter import sync_direct_download_history
@@ -623,6 +624,19 @@ class DirectAcquisitionExecutor:
         download_history_id = progress.download_history_id
         if download_history_id is None:
             raise RuntimeError("Direct post-processing requires a download history record.")
+        if _resource_safety_override_allowed(attempt):
+            review = (attempt.plan_snapshot or {}).get("safety_review")
+            await asyncio.to_thread(validate_direct_resource_approval, final_path, review)
+            try:
+                await validate_direct_artifact(
+                    session, final_path, allow_resource_safety_exception=True
+                )
+            except DirectArtifactValidationError as exc:
+                # Keep a newly discovered safety finding actionable without another transfer.
+                raise DirectArtifactValidationError(
+                    code=exc.code, message=str(exc), safety_block=exc.safety_block
+                ) from exc
+            await asyncio.to_thread(validate_direct_resource_approval, final_path, review)
         try:
             pack_coverage = _selected_pack_coverage(attempt)
             if len(pack_coverage) > 1:
