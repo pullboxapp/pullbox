@@ -94,9 +94,16 @@ class _SourceHandle:
 
 
 class MetadataSourceError(Exception):
-    def __init__(self, status: SourceStatus, retry_after_seconds: int | None = None) -> None:
+    def __init__(
+        self,
+        status: SourceStatus,
+        retry_after_seconds: int | None = None,
+        *,
+        account_failure: bool = True,
+    ) -> None:
         self.status = status
         self.retry_after_seconds = retry_after_seconds
+        self.account_failure = account_failure
         super().__init__(status.value)
 
 
@@ -238,9 +245,19 @@ class MetadataSourceRegistry:
                         truncated=page.truncated,
                     )
         except TimeoutError:
-            outcome = SourceOutcome(source=source, status=SourceStatus.TIMEOUT)
+            # Metron's operation budget includes local pacing and multiple pages.
+            # Only a transport/provider failure proves the account is unavailable.
+            if source is MetadataSource.METRON_API:
+                attempt.started = False
+            outcome = SourceOutcome(
+                source=source,
+                status=SourceStatus.TIMEOUT,
+                retry_after_seconds=3 if source is MetadataSource.METRON_API else None,
+            )
             page = SourcePage([])
         except MetadataSourceError as exc:
+            if not exc.account_failure:
+                attempt.started = False
             outcome = SourceOutcome(
                 source=source, status=exc.status, retry_after_seconds=exc.retry_after_seconds
             )

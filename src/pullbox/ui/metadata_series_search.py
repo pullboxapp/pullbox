@@ -98,6 +98,16 @@ def source_messages(snapshot: SeriesDiscoveryRead | StoryArcDiscoveryRead) -> li
     messages = []
     for outcome in snapshot.sources:
         detail = _OUTCOME_TEXT.get(outcome.status)
+        if outcome.source is MetadataSource.METRON_API and outcome.retry_after_seconds:
+            waiting = {
+                SourceStatus.RATE_LIMITED: "requests paused",
+                SourceStatus.TIMEOUT: "request timed out",
+                SourceStatus.UNAVAILABLE: "temporarily unavailable",
+            }.get(outcome.status)
+            if waiting:
+                seconds = outcome.retry_after_seconds
+                unit = "second" if seconds == 1 else "seconds"
+                detail = f"{waiting}; try again in {seconds} {unit}"
         if outcome.status is SourceStatus.UNSUPPORTED and isinstance(
             snapshot, StoryArcDiscoveryRead
         ):

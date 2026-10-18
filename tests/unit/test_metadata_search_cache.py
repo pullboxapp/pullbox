@@ -54,6 +54,16 @@ async def test_snapshot_reuse_does_not_share_mutable_results_or_outcomes():
     assert second.sources[0].status is SourceStatus.OK
 
 
+async def test_metron_retry_message_is_not_frozen_in_a_search_snapshot():
+    paused = result(SourceStatus.RATE_LIMITED, rows=False)
+    paused.sources[0].retry_after_seconds = 3
+    load = AsyncMock(side_effect=[paused, result()])
+    cache = MetadataSearchCache()
+    await cache.get("key", load)
+    assert (await cache.get("key", load)).sources[0].status is SourceStatus.OK
+    assert load.await_count == 2
+
+
 @pytest.mark.parametrize(
     "status,rows,ttl",
     [

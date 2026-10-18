@@ -236,8 +236,16 @@ async def _read_admitted[T](
                 ):
                     raise ValueError("Invalid source read outcome")
     except TimeoutError:
-        result = MetadataFetch(status=SourceStatus.TIMEOUT)
+        # An operation deadline may expire in Metron's local request queue.
+        if source is MetadataSource.METRON_API:
+            attempt.started = False
+        result = MetadataFetch(
+            status=SourceStatus.TIMEOUT,
+            retry_after_seconds=3 if source is MetadataSource.METRON_API else None,
+        )
     except MetadataSourceError as exc:
+        if not exc.account_failure:
+            attempt.started = False
         result = MetadataFetch(status=exc.status, retry_after_seconds=exc.retry_after_seconds)
     except (ValueError, TypeError, AttributeError):
         result = MetadataFetch(status=SourceStatus.INCOMPATIBLE_RESPONSE)
