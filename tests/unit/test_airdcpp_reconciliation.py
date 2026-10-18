@@ -37,6 +37,64 @@ if TYPE_CHECKING:
 _TTH = "CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y"
 
 
+@pytest.mark.parametrize("still_failed", [True, False])
+async def test_failed_owner_of_legacy_duplicate_becomes_actionable_not_running(
+    db_factory, still_failed
+):
+    from pullbox.models.pending_match import PendingMatch
+    from pullbox.services.download_operation_progress import project_download_operation_progress
+    from pullbox.services.operation_activity import list_operation_activity
+
+    cid, hid, aid = await _seed(db_factory, state=DownloadState.FAILED)
+    async with db_factory() as session:
+        owner = await session.get(AirDcppAcquisition, aid)
+        owner.client_state = "download_error"
+        original = await session.get(DownloadHistory, hid)
+        duplicate = DownloadHistory(
+            issue_id=original.issue_id,
+            title=original.title,
+            download_url="airdcpp://intent/duplicate",
+            download_client=DownloadClientType.AIRDCPP,
+            state=DownloadState.FAILED,
+            error_message="AirDC++ merged this request into an existing Pullbox download.",
+        )
+        session.add(duplicate)
+        await session.flush()
+        session.add(
+            AirDcppAcquisition(
+                download_history_id=duplicate.id,
+                request_key="duplicate",
+                client_config_id=cid,
+                client_identity=owner.client_identity,
+                tth=owner.tth,
+                size_bytes=owner.size_bytes,
+                original_name=owner.original_name,
+                client_state="duplicate",
+                route_snapshot={"existing_bundle_owner_acquisition_id": aid},
+            )
+        )
+        await project_download_operation_progress(session, duplicate)
+        await session.commit()
+    b = _bundle(status_id="download_error" if still_failed else "queued", failed=still_failed)
+    b = b.model_copy(update={"status": b.status.model_copy(update={"str": "TTH inconsistency"})})
+    api = _FakeApi([[b]])
+    reconciler = AirDcppReconciler(db_factory)
+    await reconciler.reconcile_client(cid, api)
+    await reconciler.reconcile_client(cid, api)
+    async with db_factory() as session:
+        pending = (await session.scalars(select(PendingMatch))).all()
+        assert len(pending) == 1
+        assert pending[0].match_details["dc_download_id"] == hid
+        assert pending[0].match_details["failure_code"] == (
+            "queue_hash_mismatch" if still_failed else "queue_client_failed"
+        )
+        assert (await session.get(AirDcppAcquisition, aid)).bundle_id == 91
+        activity = await list_operation_activity(session)
+        assert activity.active_count == 0
+        assert activity.attention_count == 1
+    assert not api.create_calls and not api.removed_bundles
+
+
 async def test_unavailable_client_cannot_leave_overdue_request_active_forever(db_factory):
     cid, hid, aid = await _seed(db_factory, state=DownloadState.QUEUED, bundle_id=None)
     async with db_factory() as session:
@@ -288,6 +346,12 @@ class _FakeApi:
             raise self.lookup_failure
         return self.files
 
+    async def get_queue_bundle(self, bundle_id: int):
+        return next(
+            (b for page in self.pages for b in page if b.id == bundle_id),
+            _bundle(bundle_id=bundle_id),
+        )
+
     async def search_queue_bundle(self, bundle_id: int) -> None:
         self.alternate_calls.append(bundle_id)
 
@@ -396,7 +460,9 @@ async def test_reconciliation_maps_stable_status_fields_without_localized_text(
             if expected is DownloadState.COMPLETED
             else None
         )
-        assert acquisition.client_state == bundle.status.id
+        assert acquisition.client_state == (
+            "recovery_required" if expected is DownloadState.FAILED else bundle.status.id
+        )
         assert acquisition.remote_target == "/Downloads/Example Comic 001 (2026).cbz"
         assert acquisition.last_reconciled_at is not None
         assert operation.source_label == "AirDC++"

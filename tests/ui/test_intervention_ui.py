@@ -85,8 +85,9 @@ async def test_airdcpp_recovery_actions_use_verified_queue_path(
     assert not api.create_calls
 
 
+@pytest.mark.parametrize("failure_code", ["queue_lookup_failed", "queue_hash_mismatch"])
 async def test_airdcpp_recovery_has_recheck_retry_cancel_not_direct_route_refresh(
-    client, _db_factory
+    client, _db_factory, failure_code
 ):
     async with _db_factory() as session:
         series = Series(
@@ -113,7 +114,7 @@ async def test_airdcpp_recovery_has_recheck_retry_cancel_not_direct_route_refres
                 "source_kind": "dc",
                 "provider_name": "AirDC++",
                 "failure_class": "queue_confirmation",
-                "failure_code": "queue_lookup_failed",
+                "failure_code": failure_code,
                 "dc_download_id": 27,
             },
         )
@@ -123,7 +124,11 @@ async def test_airdcpp_recovery_has_recheck_retry_cancel_not_direct_route_refres
     response = await client.get("/intervention?tab=recovery&protocol=dc")
     assert response.status_code == 200
     assert f"/htmx/intervention/{pid}/airdcpp/recheck" in response.text
-    assert f"/htmx/intervention/{pid}/airdcpp/retry" in response.text
+    assert (f"/htmx/intervention/{pid}/airdcpp/retry" in response.text) == (
+        failure_code == "queue_lookup_failed"
+    )
+    if failure_code == "queue_hash_mismatch":
+        assert "TTH inconsistency" in response.text
     assert f"/htmx/intervention/{pid}/airdcpp/cancel" in response.text
     assert f"/htmx/intervention/{pid}/retry-recovery" not in response.text
     assert f'data-testid="intervention-reject-{pid}"' not in response.text

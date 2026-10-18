@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from pullbox.models.download import DownloadState
+from pullbox.models.download import DownloadClientType, DownloadState
 from pullbox.models.operation_progress import (
     OperationProgressState,
     OperationProgressTone,
@@ -111,6 +111,11 @@ def build_download_operation_update(
 
     client_state = _progress_value(progress, "client_state") if progress is not None else None
     recovery_required = download.error_message in RECOVERY_MESSAGES.values()
+    superseded = (
+        download.download_client is DownloadClientType.AIRDCPP
+        and download.error_message
+        == "AirDC++ merged this request into an existing Pullbox download."
+    )
     if client_state:
         client_state = {
             "mutation_pending": "Sending to AirDC++",
@@ -133,7 +138,7 @@ def build_download_operation_update(
     elif eta_seconds is not None and eta_seconds <= 0:
         eta_seconds = None
 
-    attention_required = shared_state is OperationProgressState.FAILED
+    attention_required = shared_state is OperationProgressState.FAILED and not superseded
     tone = OperationProgressTone.INFO
     if attention_required:
         tone = OperationProgressTone.DANGER
@@ -152,7 +157,7 @@ def build_download_operation_update(
         revision=None,
         state=shared_state,
         phase=str(
-            client_state
+            ("superseded" if superseded else client_state)
             or (
                 "cancelled"
                 if shared_state is OperationProgressState.CANCELLED
@@ -165,7 +170,9 @@ def build_download_operation_update(
         message=str(client_state or download.error_message or ""),
         source_label=str(source_label or _default_source_label(download)),
         detail_url=RECOVERY_LINK if recovery_required else "/downloads",
-        visibility=OperationProgressVisibility.PROMINENT,
+        visibility=OperationProgressVisibility.QUIET
+        if superseded
+        else OperationProgressVisibility.PROMINENT,
         tone=tone,
         attention_required=attention_required,
         overall=OperationProgressMeasure(

@@ -15,7 +15,7 @@ from pullbox.providers.airdcpp.errors import AirDcppResponseError
 from pullbox.services.airdcpp_recovery import act_on_queue_recovery, record_queue_recovery
 from tests.sqlite_schema import create_test_schema
 from tests.unit.test_airdcpp_queue_contracts import _queue_file_payload
-from tests.unit.test_airdcpp_reconciliation import _FakeApi, _seed
+from tests.unit.test_airdcpp_reconciliation import _bundle, _FakeApi, _seed
 
 
 @pytest.fixture
@@ -52,6 +52,82 @@ async def test_existing_exact_bundle_is_adopted_without_redownload(db_factory, a
         assert (await session.get(PendingMatch, pid)).status == PendingMatchStatus.APPROVED
     assert not api.create_calls
     assert not api.retry_calls
+
+
+@pytest.mark.parametrize("action", ["recheck", "retry", "cancel"])
+async def test_known_failed_bundle_has_safe_actions_without_bypassing_hash_check(
+    db_factory, action
+):
+    hid, aid, pid = await _recovery(db_factory)
+    bundle = _bundle(status_id="download_error", failed=True)
+    bundle = bundle.model_copy(
+        update={"status": bundle.status.model_copy(update={"str": "TTH inconsistency"})}
+    )
+    api = _FakeApi([[bundle]], files=[AirDcppQueueFile.model_validate(_queue_file_payload())])
+    async with db_factory() as session:
+        a = await session.get(AirDcppAcquisition, aid)
+        a.bundle_id = 91
+        await session.commit()
+        if action == "cancel":
+            await act_on_queue_recovery(session, pid, action, api)
+            assert (await session.get(PendingMatch, pid)).status == PendingMatchStatus.REJECTED
+            assert api.removed_bundles == [91]
+        else:
+            with pytest.raises(ValueError, match="TTH inconsistency"):
+                await act_on_queue_recovery(session, pid, action, api)
+            assert (await session.get(PendingMatch, pid)).match_details[
+                "failure_code"
+            ] == "queue_hash_mismatch"
+            assert not api.removed_bundles
+        assert (await session.get(DownloadHistory, hid)).state is DownloadState.FAILED
+    assert not api.create_calls and not api.retry_calls
+
+
+async def test_known_bundle_recheck_resumes_only_after_client_error_is_fixed(db_factory):
+    hid, aid, pid = await _recovery(db_factory)
+    api = _FakeApi([[_bundle()]], files=[AirDcppQueueFile.model_validate(_queue_file_payload())])
+    async with db_factory() as session:
+        a = await session.get(AirDcppAcquisition, aid)
+        a.bundle_id = 91
+        await session.commit()
+        await act_on_queue_recovery(session, pid, "recheck", api)
+        assert (await session.get(DownloadHistory, hid)).state in {
+            DownloadState.SENT,
+            DownloadState.DOWNLOADING,
+        }
+        assert (await session.get(PendingMatch, pid)).status == PendingMatchStatus.APPROVED
+    assert not api.create_calls and not api.removed_bundles
+
+
+async def test_known_bundle_cannot_be_recreated_from_a_missing_file_index_alone(db_factory):
+    _, aid, pid = await _recovery(db_factory)
+    api = _FakeApi([[_bundle()]])
+    async with db_factory() as session:
+        a = await session.get(AirDcppAcquisition, aid)
+        a.bundle_id = 91
+        await session.commit()
+        with pytest.raises(ValueError, match="conflicting queue identities"):
+            await act_on_queue_recovery(session, pid, "retry", api)
+    assert not api.create_calls and not api.removed_bundles
+
+
+async def test_restart_does_not_mark_a_known_hash_failure_resolved(db_factory):
+    from pullbox.services.airdcpp_reconciliation import AirDcppReconciler
+
+    hid, aid, pid = await _recovery(db_factory)
+    async with db_factory() as session:
+        a = await session.get(AirDcppAcquisition, aid)
+        a.bundle_id = 91
+        a.client_state = "recovery_check_pending"
+        a.next_retry_at = datetime.now(UTC) - timedelta(minutes=1)
+        (await session.get(DownloadHistory, hid)).state = DownloadState.RETRY_PENDING
+        cid = a.client_config_id
+        await session.commit()
+    api = _FakeApi([[_bundle(status_id="download_error", failed=True)]])
+    await AirDcppReconciler(db_factory).reconcile_client(cid, api)
+    async with db_factory() as session:
+        assert (await session.get(PendingMatch, pid)).status == PendingMatchStatus.PENDING
+        assert (await session.get(DownloadHistory, hid)).state is DownloadState.FAILED
 
 
 async def test_recheck_proves_absence_without_creating_download(db_factory):

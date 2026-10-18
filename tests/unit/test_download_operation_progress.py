@@ -104,3 +104,13 @@ def test_cancelled_download_drops_stale_mutation_pending_metrics() -> None:
     assert update.phase == "cancelled"
     assert update.message == "Cancelled by user"
     assert not update.attention_required
+
+
+def test_duplicate_request_does_not_duplicate_owner_recovery_notification() -> None:
+    download = _download(DownloadState.FAILED)
+    download.download_client = DownloadClientType.AIRDCPP
+    download.error_message = "AirDC++ merged this request into an existing Pullbox download."
+    update = build_download_operation_update(download)
+    assert not update.attention_required
+    assert update.visibility.value == "quiet"
+    assert update.phase == "superseded"

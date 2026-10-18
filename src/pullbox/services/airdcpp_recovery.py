@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import joinedload
@@ -15,14 +15,29 @@ from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.providers.airdcpp.errors import AirDcppEntityNotFoundError, AirDcppError
+from pullbox.services.airdcpp_acquisition import AirDcppQueueApi
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from pullbox.services.airdcpp_acquisition import AirDcppQueueApi
+    from pullbox.providers.airdcpp.contracts import AirDcppQueueBundle
+
+
+class AirDcppRecoveryApi(AirDcppQueueApi, Protocol):
+    async def get_queue_bundle(self, bundle_id: int) -> AirDcppQueueBundle: ...
+
 
 RECOVERY_LINK = "/intervention?tab=recovery&protocol=dc"
 RECOVERY_MESSAGES = {
+    "queue_hash_mismatch": (
+        "AirDC++ stopped this download because its file hash does not match (TTH inconsistency). "
+        "Check or repair the download in AirDC++, then Recheck AirDC++; "
+        "or cancel this request. Pullbox will not bypass the integrity check."
+    ),
+    "queue_client_failed": (
+        "An earlier AirDC++ download needs review. Check its queue error, correct it if needed, "
+        "then Recheck AirDC++; or cancel this request. No new download was started."
+    ),
     "queue_lookup_failed": (
         "Pullbox could not verify this request in AirDC++. "
         "Recheck the client before retrying or cancelling."
@@ -36,6 +51,15 @@ RECOVERY_MESSAGES = {
         "Recheck the client, retry the request, or cancel it."
     ),
 }
+
+
+def queue_failure_code(bundle: AirDcppQueueBundle) -> str:
+    return (
+        "queue_hash_mismatch"
+        if (bundle.status.failed or bundle.status.id == "download_error")
+        and "tth inconsistency" in bundle.status.str.casefold()
+        else "queue_client_failed"
+    )
 
 
 async def record_queue_recovery(
@@ -98,7 +122,7 @@ async def finish_queue_recovery(
 
 
 async def act_on_queue_recovery(
-    session: AsyncSession, pending_id: int, action: str, api: AirDcppQueueApi
+    session: AsyncSession, pending_id: int, action: str, api: AirDcppRecoveryApi
 ) -> str:
     """Recheck exact provenance before any explicit retry or cancellation."""
     from pullbox.services.airdcpp_reconciliation import (
@@ -107,6 +131,7 @@ async def act_on_queue_recovery(
         _apply_recovered_mutation,
         _RecoveredMutation,
         _shared_progress_snapshot,
+        apply_airdcpp_bundle,
     )
     from pullbox.services.download_operation_progress import project_download_operation_progress
 
@@ -127,7 +152,6 @@ async def act_on_queue_recovery(
     if (
         acquisition is None
         or acquisition.client_state != "recovery_required"
-        or acquisition.bundle_id is not None
         or acquisition.download_history.issue_id != pending.issue_id
         or acquisition.download_history.state is not DownloadState.FAILED
         or acquisition.download_history.imported_at is not None
@@ -139,12 +163,13 @@ async def act_on_queue_recovery(
     deadline = datetime.now(UTC) + timedelta(minutes=5)
     acquisition_id = acquisition.id
     client_identity = acquisition.client_identity
+    expected_bundle = acquisition.bundle_id
     claimed = await session.scalar(
         update(AirDcppAcquisition)
         .where(
             AirDcppAcquisition.id == acquisition.id,
             AirDcppAcquisition.client_state == "recovery_required",
-            AirDcppAcquisition.bundle_id.is_(None),
+            AirDcppAcquisition.bundle_id == expected_bundle,
         )
         .values(client_state="recovery_check_pending", next_retry_at=deadline)
         .returning(AirDcppAcquisition.id)
@@ -173,6 +198,34 @@ async def act_on_queue_recovery(
             code = "queue_identity_ambiguous"
             raise ValueError(RECOVERY_MESSAGES[code])
         bundle_id = exact[0].bundle_id if exact else None
+        bundle = None
+        probe_id = bundle_id or expected_bundle
+        if expected_bundle is not None and bundle_id not in {None, expected_bundle}:
+            code = "queue_identity_ambiguous"
+            raise ValueError(RECOVERY_MESSAGES[code])
+        if probe_id is not None:
+            try:
+                bundle = await api.get_queue_bundle(probe_id)
+            except AirDcppEntityNotFoundError:
+                if exact:
+                    raise ValueError(RECOVERY_MESSAGES[code]) from None
+            if bundle is not None:
+                if (
+                    not exact
+                    or bundle.id != probe_id
+                    or bundle.type.id != "file"
+                    or bundle.size != acquisition.size_bytes
+                    or PurePath(bundle.target.get_secret_value().replace("\\", "/")).name
+                    != acquisition.original_name
+                ):
+                    code = "queue_identity_ambiguous"
+                    raise ValueError(RECOVERY_MESSAGES[code])
+                if (
+                    bundle.status.failed
+                    or bundle.status.id in {"download_error", "completion_validation_error"}
+                ) and action != "cancel":
+                    code = queue_failure_code(bundle)
+                    raise ValueError(RECOVERY_MESSAGES[code])
         owner_id = (
             await session.scalar(
                 select(AirDcppAcquisition.id).where(
@@ -209,6 +262,7 @@ async def act_on_queue_recovery(
                 AirDcppAcquisition.id == acquisition_id,
                 AirDcppAcquisition.client_state == "recovery_check_pending",
                 AirDcppAcquisition.next_retry_at == deadline,
+                AirDcppAcquisition.bundle_id == expected_bundle,
             )
         )
         await session.commit()
@@ -242,6 +296,7 @@ async def act_on_queue_recovery(
                 AirDcppAcquisition.id == acquisition.id,
                 AirDcppAcquisition.client_state == "recovery_check_pending",
                 AirDcppAcquisition.next_retry_at == deadline,
+                AirDcppAcquisition.bundle_id == expected_bundle,
             )
             .values(client_state="recovery_check_pending")
             .returning(AirDcppAcquisition.id)
@@ -295,6 +350,8 @@ async def act_on_queue_recovery(
             elif exact:
                 history.state = DownloadState.QUEUED
                 _apply_adopted_file(acquisition, exact[0], at=now)
+                if bundle is not None:
+                    apply_airdcpp_bundle(acquisition, bundle, at=now)
                 message = "Existing AirDC++ download reconnected."
             else:
                 _apply_recovered_mutation(

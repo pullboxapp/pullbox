@@ -94,6 +94,7 @@
                     {% if meta.lane == 'recovery' %}
                     {% if pm.match_details.get('source_kind') == 'dc' %}
                     {% for action, label in [('recheck', 'Recheck AirDC++'), ('retry', 'Retry request'), ('cancel', 'Cancel request')] %}
+                    {% if action != 'retry' or details.get('failure_code') not in ['queue_hash_mismatch', 'queue_client_failed'] %}
                     <form hx-post="/htmx/intervention/{{ pm.id }}/airdcpp/{{ action }}"
                       hx-target="#intervention-queue-results" hx-swap="outerHTML"
                       hx-sync="#intervention-queue-results:drop" hx-disabled-elt="find button">
@@ -103,6 +104,7 @@
                       <button type="submit" class="{{ 'btn-danger' if action == 'cancel' else 'btn-secondary' }} btn-sm"
                         data-testid="intervention-airdcpp-{{ action }}-{{ pm.id }}">{{ label }}</button>
                     </form>
+                    {% endif %}
                     {% endfor %}
                     {% elif meta.metadata_recovery %}
                     <button type="button" class="btn-primary btn-sm" data-testid="intervention-review-metadata-{{ pm.id }}"
