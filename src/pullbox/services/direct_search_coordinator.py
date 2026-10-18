@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _DEFAULT_SEARCH_SECONDS = 30.0
+_ANNA_BROWSER_SEARCH_SECONDS = 90.0
 _DEFAULT_RESULT_LIMIT = 20
 _MAX_FANOUT = 4
 _COLLECTION_EDITION_QUALIFIERS = ("expanded edition",)
@@ -151,7 +152,11 @@ def _default_client_factory(
         bearer_token=bearer_token,
         allow_private_http=allow_private_http,
         provider_id=provider_id,
-        request_timeout_seconds=_DEFAULT_SEARCH_SECONDS,
+        request_timeout_seconds=(
+            _ANNA_BROWSER_SEARCH_SECONDS
+            if provider_id == "pullbox.annas_archive"
+            else _DEFAULT_SEARCH_SECONDS
+        ),
     )
 
 
@@ -291,7 +296,7 @@ async def search_direct_issue_target(
     validator_kwargs: ValidatorKwargs | None = None,
     client_factory: DirectSearchClientFactory = _default_client_factory,
     result_limit: int = _DEFAULT_RESULT_LIMIT,
-    search_seconds: float = _DEFAULT_SEARCH_SECONDS,
+    search_seconds: float | None = None,
     max_fanout: int = _MAX_FANOUT,
     now: Callable[[], datetime] | None = None,
     on_resolver_attempt: ResolverAttemptCallback | None = None,
@@ -299,7 +304,7 @@ async def search_direct_issue_target(
     """Search eligible providers concurrently and preserve matcher semantics."""
     if not 1 <= result_limit <= 100:
         raise ValueError("Direct provider result limit must be between 1 and 100.")
-    if search_seconds <= 0 or search_seconds > 300:
+    if search_seconds is not None and (search_seconds <= 0 or search_seconds > 300):
         raise ValueError("Direct provider search timeout must be between 0 and 300 seconds.")
     if not 1 <= max_fanout <= _MAX_FANOUT:
         raise ValueError("Direct provider fan-out must be between 1 and 4.")
@@ -336,13 +341,22 @@ async def search_direct_issue_target(
         DirectSearchFailure | None,
     ]:
         async with semaphore:
+            seconds = search_seconds
+            if seconds is None:
+                # Anna's browser interstitial needs time to finish before fallback.
+                seconds = (
+                    _ANNA_BROWSER_SEARCH_SECONDS
+                    if provider.provider_identity == "pullbox.annas_archive"
+                    and provider.resolver_options
+                    else _DEFAULT_SEARCH_SECONDS
+                )
             return await _search_provider(
                 target,
                 provider,
                 validator=validator,
                 client_factory=client_factory,
                 result_limit=result_limit,
-                deadline=clock() + timedelta(seconds=search_seconds),
+                deadline=clock() + timedelta(seconds=seconds),
                 now=clock,
                 on_resolver_attempt=record_resolver_attempt,
             )
@@ -591,7 +605,13 @@ async def _search_with_resolver_fallback(
                 )
             )
         try:
-            return await budget.run(
+            attempt_budget = budget
+            if option is None and provider.provider_identity == "pullbox.annas_archive":
+                # The browser allowance must not extend an ordinary stalled HTTP request.
+                attempt_budget = ProviderResolverBudget(
+                    min(deadline, now() + timedelta(seconds=_DEFAULT_SEARCH_SECONDS)), now=now
+                )
+            return await attempt_budget.run(
                 DirectSearchRequest(
                     protocol_version=provider.protocol_version,
                     request_id=uuid4(),

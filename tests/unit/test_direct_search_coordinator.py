@@ -44,6 +44,7 @@ from pullbox.services.direct_resolver_service import (
 )
 from pullbox.services.direct_search_coordinator import (
     DirectSearchProvider,
+    _default_client_factory,
     load_direct_search_providers,
     persist_direct_search_discoveries,
     search_direct_issue_target,
@@ -527,9 +528,12 @@ async def test_provider_search_tries_ordinary_http_then_ranked_resolvers(failure
 @pytest.mark.parametrize(
     "failure", ["stall", "http408", "authentication", "initial_timeout", "all_stall"]
 )
-async def test_real_client_search_reserves_time_for_backup_resolvers(failure: str) -> None:
+@pytest.mark.parametrize("identity", ["pullbox.getcomics", "pullbox.annas_archive"])
+async def test_real_client_search_reserves_time_for_backup_resolvers(
+    failure: str, identity: str
+) -> None:
     provider = replace(
-        _provider("pullbox.getcomics", 10),
+        _provider(identity, 10),
         resolver_options=tuple(
             _resolver_option(index, name, kind, f"http://{name.lower()}:8191")
             for index, (name, kind) in enumerate(
@@ -617,9 +621,10 @@ async def test_real_client_search_reserves_time_for_backup_resolvers(failure: st
         assert cancelled == (["http://trawl:8191"] if failure == "stall" else [])
 
 
-async def test_cancelled_search_does_not_advance_resolvers() -> None:
+@pytest.mark.parametrize("identity", ["pullbox.getcomics", "pullbox.annas_archive"])
+async def test_cancelled_search_does_not_advance_resolvers(identity: str) -> None:
     provider = replace(
-        _provider("pullbox.getcomics", 10),
+        _provider(identity, 10),
         resolver_options=(
             _resolver_option(1, "TRAWL", DirectResolverKind.TRAWL, "http://trawl:8191"),
             _resolver_option(2, "Byparr", DirectResolverKind.BYPARR, "http://byparr:8191"),
@@ -654,6 +659,63 @@ async def test_cancelled_search_does_not_advance_resolvers() -> None:
         await task
     assert len(requests) == 2
     assert closed == [True]
+
+
+@pytest.mark.parametrize(
+    ("identity", "with_resolvers", "explicit_seconds", "expected_seconds"),
+    [
+        ("pullbox.annas_archive", True, None, 90),
+        ("pullbox.annas_archive", False, None, 30),
+        ("pullbox.getcomics", True, None, 30),
+        ("pullbox.annas_archive", True, 12, 12),
+    ],
+)
+async def test_only_anna_browser_search_gets_extended_default_budget(
+    identity: str, with_resolvers: bool, explicit_seconds: float | None, expected_seconds: float
+) -> None:
+    _reset()
+    provider = _provider(identity, 10)
+    if with_resolvers:
+        provider = replace(
+            provider,
+            resolver_options=tuple(
+                _resolver_option(i, str(i), DirectResolverKind.BYPARR, f"http://resolver{i}:8191")
+                for i in range(1, 4)
+            ),
+        )
+        _Client.challenge_required = {identity}
+    _Client.responses = {identity: []}
+    now = datetime.now(UTC)
+    kwargs = {} if explicit_seconds is None else {"search_seconds": explicit_seconds}
+    result = await search_direct_issue_target(
+        _target(), [provider], client_factory=_factory, now=lambda: now, **kwargs
+    )
+    assert not result.failures
+    ordinary = _Client.requests[0][1]
+    assert (ordinary.deadline - now).total_seconds() <= min(30, expected_seconds)
+    if with_resolvers:
+        browser = _Client.requests[1][1]
+        assert browser.resolver_profile is not None
+        assert browser.resolver_profile.timeout_seconds == pytest.approx(
+            expected_seconds / 3, abs=0.1
+        )
+        assert provider.resolver_options[0].profile.timeout_seconds == 60
+
+
+@pytest.mark.parametrize("identity", ["pullbox.annas_archive", "pullbox.getcomics"])
+async def test_default_client_can_carry_anna_extended_search(identity: str) -> None:
+    client = _default_client_factory(
+        endpoint="https://provider.example",
+        bearer_token="test-bearer-token-long-enough-for-contract",
+        allow_private_http=False,
+        provider_id=identity,
+    )
+    try:
+        assert client._request_timeout_seconds == (
+            90 if identity == "pullbox.annas_archive" else 30
+        )
+    finally:
+        await client.aclose()
 
 
 async def test_rejected_candidate_uses_existing_validator_without_provider_override() -> None:
