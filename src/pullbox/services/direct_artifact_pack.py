@@ -17,7 +17,11 @@ RECOVERABLE_PACK_FAILURES = frozenset(
         "direct_pack_ambiguous_issue",
         "direct_pack_incomplete",
         "direct_pack_series_invalid",
+        "direct_pack_ownership_changed",
     }
+)
+PACK_FULFILLED_MESSAGE = (
+    "Request fulfilled by a verified library copy; no additional import was needed."
 )
 
 

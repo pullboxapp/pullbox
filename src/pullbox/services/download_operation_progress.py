@@ -13,6 +13,7 @@ from pullbox.models.operation_progress import (
     OperationProgressVisibility,
 )
 from pullbox.services.airdcpp_recovery import RECOVERY_LINK, RECOVERY_MESSAGES
+from pullbox.services.direct_artifact_pack import PACK_FULFILLED_MESSAGE
 from pullbox.services.operation_progress import (
     OperationProgressMeasure,
     OperationProgressUpdate,
@@ -115,6 +116,9 @@ def build_download_operation_update(
         download.download_client is DownloadClientType.AIRDCPP
         and download.error_message
         == "AirDC++ merged this request into an existing Pullbox download."
+    ) or (
+        download.download_client is DownloadClientType.DIRECT
+        and download.error_message == PACK_FULFILLED_MESSAGE
     )
     if client_state:
         client_state = {

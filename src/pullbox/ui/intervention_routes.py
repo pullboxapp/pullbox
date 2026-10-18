@@ -790,6 +790,12 @@ async def htmx_intervention_approve(
             else "partials/intervention_content_bundle.html"
         )
         response = _templates().TemplateResponse(request, template_name, ctx)
+        if (pm.match_details or {}).get("resolution_reason") == "pack_fulfilled_by_library":
+            return _toast_response(
+                response,
+                "Already fulfilled by the verified library copy. No files were changed.",
+                "success",
+            )
         if is_retained_recovery:
             return _toast_response(
                 response,
@@ -808,7 +814,9 @@ async def htmx_intervention_approve(
             heading="Approved",
             title=release_title,
             message=(
-                "Continuing with the retained file. No new download was queued."
+                "Already fulfilled by the verified library copy. No files were changed."
+                if (pm.match_details or {}).get("resolution_reason") == "pack_fulfilled_by_library"
+                else "Continuing with the retained file. No new download was queued."
                 if is_retained_recovery
                 else "Release sent to the download queue."
             ),

@@ -449,6 +449,33 @@ class InterventionService:
         if attempt is None or attempt.issue_id != pending_match.issue_id:
             raise ValueError("Pending match has an invalid direct attempt reference")
 
+        from pullbox.services.direct_pack_completion import (
+            is_pack_ownership_failure,
+            reconcile_fulfilled_pack,
+        )
+
+        if is_pack_ownership_failure(attempt):
+            from pullbox.models.issue import Issue, IssueStatus
+
+            pending_issue_id = pending_match.issue_id
+            if await reconcile_fulfilled_pack(session, attempt_id):
+                await session.commit()
+                return attempt
+            # Do not requeue an already-owned issue when its current file could
+            # not be verified. Keep the actionable recovery and retained pack.
+            await session.refresh(pending_match)
+            await session.refresh(attempt, attribute_names=["artifact_attempts"])
+            issue = await session.get(Issue, pending_issue_id, populate_existing=True)
+            if issue is not None and issue.status is IssueStatus.OWNED:
+                raise DirectArtifactValidationError(
+                    code="direct_pack_completion_unverified",
+                    message=(
+                        "The library copy needs review before this pack can be reconciled. "
+                        "Check the issue's registered file and metadata. "
+                        "No new download was started; the retained pack is unchanged."
+                    ),
+                )
+
         initial_source = None
         if attempt.failure_code in RECOVERABLE_PACK_FAILURES:
             selected = [item for item in attempt.artifact_attempts if item.is_selected]

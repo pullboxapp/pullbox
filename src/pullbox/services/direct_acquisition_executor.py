@@ -691,8 +691,19 @@ class DirectAcquisitionExecutor:
             if exc.code in RECOVERABLE_PACK_FAILURES:
                 transition_artifact(artifact, DirectArtifactState.INTERVENTION, at=self._now())
                 transition_acquisition(attempt, DirectAcquisitionState.INTERVENTION, at=self._now())
-                await InterventionService().create_direct_attempt_intervention(session, attempt)
                 await progress.write(stage="intervention", force=True)
+                if exc.code == "direct_pack_ownership_changed":
+                    from pullbox.services.direct_pack_completion import reconcile_fulfilled_pack
+
+                    if await reconcile_fulfilled_pack(session, acquisition_id):
+                        await session.commit()
+                        attempt, artifact = await _load_attempt(
+                            session, acquisition_id, artifact_id
+                        )
+                        return _result(attempt, artifact)
+                    attempt, artifact = await _load_attempt(session, acquisition_id, artifact_id)
+                await InterventionService().create_direct_attempt_intervention(session, attempt)
+                await session.commit()
             else:
                 transition_artifact(artifact, DirectArtifactState.FAILED, at=self._now())
                 transition_acquisition(attempt, DirectAcquisitionState.FAILED, at=self._now())
@@ -739,6 +750,18 @@ class DirectAcquisitionExecutor:
             force=True,
             final_path=str(processed.final_path),
         )
+        if len(pack_coverage) > 1:
+            from pullbox.services.direct_pack_completion import reconcile_completed_pack_issues
+
+            try:
+                await reconcile_completed_pack_issues(session, processed.imported_issue_ids)
+            except Exception:
+                # The import is already committed. A follow-up failure must not undo it.
+                await session.rollback()
+                logger.exception(
+                    "direct_pack_completion_reconciliation_failed", acquisition_id=acquisition_id
+                )
+            attempt, artifact = await _load_attempt(session, acquisition_id, artifact_id)
         try:
             request_story_arc_sync_now()
         except Exception:

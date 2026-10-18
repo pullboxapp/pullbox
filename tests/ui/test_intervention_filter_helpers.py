@@ -207,6 +207,27 @@ def test_build_intervention_item_meta_identifies_direct_acquisition_recovery() -
     assert meta["recovery_summary"] == "TeraBox authentication required"
 
 
+def test_pack_ownership_recovery_does_not_offer_single_file_metadata_review():
+    from pullbox.ui.intervention_filter_helpers import build_intervention_item_meta
+
+    pending = SimpleNamespace(
+        is_torrent=False,
+        status="pending",
+        indexer=None,
+        match_details={
+            "source_kind": "direct",
+            "failure_class": "post_process",
+            "failure_code": "direct_pack_ownership_changed",
+        },
+    )
+    meta = build_intervention_item_meta(pending)
+    assert meta["pack_recovery"] is True
+    assert meta["metadata_recovery"] is False
+    assert meta["recovery_summary"] == (
+        "Library ownership changed during pack import; recheck the retained pack"
+    )
+
+
 def test_metadata_recovery_is_not_described_as_a_broken_download_route():
     from pullbox.ui.intervention_filter_helpers import build_intervention_item_meta
 

@@ -372,6 +372,8 @@ def _direct_recovery_summary(details: dict[str, object]) -> str:
         return RECOVERY_MESSAGES.get(
             str(details.get("failure_code")), "AirDC++ request needs review."
         )
+    if details.get("failure_code") == "direct_pack_ownership_changed":
+        return "Library ownership changed during pack import; recheck the retained pack"
     if details.get("failure_code") in RECOVERABLE_PACK_FAILURES:
         return "Downloaded pack needs issue review; no new download is needed"
     if details.get("failure_code") == "direct_metadata_review_required":
