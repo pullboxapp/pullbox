@@ -362,6 +362,8 @@ async def act_on_queue_recovery(
                     at=now,
                 )
                 message = "AirDC++ request queued."
+            if owner_id is None and issue is not None and issue.status is IssueStatus.WANTED:
+                issue.status = IssueStatus.DOWNLOADING
         else:
             await record_queue_recovery(
                 session, acquisition, code="queue_request_unconfirmed", at=now

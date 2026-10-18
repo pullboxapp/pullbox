@@ -89,6 +89,8 @@ async def test_known_bundle_recheck_resumes_only_after_client_error_is_fixed(db_
     async with db_factory() as session:
         a = await session.get(AirDcppAcquisition, aid)
         a.bundle_id = 91
+        history = await session.get(DownloadHistory, hid)
+        (await session.get(Issue, history.issue_id)).status = IssueStatus.WANTED
         await session.commit()
         await act_on_queue_recovery(session, pid, "recheck", api)
         assert (await session.get(DownloadHistory, hid)).state in {
@@ -96,6 +98,8 @@ async def test_known_bundle_recheck_resumes_only_after_client_error_is_fixed(db_
             DownloadState.DOWNLOADING,
         }
         assert (await session.get(PendingMatch, pid)).status == PendingMatchStatus.APPROVED
+        history = await session.get(DownloadHistory, hid)
+        assert (await session.get(Issue, history.issue_id)).status is IssueStatus.DOWNLOADING
     assert not api.create_calls and not api.removed_bundles
 
 
