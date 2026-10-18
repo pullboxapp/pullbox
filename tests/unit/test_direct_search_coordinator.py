@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 
 from pullbox.core.acquisition import AcquisitionProtocol
@@ -24,7 +25,7 @@ from pullbox.models.direct_acquisition import (
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import MatchConfidence
 from pullbox.models.series import Series, SeriesStatus, SeriesType
-from pullbox.providers.direct.client import DirectProviderClientError
+from pullbox.providers.direct.client import DirectProviderClient, DirectProviderClientError
 from pullbox.providers.direct.contract import (
     DIRECT_PROVIDER_PROTOCOL_V1,
     DirectCandidate,
@@ -469,7 +470,8 @@ async def test_direct_search_accepts_contiguous_pack_for_interior_issue() -> Non
     assert outcome.matched[0].candidate.parsed.issue_numbers == ["5", "6", "7", "8", "9", "10"]
 
 
-async def test_provider_search_tries_ordinary_http_then_ranked_resolvers() -> None:
+@pytest.mark.parametrize("failure_code", ["resolver_timed_out", "provider_timed_out"])
+async def test_provider_search_tries_ordinary_http_then_ranked_resolvers(failure_code: str) -> None:
     _reset()
     provider = replace(
         _provider("pullbox.getcomics", 10),
@@ -489,7 +491,7 @@ async def test_provider_search_tries_ordinary_http_then_ranked_resolvers() -> No
         ),
     )
     _Client.challenge_required = {provider.provider_identity}
-    _Client.resolver_failures = {"http://flaresolverr:8191": "resolver_timed_out"}
+    _Client.resolver_failures = {"http://flaresolverr:8191": failure_code}
     _Client.responses = {
         provider.provider_identity: [_candidate(provider, "Absolute Superman 009 (2025)")]
     }
@@ -515,6 +517,143 @@ async def test_provider_search_tries_ordinary_http_then_ranked_resolvers() -> No
         ("Byparr", 2, 2),
     ]
     assert outcome.resolver_attempts == tuple(progress)
+    first, second, third = [request for _, request in _Client.requests]
+    assert second.deadline < first.deadline
+    assert third.deadline <= first.deadline
+    assert second.resolver_profile.timeout_seconds < 15.1
+    assert provider.resolver_options[0].profile.timeout_seconds == 60
+
+
+@pytest.mark.parametrize(
+    "failure", ["stall", "http408", "authentication", "initial_timeout", "all_stall"]
+)
+async def test_real_client_search_reserves_time_for_backup_resolvers(failure: str) -> None:
+    provider = replace(
+        _provider("pullbox.getcomics", 10),
+        resolver_options=tuple(
+            _resolver_option(index, name, kind, f"http://{name.lower()}:8191")
+            for index, (name, kind) in enumerate(
+                [
+                    ("TRAWL", DirectResolverKind.TRAWL),
+                    ("Byparr", DirectResolverKind.BYPARR),
+                    ("FlareSolverr", DirectResolverKind.FLARESOLVERR),
+                ],
+                1,
+            )
+        ),
+    )
+    requests: list[DirectSearchRequest] = []
+    cancelled: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = DirectSearchRequest.model_validate_json(request.content)
+        requests.append(payload)
+        profile = payload.resolver_profile
+        if profile is None:
+            if failure == "initial_timeout":
+                return httpx.Response(408)
+            return httpx.Response(503, json={"error": {"code": "browser_challenge_required"}})
+        if "trawl" in profile.endpoint or failure == "all_stall":
+            if failure == "authentication":
+                return httpx.Response(401)
+            if failure == "http408":
+                return httpx.Response(408)
+            try:
+                # A provider that ignores its deadline must not starve the backups.
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(profile.endpoint)
+        if "byparr" in profile.endpoint:
+            return httpx.Response(503, json={"error": {"code": "resolver_timed_out"}})
+        return httpx.Response(
+            200,
+            json={
+                "protocol_version": DIRECT_PROVIDER_PROTOCOL_V1,
+                "request_id": str(payload.request_id),
+                "candidates": [
+                    _candidate(provider, "Absolute Superman 009 (2025)").model_dump(mode="json")
+                ],
+            },
+        )
+
+    async def resolve_host(_host: str, _port: int) -> list[str]:
+        return ["8.8.8.8"]
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DirectProviderClient(
+            endpoint="https://provider.example",
+            bearer_token=provider.bearer_token,
+            resolver=resolve_host,
+            http_client=http_client,
+            request_timeout_seconds=0.6,
+        )
+        outcome = await search_direct_issue_target(
+            _target(),
+            [provider],
+            client_factory=lambda **_kwargs: client,
+            search_seconds=0.6,
+        )
+    if failure == "all_stall":
+        assert not outcome.matched
+        assert len(requests) == 4
+        assert len(cancelled) == 3
+        assert outcome.failures[0].code == "provider_timed_out"
+        assert outcome.elapsed_ms < 1200
+    elif failure in {"authentication", "initial_timeout"}:
+        assert not outcome.matched
+        assert len(requests) == (1 if failure == "initial_timeout" else 2)
+        assert outcome.failures[0].code == (
+            "provider_timed_out"
+            if failure == "initial_timeout"
+            else "provider_authentication_failed"
+        )
+    else:
+        assert len(outcome.matched) == 1
+        assert not outcome.failures
+        assert len(requests) == 4
+        assert requests[1].deadline < requests[0].deadline
+        assert all(request.deadline <= requests[0].deadline for request in requests)
+        assert all(request.resolver_profile.timeout_seconds <= 0.6 for request in requests[1:])
+        assert cancelled == (["http://trawl:8191"] if failure == "stall" else [])
+
+
+async def test_cancelled_search_does_not_advance_resolvers() -> None:
+    provider = replace(
+        _provider("pullbox.getcomics", 10),
+        resolver_options=(
+            _resolver_option(1, "TRAWL", DirectResolverKind.TRAWL, "http://trawl:8191"),
+            _resolver_option(2, "Byparr", DirectResolverKind.BYPARR, "http://byparr:8191"),
+        ),
+    )
+    entered = asyncio.Event()
+    requests: list[DirectSearchRequest] = []
+    closed: list[bool] = []
+
+    class Client:
+        async def search(self, request: DirectSearchRequest) -> DirectSearchResponse:
+            requests.append(request)
+            if request.resolver_profile is None:
+                raise DirectProviderClientError("browser_challenge_required", "Challenge")
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("Cancelled resolver should not return")
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    task = asyncio.create_task(
+        search_direct_issue_target(
+            _target(),
+            [provider],
+            client_factory=lambda **_kwargs: Client(),
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(requests) == 2
+    assert closed == [True]
 
 
 async def test_rejected_candidate_uses_existing_validator_without_provider_override() -> None:

@@ -37,6 +37,7 @@ from pullbox.services.direct_provider_quota import refresh_expired_provider_quot
 from pullbox.services.direct_provider_source_origin import (
     effective_direct_provider_source_domains,
 )
+from pullbox.services.direct_resolver_budget import ProviderResolverBudget, resolver_retry_allowed
 from pullbox.services.release_validator import ReleaseValidator, ValidationResult
 from pullbox.services.search_scoring import match_confidence_rank
 
@@ -342,6 +343,7 @@ async def search_direct_issue_target(
                 client_factory=client_factory,
                 result_limit=result_limit,
                 deadline=clock() + timedelta(seconds=search_seconds),
+                now=clock,
                 on_resolver_attempt=record_resolver_attempt,
             )
 
@@ -378,6 +380,7 @@ async def _search_provider(
     client_factory: DirectSearchClientFactory,
     result_limit: int,
     deadline: datetime,
+    now: Callable[[], datetime],
     on_resolver_attempt: ResolverAttemptCallback | None,
 ) -> tuple[
     list[DirectValidatedCandidate],
@@ -397,6 +400,7 @@ async def _search_provider(
             target=target,
             result_limit=result_limit,
             deadline=deadline,
+            now=now,
             on_resolver_attempt=on_resolver_attempt,
         )
     except asyncio.CancelledError:
@@ -566,9 +570,11 @@ async def _search_with_resolver_fallback(
     target: IssueSearchTarget,
     result_limit: int,
     deadline: datetime,
+    now: Callable[[], datetime],
     on_resolver_attempt: ResolverAttemptCallback | None,
 ) -> DirectSearchResponse:
     options = (None, *provider.resolver_options)
+    budget = ProviderResolverBudget(deadline, now=now)
     last_error: DirectProviderClientError | None = None
     for option_index, option in enumerate(options):
         if option is not None and on_resolver_attempt is not None:
@@ -585,7 +591,7 @@ async def _search_with_resolver_fallback(
                 )
             )
         try:
-            return await client.search(
+            return await budget.run(
                 DirectSearchRequest(
                     protocol_version=provider.protocol_version,
                     request_id=uuid4(),
@@ -595,19 +601,20 @@ async def _search_with_resolver_fallback(
                     resolver_profile=option.profile if option is not None else None,
                     intent=_build_intent(target),
                     limit=result_limit,
-                )
+                ),
+                client.search,
+                remaining_resolvers=len(options) - option_index,
             )
         except DirectProviderClientError as exc:
             last_error = exc
-            if not _resolver_retry_allowed(exc) or option_index == len(options) - 1:
+            if (
+                not resolver_retry_allowed(exc, using_resolver=option is not None)
+                or option_index == len(options) - 1
+            ):
                 raise
     if last_error is not None:
         raise last_error
     raise RuntimeError("Direct provider search had no executable request path.")
-
-
-def _resolver_retry_allowed(exc: DirectProviderClientError) -> bool:
-    return exc.code == "browser_challenge_required" or exc.code.startswith("resolver_")
 
 
 def _build_intent(target: IssueSearchTarget) -> DirectSearchIntent:

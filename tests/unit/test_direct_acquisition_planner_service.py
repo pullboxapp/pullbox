@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -377,6 +378,8 @@ class _ResolveClient:
 
 
 class _FallbackResolveClient(_ResolveClient):
+    failure_code = "resolver_timed_out"
+
     async def resolve(self, request: Any) -> DirectResolveResponse:
         self.requests.append(request)
         profile = request.resolver_profile
@@ -388,7 +391,7 @@ class _FallbackResolveClient(_ResolveClient):
             )
         if profile.endpoint == "http://flaresolverr:8191":
             raise DirectProviderClientError(
-                "resolver_timed_out",
+                self.failure_code,
                 "Resolver timed out.",
                 retryable=True,
             )
@@ -1021,9 +1024,11 @@ async def test_generic_only_provider_does_not_require_visible_host_setting(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_code", ["resolver_timed_out", "provider_timed_out", "stall"])
 async def test_planning_resolve_tries_ordinary_http_then_ranked_resolvers(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
 ) -> None:
     from pullbox.services import direct_resolver_service
 
@@ -1060,20 +1065,48 @@ async def test_planning_resolve_tries_ordinary_http_then_ranked_resolvers(
 
     monkeypatch.setattr(direct_resolver_service, "build_provider_resolver_profiles", profiles)
     client = _FallbackResolveClient(_response())
+    client.failure_code = failure_code
+    progress: list[str] = []
+    if failure_code == "stall":
+        from pullbox.services import direct_acquisition_planner_service as planner
 
-    result = await plan_direct_acquisition(
-        session,
-        acquisition_id=1,
-        provider_client_factory=lambda **_kwargs: client,
-        provider_secret_loader=lambda _config: _provider_material(),
-        now=lambda: NOW,
-    )
+        monkeypatch.setattr(planner, "_RESOLVE_SECONDS", 0.6)
+    original_resolve = client.resolve
+
+    async def observed_resolve(request: Any) -> DirectResolveResponse:
+        if request.resolver_profile:
+            attempt = await session.get(DirectAcquisitionAttempt, 1)
+            assert attempt is not None
+            progress.append(attempt.progress_snapshot["resolver_name"])
+            if failure_code == "stall" and "flaresolverr" in request.resolver_profile.endpoint:
+                client.requests.append(request)
+                await asyncio.Event().wait()
+        return await original_resolve(request)
+
+    monkeypatch.setattr(client, "resolve", observed_resolve)
+
+    try:
+        async with asyncio.timeout(2):
+            result = await plan_direct_acquisition(
+                session,
+                acquisition_id=1,
+                provider_client_factory=lambda **_kwargs: client,
+                provider_secret_loader=lambda _config: _provider_material(),
+                now=lambda: NOW,
+            )
+    except TimeoutError:
+        pytest.fail("The stalled resolver consumed the entire candidate-resolution budget")
 
     assert result.attempt.state is DirectAcquisitionState.PLANNED
     assert [
         request.resolver_profile.endpoint if request.resolver_profile else None
         for request in client.requests
     ] == [None, "http://flaresolverr:8191", "http://byparr:8191"]
+    assert client.requests[1].deadline < client.requests[0].deadline
+    assert client.requests[2].deadline <= client.requests[0].deadline
+    assert options[0].profile.timeout_seconds == 60
+    assert client.closed
+    assert progress == ["FlareSolverr", "Byparr"]
 
 
 @pytest.mark.asyncio

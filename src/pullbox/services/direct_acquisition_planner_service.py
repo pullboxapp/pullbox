@@ -71,6 +71,7 @@ from pullbox.services.direct_provider_quota import (
     record_provider_quota,
     record_provider_resolution_error,
 )
+from pullbox.services.direct_resolver_budget import ProviderResolverBudget, resolver_retry_allowed
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -202,6 +203,7 @@ async def plan_direct_acquisition(
             provider_client_factory=provider_client_factory,
             provider_secret_loader=provider_secret_loader,
             deadline=clock() + timedelta(seconds=_RESOLVE_SECONDS),
+            now=clock,
         )
         if response.quota is not None:
             record_provider_quota(provider, response.quota, observed_at=clock())
@@ -445,6 +447,7 @@ async def resolve_planned_artifact_source(
         provider_client_factory=provider_client_factory,
         provider_secret_loader=provider_secret_loader,
         deadline=clock() + timedelta(seconds=_RESOLVE_SECONDS),
+        now=clock,
     )
     provider_artifact = next(
         (
@@ -518,6 +521,7 @@ async def _resolve_provider_candidate(
     provider_client_factory: DirectResolveClientFactory | None,
     provider_secret_loader: ProviderSecretLoader | None,
     deadline: datetime,
+    now: Callable[[], datetime],
 ) -> DirectResolveResponse:
     from pullbox.services.direct_configuration_service import load_provider_secret_material
     from pullbox.services.direct_resolver_service import (
@@ -543,6 +547,7 @@ async def _resolve_provider_candidate(
         provider_id=provider.provider_id,
     )
     try:
+        budget = ProviderResolverBudget(deadline, now=now)
         resolver_options = await build_provider_resolver_profiles(session, provider)
         options = (None, *resolver_options)
         last_error: DirectProviderClientError | None = None
@@ -572,7 +577,7 @@ async def _resolve_provider_candidate(
                 )
                 await session.commit()
             try:
-                return await client.resolve(
+                return await budget.run(
                     DirectResolveRequest(
                         protocol_version=(
                             provider.negotiated_protocol or "direct-download-provider/v1"
@@ -583,13 +588,13 @@ async def _resolve_provider_candidate(
                         source_credentials=material.configuration,
                         resolver_profile=option.profile if option is not None else None,
                         provider_candidate_id=attempt.provider_candidate_id,
-                    )
+                    ),
+                    client.resolve,
+                    remaining_resolvers=len(options) - option_index,
                 )
             except DirectProviderClientError as exc:
                 last_error = exc
-                retry_allowed = exc.code == "browser_challenge_required" or exc.code.startswith(
-                    "resolver_"
-                )
+                retry_allowed = resolver_retry_allowed(exc, using_resolver=option is not None)
                 if not retry_allowed or option_index == len(options) - 1:
                     record_provider_resolution_error(
                         provider,
