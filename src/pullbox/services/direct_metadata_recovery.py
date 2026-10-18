@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field, TypeAdapter
 from sqlalchemy import select
 
 from pullbox.config import get_settings
-from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.models import Issue, LibraryFile
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
@@ -37,6 +36,7 @@ from pullbox.services.direct_acquisition_state import (
     transition_artifact,
 )
 from pullbox.services.direct_download_history_adapter import sync_direct_download_history
+from pullbox.services.direct_metadata_file_proof import verify_file_proof
 from pullbox.services.issue_file_metadata import prepare_file_metadata, write_file_metadata
 from pullbox.services.issue_import_service import (
     execute_manual_issue_import,
@@ -92,6 +92,7 @@ class RecoveryOwner:
     file_path: str | None
     source: Path
     superseded: bool
+    source_proof: dict[str, int | str] | None = None
 
 
 @dataclass(frozen=True)
@@ -201,22 +202,26 @@ async def _read_owner(session: AsyncSession, pending_id: int) -> RecoveryOwner:
     )
 
 
-async def _check_source(owner: RecoveryOwner) -> None:
+async def _check_source(owner: RecoveryOwner) -> dict[str, int | str] | None:
     try:
-        signature = await asyncio.to_thread(build_file_identity_signature, owner.source)
-        valid = (
-            not owner.source.is_symlink()
-            and owner.source.parent.name == f"artifact-{owner.artifact_id}"
-            and owner.source.parent.parent.name == f"attempt-{owner.attempt_id}"
-            and signature == owner.marker.get("source_signature")
+        if (
+            owner.source.parent.name != f"artifact-{owner.artifact_id}"
+            or owner.source.parent.parent.name != f"attempt-{owner.attempt_id}"
+        ):
+            raise ValueError("The retained download path changed.")
+        return await asyncio.to_thread(
+            verify_file_proof,
+            owner.source,
+            owner.marker.get("source_signature"),
+            owner.marker.get("source_sha256"),
+            owner.source_proof,
         )
-    except OSError:
-        valid = False
-    if not valid:
+    except (OSError, ValueError) as exc:
         raise DirectMetadataRecoveryError(
-            "The retained download is missing or changed. Restore the original file before "
-            "retrying; Pullbox will not download it again."
-        )
+            "The retained download is missing, changed, or has no saved content proof for "
+            "its changed storage identity. Review the file on the issue page before retrying; "
+            "Pullbox will not download it again."
+        ) from exc
 
 
 async def prepare_direct_metadata_recovery(
@@ -232,17 +237,22 @@ async def prepare_direct_metadata_recovery(
     owner = await _read_owner(session, pending_id)
     await ensure_no_active_import_file_mutation(session)
     await session.commit()
-    await _check_source(owner)
+    owner = replace(owner, source_proof=await _check_source(owner))
     file_target = None
     if owner.file_id is not None:
         prepared = await prepare_file_metadata(session, owner.issue_id, choices=choices)
         file_target = prepared.target
         if prepared.target.binding.library_file_id != owner.file_id:
             raise DirectMetadataRecoveryError("The library file changed. Preview again.")
-        signature = await asyncio.to_thread(build_file_identity_signature, prepared.target.path)
-        owner = replace(
-            owner, superseded=owner.superseded or signature != owner.marker.get("copy_signature")
-        )
+        try:
+            await asyncio.to_thread(
+                verify_file_proof,
+                prepared.target.path,
+                owner.marker.get("copy_signature"),
+                owner.marker.get("copy_sha256"),
+            )
+        except (OSError, ValueError):
+            owner = replace(owner, superseded=True)
         preview = DirectMetadataRecoveryPreview(
             issue_id=owner.issue_id,
             **prepared.preview.model_dump(exclude={"file_id"}),
@@ -305,7 +315,11 @@ async def _complete(
     )
     # Supersession can also be detected from changed bytes at the same registered path.
     if (
-        replace(current, superseded=owner.superseded if owner.file_id else current.superseded)
+        replace(
+            current,
+            superseded=owner.superseded if owner.file_id else current.superseded,
+            source_proof=owner.source_proof,
+        )
         != expected
     ):
         raise DirectMetadataRecoveryError(
@@ -397,7 +411,7 @@ async def run_direct_metadata_recovery(
         await check_control()
         async with factory() as reader:
             current = await _read_owner(reader, pending_id)
-        if replace(current, superseded=owner.superseded) != owner:
+        if replace(current, superseded=owner.superseded, source_proof=owner.source_proof) != owner:
             raise DirectMetadataRecoveryError(
                 "The recovery or library binding changed. No further file changes will be made."
             )

@@ -1,5 +1,7 @@
 """Recovery completes retained metadata, not a second acquisition."""
 
+import hashlib
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -33,8 +35,9 @@ from tests.unit.test_nonzip_metadata_writing import nonzip_archive
 
 
 @pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize("remounted", [False, True])
 async def test_story_only_retained_copy_cannot_be_completed_as_full_issue(
-    identity_probe_db, tmp_path
+    identity_probe_db, tmp_path, remounted
 ):
     _, factory, _ = identity_probe_db
     attempt_id, artifact_id, _issue_id, source = await direct_artifact(
@@ -47,6 +50,8 @@ async def test_story_only_retained_copy_cannot_be_completed_as_full_issue(
     assert (
         await execute(factory, tmp_path, attempt_id, artifact_id)
     ).state is DirectAcquisitionState.INTERVENTION
+    if remounted:
+        await _remounted_marker(factory, attempt_id)
     async with factory() as session:
         pending = await session.scalar(select(PendingMatch))
         file = await session.scalar(select(LibraryFile))
@@ -183,6 +188,120 @@ async def _review_case(factory, tmp_path, *, suffix=".cbz", remove_copy=False):
             issue = await session.get(Issue, issue_id)
             issue.status = IssueStatus.WANTED
         return pending.id, attempt_id, issue_id, source
+
+
+async def _remounted_marker(factory, attempt_id, *, legacy=False):
+    async with factory.begin() as session:
+        attempt = await session.get(DirectAcquisitionAttempt, attempt_id)
+        snapshot = dict(attempt.plan_snapshot)
+        marker = dict(snapshot["paired_metadata_copy"])
+        for kind in ("source", "copy"):
+            signature = dict(marker[f"{kind}_signature"])
+            signature["device"] += 1
+            marker[f"{kind}_signature"] = signature
+            if legacy:
+                marker.pop(f"{kind}_sha256", None)
+        attempt.plan_snapshot = {**snapshot, "paired_metadata_copy": marker}
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize("seed_proof", [False, True])
+@pytest.mark.parametrize("remove_copy", [False, True])
+async def test_remounted_recovery_uses_saved_content_proof_without_reacquisition(
+    identity_probe_db, tmp_path, seed_proof, remove_copy
+):
+    _, factory, _ = identity_probe_db
+    pending_id, attempt_id, _issue_id, source = await _review_case(
+        factory, tmp_path, remove_copy=remove_copy
+    )
+    original = source.read_bytes()
+    if seed_proof:
+        async with factory.begin() as session:
+            attempt = await session.get(DirectAcquisitionAttempt, attempt_id)
+            snapshot = dict(attempt.plan_snapshot)
+            digest = hashlib.sha256(original).hexdigest()
+            attempt.plan_snapshot = {
+                **snapshot,
+                "paired_metadata_copy": {
+                    **snapshot["paired_metadata_copy"],
+                    "source_sha256": digest,
+                    "copy_sha256": digest,
+                },
+            }
+    async with factory() as session:
+        marker = (await session.get(DirectAcquisitionAttempt, attempt_id)).plan_snapshot[
+            "paired_metadata_copy"
+        ]
+        assert marker.get("source_sha256") == hashlib.sha256(original).hexdigest()
+        assert marker.get("copy_sha256") == hashlib.sha256(original).hexdigest()
+    await _remounted_marker(factory, attempt_id)
+    choices = {"series.issue_count": "library"}
+    async with factory() as session:
+        prepared = await prepare_direct_metadata_recovery(session, pending_id, choices=choices)
+        assert prepared.preview.ready and not prepared.preview.superseded
+    await run_direct_metadata_recovery(
+        factory,
+        pending_id,
+        prepared.preview.review_key,
+        uuid4(),
+        choices=choices,
+        limit=10 * 1024**2,
+        check_control=AsyncMock(),
+        progress=AsyncMock(),
+    )
+    async with factory() as session:
+        assert (await session.get(PendingMatch, pending_id)).status == "approved"
+        assert (
+            await session.get(DirectAcquisitionAttempt, attempt_id)
+        ).state == DirectAcquisitionState.COMPLETED
+        assert (await session.scalar(select(DownloadHistory))).state == DownloadState.IMPORTED
+        assert await session.scalar(select(func.count()).select_from(DirectAcquisitionAttempt)) == 1
+    assert source.read_bytes() == original
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize("change", ["bytes", "inode", "mtime", "symlink", "legacy", "digest"])
+async def test_remounted_recovery_rejects_unproven_or_changed_source(
+    identity_probe_db, tmp_path, change
+):
+    _, factory, _ = identity_probe_db
+    pending_id, attempt_id, _issue_id, source = await _review_case(factory, tmp_path)
+    await _remounted_marker(factory, attempt_id, legacy=change == "legacy")
+    stat = source.stat()
+    original = source.read_bytes()
+    if change == "bytes":
+        source.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    elif change == "inode":
+        replacement = source.with_suffix(".replacement")
+        replacement.write_bytes(original)
+        os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        replacement.replace(source)
+    elif change == "mtime":
+        os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+    elif change == "symlink":
+        replacement = source.with_suffix(".replacement")
+        source.rename(replacement)
+        source.symlink_to(replacement)
+    elif change == "digest":
+        async with factory.begin() as session:
+            attempt = await session.get(DirectAcquisitionAttempt, attempt_id)
+            snapshot = dict(attempt.plan_snapshot)
+            attempt.plan_snapshot = {
+                **snapshot,
+                "paired_metadata_copy": {
+                    **snapshot["paired_metadata_copy"],
+                    "source_sha256": "0" * 64,
+                },
+            }
+    async with factory() as session:
+        file = await session.scalar(select(LibraryFile))
+        copied = Path(file.file_path).read_bytes()
+        with pytest.raises(ValueError):
+            await prepare_direct_metadata_recovery(session, pending_id)
+        assert Path(file.file_path).read_bytes() == copied
+        assert (await session.get(PendingMatch, pending_id)).status == "pending"
+        assert (await session.scalar(select(DownloadHistory))).state == DownloadState.FAILED
 
 
 @pytest.mark.usefixtures("paired_download_setting")
